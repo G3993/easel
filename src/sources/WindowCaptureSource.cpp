@@ -1,5 +1,27 @@
 #include "sources/WindowCaptureSource.h"
 #include <iostream>
+#include <fstream>
+
+// Recursively find a descendant window by class name
+static HWND findDescendantByClass(HWND parent, const char* className) {
+    HWND child = FindWindowExA(parent, nullptr, className, nullptr);
+    if (child) return child;
+    // Search children recursively
+    HWND next = nullptr;
+    while ((next = FindWindowExA(parent, next, nullptr, nullptr)) != nullptr) {
+        HWND found = findDescendantByClass(next, className);
+        if (found) return found;
+    }
+    return nullptr;
+}
+
+// Shared log file with WGCCapture
+static void winCapLog(const std::string& msg) {
+    static std::ofstream logFile;
+    if (!logFile.is_open()) logFile.open("wgc_debug.log", std::ios::app);
+    logFile << msg << std::endl;
+    logFile.flush();
+}
 
 WindowCaptureSource::~WindowCaptureSource() {
     stop();
@@ -47,11 +69,13 @@ std::vector<WindowInfo> WindowCaptureSource::enumerateWindows() {
     return result;
 }
 
+// ─── Start ───────────────────────────────────────────────────────────
+
 bool WindowCaptureSource::start(HWND hwnd) {
     stop();
 
     if (!IsWindow(hwnd)) {
-        std::cerr << "Invalid window handle" << std::endl;
+        std::cerr << "[WinCapture] Invalid window handle" << std::endl;
         return false;
     }
 
@@ -62,22 +86,126 @@ bool WindowCaptureSource::start(HWND hwnd) {
     GetWindowTextA(hwnd, title, sizeof(title));
     m_title = title;
 
-    // Get client area size
+    // Try WGC first (works for minimized, occluded, GPU-accelerated windows)
+    winCapLog("[WinCapture] Checking WGC support...");
+    if (WGCCapture::isSupported()) {
+        winCapLog("[WinCapture] WGC supported, attempting start...");
+        m_wgc = std::make_unique<WGCCapture>();
+        if (m_wgc->start(hwnd)) {
+            // Get initial size from client rect
+            RECT clientRect;
+            GetClientRect(hwnd, &clientRect);
+            m_width = clientRect.right - clientRect.left;
+            m_height = clientRect.bottom - clientRect.top;
+            if (m_width <= 0 || m_height <= 0) {
+                m_width = 1; m_height = 1;
+            }
+            m_texture.createEmpty(m_width, m_height);
+            m_active = true;
+            winCapLog("[WinCapture] Using WGC for: " + m_title + " (" + std::to_string(m_width) + "x" + std::to_string(m_height) + ")");
+            return true;
+        }
+        winCapLog("[WinCapture] WGC start failed, falling back to GDI");
+        m_wgc.reset();
+    } else {
+        winCapLog("[WinCapture] WGC not supported, using GDI");
+    }
+
+    // Fall back to GDI
+    winCapLog("[WinCapture] Starting GDI capture for: " + m_title);
+    return startGDI(hwnd);
+}
+
+// ─── Stop ────────────────────────────────────────────────────────────
+
+void WindowCaptureSource::stop() {
+    m_active = false;
+    m_wgc.reset();
+    cleanupGDI();
+}
+
+// ─── Update ──────────────────────────────────────────────────────────
+
+void WindowCaptureSource::update() {
+    if (!m_active || !m_hwnd) return;
+
+    // Check if window still exists
+    if (!IsWindow(m_hwnd)) {
+        std::cerr << "[WinCapture] Window was closed" << std::endl;
+        m_active = false;
+        return;
+    }
+
+    if (m_wgc) {
+        // WGC path
+        m_wgcUpdateCount++;
+        if (m_wgc->update()) {
+            m_wgcFrameCount++;
+            int w = m_wgc->width();
+            int h = m_wgc->height();
+
+            // Detect Chromium content child to auto-crop toolbar (tabs + address bar)
+            // WGC captures the full window visual; the content area starts below the toolbar.
+            // Pixels are stored bottom-up (OpenGL), so toolbar rows are at the END of the buffer.
+            int wgcCropTop = 0;
+            if (m_wgcFrameCount == 1 && m_hwnd) {
+                HWND contentChild = findDescendantByClass(m_hwnd, "Chrome_RenderWidgetHostHWND");
+                if (contentChild && IsWindowVisible(contentChild)) {
+                    RECT childRect, parentRect;
+                    GetWindowRect(contentChild, &childRect);
+                    GetWindowRect(m_hwnd, &parentRect);
+                    int parentH = parentRect.bottom - parentRect.top;
+                    if (parentH > 0) {
+                        int logicalCrop = childRect.top - parentRect.top;
+                        // Convert to physical pixels using WGC/logical ratio
+                        wgcCropTop = (int)((float)logicalCrop / (float)parentH * (float)h + 0.5f);
+                        if (wgcCropTop < 0 || wgcCropTop >= h / 2) wgcCropTop = 0;
+                        if (wgcCropTop > 0) m_cropTop = wgcCropTop;
+                    }
+                }
+                winCapLog("[WinCapture] WGC first frame: " + std::to_string(w) + "x" + std::to_string(h) +
+                          " cropTop=" + std::to_string(m_cropTop));
+            }
+
+            // Apply crop: skip toolbar rows from the top of the captured image.
+            // Pixels are bottom-up, so content rows are at the start of the buffer.
+            int effectiveH = h - m_cropTop;
+            if (effectiveH <= 0) effectiveH = h;
+
+            if (w > 0 && effectiveH > 0) {
+                if (w != m_width || effectiveH != m_height) {
+                    m_width = w;
+                    m_height = effectiveH;
+                    m_texture.createEmpty(m_width, m_height);
+                }
+                m_texture.updateData(m_wgc->pixels(), m_width, m_height);
+            }
+        } else if (m_wgcUpdateCount <= 5) {
+            winCapLog("[WinCapture] WGC update returned false (poll " + std::to_string(m_wgcUpdateCount) + ")");
+        }
+    } else {
+        // GDI fallback
+        updateGDI();
+    }
+}
+
+// ─── GDI fallback ────────────────────────────────────────────────────
+
+bool WindowCaptureSource::startGDI(HWND hwnd) {
     RECT rect;
     GetClientRect(hwnd, &rect);
     m_width = rect.right - rect.left;
     m_height = rect.bottom - rect.top;
 
     if (m_width <= 0 || m_height <= 0) {
-        std::cerr << "Window has no client area" << std::endl;
+        std::cerr << "[WinCapture] Window has no client area" << std::endl;
         return false;
     }
 
-    // Create GDI resources for capture
     m_windowDC = GetDC(hwnd);
     if (!m_windowDC) {
-        std::cerr << "Failed to get window DC" << std::endl;
-        cleanup();
+        std::cerr << "[WinCapture] Failed to get window DC" << std::endl;
+        cleanupGDI();
         return false;
     }
 
@@ -87,7 +215,7 @@ bool WindowCaptureSource::start(HWND hwnd) {
 
     // Detect Chromium content child to auto-crop toolbar
     m_cropTop = 0;
-    HWND contentChild = FindWindowExA(hwnd, nullptr, "Chrome_RenderWidgetHostHWND", nullptr);
+    HWND contentChild = findDescendantByClass(hwnd, "Chrome_RenderWidgetHostHWND");
     if (contentChild && IsWindowVisible(contentChild)) {
         RECT childRect, parentRect;
         GetWindowRect(contentChild, &childRect);
@@ -101,45 +229,15 @@ bool WindowCaptureSource::start(HWND hwnd) {
     m_texture.createEmpty(m_width, m_height - m_cropTop);
 
     m_active = true;
-    std::cout << "Capturing window: " << m_title << " (" << m_width << "x" << (m_height - m_cropTop) << ")" << std::endl;
+    std::cout << "[WinCapture] Using GDI for: " << m_title
+              << " (" << m_width << "x" << (m_height - m_cropTop) << ")" << std::endl;
     return true;
 }
 
-void WindowCaptureSource::stop() {
-    m_active = false;
-    cleanup();
-}
-
-void WindowCaptureSource::cleanup() {
-    if (m_memDC) {
-        if (m_oldBitmap) SelectObject(m_memDC, m_oldBitmap);
-        DeleteDC(m_memDC);
-        m_memDC = nullptr;
-        m_oldBitmap = nullptr;
-    }
-    if (m_bitmap) {
-        DeleteObject(m_bitmap);
-        m_bitmap = nullptr;
-    }
-    if (m_windowDC && m_hwnd) {
-        ReleaseDC(m_hwnd, m_windowDC);
-        m_windowDC = nullptr;
-    }
-}
-
-void WindowCaptureSource::update() {
-    if (!m_active || !m_hwnd) return;
-
-    // Check if window still exists
-    if (!IsWindow(m_hwnd)) {
-        std::cerr << "Captured window was closed" << std::endl;
-        m_active = false;
-        return;
-    }
-
+void WindowCaptureSource::updateGDI() {
     // Recheck crop (toolbar can change, e.g. bookmarks bar toggle)
     int newCrop = 0;
-    HWND contentChild = FindWindowExA(m_hwnd, nullptr, "Chrome_RenderWidgetHostHWND", nullptr);
+    HWND contentChild = findDescendantByClass(m_hwnd, "Chrome_RenderWidgetHostHWND");
     if (contentChild && IsWindowVisible(contentChild)) {
         RECT childRect, parentRect;
         GetWindowRect(contentChild, &childRect);
@@ -189,8 +287,6 @@ void WindowCaptureSource::update() {
               (BITMAPINFO*)&bi, DIB_RGB_COLORS);
 
     // BGRA to RGBA conversion
-    // Bitmap is bottom-up: row 0 = bottom of image, last row = top.
-    // To crop the top N pixels, we only process the first (height - cropTop) rows.
     int outH = m_height - m_cropTop;
     uint8_t* px = m_pixelBuffer.data();
     int total = m_width * outH;
@@ -202,4 +298,21 @@ void WindowCaptureSource::update() {
     }
 
     m_texture.updateData(m_pixelBuffer.data(), m_width, outH);
+}
+
+void WindowCaptureSource::cleanupGDI() {
+    if (m_memDC) {
+        if (m_oldBitmap) SelectObject(m_memDC, m_oldBitmap);
+        DeleteDC(m_memDC);
+        m_memDC = nullptr;
+        m_oldBitmap = nullptr;
+    }
+    if (m_bitmap) {
+        DeleteObject(m_bitmap);
+        m_bitmap = nullptr;
+    }
+    if (m_windowDC && m_hwnd) {
+        ReleaseDC(m_hwnd, m_windowDC);
+        m_windowDC = nullptr;
+    }
 }
