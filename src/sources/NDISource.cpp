@@ -84,15 +84,36 @@ void NDISource::update() {
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return;
 
+    // Drain the receive queue: audio/metadata frames can starve video if we
+    // only call recv_capture_v3 once per update.  Loop until the queue is
+    // empty, keeping only the most recent video frame.
+    bool gotVideo = false;
     NDIlib_video_frame_v2_t video = {};
-    NDIlib_audio_frame_v3_t audio = {};
-    NDIlib_metadata_frame_t meta = {};
 
-    // Non-blocking capture
-    NDIlib_frame_type_e type = rt.api()->recv_capture_v3(m_recv, &video, &audio, &meta, 0);
+    for (int i = 0; i < 16; i++) {  // cap iterations to avoid infinite loop
+        NDIlib_video_frame_v2_t v = {};
+        NDIlib_audio_frame_v3_t audio = {};
+        NDIlib_metadata_frame_t meta = {};
 
-    if (type == NDIlib_frame_type_video && video.p_data) {
-        // Resize texture if dimensions changed
+        NDIlib_frame_type_e type = rt.api()->recv_capture_v3(m_recv, &v, &audio, &meta, 0);
+
+        if (type == NDIlib_frame_type_none) break;  // queue empty
+
+        if (type == NDIlib_frame_type_video) {
+            // Free previous video frame if we already had one (keep latest)
+            if (gotVideo) {
+                rt.api()->recv_free_video_v2(m_recv, &video);
+            }
+            video = v;
+            gotVideo = true;
+        } else if (type == NDIlib_frame_type_audio) {
+            rt.api()->recv_free_audio_v3(m_recv, &audio);
+        } else if (type == NDIlib_frame_type_metadata) {
+            rt.api()->recv_free_metadata(m_recv, &meta);
+        }
+    }
+
+    if (gotVideo && video.p_data) {
         if (video.xres != m_width || video.yres != m_height) {
             m_width = video.xres;
             m_height = video.yres;
@@ -104,7 +125,6 @@ void NDISource::update() {
         if (stride <= 0) stride = m_width * 4;
 
         // NDI gives us top-down, OpenGL wants bottom-up → flip vertically
-        // Format is RGBA (we requested RGBX_RGBA)
         for (int y = 0; y < m_height; y++) {
             const uint8_t* srcRow = video.p_data + y * stride;
             uint8_t* dstRow = m_pixelBuffer.data() + (m_height - 1 - y) * m_width * 4;
@@ -113,14 +133,6 @@ void NDISource::update() {
 
         m_texture.updateData(m_pixelBuffer.data(), m_width, m_height);
         rt.api()->recv_free_video_v2(m_recv, &video);
-    }
-
-    // Free any audio/metadata we received (we don't use them)
-    if (type == NDIlib_frame_type_audio) {
-        rt.api()->recv_free_audio_v3(m_recv, &audio);
-    }
-    if (type == NDIlib_frame_type_metadata) {
-        rt.api()->recv_free_metadata(m_recv, &meta);
     }
 }
 

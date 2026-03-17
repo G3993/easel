@@ -133,6 +133,14 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
 
 void ProjectorOutput::destroy() {
     if (m_window) {
+        // Clean up VAO in the projector's GL context (VAOs are per-context;
+        // deleting in the wrong context can destroy unrelated main-context VAOs
+        // that happen to share the same numeric ID).
+        GLFWwindow* prev = glfwGetCurrentContext();
+        glfwMakeContextCurrent(m_window);
+        m_quad.destroy();
+        if (prev && prev != m_window) glfwMakeContextCurrent(prev);
+
         glfwDestroyWindow(m_window);
         m_window = nullptr;
         std::cout << "Projector closed" << std::endl;

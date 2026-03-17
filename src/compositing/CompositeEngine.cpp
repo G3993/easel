@@ -42,12 +42,12 @@ void CompositeEngine::clear() {
     m_current = 0;
 }
 
-void CompositeEngine::composite(const LayerStack& stack) {
+void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
     clear();
 
     bool firstLayer = true;
-    for (int i = 0; i < stack.count(); i++) {
-        const auto& layer = stack[i];
+    for (int i = 0; i < (int)layers.size(); i++) {
+        const auto& layer = layers[i];
         if (!layer->visible || layer->opacity <= 0.0f || !layer->textureId()) continue;
 
         int next = 1 - m_current;
@@ -61,10 +61,21 @@ void CompositeEngine::composite(const LayerStack& stack) {
             m_passthroughShader.setMat3("uTransform", layer->getTransformMatrix());
             m_passthroughShader.setFloat("uOpacity", layer->opacity);
             m_passthroughShader.setInt("uTexture", 0);
-            m_passthroughShader.setInt("uTileX", layer->tileX);
-            m_passthroughShader.setInt("uTileY", layer->tileY);
+            m_passthroughShader.setFloat("uTileX", layer->tileX);
+            m_passthroughShader.setFloat("uTileY", layer->tileY);
             m_passthroughShader.setVec4("uCrop", glm::vec4(
                 layer->cropLeft, layer->cropRight, layer->cropTop, layer->cropBottom));
+            m_passthroughShader.setInt("uMosaicMode", (int)layer->mosaicMode);
+            m_passthroughShader.setFloat("uMosaicDensity", layer->mosaicDensity);
+            m_passthroughShader.setFloat("uMosaicSpin", layer->mosaicSpin);
+            m_passthroughShader.setFloat("uTime", m_time);
+            m_passthroughShader.setFloat("uAudioRMS", m_audioRMS);
+            m_passthroughShader.setFloat("uAudioStrength", layer->audioReactive ? layer->audioStrength : 0.0f);
+            {
+                float mt = glm::clamp((m_time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
+                m_passthroughShader.setInt("uMosaicModeFrom", (int)layer->mosaicModeFrom);
+                m_passthroughShader.setFloat("uMosaicTransition", mt);
+            }
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, layer->textureId());
 
@@ -89,10 +100,21 @@ void CompositeEngine::composite(const LayerStack& stack) {
             m_compositeShader.setInt("uLayer", 1);
             m_compositeShader.setFloat("uOpacity", layer->opacity);
             m_compositeShader.setInt("uBlendMode", (int)layer->blendMode);
-            m_compositeShader.setInt("uTileX", layer->tileX);
-            m_compositeShader.setInt("uTileY", layer->tileY);
+            m_compositeShader.setFloat("uTileX", layer->tileX);
+            m_compositeShader.setFloat("uTileY", layer->tileY);
             m_compositeShader.setVec4("uCrop", glm::vec4(
                 layer->cropLeft, layer->cropRight, layer->cropTop, layer->cropBottom));
+            m_compositeShader.setInt("uMosaicMode", (int)layer->mosaicMode);
+            m_compositeShader.setFloat("uMosaicDensity", layer->mosaicDensity);
+            m_compositeShader.setFloat("uMosaicSpin", layer->mosaicSpin);
+            m_compositeShader.setFloat("uTime", m_time);
+            m_compositeShader.setFloat("uAudioRMS", m_audioRMS);
+            m_compositeShader.setFloat("uAudioStrength", layer->audioReactive ? layer->audioStrength : 0.0f);
+            {
+                float mt = glm::clamp((m_time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
+                m_compositeShader.setInt("uMosaicModeFrom", (int)layer->mosaicModeFrom);
+                m_compositeShader.setFloat("uMosaicTransition", mt);
+            }
 
             // Base (accumulated)
             glActiveTexture(GL_TEXTURE0);

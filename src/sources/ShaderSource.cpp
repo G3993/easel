@@ -160,6 +160,16 @@ bool ShaderSource::parseISF(const std::string& source) {
                 }
             }
         }
+
+        // Parse PASSES — multi-pass buffer names
+        m_passBuffers.clear();
+        if (j.contains("PASSES") && j["PASSES"].is_array()) {
+            for (const auto& pass : j["PASSES"]) {
+                if (pass.contains("TARGET") && pass["TARGET"].is_string()) {
+                    m_passBuffers.push_back(pass["TARGET"].get<std::string>());
+                }
+            }
+        }
     } catch (const json::exception& e) {
         std::cerr << "ISF parse error: " << e.what() << std::endl;
         return false;
@@ -185,6 +195,9 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     std::regex versionRe(R"(#version\s+\d+[^\n]*)");
     body = std::regex_replace(body, versionRe, "// (version stripped by Easel)");
 
+    // Strip precision qualifiers (GLSL ES, not valid in 330 core)
+    body = std::regex_replace(body, std::regex(R"(precision\s+(highp|mediump|lowp)\s+\w+\s*;)"), "// (precision stripped)");
+
     // Replace legacy GLSL keywords for 330 core compatibility
     // varying -> in (for fragment shader)
     body = std::regex_replace(body, std::regex(R"(\bvarying\b)"), "in");
@@ -192,7 +205,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     body = std::regex_replace(body, std::regex(R"(\btexture2D\b)"), "texture");
 
     std::stringstream out;
-    out << "#version 330 core\n";
+    out << "#version 430 core\n";
     out << "out vec4 FragColor;\n";
     out << "in vec2 isf_FragNormCoord;\n";
     out << "\n";
@@ -202,6 +215,9 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform vec2 RENDERSIZE;\n";
     out << "uniform int PASSINDEX;\n";
     out << "uniform int FRAMEINDEX;\n";
+    out << "uniform vec2 mousePos;\n";
+    out << "uniform vec2 mouseDelta;\n";
+    out << "uniform float pinchHold;\n";
     out << "\n";
 
     // ISF image input stubs — provide dummy samplers and macros
@@ -212,15 +228,40 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
             out << "uniform sampler2D " << input.name << ";\n";
         }
     }
-    if (hasImageInputs) {
-        // ISF texture sampling macros
-        out << "#define IMG_NORM_PIXEL(img, coord) texture(img, coord)\n";
-        out << "#define IMG_THIS_NORM_PIXEL(img) texture(img, isf_FragNormCoord)\n";
-        out << "#define IMG_PIXEL(img, coord) texture(img, (coord) / RENDERSIZE)\n";
-        out << "#define IMG_THIS_PIXEL(img) texture(img, gl_FragCoord.xy / RENDERSIZE)\n";
-        out << "#define IMG_SIZE(img) RENDERSIZE\n";
-        out << "\n";
+
+    // Multi-pass buffer textures (declared as dummy samplers)
+    for (const auto& buf : m_passBuffers) {
+        out << "uniform sampler2D " << buf << ";\n";
+        hasImageInputs = true;
     }
+
+    // Shader-Claw font atlas (dummy sampler for text shaders)
+    if (isfBody.find("fontAtlasTex") != std::string::npos) {
+        out << "uniform sampler2D fontAtlasTex;\n";
+        hasImageInputs = true;
+    }
+
+    // Shader-Claw audio FFT (dummy sampler)
+    if (isfBody.find("audioFFT") != std::string::npos) {
+        out << "uniform sampler2D audioFFT;\n";
+        hasImageInputs = true;
+    }
+
+    // Shader-Claw voice reactivity builtins
+    if (isfBody.find("_voiceGlitch") != std::string::npos) {
+        out << "uniform float _voiceGlitch;\n";
+    }
+    if (isfBody.find("_voiceLevel") != std::string::npos) {
+        out << "uniform float _voiceLevel;\n";
+    }
+
+    // Always provide ISF texture sampling macros
+    out << "#define IMG_NORM_PIXEL(img, coord) texture(img, coord)\n";
+    out << "#define IMG_THIS_NORM_PIXEL(img) texture(img, isf_FragNormCoord)\n";
+    out << "#define IMG_PIXEL(img, coord) texture(img, (coord) / RENDERSIZE)\n";
+    out << "#define IMG_THIS_PIXEL(img) texture(img, gl_FragCoord.xy / RENDERSIZE)\n";
+    out << "#define IMG_SIZE(img) RENDERSIZE\n";
+    out << "\n";
 
     // Declare user ISF INPUTS as uniforms
     for (const auto& input : m_inputs) {
@@ -273,7 +314,7 @@ std::string ShaderSource::translateVertex(const std::string& isfBody) {
     body = std::regex_replace(body, std::regex(R"(\battribute\b)"), "in");
 
     std::stringstream out;
-    out << "#version 330 core\n";
+    out << "#version 430 core\n";
     out << "layout(location = 0) in vec2 aPos;\n";
     out << "layout(location = 1) in vec2 aTexCoord;\n";
     out << "out vec2 isf_FragNormCoord;\n";
@@ -293,7 +334,7 @@ std::string ShaderSource::translateVertex(const std::string& isfBody) {
 
 std::string ShaderSource::generateDefaultVertex() {
     return
-        "#version 330 core\n"
+        "#version 430 core\n"
         "layout(location = 0) in vec2 aPos;\n"
         "layout(location = 1) in vec2 aTexCoord;\n"
         "out vec2 isf_FragNormCoord;\n"
@@ -352,6 +393,15 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
 
     if (!m_shader.loadFromSource(vertSrc, fragSrc)) {
         std::cerr << "Failed to compile ISF shader" << std::endl;
+        // Log which shader failed and the generated source
+        {
+            FILE* f = fopen("etherea_debug.log", "a");
+            if (f) {
+                fprintf(f, "FAILED SHADER: %s\n", m_path.c_str());
+                fprintf(f, "GENERATED FRAG:\n%s\n===\n", fragSrc.c_str());
+                fclose(f);
+            }
+        }
         return false;
     }
 
@@ -429,6 +479,9 @@ void ShaderSource::uploadUniforms() {
     m_shader.setVec2("RENDERSIZE", glm::vec2((float)m_width, (float)m_height));
     m_shader.setInt("PASSINDEX", 0);
     m_shader.setInt("FRAMEINDEX", (int)(glfwGetTime() * 60.0)); // approximate frame count
+    m_shader.setVec2("mousePos", glm::vec2(m_mouseX, m_mouseY));
+    m_shader.setVec2("mouseDelta", glm::vec2(0.0f, 0.0f));
+    m_shader.setFloat("pinchHold", 0.0f);
 
     // User inputs
     for (const auto& input : m_inputs) {
@@ -448,6 +501,9 @@ void ShaderSource::uploadUniforms() {
             std::string text = std::get<std::string>(input.value);
             int maxLen = (int)input.maxVal;
             if (maxLen <= 0) maxLen = 12;
+            if ((int)text.size() > maxLen) {
+                text = text.substr(text.size() - maxLen);
+            }
             m_shader.setInt(input.name + "_len", (int)text.size());
             for (int i = 0; i < maxLen; i++) {
                 int ch = 26; // space/empty

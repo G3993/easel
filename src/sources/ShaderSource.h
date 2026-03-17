@@ -82,6 +82,8 @@ private:
     Mesh m_quad;
     int m_width = 1920;
     int m_height = 1080;
+    float m_mouseX = 0.5f;
+    float m_mouseY = 0.5f;
     std::string m_path;
     bool m_initialized = false;
 
@@ -93,6 +95,9 @@ private:
     // Raw sources (kept for save/reload)
     std::string m_rawFragment;
     std::string m_rawVertex;
+
+    // Multi-pass buffer names from PASSES
+    std::vector<std::string> m_passBuffers;
 
     // Parse ISF JSON header from shader source
     bool parseISF(const std::string& source);
