@@ -5,3 +5,6 @@ external/
 .vscode/
 *.user
 CMakeSettings.json
+recordings/
+*.log
+nul
