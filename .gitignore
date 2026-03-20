@@ -1,5 +1,8 @@
 build/
 external/
+CMakeCache.txt
+CMakeFiles/
+deps/
 *.zip
 .vs/
 .vscode/
