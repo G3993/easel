@@ -42,6 +42,16 @@ void CompositeEngine::clear() {
     m_current = 0;
 }
 
+void CompositeEngine::setAudioUniforms(ShaderProgram& shader, float audioStrength) {
+    shader.setFloat("uAudioRMS", m_audio.rms);
+    shader.setFloat("uAudioStrength", audioStrength);
+    shader.setFloat("uAudioBass", audioStrength > 0 ? m_audio.bass : 0.0f);
+    shader.setFloat("uAudioLowMid", audioStrength > 0 ? m_audio.lowMid : 0.0f);
+    shader.setFloat("uAudioHighMid", audioStrength > 0 ? m_audio.highMid : 0.0f);
+    shader.setFloat("uAudioTreble", audioStrength > 0 ? m_audio.treble : 0.0f);
+    shader.setFloat("uAudioBeatDecay", audioStrength > 0 ? m_audio.beatDecay : 0.0f);
+}
+
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
     clear();
 
@@ -54,6 +64,8 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         m_fbo[next].bind();
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        float audioStrength = layer->audioReactive ? layer->audioStrength : 0.0f;
 
         if (firstLayer && layer->blendMode == BlendMode::Normal) {
             // First layer: just draw it directly
@@ -68,11 +80,10 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_passthroughShader.setInt("uMosaicMode", (int)layer->mosaicMode);
             m_passthroughShader.setFloat("uMosaicDensity", layer->mosaicDensity);
             m_passthroughShader.setFloat("uMosaicSpin", layer->mosaicSpin);
-            m_passthroughShader.setFloat("uTime", m_time);
-            m_passthroughShader.setFloat("uAudioRMS", m_audioRMS);
-            m_passthroughShader.setFloat("uAudioStrength", layer->audioReactive ? layer->audioStrength : 0.0f);
+            m_passthroughShader.setFloat("uTime", m_audio.time);
+            setAudioUniforms(m_passthroughShader, audioStrength);
             {
-                float mt = glm::clamp((m_time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
+                float mt = glm::clamp((m_audio.time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
                 m_passthroughShader.setInt("uMosaicModeFrom", (int)layer->mosaicModeFrom);
                 m_passthroughShader.setFloat("uMosaicTransition", mt);
             }
@@ -107,11 +118,10 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_compositeShader.setInt("uMosaicMode", (int)layer->mosaicMode);
             m_compositeShader.setFloat("uMosaicDensity", layer->mosaicDensity);
             m_compositeShader.setFloat("uMosaicSpin", layer->mosaicSpin);
-            m_compositeShader.setFloat("uTime", m_time);
-            m_compositeShader.setFloat("uAudioRMS", m_audioRMS);
-            m_compositeShader.setFloat("uAudioStrength", layer->audioReactive ? layer->audioStrength : 0.0f);
+            m_compositeShader.setFloat("uTime", m_audio.time);
+            setAudioUniforms(m_compositeShader, audioStrength);
             {
-                float mt = glm::clamp((m_time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
+                float mt = glm::clamp((m_audio.time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
                 m_compositeShader.setInt("uMosaicModeFrom", (int)layer->mosaicModeFrom);
                 m_compositeShader.setFloat("uMosaicTransition", mt);
             }

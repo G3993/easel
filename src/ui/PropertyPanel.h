@@ -6,6 +6,7 @@
 
 class ShaderSource;
 class WhisperSpeech;
+class DataBus;
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {
@@ -13,6 +14,8 @@ struct SpeechState {
     bool listening = false;
     ShaderSource* targetSource = nullptr;
     std::string targetParam;
+    DataBus* dataBus = nullptr;
+    uint32_t activeLayerId = 0; // for data bus binding key
 #ifdef HAS_WHISPER
     WhisperSpeech* whisper = nullptr; // for device selection UI
 #endif
@@ -26,6 +29,8 @@ struct MosaicAudioSource {
 struct MosaicAudioState {
     int* selectedDevice = nullptr;       // -1 = system loopback
     std::vector<MosaicAudioSource> devices;
+    float bass = 0, lowMid = 0, highMid = 0, treble = 0;
+    float beatDecay = 0;
 };
 
 class PropertyPanel {

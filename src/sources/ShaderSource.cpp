@@ -241,19 +241,21 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
         hasImageInputs = true;
     }
 
-    // Shader-Claw audio FFT (dummy sampler)
-    if (isfBody.find("audioFFT") != std::string::npos) {
-        out << "uniform sampler2D audioFFT;\n";
-        hasImageInputs = true;
-    }
+    // Shader-Claw audio FFT sampler (always declared — bound by setAudioState)
+    out << "uniform sampler2D audioFFT;\n";
+    hasImageInputs = true;
+
+    // Shader-Claw audio reactivity builtins (always declared)
+    out << "uniform float audioLevel;\n";
+    out << "uniform float audioBass;\n";
+    out << "uniform float audioMid;\n";
+    out << "uniform float audioHigh;\n";
 
     // Shader-Claw voice reactivity builtins
     if (isfBody.find("_voiceGlitch") != std::string::npos) {
         out << "uniform float _voiceGlitch;\n";
     }
-    if (isfBody.find("_voiceLevel") != std::string::npos) {
-        out << "uniform float _voiceLevel;\n";
-    }
+    out << "uniform float _voiceLevel;\n";
 
     // Always provide ISF texture sampling macros
     out << "#define IMG_NORM_PIXEL(img, coord) texture(img, coord)\n";
@@ -483,6 +485,18 @@ void ShaderSource::uploadUniforms() {
     m_shader.setVec2("mouseDelta", glm::vec2(0.0f, 0.0f));
     m_shader.setFloat("pinchHold", 0.0f);
 
+    // Audio state (Shader-Claw naming convention)
+    m_shader.setFloat("audioLevel", m_audioRMS);
+    m_shader.setFloat("audioBass", m_audioBass);
+    m_shader.setFloat("audioMid", m_audioMid);
+    m_shader.setFloat("audioHigh", m_audioHigh);
+    m_shader.setFloat("_voiceLevel", m_audioRMS);
+    if (m_audioFFTTex) {
+        m_shader.setInt("audioFFT", 2);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, m_audioFFTTex);
+    }
+
     // User inputs
     for (const auto& input : m_inputs) {
         if (input.type == "float") {
@@ -565,6 +579,14 @@ void ShaderSource::setText(const std::string& name, const std::string& text) {
             return;
         }
     }
+}
+
+void ShaderSource::setAudioState(float rms, float bass, float mid, float high, GLuint fftTex) {
+    m_audioRMS = rms;
+    m_audioBass = bass;
+    m_audioMid = mid;
+    m_audioHigh = high;
+    m_audioFFTTex = fftTex;
 }
 
 void ShaderSource::setResolution(int w, int h) {

@@ -5,6 +5,19 @@
 #include "compositing/Layer.h"
 #include <vector>
 #include <memory>
+#include <glad/glad.h>
+
+struct AudioState {
+    float rms = 0;
+    float bass = 0;
+    float lowMid = 0;
+    float highMid = 0;
+    float treble = 0;
+    float beatDecay = 0;
+    bool beatDetected = false;
+    GLuint fftTexture = 0;
+    float time = 0;
+};
 
 class CompositeEngine {
 public:
@@ -14,16 +27,15 @@ public:
     // Composite a list of layers into the result FBO
     void composite(const std::vector<std::shared_ptr<Layer>>& layers);
 
-    void setAudioState(float rms, float time) { m_audioRMS = rms; m_time = time; }
-    float time() const { return m_time; }
+    void setAudioState(const AudioState& state) { m_audio = state; }
+    float time() const { return m_audio.time; }
 
     GLuint resultTexture() const;
     int width() const { return m_width; }
     int height() const { return m_height; }
 
 private:
-    float m_audioRMS = 0;
-    float m_time = 0;
+    AudioState m_audio;
     Framebuffer m_fbo[2]; // ping-pong
     int m_current = 0;
     int m_width = 0, m_height = 0;
@@ -33,4 +45,5 @@ private:
     Mesh m_quad;
 
     void clear();
+    void setAudioUniforms(ShaderProgram& shader, float audioStrength);
 };

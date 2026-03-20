@@ -2,6 +2,7 @@
 #include "compositing/BlendMode.h"
 #include "sources/ShaderSource.h"
 #include "sources/VideoSource.h"
+#include "app/DataBus.h"
 #ifdef HAS_WHISPER
 #include "speech/WhisperSpeech.h"
 #endif
@@ -215,6 +216,38 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::SetNextItemWidth(-1);
             if (namedDrag("##AudioStr", "Strength", &layer->audioStrength, 0.005f, 0.0f, 1.0f)) {}
             if (ImGui::IsItemActivated()) undoNeeded = true;
+
+            // Mini spectrum bars (bass=red, lowMid=orange, highMid=green, treble=cyan)
+            if (mosaicAudio) {
+                float barH = 24.0f;
+                float avail = ImGui::GetContentRegionAvail().x;
+                ImVec2 origin = ImGui::GetCursorScreenPos();
+                ImDrawList* draw = ImGui::GetWindowDrawList();
+
+                struct BandInfo { float level; ImU32 color; };
+                BandInfo bands[4] = {
+                    { mosaicAudio->bass,    IM_COL32(220, 50, 50, 200) },
+                    { mosaicAudio->lowMid,  IM_COL32(230, 150, 30, 200) },
+                    { mosaicAudio->highMid, IM_COL32(50, 200, 80, 200) },
+                    { mosaicAudio->treble,  IM_COL32(30, 200, 220, 200) },
+                };
+
+                float bandW = avail / 4.0f;
+                for (int b = 0; b < 4; b++) {
+                    float h = bands[b].level * barH;
+                    ImVec2 bMin(origin.x + b * bandW + 1, origin.y + barH - h);
+                    ImVec2 bMax(origin.x + (b + 1) * bandW - 1, origin.y + barH);
+                    draw->AddRectFilled(bMin, bMax, bands[b].color, 2.0f);
+                }
+
+                // Beat flash overlay
+                if (mosaicAudio->beatDecay > 0.05f) {
+                    ImU32 flashCol = IM_COL32(255, 255, 255, (int)(mosaicAudio->beatDecay * 60));
+                    draw->AddRectFilled(origin, ImVec2(origin.x + avail, origin.y + barH), flashCol, 2.0f);
+                }
+
+                ImGui::Dummy(ImVec2(avail, barH + 2));
+            }
 
             // Audio source dropdown
             if (mosaicAudio && mosaicAudio->selectedDevice) {
@@ -510,44 +543,81 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     ImGui::Text("%s", input.name.c_str());
                     ImGui::PopStyleColor();
 
-                    char textBuf[256] = {};
-                    strncpy(textBuf, text.c_str(), sizeof(textBuf) - 1);
+                    // Data bus binding dropdown
+                    DataBus* bus = (speech) ? speech->dataBus : nullptr;
+                    uint32_t layerId = (speech) ? speech->activeLayerId : 0;
+                    std::string currentBinding = bus ? bus->binding(layerId, input.name) : "";
+                    bool isBound = !currentBinding.empty();
 
-                    float micW = (speech && speech->available) ? 30.0f : 0.0f;
-                    ImGui::SetNextItemWidth(-(1.0f + micW));
-                    if (ImGui::InputText("##val", textBuf, (size_t)maxLen + 1,
-                                         ImGuiInputTextFlags_CharsUppercase)) {
-                        input.value = std::string(textBuf);
-                    }
-                    if (ImGui::IsItemActivated()) undoNeeded = true;
-
-                    if (speech && speech->available) {
+                    if (bus) {
+                        auto keys = DataBus::availableKeys();
+                        // Find current label
+                        std::string currentLabel = "Manual";
+                        for (auto& k : keys) {
+                            if (k.key == currentBinding) { currentLabel = k.label; break; }
+                        }
+                        ImGui::SetNextItemWidth(100);
+                        if (ImGui::BeginCombo("##bind", currentLabel.c_str(), ImGuiComboFlags_NoArrowButton)) {
+                            for (auto& k : keys) {
+                                bool sel = (k.key == currentBinding);
+                                if (ImGui::Selectable(k.label.c_str(), sel)) {
+                                    bus->bind(layerId, input.name, k.key);
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
                         ImGui::SameLine();
-                        bool isTarget = speech->listening &&
-                                        speech->targetSource == shaderSrc &&
-                                        speech->targetParam == input.name;
-                        if (isTarget) {
-                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 0.35f));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.15f, 0.15f, 0.50f));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.2f, 0.2f, 0.65f));
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-                            if (ImGui::Button("STOP", ImVec2(micW, 0))) {
-                                speech->listening = false;
-                                speech->targetSource = nullptr;
-                                speech->targetParam.clear();
+                    }
+
+                    if (isBound) {
+                        // Show current bound value (read-only)
+                        std::string val = bus ? bus->get(currentBinding) : "";
+                        if (val.size() > (size_t)maxLen) val = val.substr(val.size() - maxLen);
+                        ImGui::SetNextItemWidth(-1);
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.82f, 1.0f, 0.85f));
+                        ImGui::TextWrapped("%s", val.empty() ? "..." : val.c_str());
+                        ImGui::PopStyleColor();
+                    } else {
+                        // Manual text input + MIC button
+                        char textBuf[256] = {};
+                        strncpy(textBuf, text.c_str(), sizeof(textBuf) - 1);
+
+                        float micW = (speech && speech->available) ? 30.0f : 0.0f;
+                        ImGui::SetNextItemWidth(-(1.0f + micW));
+                        if (ImGui::InputText("##val", textBuf, (size_t)maxLen + 1,
+                                             ImGuiInputTextFlags_CharsUppercase)) {
+                            input.value = std::string(textBuf);
+                        }
+                        if (ImGui::IsItemActivated()) undoNeeded = true;
+
+                        if (speech && speech->available) {
+                            ImGui::SameLine();
+                            bool isTarget = speech->listening &&
+                                            speech->targetSource == shaderSrc &&
+                                            speech->targetParam == input.name;
+                            if (isTarget) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 0.35f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.15f, 0.15f, 0.50f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.2f, 0.2f, 0.65f));
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                if (ImGui::Button("STOP", ImVec2(micW, 0))) {
+                                    speech->listening = false;
+                                    speech->targetSource = nullptr;
+                                    speech->targetParam.clear();
+                                }
+                                ImGui::PopStyleColor(4);
+                            } else {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                                if (ImGui::Button("MIC", ImVec2(micW, 0))) {
+                                    speech->listening = true;
+                                    speech->targetSource = shaderSrc;
+                                    speech->targetParam = input.name;
+                                }
+                                ImGui::PopStyleColor(4);
                             }
-                            ImGui::PopStyleColor(4);
-                        } else {
-                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
-                            if (ImGui::Button("MIC", ImVec2(micW, 0))) {
-                                speech->listening = true;
-                                speech->targetSource = shaderSrc;
-                                speech->targetParam = input.name;
-                            }
-                            ImGui::PopStyleColor(4);
                         }
                     }
                 }

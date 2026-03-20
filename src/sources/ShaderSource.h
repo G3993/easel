@@ -67,6 +67,9 @@ public:
     void setPoint2D(const std::string& name, const glm::vec2& v);
     void setText(const std::string& name, const std::string& text);
 
+    // Audio state for ISF shaders (Shader-Claw naming convention)
+    void setAudioState(float rms, float bass, float mid, float high, GLuint fftTex);
+
     // Resolution (defaults to 1920x1080, can be changed)
     void setResolution(int w, int h);
 
@@ -106,6 +109,10 @@ private:
     std::string translateFragment(const std::string& isfBody);
     std::string translateVertex(const std::string& isfBody);
     std::string generateDefaultVertex();
+
+    // Audio state cached for upload
+    float m_audioRMS = 0, m_audioBass = 0, m_audioMid = 0, m_audioHigh = 0;
+    GLuint m_audioFFTTex = 0;
 
     // Upload all uniforms to shader
     void uploadUniforms();

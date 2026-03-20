@@ -18,21 +18,34 @@ uniform float uAudioStrength = 0.0;
 uniform int uMosaicModeFrom = 0;
 uniform float uMosaicTransition = 1.0; // 0=old mode, 1=new mode
 
+// Frequency band uniforms
+uniform float uAudioBass = 0.0;
+uniform float uAudioLowMid = 0.0;
+uniform float uAudioHighMid = 0.0;
+uniform float uAudioTreble = 0.0;
+uniform float uAudioBeatDecay = 0.0;
+
 float cellPop(vec2 cell) {
     float h1 = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5);
     float h2 = fract(sin(dot(cell, vec2(269.5, 183.3))) * 28461.3);
 
-    // Three waves at prime-ratio speeds — interference pattern rarely repeats
+    // Original prime-ratio wave interference — each cell has a unique phase
+    // so they light up one-at-a-time in a non-repeating pattern
     float w1 = smoothstep(0.12, 0.0, min(abs(h1 - fract(uTime * 0.7)), 1.0 - abs(h1 - fract(uTime * 0.7))));
     float w2 = smoothstep(0.15, 0.0, min(abs(h2 - fract(uTime * 1.1)), 1.0 - abs(h2 - fract(uTime * 1.1))));
     float w3 = smoothstep(0.18, 0.0, min(abs(h1 - fract(uTime * 0.3 + 0.5)), 1.0 - abs(h1 - fract(uTime * 0.3 + 0.5))));
 
-    // Radial pulse: beats ripple outward from center
+    // Radial pulse rippling outward from center
     float dist = length(cell) * 0.15;
     float ripple = smoothstep(0.2, 0.0, abs(fract(uTime * 0.8 - dist) - 0.5) * 2.0);
 
     float pop = max(max(w1, w2 * 0.7), w3 * 0.5) + ripple * 0.4;
-    pop *= uAudioRMS * uAudioStrength * 4.0;
+
+    // Drive by beat energy instead of raw RMS:
+    // beatDecay provides the envelope (1.0 on hit, decays smoothly)
+    // bass provides the intensity scaling
+    float beat = uAudioBeatDecay * (0.4 + uAudioBass * 0.6);
+    pop *= beat * uAudioStrength * 4.0;
     return clamp(pop, 0.0, 1.0);
 }
 
