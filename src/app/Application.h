@@ -137,6 +137,7 @@ private:
 
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
+    NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);

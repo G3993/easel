@@ -3,37 +3,59 @@
 #include <iostream>
 #include <cstring>
 
-NDISource::~NDISource() {
-    disconnect();
-}
+// ── NDIFinder (persistent, accumulates sources over time) ──────────
 
-std::vector<NDISenderInfo> NDISource::findSources(uint32_t waitMs) {
-    std::vector<NDISenderInfo> result;
+bool NDIFinder::create() {
+    if (m_finder) return true;
 
     auto& rt = NDIRuntime::instance();
-    if (!rt.isAvailable()) return result;
+    if (!rt.isAvailable()) return false;
 
     NDIlib_find_create_t findCreate = {};
     findCreate.show_local_sources = true;
 
-    NDIlib_find_instance_t finder = rt.api()->find_create_v2(&findCreate);
-    if (!finder) return result;
+    m_finder = rt.api()->find_create_v2(&findCreate);
+    if (!m_finder) {
+        std::cout << "[NDI] Failed to create finder" << std::endl;
+        return false;
+    }
+    std::cout << "[NDI] Finder created (persistent)" << std::endl;
+    return true;
+}
 
-    // Wait for sources to appear
-    rt.api()->find_wait_for_sources(finder, waitMs);
+void NDIFinder::destroy() {
+    if (m_finder) {
+        auto& rt = NDIRuntime::instance();
+        if (rt.isAvailable()) {
+            rt.api()->find_destroy(m_finder);
+        }
+        m_finder = nullptr;
+    }
+}
+
+std::vector<NDISenderInfo> NDIFinder::sources() const {
+    std::vector<NDISenderInfo> result;
+    if (!m_finder) return result;
+
+    auto& rt = NDIRuntime::instance();
+    if (!rt.isAvailable()) return result;
 
     uint32_t count = 0;
-    const NDIlib_source_t* sources = rt.api()->find_get_current_sources(finder, &count);
+    const NDIlib_source_t* sources = rt.api()->find_get_current_sources(m_finder, &count);
 
     for (uint32_t i = 0; i < count; i++) {
         NDISenderInfo info;
         info.name = sources[i].p_ndi_name ? sources[i].p_ndi_name : "";
-        info.url = sources[i].p_url_address ? sources[i].p_url_address : "";
+        info.url  = sources[i].p_url_address ? sources[i].p_url_address : "";
         result.push_back(info);
     }
-
-    rt.api()->find_destroy(finder);
     return result;
+}
+
+// ── NDISource ──────────────────────────────────────────────────────
+
+NDISource::~NDISource() {
+    disconnect();
 }
 
 bool NDISource::connect(const std::string& senderName) {

@@ -3,6 +3,10 @@
 
 #include <Processing.NDI.Lib.h>
 
+// NDI SDK version compatibility: older SDKs use NDIlib_api / NDIlib_load(),
+// newer ones (v6) use NDIlib_v6 / NDIlib_v6_load().
+using NDIlib_api = NDIlib_v6;
+
 // Singleton that manages the NDI runtime lifecycle.
 // Dynamically loads the NDI DLL and provides access to function pointers.
 class NDIRuntime {
@@ -10,7 +14,7 @@ public:
     static NDIRuntime& instance();
 
     bool isAvailable() const { return m_loaded; }
-    const NDIlib_api* api() const { return m_loaded ? &m_api : nullptr; }
+    const NDIlib_api* api() const { return m_loaded ? m_pApi : nullptr; }
 
     bool init();
     void shutdown();
@@ -21,7 +25,7 @@ private:
     NDIRuntime(const NDIRuntime&) = delete;
     NDIRuntime& operator=(const NDIRuntime&) = delete;
 
-    NDIlib_api m_api = {};
+    const NDIlib_api* m_pApi = nullptr;
     bool m_loaded = false;
     bool m_initialized = false;
 };

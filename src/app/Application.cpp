@@ -184,7 +184,9 @@ bool Application::init() {
 #ifdef HAS_NDI
     NDIRuntime::instance().init();
     if (NDIRuntime::instance().isAvailable()) {
-        m_ndiSources = NDISource::findSources(500);
+        // Create persistent finder — it accumulates sources over time via mDNS
+        m_ndiFinder.create();
+        m_ndiSources = m_ndiFinder.sources();
         // Auto-start composition output
         m_ndiOutput.create("Easel");
     }
@@ -851,11 +853,22 @@ void Application::renderUI() {
 #endif
     m_speechState.dataBus = &m_dataBus;
     m_speechState.activeLayerId = selectedLayer ? selectedLayer->id : 0;
+
+    // Capture undo snapshot BEFORE the property panel modifies values
+    SceneSnapshot preEditSnapshot;
+    bool capturedPre = false;
+    if (!m_propertyPanel.undoNeeded) {
+        preEditSnapshot = UndoStack::captureSnapshot(m_layerStack, m_selectedLayer);
+        capturedPre = true;
+    }
+
     m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime());
 
-    // Push undo state if a property widget was just activated (before the edit takes effect next frame)
+    // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
-        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        if (capturedPre) {
+            m_undoStack.pushSnapshot(std::move(preEditSnapshot));
+        }
         m_propertyPanel.undoNeeded = false;
     }
 
@@ -1369,7 +1382,7 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
                 if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
-                    m_ndiSources = NDISource::findSources(1000);
+                    m_ndiSources = m_ndiFinder.sources();
                 }
                 ImGui::PopStyleColor(4);
 
@@ -2034,7 +2047,7 @@ void Application::renderMenuBar() {
 #ifdef HAS_NDI
             if (NDIRuntime::instance().isAvailable() && ImGui::BeginMenu("Add NDI Source")) {
                 if (ImGui::MenuItem("Refresh")) {
-                    m_ndiSources = NDISource::findSources(1000);
+                    m_ndiSources = m_ndiFinder.sources();
                 }
                 ImGui::Separator();
                 if (m_ndiSources.empty()) {

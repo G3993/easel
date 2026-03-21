@@ -50,6 +50,20 @@ public:
         m_redoStack.clear();
     }
 
+    // Push a pre-captured snapshot (used when we need to capture before edits happen)
+    void pushSnapshot(SceneSnapshot snap) {
+        m_undoStack.push_back(std::move(snap));
+        if ((int)m_undoStack.size() > m_maxEntries) {
+            m_undoStack.pop_front();
+        }
+        m_redoStack.clear();
+    }
+
+    // Capture a snapshot without pushing it (caller decides whether to push)
+    static SceneSnapshot captureSnapshot(const LayerStack& stack, int selectedLayer) {
+        return capture(stack, selectedLayer);
+    }
+
     bool canUndo() const { return !m_undoStack.empty(); }
     bool canRedo() const { return !m_redoStack.empty(); }
 

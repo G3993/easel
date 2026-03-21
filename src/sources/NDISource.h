@@ -12,12 +12,23 @@ struct NDISenderInfo {
     std::string url;
 };
 
+// Persistent NDI finder — keeps accumulating sources over time (like ShaderClaw).
+// Create once, call sources() whenever you need the current list.
+class NDIFinder {
+public:
+    ~NDIFinder() { destroy(); }
+
+    bool create();
+    void destroy();
+    std::vector<NDISenderInfo> sources() const;
+
+private:
+    NDIlib_find_instance_t m_finder = nullptr;
+};
+
 class NDISource : public ContentSource {
 public:
     ~NDISource();
-
-    // Discover NDI senders on the network
-    static std::vector<NDISenderInfo> findSources(uint32_t waitMs = 500);
 
     bool connect(const std::string& senderName);
     void disconnect();
