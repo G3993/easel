@@ -1,4 +1,5 @@
 #include "sources/ShaderSource.h"
+#include "render/FontAtlas.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>
@@ -497,6 +498,14 @@ void ShaderSource::uploadUniforms() {
         glBindTexture(GL_TEXTURE_2D, m_audioFFTTex);
     }
 
+    // Font atlas for text shaders
+    GLuint fontAtlas = FontAtlas::texture();
+    if (fontAtlas) {
+        m_shader.setInt("fontAtlasTex", 3);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, fontAtlas);
+    }
+
     // User inputs
     for (const auto& input : m_inputs) {
         if (input.type == "float") {
@@ -511,7 +520,7 @@ void ShaderSource::uploadUniforms() {
             m_shader.setInt(input.name, (int)std::get<float>(input.value));
         } else if (input.type == "text") {
             // Send text as character code uniforms
-            // Shader-Claw encoding: A=0, B=1, ..., Z=25, space=26
+            // Shader-Claw 3 encoding: A=0..Z=25, space=26, 0-9=27-36
             std::string text = std::get<std::string>(input.value);
             int maxLen = (int)input.maxVal;
             if (maxLen <= 0) maxLen = 12;
@@ -525,6 +534,7 @@ void ShaderSource::uploadUniforms() {
                     char c = text[i];
                     if (c >= 'A' && c <= 'Z') ch = c - 'A';
                     else if (c >= 'a' && c <= 'z') ch = c - 'a';
+                    else if (c >= '0' && c <= '9') ch = 27 + (c - '0');
                     else ch = 26; // space or unknown
                 }
                 m_shader.setInt(input.name + "_" + std::to_string(i), ch);

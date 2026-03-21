@@ -163,6 +163,8 @@ bool Application::init() {
             prev += text;
             m_dataBus.set("etherea.transcript", prev);
         }
+        // Record time for voice decay
+        m_voiceLastInputTime = glfwGetTime();
     });
     m_speechState.available = true;
 
@@ -316,6 +318,37 @@ void Application::run() {
             std::string prompt = m_ethereaClient.prompt();
             if (!prompt.empty())
                 m_dataBus.set("etherea.prompt", prompt);
+        }
+
+        // Voice decay: fade layers with DataBus text bindings after speech stops
+        // 2s hold at full opacity, then ease-out over decay duration
+        // Only active while decaying (not after fully faded, so UI can regain control)
+        if (m_voiceDecayEnabled && m_voiceLastInputTime > 0.0) {
+            float elapsed = (float)(glfwGetTime() - m_voiceLastInputTime);
+            float totalDuration = m_voiceDecayHold + m_voiceDecayDuration;
+            if (elapsed < totalDuration) {
+                float decayFactor;
+                if (elapsed < m_voiceDecayHold) {
+                    decayFactor = 1.0f;
+                } else {
+                    float t = (elapsed - m_voiceDecayHold) / std::max(0.01f, m_voiceDecayDuration);
+                    decayFactor = (1.0f - t) * (1.0f - t); // ease-out quadratic
+                }
+
+                // Apply to all layers that have DataBus text bindings
+                for (auto& [bindKey, dataKey] : m_dataBus.bindings()) {
+                    if (dataKey.empty()) continue;
+                    auto sep = bindKey.find(':');
+                    if (sep == std::string::npos) continue;
+                    uint32_t layerId = (uint32_t)std::stoul(bindKey.substr(0, sep));
+                    for (int i = 0; i < m_layerStack.count(); i++) {
+                        if (m_layerStack[i]->id == layerId) {
+                            m_layerStack[i]->opacity = decayFactor;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // Apply data bus bindings to shader text params
@@ -1031,7 +1064,7 @@ void Application::renderUI() {
                 // Try common paths
                 const char* home = getenv("USERPROFILE");
                 if (home) {
-                    std::string tryPath = std::string(home) + "\\Shader-Claw\\shaders";
+                    std::string tryPath = std::string(home) + "\\shader-claw3\\shaders";
                     if (std::filesystem::exists(tryPath)) {
                         strncpy(scPath, tryPath.c_str(), sizeof(scPath) - 1);
                     }

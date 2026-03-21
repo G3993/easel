@@ -125,6 +125,12 @@ private:
     EthereaClient m_ethereaClient;
     DataBus m_dataBus;
     std::string m_prevTranscript;       // Last full_transcript for diffing
+
+    // Voice decay: fade text layers after speech stops (matches Shader-Claw 3)
+    double m_voiceLastInputTime = 0.0;  // glfwGetTime() of last transcript update
+    float m_voiceDecayHold = 2.0f;      // seconds at full opacity after last input
+    float m_voiceDecayDuration = 3.0f;  // seconds to fade out after hold
+    bool m_voiceDecayEnabled = true;
 #ifdef HAS_WHISPER
     WhisperSpeech m_whisperSpeech;
 #endif
