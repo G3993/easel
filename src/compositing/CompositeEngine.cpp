@@ -67,10 +67,26 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
         float audioStrength = layer->audioReactive ? layer->audioStrength : 0.0f;
 
+        // Build native-size transform: scale (1,1) means source's native pixel
+        // size within the composition.  User scale/rotate/translate apply on top.
+        // When mosaic tiling is active, fill the canvas so the pattern covers everything.
+        bool mosaicFill = (layer->tileX > 1.0f || layer->tileY > 1.0f ||
+                           layer->mosaicMode != MosaicMode::Mirror);
+        glm::mat3 nativeScale(1.0f);
+        if (!mosaicFill) {
+            int lw = layer->width(), lh = layer->height();
+            if (lw > 0 && lh > 0 && m_width > 0 && m_height > 0) {
+                nativeScale[0][0] = (float)lw / m_width;
+                nativeScale[1][1] = (float)lh / m_height;
+            }
+        }
+        glm::mat3 layerXform = layer->getTransformMatrix() * nativeScale;
+
         if (firstLayer && layer->blendMode == BlendMode::Normal) {
             // First layer: just draw it directly
             m_passthroughShader.use();
-            m_passthroughShader.setMat3("uTransform", layer->getTransformMatrix());
+            m_passthroughShader.setMat3("uTransform", layerXform);
+            m_passthroughShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
             m_passthroughShader.setFloat("uOpacity", layer->opacity);
             m_passthroughShader.setInt("uTexture", 0);
             m_passthroughShader.setFloat("uTileX", layer->tileX);
@@ -81,6 +97,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_passthroughShader.setFloat("uMosaicDensity", layer->mosaicDensity);
             m_passthroughShader.setFloat("uMosaicSpin", layer->mosaicSpin);
             m_passthroughShader.setFloat("uTime", m_audio.time);
+            m_passthroughShader.setFloat("uFeather", layer->feather);
             setAudioUniforms(m_passthroughShader, audioStrength);
             {
                 float mt = glm::clamp((m_audio.time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
@@ -105,8 +122,8 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             // shader uses uInvTransform to sample the layer texture at the
             // correct position.
             m_compositeShader.setMat3("uTransform", glm::mat3(1.0f));
-            glm::mat3 layerXform = layer->getTransformMatrix();
             m_compositeShader.setMat3("uInvTransform", glm::inverse(layerXform));
+            m_compositeShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
             m_compositeShader.setInt("uBase", 0);
             m_compositeShader.setInt("uLayer", 1);
             m_compositeShader.setFloat("uOpacity", layer->opacity);
@@ -119,6 +136,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             m_compositeShader.setFloat("uMosaicDensity", layer->mosaicDensity);
             m_compositeShader.setFloat("uMosaicSpin", layer->mosaicSpin);
             m_compositeShader.setFloat("uTime", m_audio.time);
+            m_compositeShader.setFloat("uFeather", layer->feather);
             setAudioUniforms(m_compositeShader, audioStrength);
             {
                 float mt = glm::clamp((m_audio.time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);

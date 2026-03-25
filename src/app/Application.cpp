@@ -932,16 +932,16 @@ void Application::renderUI() {
                 float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
                 ImGui::SetNextItemWidth(half);
                 int cw = zone.width;
-                if (ImGui::DragInt("##CW", &cw, 1, 128, 7680, "%d")) {
-                    if (cw >= 128 && cw <= 7680) {
+                if (ImGui::DragInt("##CW", &cw, 1, 128, 16384, "%d")) {
+                    if (cw >= 128 && cw <= 16384) {
                         zone.resize(cw, zone.height);
                     }
                 }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(half);
                 int ch = zone.height;
-                if (ImGui::DragInt("##CH", &ch, 1, 128, 7680, "%d")) {
-                    if (ch >= 128 && ch <= 7680) {
+                if (ImGui::DragInt("##CH", &ch, 1, 128, 16384, "%d")) {
+                    if (ch >= 128 && ch <= 16384) {
                         zone.resize(zone.width, ch);
                     }
                 }
@@ -1385,6 +1385,16 @@ void Application::renderUI() {
                     m_ndiSources = m_ndiFinder.sources();
                 }
                 ImGui::PopStyleColor(4);
+
+                // Auto-refresh source list every ~2 seconds
+                {
+                    static double lastRefresh = 0;
+                    double now = glfwGetTime();
+                    if (now - lastRefresh > 2.0) {
+                        m_ndiSources = m_ndiFinder.sources();
+                        lastRefresh = now;
+                    }
+                }
 
                 ImGui::Dummy(ImVec2(0, 2));
                 if (m_ndiSources.empty()) {
@@ -2411,6 +2421,7 @@ void Application::saveProject(const std::string& path) {
         layerJson["mosaicSpin"] = layer->mosaicSpin;
         layerJson["audioReactive"] = layer->audioReactive;
         layerJson["audioStrength"] = layer->audioStrength;
+        layerJson["feather"] = layer->feather;
 #ifdef HAS_NDI
         layerJson["ndiEnabled"] = layer->ndiEnabled;
 #endif
@@ -2619,6 +2630,7 @@ void Application::loadProject(const std::string& path) {
             layer->mosaicSpin = layerJson.value("mosaicSpin", 0.0f);
             layer->audioReactive = layerJson.value("audioReactive", false);
             layer->audioStrength = layerJson.value("audioStrength", 0.15f);
+            layer->feather = layerJson.value("feather", 0.0f);
 #ifdef HAS_NDI
             layer->ndiEnabled = layerJson.value("ndiEnabled", false);
 #endif

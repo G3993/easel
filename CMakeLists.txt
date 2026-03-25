@@ -237,6 +237,33 @@ target_link_libraries(test_audio_analyzer PRIVATE
     glfw glad glm::glm nlohmann_json::nlohmann_json opengl32
 )
 
+# NDI receive test
+if(HAS_NDI)
+    add_executable(test_ndi_receive
+        tests/test_ndi_receive.cpp
+        src/sources/NDIRuntime.cpp
+        src/sources/NDISource.cpp
+        src/render/Texture.cpp
+        src/render/Framebuffer.cpp
+        src/render/Mesh.cpp
+        src/render/ShaderProgram.cpp
+    )
+    target_compile_definitions(test_ndi_receive PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN HAS_NDI=1)
+    target_include_directories(test_ndi_receive PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${NDI_DIR}/include
+        ${stb_SOURCE_DIR}
+    )
+    target_link_libraries(test_ndi_receive PRIVATE
+        glfw glad glm::glm opengl32
+    )
+
+    add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp)
+    target_compile_definitions(test_ndi_list PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN HAS_NDI=1)
+    target_include_directories(test_ndi_list PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
+    target_link_libraries(test_ndi_list PRIVATE glfw glad opengl32)
+endif()
+
 # Copy shaders to build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

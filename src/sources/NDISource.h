@@ -40,6 +40,7 @@ public:
     int height() const override { return m_height; }
     std::string typeName() const override { return "NDI"; }
     std::string sourcePath() const override { return m_senderName; }
+    bool isFlippedV() const override { return true; }
 
 private:
     NDIlib_recv_instance_t m_recv = nullptr;

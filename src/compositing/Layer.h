@@ -48,6 +48,9 @@ public:
     float mosaicTransitionStart = -10.0f;
     float mosaicTransitionDuration = 1.5f;
 
+    // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
+    float feather = 0.0f;
+
     // Source crop (0.0–0.49): trims edges before tiling
     float cropTop = 0.0f, cropBottom = 0.0f;
     float cropLeft = 0.0f, cropRight = 0.0f;

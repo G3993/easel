@@ -47,6 +47,8 @@ std::vector<NDISenderInfo> NDIFinder::sources() const {
         NDISenderInfo info;
         info.name = sources[i].p_ndi_name ? sources[i].p_ndi_name : "";
         info.url  = sources[i].p_url_address ? sources[i].p_url_address : "";
+        // Filter out Easel's own NDI output to prevent feedback loops
+        if (info.name.find("(Easel)") != std::string::npos) continue;
         result.push_back(info);
     }
     return result;
@@ -145,12 +147,17 @@ void NDISource::update() {
 
         int stride = video.line_stride_in_bytes;
         if (stride <= 0) stride = m_width * 4;
+        int rowBytes = m_width * 4;
 
-        // NDI gives us top-down, OpenGL wants bottom-up → flip vertically
-        for (int y = 0; y < m_height; y++) {
-            const uint8_t* srcRow = video.p_data + y * stride;
-            uint8_t* dstRow = m_pixelBuffer.data() + (m_height - 1 - y) * m_width * 4;
-            std::memcpy(dstRow, srcRow, m_width * 4);
+        // Copy NDI data into our buffer.  NDI is top-down, OpenGL bottom-up.
+        // Single bulk memcpy when stride matches and we flip via shader.
+        if (stride == rowBytes) {
+            std::memcpy(m_pixelBuffer.data(), video.p_data, rowBytes * m_height);
+        } else {
+            for (int y = 0; y < m_height; y++) {
+                std::memcpy(m_pixelBuffer.data() + y * rowBytes,
+                            video.p_data + y * stride, rowBytes);
+            }
         }
 
         m_texture.updateData(m_pixelBuffer.data(), m_width, m_height);

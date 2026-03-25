@@ -352,6 +352,13 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         }
     }
 
+    // --- Feather ---
+    {
+        ImGui::SetNextItemWidth(-1);
+        if (namedDrag("##Feather", "Feather", &layer->feather, 0.005f, 0.0f, 0.5f, "%.3f"))
+            undoNeeded = true;
+    }
+
     // --- Crop ---
     ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.04f));

@@ -1,5 +1,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#include "stb_image_write.h"
 #include "render/FontAtlas.h"
 #include <vector>
 #include <cstdio>
@@ -89,13 +90,21 @@ void FontAtlas::generate() {
         if (codepoint == ' ') continue; // leave space cell blank
 
         int glyphIdx = stbtt_FindGlyphIndex(&font, codepoint);
-        if (!glyphIdx) continue;
+        if (!glyphIdx) {
+            printf("FontAtlas: no glyph for '%c' (codepoint %d)\n", (char)codepoint, codepoint);
+            continue;
+        }
 
         // Get glyph bitmap
         int gw, gh, xoff, yoff;
         unsigned char* bitmap = stbtt_GetGlyphBitmap(&font, scale, scale,
                                                       glyphIdx, &gw, &gh, &xoff, &yoff);
-        if (!bitmap) continue;
+        if (!bitmap) {
+            printf("FontAtlas: null bitmap for '%c'\n", (char)codepoint);
+            continue;
+        }
+        printf("FontAtlas: [%d] '%c' glyph=%d size=%dx%d off=%d,%d\n",
+               i, (char)codepoint, glyphIdx, gw, gh, xoff, yoff);
 
         // Get advance width for centering
         int advW, lsb;
@@ -125,6 +134,11 @@ void FontAtlas::generate() {
 
         stbtt_FreeBitmap(bitmap, nullptr);
     }
+
+    // Debug: save atlas to disk for inspection
+    stbi_write_png("screenshots/font_atlas_debug.png", atlasW, atlasH, 1,
+                   atlas.data(), atlasW);
+    printf("FontAtlas: saved debug image to screenshots/font_atlas_debug.png\n");
 
     // Upload to GL
     glGenTextures(1, &s_texture);

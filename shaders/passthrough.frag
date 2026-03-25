@@ -24,6 +24,7 @@ uniform float uAudioLowMid = 0.0;
 uniform float uAudioHighMid = 0.0;
 uniform float uAudioTreble = 0.0;
 uniform float uAudioBeatDecay = 0.0;
+uniform float uFeather = 0.0;
 
 float cellPop(vec2 cell) {
     float h1 = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5);
@@ -138,6 +139,12 @@ void main() {
 
         // Brightness pulse at midpoint
         color.rgb *= 1.0 + sin(t * 3.14159) * 0.15;
+    }
+
+    // Edge feather
+    if (uFeather > 0.0) {
+        float edgeDist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        color.a *= smoothstep(0.0, uFeather, edgeDist);
     }
 
     color.a *= uOpacity;

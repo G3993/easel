@@ -74,10 +74,14 @@ void AudioAnalyzer::initCapture() {
     if (FAILED(hr) || !enumerator) return;
 
     IMMDevice* device = nullptr;
+    bool isLoopback = false;
+
     if (m_deviceIdx == -1) {
+        // System audio loopback (default render endpoint)
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        isLoopback = true;
     } else {
-        // Try to get specific device by enumerating
+        // Specific device by index — enumerate all devices
         IMMDeviceCollection* collection = nullptr;
         hr = enumerator->EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE, &collection);
         if (SUCCEEDED(hr) && collection) {
@@ -85,6 +89,16 @@ void AudioAnalyzer::initCapture() {
             collection->GetCount(&count);
             if (m_deviceIdx >= 0 && m_deviceIdx < (int)count) {
                 collection->Item(m_deviceIdx, &device);
+
+                // Determine if this is a render or capture device
+                IMMEndpoint* endpoint = nullptr;
+                if (SUCCEEDED(device->QueryInterface(__uuidof(IMMEndpoint), (void**)&endpoint))) {
+                    EDataFlow flow;
+                    if (SUCCEEDED(endpoint->GetDataFlow(&flow))) {
+                        isLoopback = (flow == eRender);
+                    }
+                    endpoint->Release();
+                }
             }
             collection->Release();
         }
@@ -110,12 +124,15 @@ void AudioAnalyzer::initCapture() {
     audioClient->GetDevicePeriod(&defaultPeriod, &minPeriod);
     REFERENCE_TIME bufferDuration = defaultPeriod > 0 ? defaultPeriod * 4 : 2000000;
 
+    // Loopback for render devices, normal capture for microphones
+    DWORD streamFlags = isLoopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
     hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                  AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                  streamFlags,
                                   bufferDuration, 0, mixFmt, nullptr);
     CoTaskMemFree(mixFmt);
     if (FAILED(hr)) {
-        std::cerr << "[AudioAnalyzer] Initialize failed (hr=0x" << std::hex << hr << std::dec << ")" << std::endl;
+        std::cerr << "[AudioAnalyzer] Initialize failed (hr=0x" << std::hex << hr << std::dec
+                  << (isLoopback ? " loopback" : " capture") << ")" << std::endl;
         return;
     }
 

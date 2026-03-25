@@ -16,6 +16,7 @@ public:
     // Type queries
     virtual bool isVideo() const { return false; }
     virtual bool isShader() const { return false; }
+    virtual bool isFlippedV() const { return false; }
     virtual void play() {}
     virtual void pause() {}
     virtual void seek(double) {}

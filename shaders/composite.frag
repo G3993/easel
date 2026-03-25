@@ -27,6 +27,8 @@ uniform float uAudioLowMid = 0.0;
 uniform float uAudioHighMid = 0.0;
 uniform float uAudioTreble = 0.0;
 uniform float uAudioBeatDecay = 0.0;
+uniform float uFeather = 0.0;
+uniform bool uFlipV = false;
 
 vec3 blendNormal(vec3 base, vec3 blend)    { return blend; }
 vec3 blendMultiply(vec3 base, vec3 blend)  { return base * blend; }
@@ -138,6 +140,7 @@ void main() {
     vec2 ndc = vTexCoord * 2.0 - 1.0;
     vec3 layerNDC = uInvTransform * vec3(ndc, 1.0);
     vec2 layerUV = layerNDC.xy * 0.5 + 0.5;
+    if (uFlipV) layerUV.y = 1.0 - layerUV.y;
 
     if (layerUV.x < 0.0 || layerUV.x > 1.0 || layerUV.y < 0.0 || layerUV.y > 1.0) {
         FragColor = base;
@@ -170,7 +173,14 @@ void main() {
         layer.rgb *= 1.0 + sin(t * 3.14159) * 0.15;
     }
 
-    float alpha = layer.a * uOpacity;
+    // Edge feather (based on layer UV, not mosaic UV)
+    float featherAlpha = 1.0;
+    if (uFeather > 0.0) {
+        float edgeDist = min(min(layerUV.x, 1.0 - layerUV.x), min(layerUV.y, 1.0 - layerUV.y));
+        featherAlpha = smoothstep(0.0, uFeather, edgeDist);
+    }
+
+    float alpha = layer.a * uOpacity * featherAlpha;
 
     if (uHasMask) {
         float maskVal = texture(uMask, maskUV).r;
