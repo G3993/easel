@@ -221,16 +221,22 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform float pinchHold;\n";
     out << "\n";
 
-    // ISF image input stubs — provide dummy samplers and macros
+    // Mouse interaction (for painting shaders)
+    out << "uniform float mouseDown;\n";
+    out << "\n";
+
+    // ISF image input stubs — provide samplers + IMG_SIZE + flip uniforms
     bool hasImageInputs = false;
     for (const auto& input : m_inputs) {
         if (input.type == "image") {
             hasImageInputs = true;
             out << "uniform sampler2D " << input.name << ";\n";
+            out << "uniform vec2 IMG_SIZE_" << input.name << ";\n";
+            out << "uniform bool _flip_" << input.name << ";\n";
         }
     }
 
-    // Multi-pass buffer textures (declared as dummy samplers)
+    // Multi-pass buffer textures
     for (const auto& buf : m_passBuffers) {
         out << "uniform sampler2D " << buf << ";\n";
         hasImageInputs = true;
@@ -377,6 +383,56 @@ bool ShaderSource::loadFromFile(const std::string& path) {
     return loadFromCode(m_rawFragment);
 }
 
+void ShaderSource::createPassFBOs() {
+    m_passes.clear();
+    m_frameIndex = 0; // reset frame counter so shader seeds correctly
+
+    // Build ISFPass structs from parsed PASSES metadata
+    // m_passBuffers has only the named targets; we also need the final pass (no target)
+    // Re-parse from raw source to get full PASSES array including final empty pass
+    auto start = m_rawFragment.find("/*");
+    auto commentEnd = m_rawFragment.find("*/", start);
+    auto jsonStart = m_rawFragment.find('{', start);
+    if (jsonStart != std::string::npos && jsonStart < commentEnd) {
+        int depth = 0;
+        size_t jsonEnd = std::string::npos;
+        for (size_t i = jsonStart; i < commentEnd; i++) {
+            if (m_rawFragment[i] == '{') depth++;
+            else if (m_rawFragment[i] == '}') { depth--; if (depth == 0) { jsonEnd = i; break; } }
+        }
+        if (jsonEnd != std::string::npos) {
+            try {
+                auto j = json::parse(m_rawFragment.substr(jsonStart, jsonEnd - jsonStart + 1));
+                if (j.contains("PASSES") && j["PASSES"].is_array()) {
+                    for (const auto& p : j["PASSES"]) {
+                        ISFPass pass;
+                        if (p.contains("TARGET") && p["TARGET"].is_string())
+                            pass.target = p["TARGET"].get<std::string>();
+                        if (p.contains("PERSISTENT") && p["PERSISTENT"].is_boolean())
+                            pass.persistent = p["PERSISTENT"].get<bool>();
+
+                        if (!pass.target.empty()) {
+                            // Auto-downscale simulation passes on large canvases
+                            // (fluid sim is low-frequency, half-res looks identical)
+                            int pw = m_width, ph = m_height;
+                            if (m_width > 4096) {
+                                pw = std::max(1, m_width / 2);
+                                ph = std::max(1, m_height / 2);
+                            }
+                            pass.simWidth = pw;
+                            pass.simHeight = ph;
+                            pass.ppFBO = std::make_unique<PingPongFBO>();
+                            pass.ppFBO->a.createHalfFloat(pw, ph);
+                            pass.ppFBO->b.createHalfFloat(pw, ph);
+                        }
+                        m_passes.push_back(std::move(pass));
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+}
+
 bool ShaderSource::loadFromCode(const std::string& isfSource) {
     m_rawFragment = isfSource;
 
@@ -396,7 +452,6 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
 
     if (!m_shader.loadFromSource(vertSrc, fragSrc)) {
         std::cerr << "Failed to compile ISF shader" << std::endl;
-        // Log which shader failed and the generated source
         {
             FILE* f = fopen("etherea_debug.log", "a");
             if (f) {
@@ -415,6 +470,11 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
         }
         m_quad.createQuad();
         m_initialized = true;
+    }
+
+    // Create ping-pong FBOs for multi-pass shaders
+    if (!m_passBuffers.empty()) {
+        createPassFBOs();
     }
 
     return true;
@@ -465,25 +525,97 @@ bool ShaderSource::reload(const std::string& isfSource) {
 void ShaderSource::update() {
     if (!m_initialized) return;
 
-    m_fbo.bind();
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-
     m_shader.use();
-    uploadUniforms();
-    m_quad.draw();
 
-    Framebuffer::unbind();
+    if (m_passes.empty()) {
+        // Single-pass shader (no PASSES in ISF header)
+        m_fbo.bind();
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        uploadUniforms(0, m_width, m_height);
+        m_quad.draw();
+        Framebuffer::unbind();
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgram(0);
+    } else {
+        // Multi-pass rendering with ping-pong persistent buffers
+        // Reserve texture units for pass buffers (start after audio=2, font=3)
+        int targetBaseUnit = 4;
+
+        for (int i = 0; i < (int)m_passes.size(); i++) {
+            auto& pass = m_passes[i];
+            bool isFinal = pass.target.empty();
+
+            // Determine output FBO
+            Framebuffer* outFBO;
+            if (isFinal) {
+                outFBO = &m_fbo;
+            } else {
+                outFBO = &pass.ppFBO->writeFBO();
+            }
+
+            // Bind output
+            glBindFramebuffer(GL_FRAMEBUFFER, outFBO->fboId());
+            glViewport(0, 0, outFBO->width(), outFBO->height());
+
+            // Clear: skip for persistent passes, always clear final
+            if (!pass.persistent || isFinal) {
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+
+            // Upload uniforms with current pass index and dimensions
+            uploadUniforms(i, outFBO->width(), outFBO->height());
+
+            // Bind all pass buffer textures (read side of ping-pong)
+            int unit = targetBaseUnit;
+            for (int pi = 0; pi < (int)m_passes.size(); pi++) {
+                auto& p = m_passes[pi];
+                if (p.target.empty() || !p.ppFBO) continue;
+
+                glActiveTexture(GL_TEXTURE0 + unit);
+                glBindTexture(GL_TEXTURE_2D, p.ppFBO->readFBO().textureId());
+                m_shader.setInt(p.target, unit);
+                unit++;
+            }
+
+            m_quad.draw();
+
+            // Swap ping-pong for persistent passes
+            if (pass.persistent && pass.ppFBO) {
+                pass.ppFBO->swap();
+            }
+        }
+
+        Framebuffer::unbind();
+        glViewport(0, 0, m_width, m_height);
+    }
+
+    // Restore default GL state so other sources (NDI, etc.) aren't affected
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+
+    m_frameIndex++;
 }
 
-void ShaderSource::uploadUniforms() {
+void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) {
+    if (passWidth <= 0) passWidth = m_width;
+    if (passHeight <= 0) passHeight = m_height;
+
     // ISF built-ins
     m_shader.setFloat("TIME", (float)glfwGetTime());
-    m_shader.setVec2("RENDERSIZE", glm::vec2((float)m_width, (float)m_height));
-    m_shader.setInt("PASSINDEX", 0);
-    m_shader.setInt("FRAMEINDEX", (int)(glfwGetTime() * 60.0)); // approximate frame count
+    m_shader.setVec2("RENDERSIZE", glm::vec2((float)passWidth, (float)passHeight));
+    m_shader.setInt("PASSINDEX", passIndex);
+    m_shader.setInt("FRAMEINDEX", m_frameIndex);
+
+    // Mouse state
+    float dx = m_mouseX - m_prevMouseX;
+    float dy = m_mouseY - m_prevMouseY;
     m_shader.setVec2("mousePos", glm::vec2(m_mouseX, m_mouseY));
-    m_shader.setVec2("mouseDelta", glm::vec2(0.0f, 0.0f));
+    m_shader.setVec2("mouseDelta", glm::vec2(dx, dy));
+    m_shader.setFloat("mouseDown", m_mouseDown);
     m_shader.setFloat("pinchHold", 0.0f);
 
     // Audio state (Shader-Claw naming convention)
@@ -540,7 +672,33 @@ void ShaderSource::uploadUniforms() {
                 m_shader.setInt(input.name + "_" + std::to_string(i), ch);
             }
         }
-        // image inputs: would bind textures if we had them
+        // image inputs: bind external texture if available
+        if (input.type == "image") {
+            auto it = m_imageBindings.find(input.name);
+            if (it != m_imageBindings.end() && it->second.textureId != 0) {
+                // Bind to texture unit 8+ (after audio=2, font=3, pass buffers=4+)
+                int imgUnit = 8;
+                for (const auto& inp : m_inputs) {
+                    if (inp.type == "image" && inp.name == input.name) break;
+                    if (inp.type == "image") imgUnit++;
+                }
+                glActiveTexture(GL_TEXTURE0 + imgUnit);
+                glBindTexture(GL_TEXTURE_2D, it->second.textureId);
+                m_shader.setInt(input.name, imgUnit);
+                m_shader.setVec2("IMG_SIZE_" + input.name,
+                    glm::vec2((float)it->second.width, (float)it->second.height));
+                m_shader.setBool("_flip_" + input.name, it->second.flippedV);
+            } else {
+                m_shader.setVec2("IMG_SIZE_" + input.name, glm::vec2(0.0f, 0.0f));
+                m_shader.setBool("_flip_" + input.name, false);
+            }
+        }
+    }
+
+    // Update previous mouse position (only on pass 0 to avoid multi-update)
+    if (passIndex == 0) {
+        m_prevMouseX = m_mouseX;
+        m_prevMouseY = m_mouseY;
     }
 }
 
@@ -591,6 +749,55 @@ void ShaderSource::setText(const std::string& name, const std::string& text) {
     }
 }
 
+void ShaderSource::setMouseState(float x, float y, bool down) {
+    m_mouseX = x;
+    m_mouseY = y;
+    m_mouseDown = down ? 1.0f : 0.0f;
+}
+
+void ShaderSource::bindImageInput(const std::string& name, GLuint texId, int w, int h, uint32_t sourceLayerId, bool flippedV) {
+    m_imageBindings[name] = {texId, w, h, sourceLayerId, flippedV};
+}
+
+void ShaderSource::unbindImageInput(const std::string& name) {
+    m_imageBindings.erase(name);
+}
+
+void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat) {
+    for (auto& [paramName, binding] : m_audioBindings) {
+        if (binding.signal == AudioSignal::None) continue;
+
+        // Get raw signal value (0-1)
+        float raw = 0.0f;
+        switch (binding.signal) {
+            case AudioSignal::Level: raw = level; break;
+            case AudioSignal::Bass:  raw = bass; break;
+            case AudioSignal::Mid:   raw = mid; break;
+            case AudioSignal::High:  raw = high; break;
+            case AudioSignal::Beat:  raw = beat; break;
+            default: break;
+        }
+
+        // Asymmetric smoothing: fast attack, slow release
+        float attackAlpha = 1.0f - binding.smoothing * 0.8f;
+        float releaseAlpha = 1.0f - binding.smoothing * 0.95f;
+        float alpha = (raw > binding.smoothedValue) ? attackAlpha : releaseAlpha;
+        binding.smoothedValue += (raw - binding.smoothedValue) * alpha;
+
+        // Map to parameter range
+        float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
+
+        // Find the input and set its value
+        for (auto& input : m_inputs) {
+            if (input.name == paramName && (input.type == "float" || input.type == "long")) {
+                mapped = std::max(input.minVal, std::min(input.maxVal, mapped));
+                input.value = mapped;
+                break;
+            }
+        }
+    }
+}
+
 void ShaderSource::setAudioState(float rms, float bass, float mid, float high, GLuint fftTex) {
     m_audioRMS = rms;
     m_audioBass = bass;
@@ -605,5 +812,20 @@ void ShaderSource::setResolution(int w, int h) {
     m_height = h;
     if (m_initialized) {
         m_fbo.resize(w, h);
+        // Resize pass FBOs (simulation passes at half-res for large canvases)
+        for (auto& pass : m_passes) {
+            if (pass.ppFBO) {
+                int pw = w, ph = h;
+                if (w > 4096) {
+                    pw = std::max(1, w / 2);
+                    ph = std::max(1, h / 2);
+                }
+                pass.simWidth = pw;
+                pass.simHeight = ph;
+                pass.ppFBO->a.resize(pw, ph);
+                pass.ppFBO->b.resize(pw, ph);
+            }
+        }
+        m_frameIndex = 0; // reset so shader re-seeds
     }
 }

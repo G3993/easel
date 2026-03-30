@@ -47,9 +47,44 @@ bool Framebuffer::create(int width, int height, bool withDepth) {
     return true;
 }
 
+bool Framebuffer::createHalfFloat(int width, int height) {
+    destroy();
+    m_width = width;
+    m_height = height;
+    m_hasDepth = false;
+    m_halfFloat = true;
+
+    glGenFramebuffers(1, &m_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+
+    glGenTextures(1, &m_texture);
+    glBindTexture(GL_TEXTURE_2D, m_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_texture, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Half-float framebuffer incomplete, falling back to RGBA8" << std::endl;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        destroy();
+        m_halfFloat = false;
+        return create(width, height, false);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
 void Framebuffer::resize(int width, int height) {
     if (width == m_width && height == m_height) return;
-    create(width, height, m_hasDepth);
+    if (m_halfFloat)
+        createHalfFloat(width, height);
+    else
+        create(width, height, m_hasDepth);
 }
 
 void Framebuffer::bind() const {

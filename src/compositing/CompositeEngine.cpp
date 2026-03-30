@@ -67,17 +67,21 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
         float audioStrength = layer->audioReactive ? layer->audioStrength : 0.0f;
 
-        // Build native-size transform: scale (1,1) means source's native pixel
-        // size within the composition.  User scale/rotate/translate apply on top.
+        // Build native-size transform: normalized by canvas height so aspect ratio
+        // is always preserved.  scale (1,1) = source fills canvas height.
+        // Layers look consistent regardless of canvas resolution/aspect.
         // When mosaic tiling is active, fill the canvas so the pattern covers everything.
         bool mosaicFill = (layer->tileX > 1.0f || layer->tileY > 1.0f ||
                            layer->mosaicMode != MosaicMode::Mirror);
         glm::mat3 nativeScale(1.0f);
-        if (!mosaicFill) {
+        if (!mosaicFill && !layer->source->isShader()) {
             int lw = layer->width(), lh = layer->height();
             if (lw > 0 && lh > 0 && m_width > 0 && m_height > 0) {
-                nativeScale[0][0] = (float)lw / m_width;
-                nativeScale[1][1] = (float)lh / m_height;
+                // Height-normalized: Y fills canvas, X preserves aspect
+                float srcAspect = (float)lw / lh;
+                float canvasAspect = (float)m_width / m_height;
+                nativeScale[0][0] = srcAspect / canvasAspect;
+                nativeScale[1][1] = 1.0f;
             }
         }
         glm::mat3 layerXform = layer->getTransformMatrix() * nativeScale;

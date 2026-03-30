@@ -1,5 +1,6 @@
 #include "ui/PropertyPanel.h"
 #include "compositing/BlendMode.h"
+#include "compositing/LayerStack.h"
 #include "sources/ShaderSource.h"
 #include "sources/VideoSource.h"
 #include "app/DataBus.h"
@@ -59,7 +60,7 @@ static bool dragPair(const char* idA, const char* labelA, float* a,
 
 void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
-                           float appTime) {
+                           float appTime, LayerStack* layerStack) {
     ImGui::Begin("Properties");
 
     if (!layer) {
@@ -492,16 +493,67 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::PushID(i + 10000);
 
                 if (input.type == "float") {
-                    float v = std::get<float>(input.value);
+                    auto& bindings = shaderSrc->audioBindings();
+                    auto bit = bindings.find(input.name);
+                    bool isBound = (bit != bindings.end() && bit->second.signal != AudioSignal::None);
+
                     ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
                     ImGui::Text("%s", input.name.c_str());
                     ImGui::PopStyleColor();
-                    ImGui::SameLine(ImGui::GetFontSize() * 7.0f);
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::SliderFloat("##val", &v, input.minVal, input.maxVal)) {
-                        input.value = v;
+
+                    // Audio bind button
+                    ImGui::SameLine(ImGui::GetFontSize() * 6.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, isBound ? ImVec4(0.9f, 0.3f, 0.1f, 0.35f) : ImVec4(0.3f, 0.3f, 0.3f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.5f, 0.2f, 0.5f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, isBound ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 0.7f));
+                    if (ImGui::SmallButton("~")) {
+                        ImGui::OpenPopup("##audiobind");
                     }
-                    if (ImGui::IsItemActivated()) undoNeeded = true;
+                    ImGui::PopStyleColor(3);
+
+                    if (ImGui::BeginPopup("##audiobind")) {
+                        static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat" };
+                        AudioBinding& ab = bindings[input.name];
+                        int sigIdx = (int)ab.signal;
+                        ImGui::Text("Audio Signal");
+                        ImGui::SetNextItemWidth(120);
+                        if (ImGui::Combo("##sig", &sigIdx, signalNames, 6)) {
+                            ab.signal = (AudioSignal)sigIdx;
+                        }
+                        if (ab.signal != AudioSignal::None) {
+                            ImGui::Text("Range");
+                            ImGui::SetNextItemWidth(55);
+                            ImGui::DragFloat("##rmin", &ab.rangeMin, 0.01f, input.minVal, input.maxVal, "%.2f");
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(55);
+                            ImGui::DragFloat("##rmax", &ab.rangeMax, 0.01f, input.minVal, input.maxVal, "%.2f");
+                            ImGui::SetNextItemWidth(120);
+                            ImGui::SliderFloat("Smooth", &ab.smoothing, 0.0f, 0.95f);
+                        }
+                        ImGui::EndPopup();
+                    }
+
+                    if (!isBound) {
+                        float v = std::get<float>(input.value);
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::SliderFloat("##val", &v, input.minVal, input.maxVal)) {
+                            input.value = v;
+                        }
+                        if (ImGui::IsItemActivated()) undoNeeded = true;
+                    } else {
+                        // Show current value as read-only colored bar
+                        float v = std::get<float>(input.value);
+                        float frac = (input.maxVal > input.minVal) ? (v - input.minVal) / (input.maxVal - input.minVal) : 0.0f;
+                        ImGui::SameLine();
+                        float barW = ImGui::GetContentRegionAvail().x;
+                        ImVec2 p = ImGui::GetCursorScreenPos();
+                        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + barW, p.y + 14),
+                            IM_COL32(30, 30, 30, 180), 3.0f);
+                        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + barW * frac, p.y + 14),
+                            IM_COL32(230, 120, 40, 200), 3.0f);
+                        ImGui::Dummy(ImVec2(barW, 14));
+                    }
                 } else if (input.type == "color") {
                     glm::vec4 c = std::get<glm::vec4>(input.value);
                     ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
@@ -626,6 +678,50 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                 ImGui::PopStyleColor(4);
                             }
                         }
+                    }
+                } else if (input.type == "image" && layerStack) {
+                    // Image input — dropdown to pick a layer as texture source
+                    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+                    ImGui::Text("%s", input.name.c_str());
+                    ImGui::PopStyleColor();
+
+                    auto& bindings = shaderSrc->imageBindings();
+                    auto it = bindings.find(input.name);
+                    uint32_t currentSrcId = (it != bindings.end()) ? it->second.sourceLayerId : 0;
+
+                    // Build label for current selection
+                    std::string preview = "None";
+                    for (int li = 0; li < layerStack->count(); li++) {
+                        auto& other = (*layerStack)[li];
+                        if (other->id == currentSrcId && other->source) {
+                            preview = other->name + " (" + other->source->typeName() + ")";
+                            break;
+                        }
+                    }
+
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("##imgsrc", preview.c_str())) {
+                        // "None" option
+                        if (ImGui::Selectable("None", currentSrcId == 0)) {
+                            shaderSrc->unbindImageInput(input.name);
+                        }
+                        // List all other layers that have a texture
+                        for (int li = 0; li < layerStack->count(); li++) {
+                            auto& other = (*layerStack)[li];
+                            if (other->id == layer->id) continue; // skip self
+                            if (!other->source || other->source->textureId() == 0) continue;
+                            std::string label = other->name + " (" + other->source->typeName() + ")";
+                            bool selected = (other->id == currentSrcId);
+                            if (ImGui::Selectable(label.c_str(), selected)) {
+                                shaderSrc->bindImageInput(input.name,
+                                    other->source->textureId(),
+                                    other->source->width(),
+                                    other->source->height(),
+                                    other->id,
+                                    other->source->isFlippedV());
+                            }
+                        }
+                        ImGui::EndCombo();
                     }
                 }
 

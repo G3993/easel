@@ -7,6 +7,7 @@
 class ShaderSource;
 class WhisperSpeech;
 class DataBus;
+class LayerStack;
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {
@@ -37,7 +38,7 @@ class PropertyPanel {
 public:
     void render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
-                float appTime = 0.0f);
+                float appTime = 0.0f, LayerStack* layerStack = nullptr);
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;

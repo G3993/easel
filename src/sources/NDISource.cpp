@@ -2,6 +2,12 @@
 #include "sources/NDISource.h"
 #include <iostream>
 #include <cstring>
+#ifdef _WIN32
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <unistd.h>
+#endif
 
 // ── NDIFinder (persistent, accumulates sources over time) ──────────
 
@@ -40,6 +46,18 @@ std::vector<NDISenderInfo> NDIFinder::sources() const {
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return result;
 
+    // Get local machine name for self-filtering
+    std::string localHost;
+    {
+        char buf[256] = {};
+        if (gethostname(buf, sizeof(buf)) == 0) {
+            localHost = buf;
+            // NDI uppercases the hostname
+            for (auto& c : localHost) c = (char)toupper((unsigned char)c);
+        }
+    }
+    std::string selfPrefix = localHost + " (Easel)";
+
     uint32_t count = 0;
     const NDIlib_source_t* sources = rt.api()->find_get_current_sources(m_finder, &count);
 
@@ -47,8 +65,8 @@ std::vector<NDISenderInfo> NDIFinder::sources() const {
         NDISenderInfo info;
         info.name = sources[i].p_ndi_name ? sources[i].p_ndi_name : "";
         info.url  = sources[i].p_url_address ? sources[i].p_url_address : "";
-        // Filter out Easel's own NDI output to prevent feedback loops
-        if (info.name.find("(Easel)") != std::string::npos) continue;
+        // Only filter out THIS machine's Easel output (not remote Easel instances)
+        if (!selfPrefix.empty() && info.name == selfPrefix) continue;
         result.push_back(info);
     }
     return result;
@@ -149,18 +167,22 @@ void NDISource::update() {
         if (stride <= 0) stride = m_width * 4;
         int rowBytes = m_width * 4;
 
-        // Copy NDI data into our buffer.  NDI is top-down, OpenGL bottom-up.
-        // Single bulk memcpy when stride matches and we flip via shader.
+        // Upload to GPU -- skip intermediate copy when stride matches
         if (stride == rowBytes) {
-            std::memcpy(m_pixelBuffer.data(), video.p_data, rowBytes * m_height);
+            // Direct upload from NDI memory (no CPU copy)
+            glBindTexture(GL_TEXTURE_2D, m_texture.id());
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
+                            GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
         } else {
-            for (int y = 0; y < m_height; y++) {
-                std::memcpy(m_pixelBuffer.data() + y * rowBytes,
-                            video.p_data + y * stride, rowBytes);
-            }
+            // Stride mismatch -- use GL_UNPACK_ROW_LENGTH to skip padding
+            glBindTexture(GL_TEXTURE_2D, m_texture.id());
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 4);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
+                            GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         }
 
-        m_texture.updateData(m_pixelBuffer.data(), m_width, m_height);
         rt.api()->recv_free_video_v2(m_recv, &video);
     }
 }

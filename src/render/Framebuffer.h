@@ -9,11 +9,31 @@ public:
     Framebuffer(const Framebuffer&) = delete;
     Framebuffer& operator=(const Framebuffer&) = delete;
 
+    // Move semantics for container storage
+    Framebuffer(Framebuffer&& o) noexcept
+        : m_fbo(o.m_fbo), m_texture(o.m_texture), m_depth(o.m_depth),
+          m_width(o.m_width), m_height(o.m_height), m_hasDepth(o.m_hasDepth),
+          m_halfFloat(o.m_halfFloat) {
+        o.m_fbo = o.m_texture = o.m_depth = 0;
+    }
+    Framebuffer& operator=(Framebuffer&& o) noexcept {
+        if (this != &o) {
+            destroy();
+            m_fbo = o.m_fbo; m_texture = o.m_texture; m_depth = o.m_depth;
+            m_width = o.m_width; m_height = o.m_height;
+            m_hasDepth = o.m_hasDepth; m_halfFloat = o.m_halfFloat;
+            o.m_fbo = o.m_texture = o.m_depth = 0;
+        }
+        return *this;
+    }
+
     bool create(int width, int height, bool withDepth = false);
+    bool createHalfFloat(int width, int height);
     void resize(int width, int height);
     void bind() const;
     static void unbind();
 
+    GLuint fboId() const { return m_fbo; }
     GLuint textureId() const { return m_texture; }
     int width() const { return m_width; }
     int height() const { return m_height; }
@@ -24,6 +44,7 @@ private:
     GLuint m_depth = 0;
     int m_width = 0, m_height = 0;
     bool m_hasDepth = false;
+    bool m_halfFloat = false;
 
     void destroy();
 };

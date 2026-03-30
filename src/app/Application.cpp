@@ -101,7 +101,7 @@ bool Application::init() {
     }
 
     glfwMakeContextCurrent(m_window);
-    glfwSwapInterval(1);
+    glfwSwapInterval(0); // uncapped — NDI needs low-latency updates
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD" << std::endl;
@@ -191,6 +191,33 @@ bool Application::init() {
         m_ndiOutput.create("Easel");
     }
 #endif
+
+    // Auto-connect to ShaderClaw shaders directory
+    {
+        const char* home = getenv("USERPROFILE");
+        if (home) {
+            std::string candidates[] = {
+                std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
+                std::string(home) + "\\Documents\\ShaderClaw\\shaders",
+            };
+            for (const auto& path : candidates) {
+                if (std::filesystem::exists(path)) {
+                    m_shaderClaw.connect(path);
+                    std::cout << "[ShaderClaw] Auto-connected to: " << path << std::endl;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Auto-load default project if it exists
+    {
+        std::string defaultPath = "default.easel";
+        if (std::filesystem::exists(defaultPath)) {
+            loadProject(defaultPath);
+            std::cout << "[Easel] Auto-loaded default project" << std::endl;
+        }
+    }
 
     return true;
 }
@@ -298,6 +325,16 @@ void Application::run() {
         compositeAndWarp();
         presentOutputs();
 
+        // Periodic auto-save every 30 seconds (crash recovery)
+        {
+            static double lastAutoSave = 0;
+            double now = glfwGetTime();
+            if (now - lastAutoSave > 30.0) {
+                saveProject("default.easel");
+                lastAutoSave = now;
+            }
+        }
+
         glViewport(0, 0, m_windowWidth, m_windowHeight);
         glClearColor(0.055f, 0.063f, 0.082f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -378,6 +415,13 @@ void Application::run() {
 }
 
 void Application::shutdown() {
+    // Auto-save current state as default project
+    {
+        std::string defaultPath = "default.easel";
+        saveProject(defaultPath);
+        std::cout << "[Easel] Auto-saved default project" << std::endl;
+    }
+
 #ifdef HAS_FFMPEG
     m_recorder.stop();
     m_rtmpOutput.stop();
@@ -411,12 +455,24 @@ void Application::updateSources() {
     // Hot-reload any changed Shader-Claw shaders
     m_shaderClaw.update();
 
+    // Get mouse state for interactive shaders (normalized 0-1)
+    double mx, my;
+    glfwGetCursorPos(m_window, &mx, &my);
+    int winW, winH;
+    glfwGetWindowSize(m_window, &winW, &winH);
+    float normMX = (winW > 0) ? (float)(mx / winW) : 0.5f;
+    float normMY = (winH > 0) ? 1.0f - (float)(my / winH) : 0.5f; // flip Y for GL
+    bool mousePressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
     for (int i = 0; i < m_layerStack.count(); i++) {
         auto& layer = m_layerStack[i];
         if (layer->source) {
-            // Pass audio state to ShaderSource layers for ISF uniforms
+            // Pass audio + mouse state to ShaderSource layers
             if (layer->source->isShader()) {
                 auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
+                // Match shader resolution to composition size
+                auto& zone = activeZone();
+                shaderSrc->setResolution(zone.width, zone.height);
                 shaderSrc->setAudioState(
                     m_audioAnalyzer.smoothedRMS(),
                     m_audioAnalyzer.bass(),
@@ -424,6 +480,29 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.fftTexture()
                 );
+                shaderSrc->applyAudioBindings(
+                    m_audioAnalyzer.smoothedRMS(),
+                    m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.beatDecay()
+                );
+                shaderSrc->setMouseState(normMX, normMY, mousePressed);
+
+                // Refresh image input bindings (texture IDs may change each frame)
+                for (auto& [name, binding] : shaderSrc->imageBindings()) {
+                    if (binding.sourceLayerId == 0) continue;
+                    for (int j = 0; j < m_layerStack.count(); j++) {
+                        auto& srcLayer = m_layerStack[j];
+                        if (srcLayer->id == binding.sourceLayerId && srcLayer->source) {
+                            binding.textureId = srcLayer->source->textureId();
+                            binding.width = srcLayer->source->width();
+                            binding.height = srcLayer->source->height();
+                            binding.flippedV = srcLayer->source->isFlippedV();
+                            break;
+                        }
+                    }
+                }
             }
 
             layer->source->update();
@@ -620,20 +699,33 @@ void Application::presentOutputs() {
         auto& zone = *m_zones[i];
 
         if (zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0) {
-            neededMonitors.insert(zone.outputMonitor);
-            // Ensure a projector exists on this monitor
-            auto it = m_projectors.find(zone.outputMonitor);
-            if (it == m_projectors.end() || !it->second->isActive()) {
-                // Create new projector for this monitor
-                auto proj = std::make_unique<ProjectorOutput>();
-                if (proj->create(m_window, zone.outputMonitor)) {
-                    zone.resize(proj->projectorWidth(), proj->projectorHeight());
-                    m_projectors[zone.outputMonitor] = std::move(proj);
+            // Verify monitor still exists before using it
+            auto monitors = ProjectorOutput::enumerateMonitors();
+            if (zone.outputMonitor >= (int)monitors.size()) {
+                // Monitor disconnected -- clear destination to avoid crash
+                zone.outputDest = OutputDest::None;
+                zone.outputMonitor = -1;
+                // Destroy any stale projector
+                auto stale = m_projectors.find(zone.outputMonitor);
+                if (stale != m_projectors.end()) {
+                    stale->second->destroy();
+                    m_projectors.erase(stale);
                 }
-            }
-            auto it2 = m_projectors.find(zone.outputMonitor);
-            if (it2 != m_projectors.end() && it2->second->isActive()) {
-                it2->second->present(zone.warpFBO.textureId());
+            } else {
+                neededMonitors.insert(zone.outputMonitor);
+                // Ensure a projector exists on this monitor
+                auto it = m_projectors.find(zone.outputMonitor);
+                if (it == m_projectors.end() || !it->second->isActive()) {
+                    auto proj = std::make_unique<ProjectorOutput>();
+                    if (proj->create(m_window, zone.outputMonitor)) {
+                        zone.resize(proj->projectorWidth(), proj->projectorHeight());
+                        m_projectors[zone.outputMonitor] = std::move(proj);
+                    }
+                }
+                auto it2 = m_projectors.find(zone.outputMonitor);
+                if (it2 != m_projectors.end() && it2->second->isActive()) {
+                    it2->second->present(zone.warpFBO.textureId());
+                }
             }
         }
 
@@ -862,7 +954,7 @@ void Application::renderUI() {
         capturedPre = true;
     }
 
-    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime());
+    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack);
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
@@ -906,11 +998,11 @@ void Application::renderUI() {
         {
             static const char* presetLabels[] = {
                 "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
-                "2560x1440 (1440p)", "1024x768", "Custom"
+                "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
             };
-            static const int presetW[] = { 1920, 3840, 1280, 2560, 1024, 0 };
-            static const int presetH[] = { 1080, 2160, 720, 1440, 768, 0 };
-            const int presetCount = 6;
+            static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
+            static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
+            const int presetCount = 7;
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             ImGui::Text("Composition");
@@ -1074,12 +1166,19 @@ void Application::renderUI() {
             // Auto-detect common locations
             static char scPath[512] = "";
             if (scPath[0] == '\0') {
-                // Try common paths
                 const char* home = getenv("USERPROFILE");
                 if (home) {
-                    std::string tryPath = std::string(home) + "\\shader-claw3\\shaders";
-                    if (std::filesystem::exists(tryPath)) {
-                        strncpy(scPath, tryPath.c_str(), sizeof(scPath) - 1);
+                    // Try known ShaderClaw locations
+                    std::string candidates[] = {
+                        std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
+                        std::string(home) + "\\Documents\\ShaderClaw\\shaders",
+                        std::string(home) + "\\shader-claw3\\shaders",
+                    };
+                    for (const auto& tryPath : candidates) {
+                        if (std::filesystem::exists(tryPath)) {
+                            strncpy(scPath, tryPath.c_str(), sizeof(scPath) - 1);
+                            break;
+                        }
                     }
                 }
             }
@@ -2454,6 +2553,39 @@ void Application::saveProject(const std::string& path) {
                     params.push_back(p);
                 }
                 layerJson["shaderParams"] = params;
+
+                // Save audio bindings
+                const auto& audioBinds = shaderSrc->audioBindings();
+                if (!audioBinds.empty()) {
+                    json abJson = json::array();
+                    for (const auto& [name, ab] : audioBinds) {
+                        if (ab.signal == AudioSignal::None) continue;
+                        json abj;
+                        abj["param"] = name;
+                        abj["signal"] = (int)ab.signal;
+                        abj["rangeMin"] = ab.rangeMin;
+                        abj["rangeMax"] = ab.rangeMax;
+                        abj["smoothing"] = ab.smoothing;
+                        abJson.push_back(abj);
+                    }
+                    if (!abJson.empty()) {
+                        layerJson["audioBindings"] = abJson;
+                    }
+                }
+
+                // Save image input bindings (which layer provides texture)
+                const auto& bindings = shaderSrc->imageBindings();
+                if (!bindings.empty()) {
+                    json bindingsJson = json::object();
+                    for (const auto& [name, binding] : bindings) {
+                        if (binding.sourceLayerId != 0) {
+                            bindingsJson[name] = binding.sourceLayerId;
+                        }
+                    }
+                    if (!bindingsJson.empty()) {
+                        layerJson["imageBindings"] = bindingsJson;
+                    }
+                }
             }
         }
 
@@ -2687,6 +2819,17 @@ void Application::loadProject(const std::string& path) {
                             }
                         }
                     }
+                    // Restore audio bindings
+                    if (layerJson.contains("audioBindings")) {
+                        for (const auto& abj : layerJson["audioBindings"]) {
+                            AudioBinding ab;
+                            ab.signal = (AudioSignal)abj.value("signal", 0);
+                            ab.rangeMin = abj.value("rangeMin", 0.0f);
+                            ab.rangeMax = abj.value("rangeMax", 1.0f);
+                            ab.smoothing = abj.value("smoothing", 0.3f);
+                            src->audioBindings()[abj.value("param", "")] = ab;
+                        }
+                    }
                     layer->source = src;
                 }
 #ifdef HAS_NDI
@@ -2720,6 +2863,35 @@ void Application::loadProject(const std::string& path) {
     for (int i = 0; i < m_layerStack.count(); i++) {
         if (m_layerStack[i]->id == 0) {
             m_layerStack[i]->id = m_nextLayerId++;
+        }
+    }
+
+    // Restore image input bindings (must happen after all layers are loaded)
+    if (j.contains("layers")) {
+        int idx = 0;
+        for (const auto& layerJson : j["layers"]) {
+            if (idx >= m_layerStack.count()) break;
+            auto& layer = m_layerStack[idx];
+            if (layer->source && layer->source->isShader() && layerJson.contains("imageBindings")) {
+                auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
+                for (auto& [name, srcIdJson] : layerJson["imageBindings"].items()) {
+                    uint32_t srcId = srcIdJson.get<uint32_t>();
+                    // Find the source layer and bind its texture
+                    for (int j = 0; j < m_layerStack.count(); j++) {
+                        auto& srcLayer = m_layerStack[j];
+                        if (srcLayer->id == srcId && srcLayer->source) {
+                            shaderSrc->bindImageInput(name,
+                                srcLayer->source->textureId(),
+                                srcLayer->source->width(),
+                                srcLayer->source->height(),
+                                srcId,
+                                srcLayer->source->isFlippedV());
+                            break;
+                        }
+                    }
+                }
+            }
+            idx++;
         }
     }
 
