@@ -349,6 +349,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         layer->cropTop = layer->cropBottom = layer->cropLeft = layer->cropRight = 0.0f;
     }
 
+    thinSep();
+
     // --- Effects ---
     ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
@@ -740,6 +742,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     } else {
         maskEditMode = false;
     }
+
+    } // end Effects section
 
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {
