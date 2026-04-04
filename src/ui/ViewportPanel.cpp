@@ -501,8 +501,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             ImVec2 mousePos = ImGui::GetMousePos();
             glm::vec2 mouseNDC = screenToNDC({mousePos.x, mousePos.y});
 
-            // Only start warp drag if not already dragging a layer
-            if (cornerPinPtr && meshWarpPtr && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
+            // Warp handles get priority over layer handles (smaller hit targets)
+            if (cornerPinPtr && meshWarpPtr && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered) {
                 int hit = -1;
                 if (warpMode == WarpMode::CornerPin) {
                     hit = cornerPinPtr->hitTest(mouseNDC);
