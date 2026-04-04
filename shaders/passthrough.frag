@@ -156,7 +156,7 @@ void main() {
     color.a *= uOpacity;
     if (uHasMask) {
         float maskVal = texture(uMask, maskUV).r;
-        color.a *= maskVal;
+        color *= maskVal;
     }
     FragColor = color;
 }
