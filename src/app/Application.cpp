@@ -1156,7 +1156,7 @@ void Application::renderUI() {
         // Show the flat (pre-warp) composite in the viewport so layer bboxes match.
         // Warp is only applied to projector/NDI output.
         GLuint previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
-        if (m_layerStack.count() == 0 || !previewTex) previewTex = m_testPattern.id();
+        if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
                                &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings);
