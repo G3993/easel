@@ -312,11 +312,13 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGui::DockBuilderDockWindow("Projector", leftTopId);
         ImGui::DockBuilderDockWindow("Mapping", leftBottomId);
         ImGui::DockBuilderDockWindow("Layers", rightTopId);
+        ImGui::DockBuilderDockWindow("Masks", rightTopId);
         ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
         ImGui::DockBuilderDockWindow("Etherea", rightTopId);
         ImGui::DockBuilderDockWindow("NDI", rightTopId);
         ImGui::DockBuilderDockWindow("Capture", rightTopId);
         ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+        ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);
     } else {

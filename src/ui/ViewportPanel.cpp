@@ -769,12 +769,12 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
             glm::vec2 ns = m_dragStartScale;
 
             switch (m_handleDrag) {
-            case HandleType::TopLeft:     ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-            case HandleType::TopRight:    ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-            case HandleType::BottomLeft:  ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
-            case HandleType::BottomRight: ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
-            case HandleType::Top:    ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
-            case HandleType::Bottom: ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::TopLeft:     ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::TopRight:    ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::BottomLeft:  ns.x = std::max(0.05f, ns.x - dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
+            case HandleType::BottomRight: ns.x = std::max(0.05f, ns.x + dx*0.5f); ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
+            case HandleType::Top:    ns.y = std::max(0.05f, ns.y - dy*0.5f); break;
+            case HandleType::Bottom: ns.y = std::max(0.05f, ns.y + dy*0.5f); break;
             case HandleType::Left:   ns.x = std::max(0.05f, ns.x - dx*0.5f); break;
             case HandleType::Right:  ns.x = std::max(0.05f, ns.x + dx*0.5f); break;
             default: break;

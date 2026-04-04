@@ -100,6 +100,7 @@ private:
     ShaderProgram m_passthroughShader;
     ShaderProgram m_edgeBlendShader;
     Framebuffer m_edgeBlendFBO;
+    Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
     Texture m_testPattern;
 
     int m_selectedLayer = -1;
@@ -133,10 +134,20 @@ private:
     std::vector<WindowInfo> m_windowList;
     ShaderClawBridge m_shaderClaw;
 
-    // ShaderClaw thumbnail preview
+    // ShaderClaw thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;
     std::string m_scPreviewPath;
     int m_scPreviewFrame = 0;
+
+    // ShaderClaw static thumbnail cache (one per shader)
+    struct SCThumbEntry {
+        std::shared_ptr<Texture> texture;
+        bool ready = false;
+    };
+    std::unordered_map<std::string, SCThumbEntry> m_scThumbnails;
+    std::shared_ptr<ShaderSource> m_scThumbRenderer; // temp shader for generating thumbnails
+    std::string m_scThumbRenderPath; // currently rendering thumbnail for this shader
+    int m_scThumbRenderFrame = 0;
 
 #ifdef HAS_OPENCV
     SceneScanner m_scanner;

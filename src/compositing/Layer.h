@@ -77,7 +77,7 @@ public:
     // Source crop (0.0–0.49): trims edges before tiling
     float cropTop = 0.0f, cropBottom = 0.0f;
     float cropLeft = 0.0f, cropRight = 0.0f;
-    bool autoCrop = true;     // auto-detect and remove black borders
+    bool autoCrop = false;    // auto-detect and remove black borders
     bool autoCropDone = false; // already ran for current source
 
     // Per-layer effects chain

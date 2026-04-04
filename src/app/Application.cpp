@@ -730,37 +730,90 @@ void Application::compositeZone(OutputZone& zone) {
     }
 
     // Apply mapping masks to the composite BEFORE warping
-    // so masks are visible in the canvas preview and affect the whole output
+    // Multiple masks are combined as union (additive), then applied once
     auto* mpMask = mappingForZone(zone);
     if (mpMask && !mpMask->masks.empty()) {
-        for (auto& mask : mpMask->masks) {
-            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
-                if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
-                    m_edgeBlendFBO.create(zone.width, zone.height);
-                }
-                m_edgeBlendFBO.bind();
+        // Count valid masks
+        int validCount = 0;
+        for (auto& mask : mpMask->masks)
+            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) validCount++;
+
+        if (validCount > 0) {
+            if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height)
+                m_edgeBlendFBO.create(zone.width, zone.height);
+
+            if (validCount > 1) {
+                // Combine all mask textures into one via additive blending (union)
+                if (m_maskPingPongFBO.width() != zone.width || m_maskPingPongFBO.height() != zone.height)
+                    m_maskPingPongFBO.create(zone.width, zone.height);
+
+                m_maskPingPongFBO.bind();
                 glViewport(0, 0, zone.width, zone.height);
-                glClearColor(0, 0, 0, 0);
+                glClearColor(0, 0, 0, 1); // black = fully masked
                 glClear(GL_COLOR_BUFFER_BIT);
+
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_ONE, GL_ONE); // additive (saturates at white)
+
                 m_passthroughShader.use();
                 m_passthroughShader.setInt("uTexture", 0);
                 m_passthroughShader.setFloat("uOpacity", 1.0f);
                 m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
-                m_passthroughShader.setBool("uHasMask", true);
-                m_passthroughShader.setInt("uMask", 1);
+                m_passthroughShader.setBool("uHasMask", false);
                 m_passthroughShader.setBool("uFlipV", false);
                 m_passthroughShader.setFloat("uTileX", 1.0f);
                 m_passthroughShader.setFloat("uTileY", 1.0f);
                 m_passthroughShader.setInt("uMosaicMode", 0);
                 m_passthroughShader.setFloat("uFeather", 0.0f);
-                glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D, sourceTex);
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, mask.texture->id());
-                m_quad.draw();
+
+                for (auto& mask : mpMask->masks) {
+                    if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, mask.texture->id());
+                        m_quad.draw();
+                    }
+                }
+
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // restore default
                 Framebuffer::unbind();
-                sourceTex = m_edgeBlendFBO.textureId();
             }
+
+            // Determine which mask texture to use (single mask or combined)
+            GLuint combinedMaskTex = 0;
+            if (validCount == 1) {
+                for (auto& mask : mpMask->masks) {
+                    if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                        combinedMaskTex = mask.texture->id();
+                        break;
+                    }
+                }
+            } else {
+                combinedMaskTex = m_maskPingPongFBO.textureId();
+            }
+
+            // Apply the combined mask to the source
+            m_edgeBlendFBO.bind();
+            glViewport(0, 0, zone.width, zone.height);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_passthroughShader.use();
+            m_passthroughShader.setInt("uTexture", 0);
+            m_passthroughShader.setFloat("uOpacity", 1.0f);
+            m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+            m_passthroughShader.setBool("uHasMask", true);
+            m_passthroughShader.setInt("uMask", 1);
+            m_passthroughShader.setBool("uFlipV", false);
+            m_passthroughShader.setFloat("uTileX", 1.0f);
+            m_passthroughShader.setFloat("uTileY", 1.0f);
+            m_passthroughShader.setInt("uMosaicMode", 0);
+            m_passthroughShader.setFloat("uFeather", 0.0f);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, sourceTex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, combinedMaskTex);
+            m_quad.draw();
+            Framebuffer::unbind();
+            sourceTex = m_edgeBlendFBO.textureId();
         }
     }
 
@@ -1207,6 +1260,96 @@ void Application::renderUI() {
         if (!path.empty()) loadShader(path);
     }
 
+    // --- Masks panel (next to Layers) ---
+    ImGui::Begin("Masks");
+    {
+        auto* zoneMapping = mappingForZone(zone);
+        if (zoneMapping) {
+            for (int mi = 0; mi < (int)zoneMapping->masks.size(); mi++) {
+                ImGui::PushID(8000 + mi);
+                auto& mask = zoneMapping->masks[mi];
+                bool isActive = (zoneMapping->activeMaskIndex == mi && m_maskEditMode);
+
+                if (isActive) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+                }
+
+                char label[128];
+                snprintf(label, sizeof(label), "%s (%d pts)", mask.name.c_str(), mask.path.count());
+                float btnW = ImGui::GetContentRegionAvail().x - 28;
+                if (ImGui::Button(label, ImVec2(btnW, 0))) {
+                    if (isActive) {
+                        m_maskEditMode = false;
+                        zoneMapping->activeMaskIndex = -1;
+                    } else {
+                        zoneMapping->activeMaskIndex = mi;
+                        m_maskEditMode = true;
+                    }
+                }
+                ImGui::PopStyleColor(2);
+
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+                if (ImGui::Button("X", ImVec2(24, 0))) {
+                    if (zoneMapping->activeMaskIndex == mi) { m_maskEditMode = false; zoneMapping->activeMaskIndex = -1; }
+                    else if (zoneMapping->activeMaskIndex > mi) zoneMapping->activeMaskIndex--;
+                    zoneMapping->masks.erase(zoneMapping->masks.begin() + mi);
+                    ImGui::PopStyleColor(2);
+                    ImGui::PopID();
+                    goto masks_panel_done;
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::PopID();
+            }
+
+            // Add mask button
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            if (ImGui::Button("+ Add Mask", ImVec2(-1, 0))) {
+                MappingMask newMask;
+                newMask.name = "Mask " + std::to_string(zoneMapping->masks.size() + 1);
+                zoneMapping->masks.push_back(std::move(newMask));
+                zoneMapping->activeMaskIndex = (int)zoneMapping->masks.size() - 1;
+                m_maskEditMode = true;
+            }
+            ImGui::PopStyleColor(4);
+
+            // Shape presets for active mask
+            if (m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
+                zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
+                auto& mask = zoneMapping->masks[zoneMapping->activeMaskIndex];
+                float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                if (ImGui::Button("Rect", ImVec2(shapeW, 0))) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
+                ImGui::SameLine();
+                if (ImGui::Button("Circle", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
+                ImGui::SameLine();
+                if (ImGui::Button("Tri", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); }
+                ImGui::SameLine();
+                if (ImGui::Button("Oct", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); }
+                ImGui::SameLine();
+                if (ImGui::Button("Star", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
+                ImGui::PopStyleColor(4);
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                ImGui::TextWrapped("Click: add  |  Drag: move  |  R-click: del");
+                ImGui::PopStyleColor();
+            }
+        }
+        masks_panel_done:;
+    }
+    ImGui::End();
+
     std::shared_ptr<Layer> selectedLayer;
     if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
         selectedLayer = m_layerStack[m_selectedLayer];
@@ -1561,6 +1704,10 @@ void Application::renderUI() {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
             if (ImGui::SmallButton("Disconnect")) {
                 m_shaderClaw.disconnect();
+                m_scThumbnails.clear();
+                m_scThumbRenderer.reset();
+                m_scPreview.reset();
+                m_scPreviewPath.clear();
             }
             ImGui::PopStyleColor(4);
 
@@ -1581,27 +1728,90 @@ void Application::renderUI() {
             dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
             ImGui::Dummy(ImVec2(0, 6));
 
-            // Update preview shader if loaded
+            // Update animated preview shader (for hovered item)
             bool previewValid = false;
             if (m_scPreview) {
                 m_scPreview->setResolution(64, 64);
                 m_scPreview->update();
                 m_scPreviewFrame++;
-                previewValid = (m_scPreviewFrame > 2); // allow a few frames to warm up
+                previewValid = (m_scPreviewFrame > 2);
             }
 
-            // Shader list with thumbnails
+            // Generate static thumbnails (one shader per frame to avoid lag)
+            if (m_scThumbRenderer) {
+                m_scThumbRenderer->setResolution(48, 48);
+                m_scThumbRenderer->update();
+                m_scThumbRenderFrame++;
+                if (m_scThumbRenderFrame > 3) {
+                    // Capture the rendered frame into a static texture
+                    auto& entry = m_scThumbnails[m_scThumbRenderPath];
+                    if (!entry.texture) entry.texture = std::make_shared<Texture>();
+                    // Read pixels from the shader FBO
+                    std::vector<uint8_t> pixels(48 * 48 * 4);
+                    GLint prevFBO;
+                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+                    // ShaderSource renders to its own FBO, read from its texture
+                    GLuint thumbTex = m_scThumbRenderer->textureId();
+                    GLuint tempFBO;
+                    glGenFramebuffers(1, &tempFBO);
+                    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
+                    glReadPixels(0, 0, 48, 48, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                    glDeleteFramebuffers(1, &tempFBO);
+                    entry.texture->createEmpty(48, 48);
+                    entry.texture->updateData(pixels.data(), 48, 48);
+                    entry.ready = true;
+                    m_scThumbRenderer.reset();
+                    m_scThumbRenderPath.clear();
+                }
+            } else {
+                // Find next shader that needs a thumbnail
+                for (const auto& shader : m_shaderClaw.shaders()) {
+                    auto it = m_scThumbnails.find(shader.fullPath);
+                    if (it == m_scThumbnails.end() || !it->second.ready) {
+                        m_scThumbRenderer = std::make_shared<ShaderSource>();
+                        if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
+                            m_scThumbRenderPath = shader.fullPath;
+                            m_scThumbRenderFrame = 0;
+                        } else {
+                            m_scThumbRenderer.reset();
+                            // Mark as failed so we don't retry
+                            m_scThumbnails[shader.fullPath].ready = true;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Shader list with always-visible thumbnails
             std::string hoveredPath;
-            float thumbSize = 32.0f;
+            float thumbSize = 36.0f;
             for (int i = 0; i < (int)m_shaderClaw.shaders().size(); i++) {
                 const auto& shader = m_shaderClaw.shaders()[i];
                 ImGui::PushID(2000 + i);
 
-                // Show thumbnail if this is the previewed shader
-                bool hasThumb = previewValid && (shader.fullPath == m_scPreviewPath);
-                if (hasThumb) {
-                    ImGui::Image((ImTextureID)(intptr_t)m_scPreview->textureId(),
+                // Show thumbnail (animated if hovered, static otherwise)
+                bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
+                GLuint thumbTex = 0;
+                if (isHoveredShader && previewValid && m_scPreview) {
+                    thumbTex = m_scPreview->textureId();
+                } else {
+                    auto it = m_scThumbnails.find(shader.fullPath);
+                    if (it != m_scThumbnails.end() && it->second.ready && it->second.texture)
+                        thumbTex = it->second.texture->id();
+                }
+
+                if (thumbTex) {
+                    ImGui::Image((ImTextureID)(intptr_t)thumbTex,
                                  ImVec2(thumbSize, thumbSize), ImVec2(0, 1), ImVec2(1, 0));
+                    ImGui::SameLine();
+                } else {
+                    // Placeholder
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    ImGui::GetWindowDrawList()->AddRectFilled(p,
+                        ImVec2(p.x + thumbSize, p.y + thumbSize), IM_COL32(30, 35, 45, 255), 3.0f);
+                    ImGui::Dummy(ImVec2(thumbSize, thumbSize));
                     ImGui::SameLine();
                 }
 
@@ -1616,21 +1826,22 @@ void Application::renderUI() {
                 ImGui::PopStyleColor(4);
 
                 ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, isHoveredShader
+                    ? ImVec4(0.0f, 0.85f, 1.0f, 1.0f)
+                    : ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
                 ImGui::Text("%s", shader.title.c_str());
                 ImGui::PopStyleColor();
 
                 if (!shader.description.empty()) {
-                    ImGui::SameLine();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.8f));
                     std::string desc = shader.description;
-                    if (desc.length() > 50) desc = desc.substr(0, 47) + "...";
-                    ImGui::Text("- %s", desc.c_str());
+                    if (desc.length() > 40) desc = desc.substr(0, 37) + "...";
+                    ImGui::Text("%s", desc.c_str());
                     ImGui::PopStyleColor();
                 }
                 ImGui::EndGroup();
 
-                // Load preview when hovered
+                // Load animated preview when hovered
                 if (ImGui::IsItemHovered()) {
                     hoveredPath = shader.fullPath;
                 }
@@ -1638,7 +1849,7 @@ void Application::renderUI() {
                 ImGui::PopID();
             }
 
-            // Load/unload preview shader based on hover
+            // Load/switch animated preview shader on hover
             if (!hoveredPath.empty() && hoveredPath != m_scPreviewPath) {
                 m_scPreview = std::make_shared<ShaderSource>();
                 if (m_scPreview->loadFromFile(hoveredPath)) {
@@ -1983,6 +2194,167 @@ void Application::renderUI() {
     }
     ImGui::End();
 #endif
+
+    // MIDI panel — device selection + mapping
+    ImGui::Begin("MIDI");
+    {
+        // Device selection
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Device");
+        ImGui::PopStyleColor();
+
+        auto devices = m_midiManager.listDevices();
+        if (devices.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
+            ImGui::TextWrapped("No MIDI devices found. Plug in a controller and reopen this panel.");
+            ImGui::PopStyleColor();
+        } else {
+            // Current device label
+            const char* currentLabel = m_midiManager.isOpen()
+                ? devices[m_midiManager.deviceIndex()].c_str() : "None";
+
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##MIDIDevice", currentLabel)) {
+                // "None" option to disconnect
+                if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
+                    m_midiManager.closeDevice();
+                }
+                for (int i = 0; i < (int)devices.size(); i++) {
+                    bool selected = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
+                    if (ImGui::Selectable(devices[i].c_str(), selected)) {
+                        m_midiManager.openDevice(i);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            // Connection status
+            if (m_midiManager.isOpen()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                ImGui::Text("Connected");
+                ImGui::PopStyleColor();
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // MIDI activity monitor (last received event)
+        if (m_midiManager.isOpen()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("Mappings");
+            ImGui::PopStyleColor();
+
+            // Add mapping with learn mode
+            if (!m_midiManager.isLearning()) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                if (ImGui::Button("+ Learn Mapping", ImVec2(-1, 0))) {
+                    m_midiManager.startLearn();
+                }
+                ImGui::PopStyleColor(4);
+            } else {
+                // Learning mode — waiting for MIDI input
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                ImGui::TextWrapped("Move a knob or press a button on your controller...");
+                ImGui::PopStyleColor();
+
+                MIDIEvent learned = m_midiManager.lastLearnEvent();
+                if (learned.value > 0) {
+                    // Got an event — show what was detected and offer target selection
+                    ImGui::Text("Detected: %s Ch%d #%d",
+                        learned.type == 0 ? "CC" : (learned.type == 1 ? "NoteOn" : "NoteOff"),
+                        learned.channel + 1, learned.number);
+
+                    static int learnTarget = 0;
+                    const char* targetNames[] = {
+                        "Layer Opacity", "Layer Visible", "Layer Pos X", "Layer Pos Y",
+                        "Layer Scale", "Layer Rotation", "Scene Recall", "BPM Set", "BPM Tap"
+                    };
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::Combo("##LearnTarget", &learnTarget, targetNames, IM_ARRAYSIZE(targetNames));
+
+                    static int learnLayerIdx = 0;
+                    if (learnTarget <= 5) { // Layer targets
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::BeginCombo("##LearnLayer",
+                            (learnLayerIdx < m_layerStack.count()) ? m_layerStack[learnLayerIdx]->name.c_str() : "Layer 0")) {
+                            for (int li = 0; li < m_layerStack.count(); li++) {
+                                if (ImGui::Selectable(m_layerStack[li]->name.c_str(), learnLayerIdx == li))
+                                    learnLayerIdx = li;
+                            }
+                            ImGui::EndCombo();
+                        }
+                    }
+
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                    if (ImGui::Button("Assign", ImVec2(-1, 0))) {
+                        MIDIMapping map;
+                        map.channel = learned.channel;
+                        map.type = (learned.type == 0) ? 0 : 1;
+                        map.number = learned.number;
+                        map.target = (MIDIMapping::Target)learnTarget;
+                        map.layerIndex = learnLayerIdx;
+                        m_midiManager.addMapping(map);
+                        m_midiManager.stopLearn();
+                    }
+                    ImGui::PopStyleColor(3);
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) {
+                        m_midiManager.stopLearn();
+                    }
+                } else {
+                    if (ImGui::Button("Cancel")) {
+                        m_midiManager.stopLearn();
+                    }
+                }
+            }
+
+            // Show existing mappings
+            ImGui::Dummy(ImVec2(0, 4));
+            int removeIdx = -1;
+            for (int mi = 0; mi < (int)m_midiManager.mappings().size(); mi++) {
+                const auto& map = m_midiManager.mappings()[mi];
+                ImGui::PushID(5000 + mi);
+
+                const char* typeStr = (map.type == 0) ? "CC" : "Note";
+                const char* targetNames[] = {
+                    "Opacity", "Visible", "PosX", "PosY", "Scale", "Rotation",
+                    "Scene", "BPM", "Tap"
+                };
+                const char* tgt = targetNames[(int)map.target];
+
+                char label[128];
+                if ((int)map.target <= 5) {
+                    const char* layerName = (map.layerIndex < m_layerStack.count())
+                        ? m_layerStack[map.layerIndex]->name.c_str() : "?";
+                    snprintf(label, sizeof(label), "%s Ch%d #%d -> %s [%s]",
+                        typeStr, map.channel + 1, map.number, tgt, layerName);
+                } else {
+                    snprintf(label, sizeof(label), "%s Ch%d #%d -> %s",
+                        typeStr, map.channel + 1, map.number, tgt);
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.75f, 0.82f, 1.0f));
+                ImGui::Text("%s", label);
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 20);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+                if (ImGui::SmallButton("X")) removeIdx = mi;
+                ImGui::PopStyleColor(2);
+
+                ImGui::PopID();
+            }
+            if (removeIdx >= 0) m_midiManager.removeMapping(removeIdx);
+        }
+    }
+    ImGui::End();
 
 #ifdef HAS_OPENCV
     m_scanPanel.render(m_scanner, m_webcam);
