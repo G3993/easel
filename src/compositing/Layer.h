@@ -93,13 +93,13 @@ public:
     };
     std::vector<AudioBinding> audioBindings;
 
+    // Shader resolution override (0 = use canvas size)
+    int shaderWidth = 0;
+    int shaderHeight = 0;
+
     // Content source
     std::shared_ptr<ContentSource> source;
 
-    // Optional mask (rendered from maskPath)
-    std::shared_ptr<Texture> mask;
-    MaskPath maskPath;
-    bool maskEnabled = false;
 
     // Toggle visibility with transition
     void toggleVisibility() {

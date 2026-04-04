@@ -1,5 +1,6 @@
 #include "ui/ViewportPanel.h"
 #include "app/OutputZone.h"
+#include "app/MappingProfile.h"
 #include "app/ProjectorOutput.h"
 #include "warp/CornerPinWarp.h"
 #include "warp/MeshWarp.h"
@@ -62,13 +63,19 @@ glm::vec2 ViewportPanel::ndcToScreen(glm::vec2 ndc) const {
 
 static ImVec2 toImVec2(glm::vec2 v) { return ImVec2(v.x, v.y); }
 
-void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                           WarpMode warpMode, float projectorAspect,
+void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
+                           float projectorAspect,
                            std::vector<std::unique_ptr<OutputZone>>* zones,
                            int* activeZone,
                            const std::vector<MonitorInfo>* monitors,
                            bool ndiAvailable,
-                           ObjMeshWarp* objMeshWarp) {
+                           int editorMonitor,
+                           const std::vector<std::unique_ptr<MappingProfile>>* allMappings) {
+    // Unpack mapping for warp overlay
+    WarpMode warpMode = mapping ? mapping->warpMode : WarpMode::CornerPin;
+    CornerPinWarp* cornerPinPtr = mapping ? &mapping->cornerPin : nullptr;
+    MeshWarp* meshWarpPtr = mapping ? &mapping->meshWarp : nullptr;
+    ObjMeshWarp* objMeshWarp = mapping ? &mapping->objMeshWarp : nullptr;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("Projector Preview");
     ImGui::PopStyleVar();
@@ -246,6 +253,14 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
                     ImGui::PopStyleColor();
                     for (int mi = 0; mi < (int)monitors->size(); mi++) {
                         ImGui::PushID(mi);
+
+                        // Skip the editor's own monitor
+                        bool isEditorMonitor = (mi == editorMonitor);
+                        if (isEditorMonitor) {
+                            ImGui::PopID();
+                            continue;
+                        }
+
                         // Check if another zone claims this monitor
                         std::string claimedBy;
                         for (int zi = 0; zi < (int)zones->size(); zi++) {
@@ -315,6 +330,27 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
                 ImGui::EndCombo();
             }
             ImGui::PopStyleColor(); // combo text color
+
+            // --- Mapping profile selector ---
+            if (allMappings && !allMappings->empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::Text("Mapping");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                const char* mapLabel = (az.mappingIndex >= 0 && az.mappingIndex < (int)allMappings->size())
+                    ? (*allMappings)[az.mappingIndex]->name.c_str() : "None";
+                ImGui::SetNextItemWidth(std::min(300.0f, ImGui::GetContentRegionAvail().x - 4));
+                if (ImGui::BeginCombo("##ZoneMapping", mapLabel)) {
+                    for (int mi = 0; mi < (int)allMappings->size(); mi++) {
+                        bool sel = (az.mappingIndex == mi);
+                        if (ImGui::Selectable((*allMappings)[mi]->name.c_str(), sel)) {
+                            az.mappingIndex = mi;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
 
             ImGui::PopStyleVar(2);
         }
@@ -452,12 +488,12 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
             glm::vec2 mouseNDC = screenToNDC({mousePos.x, mousePos.y});
 
             // Only start warp drag if not already dragging a layer
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
+            if (cornerPinPtr && meshWarpPtr && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !m_layerDragging) {
                 int hit = -1;
                 if (warpMode == WarpMode::CornerPin) {
-                    hit = cornerPin.hitTest(mouseNDC);
+                    hit = cornerPinPtr->hitTest(mouseNDC);
                 } else {
-                    hit = meshWarp.hitTest(mouseNDC);
+                    hit = meshWarpPtr->hitTest(mouseNDC);
                 }
                 if (hit >= 0) {
                     m_warpDragIndex = hit;
@@ -465,13 +501,13 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
                 }
             }
 
-            if (m_warpDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (m_warpDragging && cornerPinPtr && meshWarpPtr && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 glm::vec2 clamped(std::max(-1.5f, std::min(1.5f, mouseNDC.x)),
                                   std::max(-1.5f, std::min(1.5f, mouseNDC.y)));
                 if (warpMode == WarpMode::CornerPin) {
-                    cornerPin.corners()[m_warpDragIndex] = clamped;
+                    cornerPinPtr->corners()[m_warpDragIndex] = clamped;
                 } else {
-                    meshWarp.points()[m_warpDragIndex] = clamped;
+                    meshWarpPtr->points()[m_warpDragIndex] = clamped;
                 }
             }
 
@@ -484,8 +520,8 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
             ImDrawList* draw = ImGui::GetWindowDrawList();
             auto ndc2scr = [&](glm::vec2 ndc) -> ImVec2 { return toImVec2(ndcToScreen(ndc)); };
 
-            if (warpMode == WarpMode::CornerPin) {
-                const auto& corners = cornerPin.corners();
+            if (warpMode == WarpMode::CornerPin && cornerPinPtr) {
+                const auto& corners = cornerPinPtr->corners();
 
                 for (int i = 0; i < 4; i++) {
                     draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccentGlow, 6.0f);
@@ -498,9 +534,9 @@ void ViewportPanel::render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& m
                     draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? kAccent : kAccentDim);
                     draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
                 }
-            } else {
-                const auto& points = meshWarp.points();
-                int cols = meshWarp.cols(), rows = meshWarp.rows();
+            } else if (meshWarpPtr) {
+                const auto& points = meshWarpPtr->points();
+                int cols = meshWarpPtr->cols(), rows = meshWarpPtr->rows();
                 for (int r = 0; r < rows; r++)
                     for (int c = 0; c < cols - 1; c++)
                         draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), kAccentSoft, 1.0f);
@@ -825,13 +861,34 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
 
 // ======== MASK OVERLAY ========
 
-void ViewportPanel::renderMaskOverlay(MaskPath& mask) {
+void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
     if (m_editMode != EditMode::Mask) return;
 
+    // Convert between canvas UV (what's displayed) and layer UV (what the mask stores).
+    // Mask points are in layer UV; the viewport shows canvas UV.
+    glm::mat3 invXform = glm::inverse(layerTransform);
+    auto canvasToLayerUV = [&](glm::vec2 cuv) -> glm::vec2 {
+        glm::vec2 ndc = cuv * 2.0f - 1.0f;
+        glm::vec3 lndc = invXform * glm::vec3(ndc, 1.0f);
+        return glm::vec2(lndc.x, lndc.y) * 0.5f + 0.5f;
+    };
+    auto layerToCanvasUV = [&](glm::vec2 luv) -> glm::vec2 {
+        glm::vec2 ndc = luv * 2.0f - 1.0f;
+        glm::vec3 cndc = layerTransform * glm::vec3(ndc, 1.0f);
+        return glm::vec2(cndc.x, cndc.y) * 0.5f + 0.5f;
+    };
+    // Screen-to-layer and layer-to-screen convenience
+    auto screenToLayerUV = [&](glm::vec2 screen) -> glm::vec2 {
+        return canvasToLayerUV(screenToUV(screen));
+    };
+    auto layerUVToScreen = [&](glm::vec2 luv) -> glm::vec2 {
+        return uvToScreenVec(layerToCanvasUV(luv));
+    };
+
     ImDrawList* draw = ImGui::GetForegroundDrawList();
     ImVec2 mousePos = ImGui::GetMousePos();
-    glm::vec2 mouseUV = screenToUV({mousePos.x, mousePos.y});
+    glm::vec2 mouseUV = screenToLayerUV({mousePos.x, mousePos.y});
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered) {
         int hi = mask.hitTestHandleIn(mouseUV, 0.025f);
@@ -885,10 +942,10 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask) {
     if (pts.size() >= 3) {
         auto tv = mask.tessellate(24);
         if (tv.size() >= 3) {
-            ImVec2 cs = toImVec2(uvToScreenVec(mask.centroid()));
+            ImVec2 cs = toImVec2(layerUVToScreen(mask.centroid()));
             for (int i = 0; i < (int)tv.size(); i++) {
                 int j = (i+1) % (int)tv.size();
-                draw->AddTriangleFilled(cs, toImVec2(uvToScreenVec(tv[i])), toImVec2(uvToScreenVec(tv[j])), kMaskFill);
+                draw->AddTriangleFilled(cs, toImVec2(layerUVToScreen(tv[i])), toImVec2(layerUVToScreen(tv[j])), kMaskFill);
             }
         }
     }
@@ -896,21 +953,21 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask) {
         int n = (int)pts.size(), edges = mask.closed() ? n : (n-1);
         for (int i = 0; i < edges; i++) {
             int j = (i+1)%n;
-            ImVec2 p0=toImVec2(uvToScreenVec(pts[i].position)), c0=toImVec2(uvToScreenVec(pts[i].position+pts[i].handleOut));
-            ImVec2 c1=toImVec2(uvToScreenVec(pts[j].position+pts[j].handleIn)), p1=toImVec2(uvToScreenVec(pts[j].position));
+            ImVec2 p0=toImVec2(layerUVToScreen(pts[i].position)), c0=toImVec2(layerUVToScreen(pts[i].position+pts[i].handleOut));
+            ImVec2 c1=toImVec2(layerUVToScreen(pts[j].position+pts[j].handleIn)), p1=toImVec2(layerUVToScreen(pts[j].position));
             draw->AddBezierCubic(p0,c0,c1,p1,kMaskCurveGlow,5.0f,32);
             draw->AddBezierCubic(p0,c0,c1,p1,kMaskCurve,1.8f,32);
         }
     }
     for (int i = 0; i < (int)pts.size(); i++) {
-        ImVec2 anchor = toImVec2(uvToScreenVec(pts[i].position));
+        ImVec2 anchor = toImVec2(layerUVToScreen(pts[i].position));
         bool isSel = (i == m_maskSelectedPoint);
         if (glm::length(pts[i].handleIn) > 0.001f) {
-            ImVec2 h = toImVec2(uvToScreenVec(pts[i].position+pts[i].handleIn));
+            ImVec2 h = toImVec2(layerUVToScreen(pts[i].position+pts[i].handleIn));
             draw->AddLine(anchor,h,kHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kHandleDot); draw->AddCircle(h,3.5f,kHandleRing,0,1.2f);
         }
         if (glm::length(pts[i].handleOut) > 0.001f) {
-            ImVec2 h = toImVec2(uvToScreenVec(pts[i].position+pts[i].handleOut));
+            ImVec2 h = toImVec2(layerUVToScreen(pts[i].position+pts[i].handleOut));
             draw->AddLine(anchor,h,kHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kHandleDot); draw->AddCircle(h,3.5f,kHandleRing,0,1.2f);
         }
         if (isSel) {

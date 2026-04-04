@@ -2,11 +2,7 @@
 
 bool OutputZone::init() {
     if (!compositor.init(width, height)) return false;
-    if (!cornerPin.init()) return false;
-    if (!meshWarp.init(5, 5)) return false;
-    if (!objMeshWarp.init()) return false;
-    bool needsDepth = (warpMode == ViewportPanel::WarpMode::ObjMesh);
-    if (!warpFBO.create(width, height, needsDepth)) return false;
+    if (!warpFBO.create(width, height, false)) return false;
     return true;
 }
 

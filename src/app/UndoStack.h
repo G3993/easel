@@ -23,9 +23,6 @@ struct LayerSnapshot {
     float audioStrength = 0.15f;
     float cropTop = 0.0f, cropBottom = 0.0f;
     float cropLeft = 0.0f, cropRight = 0.0f;
-    bool maskEnabled = false;
-    std::vector<MaskPoint> maskPoints;
-    bool maskClosed = true;
 
     // Shader param values (empty if not a shader source)
     std::vector<std::variant<float, glm::vec4, bool, glm::vec2, std::string>> shaderParamValues;
@@ -112,9 +109,6 @@ private:
             ls.cropBottom = layer->cropBottom;
             ls.cropLeft = layer->cropLeft;
             ls.cropRight = layer->cropRight;
-            ls.maskEnabled = layer->maskEnabled;
-            ls.maskPoints = layer->maskPath.points();
-            ls.maskClosed = layer->maskPath.closed();
             ls.source = layer->source;
 
             // Snapshot shader param values
@@ -158,9 +152,6 @@ private:
             layer->cropBottom = ls.cropBottom;
             layer->cropLeft = ls.cropLeft;
             layer->cropRight = ls.cropRight;
-            layer->maskEnabled = ls.maskEnabled;
-            layer->maskPath.points() = ls.maskPoints;
-            layer->maskPath.setClosed(ls.maskClosed);
             layer->source = ls.source;
 
             // Restore shader param values

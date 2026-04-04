@@ -1,4 +1,5 @@
 #include "ui/WarpEditor.h"
+#include "app/MappingProfile.h"
 #include <imgui.h>
 #include <filesystem>
 
@@ -36,14 +37,48 @@ static void modeButton(const char* label, int thisMode, int& currentMode, float 
     ImGui::PopStyleColor(2);
 }
 
-void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                        ObjMeshWarp& objMeshWarp, ViewportPanel::WarpMode& mode) {
+void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
+                        std::vector<std::unique_ptr<MappingProfile>>* allMappings,
+                        int activeMappingIndex) {
     m_wantsLoadOBJ = false;
 
-    ImGui::Begin("Warp");
+    ImGui::Begin("Mapping");
+
+    // --- Mapping profile header ---
+    if (allMappings && !allMappings->empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Profile");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+
+        // Profile name (editable inline)
+        if (m_renaming) {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+            if (ImGui::InputText("##MapRename", m_renameBuf, sizeof(m_renameBuf),
+                                 ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                mapping.name = m_renameBuf;
+                m_renaming = false;
+            }
+            if (!ImGui::IsItemActive() && ImGui::IsMouseClicked(0)) m_renaming = false;
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::Text("%s", mapping.name.c_str());
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemClicked()) {
+                m_renaming = true;
+                snprintf(m_renameBuf, sizeof(m_renameBuf), "%s", mapping.name.c_str());
+            }
+        }
+
+        sectionSep();
+    }
+
+    auto& cornerPin = mapping.cornerPin;
+    auto& meshWarp = mapping.meshWarp;
+    auto& objMeshWarp = mapping.objMeshWarp;
 
     // Mode selector — 3 buttons
-    int modeInt = (int)mode;
+    int modeInt = (int)mapping.warpMode;
     float thirdW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
 
     modeButton("Corner Pin", 0, modeInt, thirdW);
@@ -52,11 +87,11 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
     ImGui::SameLine();
     modeButton("OBJ Mesh", 2, modeInt, thirdW);
 
-    mode = (ViewportPanel::WarpMode)modeInt;
+    mapping.warpMode = (ViewportPanel::WarpMode)modeInt;
 
     sectionSep();
 
-    if (mode == ViewportPanel::WarpMode::CornerPin) {
+    if (mapping.warpMode == ViewportPanel::WarpMode::CornerPin) {
         auto& corners = cornerPin.corners();
         const char* labels[] = {"BL", "BR", "TR", "TL"};
         for (int i = 0; i < 4; i++) {
@@ -74,7 +109,7 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
                 {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}
             }};
         }
-    } else if (mode == ViewportPanel::WarpMode::MeshWarp) {
+    } else if (mapping.warpMode == ViewportPanel::WarpMode::MeshWarp) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
         ImGui::Text("%d x %d", meshWarp.cols(), meshWarp.rows());
         ImGui::PopStyleColor();
@@ -91,7 +126,7 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
         if (accentButton("Reset", -1)) {
             meshWarp.resetGrid();
         }
-    } else if (mode == ViewportPanel::WarpMode::ObjMesh) {
+    } else if (mapping.warpMode == ViewportPanel::WarpMode::ObjMesh) {
         // Mesh file display
         if (objMeshWarp.isLoaded()) {
             std::string filename = std::filesystem::path(objMeshWarp.meshPath()).filename().string();
@@ -176,5 +211,84 @@ void WarpEditor::render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
         }
     }
 
+    // --- Masks section ---
+    sectionSep();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+    ImGui::Text("Masks");
+    ImGui::PopStyleColor();
+
+    // List existing masks
+    for (int mi = 0; mi < (int)mapping.masks.size(); mi++) {
+        ImGui::PushID(8000 + mi);
+        auto& mask = mapping.masks[mi];
+        bool isActive = (mapping.activeMaskIndex == mi && maskEditMode);
+
+        if (isActive) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+        }
+
+        char label[128];
+        snprintf(label, sizeof(label), "%s (%d pts)", mask.name.c_str(), mask.path.count());
+        float btnW = ImGui::GetContentRegionAvail().x - 28;
+        if (ImGui::Button(label, ImVec2(btnW, 0))) {
+            if (isActive) {
+                maskEditMode = false;
+                mapping.activeMaskIndex = -1;
+            } else {
+                mapping.activeMaskIndex = mi;
+                maskEditMode = true;
+            }
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+        if (ImGui::Button("X", ImVec2(24, 0))) {
+            if (mapping.activeMaskIndex == mi) { maskEditMode = false; mapping.activeMaskIndex = -1; }
+            else if (mapping.activeMaskIndex > mi) mapping.activeMaskIndex--;
+            mapping.masks.erase(mapping.masks.begin() + mi);
+            ImGui::PopStyleColor(2);
+            ImGui::PopID();
+            // skip rest of loop since we erased
+            goto masks_done;
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::PopID();
+    }
+
+    if (accentButton("+ Add Mask", -1)) {
+        MappingMask newMask;
+        newMask.name = "Mask " + std::to_string(mapping.masks.size() + 1);
+        mapping.masks.push_back(std::move(newMask));
+        mapping.activeMaskIndex = (int)mapping.masks.size() - 1;
+        maskEditMode = true;
+    }
+
+    // Shape presets for active mask
+    if (maskEditMode && mapping.activeMaskIndex >= 0 && mapping.activeMaskIndex < (int)mapping.masks.size()) {
+        auto& mask = mapping.masks[mapping.activeMaskIndex];
+        float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
+        if (accentButton("Rect", shapeW)) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
+        ImGui::SameLine();
+        if (accentButton("Circle", shapeW)) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
+        ImGui::SameLine();
+        if (accentButton("Tri", shapeW)) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); }
+        ImGui::SameLine();
+        if (accentButton("Oct", shapeW)) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); }
+        ImGui::SameLine();
+        if (accentButton("Star", shapeW)) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+        ImGui::TextWrapped("Click: add  |  Drag: move  |  R-click: del");
+        ImGui::PopStyleColor();
+    }
+
+    masks_done:
     ImGui::End();
 }

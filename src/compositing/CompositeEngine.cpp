@@ -313,15 +313,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, layerTex);
 
-            // Mask support for first layer
-            if (layer->mask && layer->mask->id()) {
-                m_passthroughShader.setBool("uHasMask", true);
-                m_passthroughShader.setInt("uMask", 1);
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, layer->mask->id());
-            } else {
-                m_passthroughShader.setBool("uHasMask", false);
-            }
+            m_passthroughShader.setBool("uHasMask", false);
         } else {
             m_compositeShader.use();
             // Draw a full-screen quad (identity transform) — the fragment
@@ -358,15 +350,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, layerTex);
 
-            // Mask
-            if (layer->mask && layer->mask->id()) {
-                m_compositeShader.setBool("uHasMask", true);
-                m_compositeShader.setInt("uMask", 2);
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, layer->mask->id());
-            } else {
-                m_compositeShader.setBool("uHasMask", false);
-            }
+            m_compositeShader.setBool("uHasMask", false);
         }
 
         glEnable(GL_BLEND);

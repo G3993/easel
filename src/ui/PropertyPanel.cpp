@@ -690,85 +690,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     }
     ImGui::PopStyleColor(2);
 
-    thinSep();
-
-    // --- Mask ---
-    if (ImGui::Checkbox("Mask", &layer->maskEnabled)) undoNeeded = true;
-
-    if (layer->maskEnabled) {
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-        ImGui::Text("(%d pts)", layer->maskPath.count());
-        ImGui::PopStyleColor();
-
-        if (maskEditMode) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.60f));
-            if (ImGui::Button("Done Editing", ImVec2(-1, 0))) {
-                maskEditMode = false;
-            }
-            ImGui::PopStyleColor(3);
-        } else {
-            if (accentBtn("Edit Mask", -1)) {
-                maskEditMode = true;
-            }
-        }
-
-        if (layer->maskPath.count() > 0) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.15f, 0.15f, 0.35f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.2f, 0.2f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
-            if (ImGui::Button("Clear Mask", ImVec2(-1, 0))) {
-                layer->maskPath.points().clear();
-                layer->maskPath.markDirty();
-                maskEditMode = false;
-            }
-            ImGui::PopStyleColor(4);
-        }
-
-        // Shape presets - 5 buttons in a row
-        float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
-        if (accentBtn("Rect", shapeW)) {
-            undoNeeded = true;
-            layer->maskPath.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f});
-            maskEditMode = true;
-        }
-        ImGui::SameLine();
-        if (accentBtn("Circle", shapeW)) {
-            undoNeeded = true;
-            layer->maskPath.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f});
-            maskEditMode = true;
-        }
-        ImGui::SameLine();
-        if (accentBtn("Tri", shapeW)) {
-            undoNeeded = true;
-            layer->maskPath.makeTriangle({0.5f, 0.5f}, 0.3f);
-            maskEditMode = true;
-        }
-        ImGui::SameLine();
-        if (accentBtn("Oct", shapeW)) {
-            undoNeeded = true;
-            layer->maskPath.makePolygon({0.5f, 0.5f}, 0.3f, 8);
-            maskEditMode = true;
-        }
-        ImGui::SameLine();
-        if (accentBtn("Star", shapeW)) {
-            undoNeeded = true;
-            layer->maskPath.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5);
-            maskEditMode = true;
-        }
-
-        if (maskEditMode) {
-            ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-            ImGui::TextWrapped("Click: add  |  Drag: move  |  Handles: curve  |  R-click: del");
-            ImGui::PopStyleColor();
-        }
-    } else {
-        maskEditMode = false;
-    }
-
     // --- Video controls ---
     if (layer->source && layer->source->isVideo()) {
         thinSep();
@@ -816,6 +737,70 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     if (layer->source && layer->source->isShader()) {
         auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
         auto& inputs = shaderSrc->inputs();
+
+        // Shader resolution override
+        {
+            thinSep();
+            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+            ImGui::Text("Resolution");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
+            bool custom = (layer->shaderWidth > 0 && layer->shaderHeight > 0);
+            // Preset resolutions
+            struct ResPreset { const char* label; int w; int h; };
+            ResPreset presets[] = {
+                {"Canvas", 0, 0},
+                {"720p",  1280, 720},
+                {"1080p", 1920, 1080},
+                {"1440p", 2560, 1440},
+                {"4K",    3840, 2160},
+            };
+            const char* currentLabel = "Canvas";
+            for (auto& p : presets) {
+                if (layer->shaderWidth == p.w && layer->shaderHeight == p.h) {
+                    currentLabel = p.label;
+                    break;
+                }
+            }
+            if (custom) {
+                // Check if it matches a preset
+                bool found = false;
+                for (auto& p : presets) {
+                    if (layer->shaderWidth == p.w && layer->shaderHeight == p.h) { found = true; break; }
+                }
+                if (!found) {
+                    static char customLabel[64];
+                    snprintf(customLabel, sizeof(customLabel), "%dx%d", layer->shaderWidth, layer->shaderHeight);
+                    currentLabel = customLabel;
+                }
+            }
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (ImGui::BeginCombo("##ShaderRes", currentLabel)) {
+                for (auto& p : presets) {
+                    bool sel = (layer->shaderWidth == p.w && layer->shaderHeight == p.h);
+                    if (ImGui::Selectable(p.label, sel)) {
+                        layer->shaderWidth = p.w;
+                        layer->shaderHeight = p.h;
+                    }
+                }
+                ImGui::Separator();
+                // Custom input
+                static int customW = 1920, customH = 1080;
+                if (custom && layer->shaderWidth > 0) { customW = layer->shaderWidth; customH = layer->shaderHeight; }
+                ImGui::SetNextItemWidth(80);
+                ImGui::InputInt("##cw", &customW, 0); ImGui::SameLine(); ImGui::Text("x"); ImGui::SameLine();
+                ImGui::SetNextItemWidth(80);
+                ImGui::InputInt("##ch", &customH, 0); ImGui::SameLine();
+                if (ImGui::SmallButton("Set")) {
+                    if (customW >= 64 && customH >= 64 && customW <= 7680 && customH <= 4320) {
+                        layer->shaderWidth = customW;
+                        layer->shaderHeight = customH;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
 
         if (!inputs.empty()) {
             thinSep();

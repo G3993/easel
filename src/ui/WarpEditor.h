@@ -1,17 +1,21 @@
 #pragma once
 #include "ui/ViewportPanel.h"
-#include "warp/CornerPinWarp.h"
-#include "warp/MeshWarp.h"
-#include "warp/ObjMeshWarp.h"
+#include <vector>
+#include <memory>
+
+struct MappingProfile;
 
 class WarpEditor {
 public:
-    void render(CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                ObjMeshWarp& objMeshWarp, ViewportPanel::WarpMode& mode);
+    void render(MappingProfile& mapping, bool& maskEditMode,
+                std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr,
+                int activeMappingIndex = 0);
 
     bool wantsLoadOBJ() const { return m_wantsLoadOBJ; }
     void clearLoadOBJ() { m_wantsLoadOBJ = false; }
 
 private:
     bool m_wantsLoadOBJ = false;
+    bool m_renaming = false;
+    char m_renameBuf[128] = {};
 };

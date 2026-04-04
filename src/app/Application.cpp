@@ -71,6 +71,13 @@ static std::string saveFileDialog(const char* filter, const char* defaultExt) {
     return "";
 }
 
+MappingProfile* Application::mappingForZone(OutputZone& z) {
+    if (z.mappingIndex >= 0 && z.mappingIndex < (int)m_mappings.size())
+        return m_mappings[z.mappingIndex].get();
+    return nullptr;
+}
+
+
 bool Application::init() {
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
@@ -125,9 +132,15 @@ bool Application::init() {
 
     if (!m_ui.init(m_window)) return false;
 
+    // Create default mapping profile
+    auto mapping = std::make_unique<MappingProfile>();
+    if (!mapping->init()) return false;
+    m_mappings.push_back(std::move(mapping));
+
     // Create default output zone
     auto zone = std::make_unique<OutputZone>();
     if (!zone->init()) return false;
+    zone->mappingIndex = 0;
     m_zones.push_back(std::move(zone));
 
     m_quad.createQuad();
@@ -250,10 +263,20 @@ void Application::run() {
     while (!glfwWindowShouldClose(m_window)) {
         glfwPollEvents();
 
-        // Escape on main window closes all projectors
-        if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS && !m_projectors.empty()) {
+        // Escape on main window closes all projectors and resets fullscreen zones
+        if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+            bool hadOutput = !m_projectors.empty();
             for (auto& [idx, proj] : m_projectors) proj->destroy();
             m_projectors.clear();
+            for (auto& zone : m_zones) {
+                if (zone->outputDest == OutputDest::Fullscreen) {
+                    zone->outputDest = OutputDest::None;
+                    zone->outputMonitor = -1;
+                    hadOutput = true;
+                }
+            }
+            // Consume key only if we actually closed something
+            if (hadOutput) continue;
         }
 
         // Undo / Redo keybinds
@@ -495,9 +518,11 @@ void Application::updateSources() {
             // Pass audio + mouse state to ShaderSource layers
             if (layer->source->isShader()) {
                 auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
-                // Match shader resolution to composition size
+                // Match shader resolution to composition size (or per-layer override)
                 auto& zone = activeZone();
-                shaderSrc->setResolution(zone.width, zone.height);
+                int sw = (layer->shaderWidth > 0)  ? layer->shaderWidth  : zone.width;
+                int sh = (layer->shaderHeight > 0) ? layer->shaderHeight : zone.height;
+                shaderSrc->setResolution(sw, sh);
                 shaderSrc->setAudioState(
                     m_audioAnalyzer.smoothedRMS(),
                     m_audioAnalyzer.bass(),
@@ -639,20 +664,16 @@ void Application::compositeAndWarp() {
     }
 #endif
 
-    // Re-render any dirty masks before compositing (shared across zones)
-    for (int i = 0; i < m_layerStack.count(); i++) {
-        auto& layer = m_layerStack[i];
-        if (layer->maskEnabled && layer->maskPath.isDirty() && layer->maskPath.count() >= 3) {
-            if (!layer->mask) {
-                layer->mask = std::make_shared<Texture>();
+    // Re-render any dirty masks in mapping profiles
+    for (auto& mp : m_mappings) {
+        for (auto& mask : mp->masks) {
+            if (mask.path.isDirty() && mask.path.count() >= 3) {
+                if (!mask.texture) {
+                    mask.texture = std::make_shared<Texture>();
+                }
+                m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture);
+                mask.path.clearDirty();
             }
-            int mw = layer->width() > 0 ? layer->width() : 1024;
-            int mh = layer->height() > 0 ? layer->height() : 1024;
-            m_maskRenderer.render(layer->maskPath, mw, mh, *layer->mask);
-            layer->maskPath.clearDirty();
-        }
-        if (!layer->maskEnabled) {
-            layer->mask = nullptr;
         }
     }
 
@@ -703,22 +724,38 @@ void Application::compositeZone(OutputZone& zone) {
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    if (sourceTex) {
-        if (zone.warpMode == ViewportPanel::WarpMode::CornerPin) {
-            zone.cornerPin.render(sourceTex);
-        } else if (zone.warpMode == ViewportPanel::WarpMode::MeshWarp) {
-            zone.meshWarp.render(sourceTex);
-        } else if (zone.warpMode == ViewportPanel::WarpMode::ObjMesh) {
+    auto* mp = mappingForZone(zone);
+    if (sourceTex && mp) {
+        if (mp->warpMode == ViewportPanel::WarpMode::CornerPin) {
+            mp->cornerPin.render(sourceTex);
+        } else if (mp->warpMode == ViewportPanel::WarpMode::MeshWarp) {
+            mp->meshWarp.render(sourceTex);
+        } else if (mp->warpMode == ViewportPanel::WarpMode::ObjMesh) {
             float aspect = (float)zone.width / (float)zone.height;
-            zone.objMeshWarp.render(sourceTex, aspect);
+            mp->objMeshWarp.render(sourceTex, aspect);
         }
+    } else if (sourceTex) {
+        // No mapping — passthrough
+        m_passthroughShader.use();
+        m_passthroughShader.setInt("uTexture", 0);
+        m_passthroughShader.setFloat("uOpacity", 1.0f);
+        m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_passthroughShader.setBool("uHasMask", false);
+        m_passthroughShader.setBool("uFlipV", false);
+        m_passthroughShader.setFloat("uTileX", 1.0f);
+        m_passthroughShader.setFloat("uTileY", 1.0f);
+        m_passthroughShader.setInt("uMosaicMode", 0);
+        m_passthroughShader.setFloat("uFeather", 0.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sourceTex);
+        m_quad.draw();
     }
 
     Framebuffer::unbind();
 
     // Edge blend post-process (if any edge has blend width > 0)
-    bool hasEdgeBlend = zone.edgeBlendLeft > 0 || zone.edgeBlendRight > 0 ||
-                        zone.edgeBlendTop > 0 || zone.edgeBlendBottom > 0;
+    bool hasEdgeBlend = mp && (mp->edgeBlendLeft > 0 || mp->edgeBlendRight > 0 ||
+                               mp->edgeBlendTop > 0 || mp->edgeBlendBottom > 0);
     if (hasEdgeBlend) {
         // Ensure temp FBO matches zone size
         if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
@@ -733,11 +770,11 @@ void Application::compositeZone(OutputZone& zone) {
         m_edgeBlendShader.use();
         m_edgeBlendShader.setInt("uTexture", 0);
         m_edgeBlendShader.setMat3("uTransform", glm::mat3(1.0f));
-        m_edgeBlendShader.setFloat("uBlendLeft", zone.edgeBlendLeft / (float)zone.width);
-        m_edgeBlendShader.setFloat("uBlendRight", zone.edgeBlendRight / (float)zone.width);
-        m_edgeBlendShader.setFloat("uBlendTop", zone.edgeBlendTop / (float)zone.height);
-        m_edgeBlendShader.setFloat("uBlendBottom", zone.edgeBlendBottom / (float)zone.height);
-        m_edgeBlendShader.setFloat("uGamma", zone.edgeBlendGamma);
+        m_edgeBlendShader.setFloat("uBlendLeft", mp->edgeBlendLeft / (float)zone.width);
+        m_edgeBlendShader.setFloat("uBlendRight", mp->edgeBlendRight / (float)zone.width);
+        m_edgeBlendShader.setFloat("uBlendTop", mp->edgeBlendTop / (float)zone.height);
+        m_edgeBlendShader.setFloat("uBlendBottom", mp->edgeBlendBottom / (float)zone.height);
+        m_edgeBlendShader.setFloat("uGamma", mp->edgeBlendGamma);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
@@ -761,6 +798,58 @@ void Application::compositeZone(OutputZone& zone) {
         glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
         m_quad.draw();
         Framebuffer::unbind();
+    }
+
+    // Apply mapping masks (multiply into warpFBO)
+    if (mp && !mp->masks.empty()) {
+        for (auto& mask : mp->masks) {
+            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                // Read warpFBO, multiply by mask, write back
+                if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
+                    m_edgeBlendFBO.create(zone.width, zone.height);
+                }
+                m_edgeBlendFBO.bind();
+                glViewport(0, 0, zone.width, zone.height);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", true);
+                m_passthroughShader.setInt("uMask", 1);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, mask.texture->id());
+                m_quad.draw();
+                Framebuffer::unbind();
+
+                // Copy back
+                zone.warpFBO.bind();
+                glViewport(0, 0, zone.width, zone.height);
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
+                m_quad.draw();
+                Framebuffer::unbind();
+            }
+        }
     }
 }
 
@@ -796,6 +885,11 @@ void Application::presentOutputs() {
                     if (proj->create(m_window, zone.outputMonitor)) {
                         zone.resize(proj->projectorWidth(), proj->projectorHeight());
                         m_projectors[zone.outputMonitor] = std::move(proj);
+                    } else {
+                        // Failed (e.g. tried to project on editor's own monitor)
+                        // -- reset zone so we don't retry every frame
+                        zone.outputDest = OutputDest::None;
+                        zone.outputMonitor = -1;
                     }
                 }
                 auto it2 = m_projectors.find(zone.outputMonitor);
@@ -860,6 +954,7 @@ void Application::addZone() {
         zone->width = m_zones[0]->width;
         zone->height = m_zones[0]->height;
     }
+    zone->mappingIndex = 0; // default to first mapping
     zone->init();
     m_zones.push_back(std::move(zone));
 }
@@ -909,33 +1004,13 @@ void Application::duplicateZone(int index) {
     z->width = src.width;
     z->height = src.height;
     z->compPreset = src.compPreset;
-    z->warpMode = src.warpMode;
+    z->mappingIndex = src.mappingIndex; // share the same mapping profile
     z->showAllLayers = src.showAllLayers;
     z->visibleLayerIds = src.visibleLayerIds;
     z->outputDest = OutputDest::None; // user picks new output for copy
     z->outputMonitor = -1;
 
     z->init();
-
-    // Copy warp points from source
-    auto& dstCorners = z->cornerPin.corners();
-    const auto& srcCorners = src.cornerPin.corners();
-    for (int i = 0; i < 4; i++) dstCorners[i] = srcCorners[i];
-
-    z->meshWarp.setGridSize(src.meshWarp.cols(), src.meshWarp.rows());
-    auto& dstPts = z->meshWarp.points();
-    const auto& srcPts = src.meshWarp.points();
-    for (int i = 0; i < (int)srcPts.size() && i < (int)dstPts.size(); i++) {
-        dstPts[i] = srcPts[i];
-    }
-
-    // Copy OBJ mesh state
-    if (src.objMeshWarp.isLoaded()) {
-        z->objMeshWarp.loadModel(src.objMeshWarp.meshPath());
-        z->objMeshWarp.modelScale() = src.objMeshWarp.modelScale();
-        z->objMeshWarp.modelPosition() = src.objMeshWarp.modelPosition();
-        z->objMeshWarp.camera() = src.objMeshWarp.camera();
-    }
 
     m_zones.push_back(std::move(z));
 }
@@ -1061,8 +1136,21 @@ void Application::renderUI() {
 #ifdef HAS_NDI
         ndiAvail = NDIRuntime::instance().isAvailable();
 #endif
-        m_viewportPanel.render(z.warpFBO.textureId(), z.cornerPin, z.meshWarp, z.warpMode, projAspect,
-                               &m_zones, &m_activeZone, &monitors, ndiAvail, &z.objMeshWarp);
+        // Determine which monitor the editor window is on so the UI can hide it
+        int editorMon = -1;
+        {
+            int wx, wy;
+            glfwGetWindowPos(m_window, &wx, &wy);
+            for (int mi = 0; mi < (int)monitors.size(); mi++) {
+                const auto& m = monitors[mi];
+                if (wx >= m.x && wx < m.x + m.width && wy >= m.y && wy < m.y + m.height) {
+                    editorMon = mi;
+                    break;
+                }
+            }
+        }
+        m_viewportPanel.render(z.warpFBO.textureId(), mappingForZone(z), projAspect,
+                               &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings);
     }
 
     // Handle signals from viewport tabs
@@ -1151,41 +1239,40 @@ void Application::renderUI() {
     }
 
     // Set viewport edit mode based on current editing state
-    if (m_maskEditMode && selectedLayer && selectedLayer->maskEnabled) {
+    // Masks are now on the mapping profile, not on layers
+    auto* zoneMapping = mappingForZone(zone);
+    MappingMask* activeMask = nullptr;
+    if (zoneMapping && m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
+        zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
+        activeMask = &zoneMapping->masks[zoneMapping->activeMaskIndex];
+    }
+    if (m_maskEditMode && activeMask) {
         m_viewportPanel.setEditMode(ViewportPanel::EditMode::Mask);
-        m_viewportPanel.renderMaskOverlay(selectedLayer->maskPath);
+        // Masks are in canvas UV space (identity transform — they apply to the zone output)
+        m_viewportPanel.renderMaskOverlay(activeMask->path, glm::mat3(1.0f));
     } else {
         m_viewportPanel.setEditMode(ViewportPanel::EditMode::Normal);
         m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer, zone.width, zone.height);
         m_maskEditMode = false;
+    }
 
-        // Double-click corner/edge: enter mask edit mode
-        if (m_viewportPanel.wantsMaskEdit() && selectedLayer) {
-            m_viewportPanel.clearMaskEditSignal();
-            selectedLayer->maskEnabled = true;
-            m_maskEditMode = true;
-            // If edge-click had a UV, add initial point
-            glm::vec2 uv = m_viewportPanel.maskEditClickUV();
-            if (uv.x > 0.001f || uv.y > 0.001f) {
-                selectedLayer->maskPath.addPoint(uv);
-            }
+    auto* mp = mappingForZone(zone);
+    if (mp) {
+        auto prevWarpMode = mp->warpMode;
+        m_warpEditor.render(*mp, m_maskEditMode, &m_mappings, zone.mappingIndex);
+
+        // Recreate warp FBO with/without depth when mode changes
+        if (mp->warpMode != prevWarpMode) {
+            bool needsDepth = (mp->warpMode == ViewportPanel::WarpMode::ObjMesh);
+            zone.warpFBO.create(zone.width, zone.height, needsDepth);
         }
-    }
 
-    auto prevWarpMode = zone.warpMode;
-    m_warpEditor.render(zone.cornerPin, zone.meshWarp, zone.objMeshWarp, zone.warpMode);
-
-    // Recreate warp FBO with/without depth when mode changes
-    if (zone.warpMode != prevWarpMode) {
-        bool needsDepth = (zone.warpMode == ViewportPanel::WarpMode::ObjMesh);
-        zone.warpFBO.create(zone.width, zone.height, needsDepth);
-    }
-
-    // Handle OBJ load request
-    if (m_warpEditor.wantsLoadOBJ()) {
-        std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
-        if (!path.empty()) {
-            zone.objMeshWarp.loadModel(path);
+        // Handle OBJ load request
+        if (m_warpEditor.wantsLoadOBJ()) {
+            std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
+            if (!path.empty()) {
+                mp->objMeshWarp.loadModel(path);
+            }
         }
     }
 
@@ -1272,21 +1359,24 @@ void Application::renderUI() {
             ImGui::Text("Edge Blend");
             ImGui::PopStyleColor();
 
-            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBL", &zone.edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBR", &zone.edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
+            auto* ebm = mappingForZone(zone);
+            if (ebm) {
+                float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                ImGui::SetNextItemWidth(half);
+                ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(half);
+                ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
 
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBT", &zone.edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBB", &zone.edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
+                ImGui::SetNextItemWidth(half);
+                ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(half);
+                ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
 
-            ImGui::SetNextItemWidth(-1);
-            ImGui::DragFloat("##EBGamma", &zone.edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
+            }
 
             ImGui::Dummy(ImVec2(0, 4));
             {
@@ -2156,9 +2246,14 @@ void Application::renderMenuBar() {
                     m_layerStack.removeLayer(m_layerStack.count() - 1);
                 }
                 m_selectedLayer = -1;
-                // Reset zones to single default
+                // Reset mappings, masks, and zones to defaults
+                m_mappings.clear();
+                auto mp = std::make_unique<MappingProfile>();
+                mp->init();
+                m_mappings.push_back(std::move(mp));
                 m_zones.clear();
                 auto zone = std::make_unique<OutputZone>();
+                zone->mappingIndex = 0;
                 zone->init();
                 m_zones.push_back(std::move(zone));
                 m_activeZone = 0;
@@ -2507,6 +2602,82 @@ void Application::saveProject(const std::string& path) {
     json j;
     j["version"] = 2;
 
+    // Save mapping profiles
+    json mappingsJson = json::array();
+    for (auto& mPtr : m_mappings) {
+        auto& m = *mPtr;
+        json mj;
+        mj["name"] = m.name;
+        mj["warpMode"] = (int)m.warpMode;
+
+        json corners = json::array();
+        for (const auto& c : m.cornerPin.corners()) corners.push_back({c.x, c.y});
+        mj["cornerPin"] = corners;
+
+        mj["meshWarp"]["cols"] = m.meshWarp.cols();
+        mj["meshWarp"]["rows"] = m.meshWarp.rows();
+        json meshPoints = json::array();
+        for (const auto& p : m.meshWarp.points()) meshPoints.push_back({p.x, p.y});
+        mj["meshWarp"]["points"] = meshPoints;
+
+        if (m.objMeshWarp.isLoaded()) {
+            json objJson;
+            objJson["path"] = m.objMeshWarp.objPath();
+            objJson["modelScale"] = m.objMeshWarp.modelScale();
+            objJson["modelPosition"] = {m.objMeshWarp.modelPosition().x,
+                                         m.objMeshWarp.modelPosition().y,
+                                         m.objMeshWarp.modelPosition().z};
+            const auto& cam = m.objMeshWarp.camera();
+            objJson["camera"]["azimuth"] = cam.azimuth;
+            objJson["camera"]["elevation"] = cam.elevation;
+            objJson["camera"]["distance"] = cam.distance;
+            objJson["camera"]["fovDeg"] = cam.fovDeg;
+            objJson["camera"]["target"] = {cam.target.x, cam.target.y, cam.target.z};
+            json matsJson = json::array();
+            for (const auto& mg : m.objMeshWarp.materials()) {
+                json mj2;
+                mj2["name"] = mg.name;
+                mj2["textured"] = mg.textured;
+                matsJson.push_back(mj2);
+            }
+            objJson["materials"] = matsJson;
+            mj["objMesh"] = objJson;
+        }
+
+        if (m.edgeBlendLeft > 0 || m.edgeBlendRight > 0 || m.edgeBlendTop > 0 || m.edgeBlendBottom > 0) {
+            mj["edgeBlendLeft"] = m.edgeBlendLeft;
+            mj["edgeBlendRight"] = m.edgeBlendRight;
+            mj["edgeBlendTop"] = m.edgeBlendTop;
+            mj["edgeBlendBottom"] = m.edgeBlendBottom;
+            mj["edgeBlendGamma"] = m.edgeBlendGamma;
+        }
+
+        // Masks within this mapping profile
+        if (!m.masks.empty()) {
+            json masksArr = json::array();
+            for (auto& mask : m.masks) {
+                json mkj;
+                mkj["name"] = mask.name;
+                mkj["closed"] = mask.path.closed();
+                json pts = json::array();
+                for (const auto& pt : mask.path.points()) {
+                    json pj;
+                    pj["pos"] = {pt.position.x, pt.position.y};
+                    pj["in"] = {pt.handleIn.x, pt.handleIn.y};
+                    pj["out"] = {pt.handleOut.x, pt.handleOut.y};
+                    pj["smooth"] = pt.smooth;
+                    pts.push_back(pj);
+                }
+                mkj["points"] = pts;
+                masksArr.push_back(mkj);
+            }
+            mj["masks"] = masksArr;
+        }
+
+        mappingsJson.push_back(mj);
+    }
+    j["mappings"] = mappingsJson;
+
     // Save zones
     json zonesJson = json::array();
     for (auto& zonePtr : m_zones) {
@@ -2515,64 +2686,12 @@ void Application::saveProject(const std::string& path) {
         zj["name"] = z.name;
         zj["width"] = z.width;
         zj["height"] = z.height;
-        zj["warpMode"] = (int)z.warpMode;
+        zj["mappingIndex"] = z.mappingIndex;
         zj["showAllLayers"] = z.showAllLayers;
 
         json visIds = json::array();
         for (uint32_t id : z.visibleLayerIds) visIds.push_back(id);
         zj["visibleLayerIds"] = visIds;
-
-        json corners = json::array();
-        for (const auto& c : z.cornerPin.corners()) {
-            corners.push_back({c.x, c.y});
-        }
-        zj["cornerPin"] = corners;
-
-        zj["meshWarp"]["cols"] = z.meshWarp.cols();
-        zj["meshWarp"]["rows"] = z.meshWarp.rows();
-        json meshPoints = json::array();
-        for (const auto& p : z.meshWarp.points()) {
-            meshPoints.push_back({p.x, p.y});
-        }
-        zj["meshWarp"]["points"] = meshPoints;
-
-        // OBJ mesh warp
-        if (z.objMeshWarp.isLoaded()) {
-            json objJson;
-            objJson["path"] = z.objMeshWarp.objPath();
-            objJson["modelScale"] = z.objMeshWarp.modelScale();
-            objJson["modelPosition"] = {z.objMeshWarp.modelPosition().x,
-                                         z.objMeshWarp.modelPosition().y,
-                                         z.objMeshWarp.modelPosition().z};
-            const auto& cam = z.objMeshWarp.camera();
-            objJson["camera"]["azimuth"] = cam.azimuth;
-            objJson["camera"]["elevation"] = cam.elevation;
-            objJson["camera"]["distance"] = cam.distance;
-            objJson["camera"]["fovDeg"] = cam.fovDeg;
-            objJson["camera"]["target"] = {cam.target.x, cam.target.y, cam.target.z};
-
-            // Save material textured state
-            json matsJson = json::array();
-            for (const auto& mg : z.objMeshWarp.materials()) {
-                json mj;
-                mj["name"] = mg.name;
-                mj["textured"] = mg.textured;
-                matsJson.push_back(mj);
-            }
-            objJson["materials"] = matsJson;
-
-            zj["objMesh"] = objJson;
-        }
-
-        // Output routing
-        // Edge blend
-        if (z.edgeBlendLeft > 0 || z.edgeBlendRight > 0 || z.edgeBlendTop > 0 || z.edgeBlendBottom > 0) {
-            zj["edgeBlendLeft"] = z.edgeBlendLeft;
-            zj["edgeBlendRight"] = z.edgeBlendRight;
-            zj["edgeBlendTop"] = z.edgeBlendTop;
-            zj["edgeBlendBottom"] = z.edgeBlendBottom;
-            zj["edgeBlendGamma"] = z.edgeBlendGamma;
-        }
 
         zj["outputDest"] = (int)z.outputDest;
         zj["outputMonitor"] = z.outputMonitor;
@@ -2605,6 +2724,10 @@ void Application::saveProject(const std::string& path) {
         layerJson["audioReactive"] = layer->audioReactive;
         layerJson["audioStrength"] = layer->audioStrength;
         layerJson["feather"] = layer->feather;
+        if (layer->shaderWidth > 0 && layer->shaderHeight > 0) {
+            layerJson["shaderWidth"] = layer->shaderWidth;
+            layerJson["shaderHeight"] = layer->shaderHeight;
+        }
         if (layer->groupId != 0) layerJson["groupId"] = layer->groupId;
 #ifdef HAS_NDI
         layerJson["ndiEnabled"] = layer->ndiEnabled;
@@ -2723,47 +2846,47 @@ void Application::loadProject(const std::string& path) {
     }
     m_selectedLayer = -1;
 
-    // Helper to load warp state into a zone from a JSON object
-    auto loadZoneWarp = [](OutputZone& z, const json& zj) {
-        if (zj.contains("warpMode")) {
-            z.warpMode = (ViewportPanel::WarpMode)zj["warpMode"].get<int>();
+    // Helper to load warp state into a mapping profile from a JSON object
+    auto loadMappingWarp = [](MappingProfile& m, const json& mj) {
+        if (mj.contains("warpMode")) {
+            m.warpMode = (ViewportPanel::WarpMode)mj["warpMode"].get<int>();
         }
-        if (zj.contains("cornerPin")) {
-            auto& corners = z.cornerPin.corners();
-            const auto& cj = zj["cornerPin"];
+        if (mj.contains("cornerPin")) {
+            auto& corners = m.cornerPin.corners();
+            const auto& cj = mj["cornerPin"];
             for (int i = 0; i < 4 && i < (int)cj.size(); i++) {
                 corners[i] = {cj[i][0].get<float>(), cj[i][1].get<float>()};
             }
         }
-        if (zj.contains("meshWarp")) {
-            int cols = zj["meshWarp"]["cols"].get<int>();
-            int rows = zj["meshWarp"]["rows"].get<int>();
-            z.meshWarp.setGridSize(cols, rows);
-            if (zj["meshWarp"].contains("points")) {
-                auto& points = z.meshWarp.points();
-                const auto& pj = zj["meshWarp"]["points"];
+        if (mj.contains("meshWarp")) {
+            int cols = mj["meshWarp"]["cols"].get<int>();
+            int rows = mj["meshWarp"]["rows"].get<int>();
+            m.meshWarp.setGridSize(cols, rows);
+            if (mj["meshWarp"].contains("points")) {
+                auto& points = m.meshWarp.points();
+                const auto& pj = mj["meshWarp"]["points"];
                 for (int i = 0; i < (int)pj.size() && i < (int)points.size(); i++) {
                     points[i] = {pj[i][0].get<float>(), pj[i][1].get<float>()};
                 }
             }
         }
-        if (zj.contains("objMesh")) {
-            const auto& oj = zj["objMesh"];
+        if (mj.contains("objMesh")) {
+            const auto& oj = mj["objMesh"];
             if (oj.contains("path")) {
-                z.objMeshWarp.loadModel(oj["path"].get<std::string>());
+                m.objMeshWarp.loadModel(oj["path"].get<std::string>());
             }
             if (oj.contains("modelScale")) {
-                z.objMeshWarp.modelScale() = oj["modelScale"].get<float>();
+                m.objMeshWarp.modelScale() = oj["modelScale"].get<float>();
             }
             if (oj.contains("modelPosition")) {
-                z.objMeshWarp.modelPosition() = {
+                m.objMeshWarp.modelPosition() = {
                     oj["modelPosition"][0].get<float>(),
                     oj["modelPosition"][1].get<float>(),
                     oj["modelPosition"][2].get<float>()
                 };
             }
             if (oj.contains("camera")) {
-                auto& cam = z.objMeshWarp.camera();
+                auto& cam = m.objMeshWarp.camera();
                 const auto& cj = oj["camera"];
                 cam.azimuth = cj.value("azimuth", 0.0f);
                 cam.elevation = cj.value("elevation", 0.3f);
@@ -2775,33 +2898,68 @@ void Application::loadProject(const std::string& path) {
                                   cj["target"][2].get<float>()};
                 }
             }
-            // Restore material textured state
             if (oj.contains("materials")) {
-                auto& mats = z.objMeshWarp.materials();
+                auto& mats = m.objMeshWarp.materials();
                 const auto& matsJson = oj["materials"];
-                for (const auto& mj : matsJson) {
-                    std::string name = mj.value("name", "");
-                    bool tex = mj.value("textured", true);
+                for (const auto& matJ : matsJson) {
+                    std::string name = matJ.value("name", "");
+                    bool tex = matJ.value("textured", true);
                     for (auto& mg : mats) {
-                        if (mg.name == name) {
-                            mg.textured = tex;
-                            break;
-                        }
+                        if (mg.name == name) { mg.textured = tex; break; }
                     }
                 }
             }
         }
-        // Recreate FBO with depth if ObjMesh mode
-        if (z.warpMode == ViewportPanel::WarpMode::ObjMesh) {
-            z.warpFBO.create(z.width, z.height, true);
+        m.edgeBlendLeft = mj.value("edgeBlendLeft", 0.0f);
+        m.edgeBlendRight = mj.value("edgeBlendRight", 0.0f);
+        m.edgeBlendTop = mj.value("edgeBlendTop", 0.0f);
+        m.edgeBlendBottom = mj.value("edgeBlendBottom", 0.0f);
+        m.edgeBlendGamma = mj.value("edgeBlendGamma", 2.2f);
+
+        // Load masks
+        if (mj.contains("masks")) {
+            for (const auto& mkj : mj["masks"]) {
+                MappingMask mask;
+                mask.name = mkj.value("name", "Mask");
+                if (mkj.contains("closed")) mask.path.setClosed(mkj["closed"].get<bool>());
+                if (mkj.contains("points")) {
+                    for (const auto& pj : mkj["points"]) {
+                        MaskPoint pt;
+                        pt.position = {pj["pos"][0].get<float>(), pj["pos"][1].get<float>()};
+                        pt.handleIn = {pj["in"][0].get<float>(), pj["in"][1].get<float>()};
+                        pt.handleOut = {pj["out"][0].get<float>(), pj["out"][1].get<float>()};
+                        pt.smooth = pj.value("smooth", true);
+                        mask.path.points().push_back(pt);
+                    }
+                    mask.path.markDirty();
+                }
+                m.masks.push_back(std::move(mask));
+            }
         }
     };
 
     int version = j.value("version", 1);
 
+    // Load mapping profiles
+    m_mappings.clear();
+    if (j.contains("mappings")) {
+        for (const auto& mj : j["mappings"]) {
+            auto mp = std::make_unique<MappingProfile>();
+            mp->name = mj.value("name", "Default");
+            mp->init();
+            loadMappingWarp(*mp, mj);
+            m_mappings.push_back(std::move(mp));
+        }
+    }
+
+
     if (version >= 2 && j.contains("zones")) {
         // v2 format: multiple zones
         m_zones.clear();
+
+        // Backward compat: if no "mappings" key, extract warp from each zone
+        bool legacyWarp = m_mappings.empty();
+
         for (const auto& zj : j["zones"]) {
             auto z = std::make_unique<OutputZone>();
             z->name = zj.value("name", "Zone");
@@ -2814,16 +2972,26 @@ void Application::loadProject(const std::string& path) {
                 }
             }
             z->init();
-            loadZoneWarp(*z, zj);
 
-            // Edge blend
-            z->edgeBlendLeft = zj.value("edgeBlendLeft", 0.0f);
-            z->edgeBlendRight = zj.value("edgeBlendRight", 0.0f);
-            z->edgeBlendTop = zj.value("edgeBlendTop", 0.0f);
-            z->edgeBlendBottom = zj.value("edgeBlendBottom", 0.0f);
-            z->edgeBlendGamma = zj.value("edgeBlendGamma", 2.2f);
+            if (legacyWarp) {
+                // Old format: warp data is in the zone JSON — migrate to a mapping profile
+                auto mp = std::make_unique<MappingProfile>();
+                mp->name = z->name;
+                mp->init();
+                loadMappingWarp(*mp, zj);
+                z->mappingIndex = (int)m_mappings.size();
+                m_mappings.push_back(std::move(mp));
+            } else {
+                z->mappingIndex = zj.value("mappingIndex", 0);
+            }
 
-            // Output routing
+            // Recreate FBO with depth if ObjMesh mode
+            auto* mp = (z->mappingIndex >= 0 && z->mappingIndex < (int)m_mappings.size())
+                ? m_mappings[z->mappingIndex].get() : nullptr;
+            if (mp && mp->warpMode == ViewportPanel::WarpMode::ObjMesh) {
+                z->warpFBO.create(z->width, z->height, true);
+            }
+
             z->outputDest = (OutputDest)zj.value("outputDest", 0);
             z->outputMonitor = zj.value("outputMonitor", -1);
             z->ndiStreamName = zj.value("ndiStreamName", std::string(""));
@@ -2837,16 +3005,29 @@ void Application::loadProject(const std::string& path) {
         }
         m_activeZone = 0;
     } else {
-        // v1 format: single zone — load warp directly into zone 0
+        // v1 format: single zone — load warp into a mapping profile
         if (m_zones.empty()) {
             auto z = std::make_unique<OutputZone>();
             z->init();
             m_zones.push_back(std::move(z));
         }
-        // Reset to single zone
         while (m_zones.size() > 1) m_zones.pop_back();
         m_activeZone = 0;
-        loadZoneWarp(*m_zones[0], j);
+
+        if (m_mappings.empty()) {
+            auto mp = std::make_unique<MappingProfile>();
+            mp->init();
+            loadMappingWarp(*mp, j);
+            m_mappings.push_back(std::move(mp));
+        }
+        m_zones[0]->mappingIndex = 0;
+    }
+
+    // Ensure at least one mapping exists
+    if (m_mappings.empty()) {
+        auto mp = std::make_unique<MappingProfile>();
+        mp->init();
+        m_mappings.push_back(std::move(mp));
     }
 
     // Load layers
@@ -2869,6 +3050,8 @@ void Application::loadProject(const std::string& path) {
             layer->audioReactive = layerJson.value("audioReactive", false);
             layer->audioStrength = layerJson.value("audioStrength", 0.15f);
             layer->feather = layerJson.value("feather", 0.0f);
+            layer->shaderWidth = layerJson.value("shaderWidth", 0);
+            layer->shaderHeight = layerJson.value("shaderHeight", 0);
             layer->groupId = layerJson.value("groupId", (uint32_t)0);
 #ifdef HAS_NDI
             layer->ndiEnabled = layerJson.value("ndiEnabled", false);

@@ -1,10 +1,6 @@
 #pragma once
 #include "compositing/CompositeEngine.h"
-#include "warp/CornerPinWarp.h"
-#include "warp/MeshWarp.h"
-#include "warp/ObjMeshWarp.h"
 #include "render/Framebuffer.h"
-#include "ui/ViewportPanel.h" // for WarpMode enum
 #ifdef HAS_NDI
 #include "app/NDIOutput.h"
 #endif
@@ -21,22 +17,14 @@ struct OutputZone {
     int compPreset = 0; // resolution preset index
 
     CompositeEngine compositor;
-    CornerPinWarp cornerPin;
-    MeshWarp meshWarp;
-    ObjMeshWarp objMeshWarp;
     Framebuffer warpFBO;
-    ViewportPanel::WarpMode warpMode = ViewportPanel::WarpMode::CornerPin;
+
+    // Mapping profile index (-1 = none/passthrough, >=0 = index into Application::m_mappings)
+    int mappingIndex = 0;
 
     // Layer visibility
     bool showAllLayers = true;
     std::set<uint32_t> visibleLayerIds;
-
-    // Edge blending (pixels of overlap on each edge)
-    float edgeBlendLeft = 0.0f;
-    float edgeBlendRight = 0.0f;
-    float edgeBlendTop = 0.0f;
-    float edgeBlendBottom = 0.0f;
-    float edgeBlendGamma = 2.2f;  // gamma correction for linear blending
 
     // Output routing
     OutputDest outputDest = OutputDest::None;

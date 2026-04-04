@@ -1,5 +1,6 @@
 #pragma once
 #include "app/OutputZone.h"
+#include "app/MappingProfile.h"
 #include "app/ProjectorOutput.h"
 #include "app/UndoStack.h"
 #include "compositing/CompositeEngine.h"
@@ -74,6 +75,11 @@ private:
     LayerPanel m_layerPanel;
     PropertyPanel m_propertyPanel;
     WarpEditor m_warpEditor;
+
+    // Mapping profiles (warp + edge blend, independent of zones)
+    std::vector<std::unique_ptr<MappingProfile>> m_mappings;
+    MappingProfile* mappingForZone(OutputZone& z);
+
 
     // Output zones (replaces singular compositor/warp/FBO)
     std::vector<std::unique_ptr<OutputZone>> m_zones;

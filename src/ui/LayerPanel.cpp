@@ -516,9 +516,6 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                 dupe->cropLeft = orig->cropLeft;
                 dupe->cropRight = orig->cropRight;
                 dupe->source = orig->source;
-                dupe->mask = orig->mask;
-                dupe->maskPath = orig->maskPath;
-                dupe->maskEnabled = orig->maskEnabled;
                 stack.insertLayer(ci + 1, dupe);
                 selectedLayer = ci + 1;
             }
@@ -614,9 +611,6 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             dupe->cropLeft = orig->cropLeft;
             dupe->cropRight = orig->cropRight;
             dupe->source = orig->source;
-            dupe->mask = orig->mask;
-            dupe->maskPath = orig->maskPath;
-            dupe->maskEnabled = orig->maskEnabled;
             stack.insertLayer(ci + 1, dupe);
             selectedLayer = ci + 1;
         }

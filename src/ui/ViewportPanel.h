@@ -12,25 +12,29 @@ class ObjMeshWarp;
 class MaskPath;
 struct OutputZone;
 struct MonitorInfo;
+struct MappingProfile;
 
 class ViewportPanel {
 public:
     enum class WarpMode { CornerPin, MeshWarp, ObjMesh };
     enum class EditMode { Normal, Mask };
 
-    void render(GLuint texture, CornerPinWarp& cornerPin, MeshWarp& meshWarp,
-                WarpMode warpMode, float projectorAspect = 16.0f / 9.0f,
+    void render(GLuint texture, MappingProfile* mapping,
+                float projectorAspect = 16.0f / 9.0f,
                 std::vector<std::unique_ptr<OutputZone>>* zones = nullptr,
                 int* activeZone = nullptr,
                 const std::vector<MonitorInfo>* monitors = nullptr,
                 bool ndiAvailable = false,
-                ObjMeshWarp* objMeshWarp = nullptr);
+                int editorMonitor = -1,
+                const std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr);
 
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
 
     // Mask editing overlay
-    void renderMaskOverlay(MaskPath& mask);
+    // layerTransform: the full layer transform (getTransformMatrix() * nativeScale)
+    // used to convert between canvas UV and layer UV for correct mask placement.
+    void renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform = glm::mat3(1.0f));
 
     void setEditMode(EditMode m) { m_editMode = m; }
     EditMode editMode() const { return m_editMode; }

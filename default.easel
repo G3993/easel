@@ -1,7 +1,36 @@
 {
-  "layers": [],
-  "version": 2,
-  "zones": [
+  "layers": [
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 1,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "Win: Etherea Projection (MediaMTX) - Google Chrome",
+      "ndiEnabled": false,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        0.5299999713897705,
+        0.5299999713897705
+      ],
+      "sourcePath": "Etherea Projection (MediaMTX) - Google Chrome",
+      "sourceType": "Window Capture",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "visible": true
+    }
+  ],
+  "mappings": [
     {
       "cornerPin": [
         [
@@ -21,7 +50,6 @@
           1.0
         ]
       ],
-      "height": 1080,
       "meshWarp": {
         "cols": 5,
         "points": [
@@ -129,12 +157,20 @@
         "rows": 5
       },
       "name": "Main",
+      "warpMode": 0
+    }
+  ],
+  "version": 2,
+  "zones": [
+    {
+      "height": 810,
+      "mappingIndex": 0,
+      "name": "Main",
       "ndiStreamName": "",
-      "outputDest": 0,
-      "outputMonitor": -1,
+      "outputDest": 1,
+      "outputMonitor": 2,
       "showAllLayers": true,
       "visibleLayerIds": [],
-      "warpMode": 0,
       "width": 1920
     }
   ]
