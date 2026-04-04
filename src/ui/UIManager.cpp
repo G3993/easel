@@ -275,35 +275,39 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspaceId, dockSize);
 
-        // Split: left 70% = preview, right 30% = panels
+        // Split: top 75% = main area, bottom 25% = Mapping
+        ImGuiID topId, bottomId;
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Up, 0.75f, &topId, &bottomId);
+
+        // Split main area: left 62% = preview canvas, right 38% = panels
         ImGuiID leftId, rightId;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.70f, &leftId, &rightId);
+        ImGui::DockBuilderSplitNode(topId, ImGuiDir_Left, 0.62f, &leftId, &rightId);
 
-        // Split right side: top 45% = Layers, bottom 55% = Properties
+        // Split right side: top ~15% = Layers tabs, bottom ~85% = Properties
         ImGuiID rightTopId, rightBottomId;
-        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
+        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.15f, &rightTopId, &rightBottomId);
 
-        // Set panel sizes proportionally (responsive to window size)
-        float rightW = dockSize.x * 0.30f;
-        float rightTopH = dockSize.y * 0.45f;
-        float rightBotH = dockSize.y * 0.55f;
+        // Set panel sizes proportionally
+        float rightW = dockSize.x * 0.38f;
         ImGuiDockNode* rightTopNode = ImGui::DockBuilderGetNode(rightTopId);
         ImGuiDockNode* rightBottomNode = ImGui::DockBuilderGetNode(rightBottomId);
-        if (rightTopNode) rightTopNode->SizeRef = ImVec2(std::max(280.0f, rightW), rightTopH);
-        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(std::max(280.0f, rightW), rightBotH);
+        if (rightTopNode) rightTopNode->SizeRef = ImVec2(std::max(280.0f, rightW), dockSize.y * 0.15f);
+        if (rightBottomNode) rightBottomNode->SizeRef = ImVec2(std::max(280.0f, rightW), dockSize.y * 0.60f);
+        ImGuiDockNode* bottomNode = ImGui::DockBuilderGetNode(bottomId);
+        if (bottomNode) bottomNode->SizeRef = ImVec2(dockSize.x, dockSize.y * 0.25f);
 
         // Dock windows into regions
         ImGui::DockBuilderDockWindow("Projector Preview", leftId);
         ImGui::DockBuilderDockWindow("Stage", leftId);
         ImGui::DockBuilderDockWindow("Stream", leftId);
         ImGui::DockBuilderDockWindow("Capture", leftId);
-        ImGui::DockBuilderDockWindow("Warp", leftId);
+        ImGui::DockBuilderDockWindow("Projector", leftId);
         ImGui::DockBuilderDockWindow("Layers", rightTopId);
         ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
         ImGui::DockBuilderDockWindow("Etherea", rightTopId);
         ImGui::DockBuilderDockWindow("NDI", rightTopId);
-        ImGui::DockBuilderDockWindow("Projector", leftId);
         ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+        ImGui::DockBuilderDockWindow("Mapping", bottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);
     }

@@ -225,6 +225,7 @@ bool Application::init() {
         const char* home = getenv("USERPROFILE");
         if (home) {
             std::string candidates[] = {
+                std::string(home) + "\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw\\shaders",
             };
@@ -519,9 +520,22 @@ void Application::updateSources() {
             if (layer->source->isShader()) {
                 auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
                 // Match shader resolution to composition size (or per-layer override)
-                auto& zone = activeZone();
-                int sw = (layer->shaderWidth > 0)  ? layer->shaderWidth  : zone.width;
-                int sh = (layer->shaderHeight > 0) ? layer->shaderHeight : zone.height;
+                // Use the largest zone that contains this layer so the shader renders
+                // at sufficient quality for all outputs (editor, projector, NDI).
+                int sw = 0, sh = 0;
+                if (layer->shaderWidth > 0 && layer->shaderHeight > 0) {
+                    sw = layer->shaderWidth;
+                    sh = layer->shaderHeight;
+                } else {
+                    for (auto& zp : m_zones) {
+                        bool inZone = zp->showAllLayers || zp->visibleLayerIds.count(layer->id);
+                        if (inZone && zp->width * zp->height > sw * sh) {
+                            sw = zp->width;
+                            sh = zp->height;
+                        }
+                    }
+                    if (sw == 0 || sh == 0) { sw = activeZone().width; sh = activeZone().height; }
+                }
                 shaderSrc->setResolution(sw, sh);
                 shaderSrc->setAudioState(
                     m_audioAnalyzer.smoothedRMS(),
@@ -1016,6 +1030,13 @@ void Application::duplicateZone(int index) {
 }
 
 void Application::renderUI() {
+    // Escape key deselects current layer
+    if (m_selectedLayer >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsAnyItemActive()) {
+        m_selectedLayer = -1;
+    }
+    // Click on any non-interactive area deselects (Escape already handles keyboard)
+    // Viewport and LayerPanel handle their own deselect on empty-space click.
+
     handleDroppedFiles();
 
     // Process MIDI events
@@ -1509,6 +1530,7 @@ void Application::renderUI() {
                 if (home) {
                     // Try known ShaderClaw locations
                     std::string candidates[] = {
+                        std::string(home) + "\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw\\shaders",
                         std::string(home) + "\\shader-claw3\\shaders",
@@ -1884,6 +1906,11 @@ void Application::renderUI() {
         }
         ImGui::End();
     }
+#else
+    ImGui::Begin("NDI");
+    ImGui::TextDisabled("NDI SDK not installed");
+    ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
+    ImGui::End();
 #endif
 
 #ifdef HAS_FFMPEG
@@ -3078,6 +3105,7 @@ void Application::loadProject(const std::string& path) {
             } else if (sourceType == "Video" && !sourcePath.empty()) {
                 auto src = std::make_shared<VideoSource>();
                 if (src->load(sourcePath)) {
+                    src->play();
                     layer->source = src;
                 }
 #endif

@@ -596,6 +596,18 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
     auto getCorners = [&](const std::shared_ptr<Layer>& layer, ImVec2 out[4]) {
         float sx = layer->scale.x * (layer->flipH ? -1.0f : 1.0f);
         float sy = layer->scale.y * (layer->flipV ? -1.0f : 1.0f);
+        // Apply same aspect ratio correction as CompositeEngine::nativeScale
+        // so bounding box matches rendered content
+        bool mosaicFill = (layer->tileX > 1.0f || layer->tileY > 1.0f ||
+                           layer->mosaicMode != MosaicMode::Mirror);
+        if (!mosaicFill && layer->source && canvasW > 0 && canvasH > 0) {
+            int lw = layer->width(), lh = layer->height();
+            if (lw > 0 && lh > 0) {
+                float srcAspect = (float)lw / lh;
+                float canvasAspect = (float)canvasW / canvasH;
+                sx *= srcAspect / canvasAspect;
+            }
+        }
         float rad = glm::radians(layer->rotation);
         float c = cosf(rad), s = sinf(rad);
         float px = layer->position.x, py = layer->position.y;

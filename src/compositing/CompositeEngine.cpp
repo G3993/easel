@@ -276,7 +276,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         bool mosaicFill = (layer->tileX > 1.0f || layer->tileY > 1.0f ||
                            layer->mosaicMode != MosaicMode::Mirror);
         glm::mat3 nativeScale(1.0f);
-        if (!mosaicFill && !layer->source->isShader()) {
+        if (!mosaicFill) {
             int lw = layer->width(), lh = layer->height();
             if (lw > 0 && lh > 0 && m_width > 0 && m_height > 0) {
                 // Height-normalized: Y fills canvas, X preserves aspect

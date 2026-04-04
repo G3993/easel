@@ -166,13 +166,14 @@ private:
     void addScopeRTMP();
 #endif
 
+    int m_selectedAudioDevice = -1; // -1 = default loopback
+
 #ifdef HAS_FFMPEG
     RTMPOutput m_rtmpOutput;
     char m_streamKeyBuf[128] = {};
     int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
     VideoRecorder m_recorder;
     std::vector<RecAudioDevice> m_audioDevices;
-    int m_selectedAudioDevice = -1; // -1 = default loopback
     void renderTransportBar();
 
     // Audio level meter (WASAPI IAudioMeterInformation)

@@ -218,6 +218,9 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                 m_dragOffsetY = mousePos.y - (listStart.y + displayIdx * rowHeight);
                 m_dragActive = false; // not yet — need to move first
             }
+        } else {
+            // Clicked outside any layer row — deselect
+            selectedLayer = -1;
         }
     }
 

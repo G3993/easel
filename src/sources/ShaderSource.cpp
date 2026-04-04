@@ -265,12 +265,26 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     }
     out << "uniform float _voiceLevel;\n";
 
-    // Always provide ISF texture sampling macros
+    // ISF texture sampling macros
+    // IMG_SIZE returns the actual size of the named image (via IMG_SIZE_<name> uniform),
+    // falling back to RENDERSIZE for pass buffers and unknown textures.
+    // IMG_PIXEL uses the image's own size for pixel-coordinate lookups.
     out << "#define IMG_NORM_PIXEL(img, coord) texture(img, coord)\n";
     out << "#define IMG_THIS_NORM_PIXEL(img) texture(img, isf_FragNormCoord)\n";
-    out << "#define IMG_PIXEL(img, coord) texture(img, (coord) / RENDERSIZE)\n";
     out << "#define IMG_THIS_PIXEL(img) texture(img, gl_FragCoord.xy / RENDERSIZE)\n";
+    out << "\n";
+    // Per-image IMG_SIZE and IMG_PIXEL overloads for each image input
+    for (const auto& input : m_inputs) {
+        if (input.type == "image") {
+            // IMG_SIZE(inputName) -> IMG_SIZE_inputName (actual image dimensions)
+            out << "vec2 _isf_img_size_" << input.name << "() { return IMG_SIZE_" << input.name << "; }\n";
+            // IMG_PIXEL(inputName, coord) -> sample using image's own dimensions
+            out << "vec4 _isf_img_pixel_" << input.name << "(vec2 coord) { return texture(" << input.name << ", coord / IMG_SIZE_" << input.name << "); }\n";
+        }
+    }
+    // Default fallbacks for pass buffers and unknown textures
     out << "#define IMG_SIZE(img) RENDERSIZE\n";
+    out << "#define IMG_PIXEL(img, coord) texture(img, (coord) / RENDERSIZE)\n";
     out << "\n";
 
     // Declare user ISF INPUTS as uniforms
