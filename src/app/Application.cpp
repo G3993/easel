@@ -341,6 +341,12 @@ void Application::run() {
             float dt = (float)(now - lastTime);
             lastTime = now;
             m_audioAnalyzer.setDevice(m_selectedAudioDevice);
+            if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
+                                            m_audioDevices[m_selectedAudioDevice].isCapture);
+            } else {
+                m_audioAnalyzer.setDeviceId("", false);
+            }
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
             m_bpmSync.update(dt);
@@ -1007,6 +1013,67 @@ void Application::addZone() {
     zone->mappingIndex = 0; // default to first mapping
     zone->init();
     m_zones.push_back(std::move(zone));
+}
+
+void Application::setupMultiGPUProjection(const std::vector<std::string>& ndiSourceNames) {
+    // Auto-setup for multi-GPU projection mapping:
+    // Creates one zone per NDI source, each with a dedicated NDI layer.
+    // Each zone shows only its own layer and can be assigned to a projector.
+
+    std::cout << "[MultiGPU] Setting up " << ndiSourceNames.size() << " projection zones\n";
+
+    // Enumerate available monitors for auto-assignment
+    int monitorCount = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&monitorCount);
+
+    for (size_t i = 0; i < ndiSourceNames.size(); i++) {
+        // Create a zone for this stream
+        auto zone = std::make_unique<OutputZone>();
+        zone->name = "GPU " + std::to_string(i);
+        if (!m_zones.empty()) {
+            zone->width = m_zones[0]->width;
+            zone->height = m_zones[0]->height;
+        }
+        zone->mappingIndex = 0;
+        zone->showAllLayers = false; // Only show assigned layer
+        zone->init();
+
+#ifdef HAS_NDI
+        // Connect NDI source
+        auto source = std::make_shared<NDISource>();
+        if (source->connect(ndiSourceNames[i])) {
+            auto layer = std::make_shared<Layer>();
+            layer->id = m_nextLayerId++;
+            layer->name = "GPU " + std::to_string(i) + ": " + ndiSourceNames[i];
+            layer->source = source;
+            m_layerStack.addLayer(layer);
+
+            // Set zone visibility to only this layer
+            zone->visibleLayerIds.insert(layer->id);
+
+            // Auto-assign to projector if monitor available (skip primary = index 0)
+            int monitorIdx = static_cast<int>(i) + 1;
+            if (monitorIdx < monitorCount) {
+                zone->outputDest = OutputDest::Fullscreen;
+                zone->outputMonitor = monitorIdx;
+            }
+
+            std::cout << "[MultiGPU] Zone " << i << ": " << ndiSourceNames[i]
+                      << " -> layer " << layer->id;
+            if (monitorIdx < monitorCount)
+                std::cout << " -> monitor " << monitorIdx;
+            std::cout << "\n";
+        } else {
+            std::cerr << "[MultiGPU] Failed to connect NDI: " << ndiSourceNames[i] << "\n";
+        }
+#else
+        std::cerr << "[MultiGPU] NDI not available (compiled without HAS_NDI)\n";
+#endif
+
+        m_zones.push_back(std::move(zone));
+    }
+
+    std::cout << "[MultiGPU] Setup complete: " << m_zones.size() << " total zones\n";
 }
 
 void Application::removeZone(int index) {
@@ -2582,8 +2649,15 @@ void Application::renderTransportBar() {
         float meterY = cy + (btnH - meterH) * 0.5f;
         float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
 
-        // Lazy-init
-        if (m_audioDevices.empty()) m_audioDevices = VideoRecorder::enumerateAudioDevices();
+        // Refresh device list periodically (every 3 seconds)
+        {
+            static double lastEnum = 0;
+            double now = glfwGetTime();
+            if (m_audioDevices.empty() || now - lastEnum > 3.0) {
+                lastEnum = now;
+                m_audioDevices = VideoRecorder::enumerateAudioDevices();
+            }
+        }
 
         // Audio source dropdown (compact)
         ImGui::SetCursorScreenPos(ImVec2(curX, cy + 2));

@@ -125,6 +125,7 @@ private:
     void addZone();
     void removeZone(int index);
     void duplicateZone(int index);
+    void setupMultiGPUProjection(const std::vector<std::string>& ndiSourceNames);
     void loadImage(const std::string& path);
     void loadVideo(const std::string& path);
     void addScreenCapture(int monitorIndex);
