@@ -171,6 +171,115 @@ std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     enumerator->Release();
     return result;
 }
+#elif defined(__APPLE__)
+#include <CoreAudio/CoreAudio.h>
+#include <CoreFoundation/CoreFoundation.h>
+
+static std::string cfStringToStd(CFStringRef cfStr) {
+    if (!cfStr) return "";
+    char buf[256] = {};
+    if (CFStringGetCString(cfStr, buf, sizeof(buf), kCFStringEncodingUTF8))
+        return buf;
+    return "";
+}
+
+std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
+    std::vector<RecAudioDevice> result;
+
+    AudioObjectPropertyAddress prop = {
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+
+    UInt32 dataSize = 0;
+    OSStatus status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &prop, 0, nullptr, &dataSize);
+    if (status != noErr || dataSize == 0) return result;
+
+    int deviceCount = dataSize / sizeof(AudioDeviceID);
+    std::vector<AudioDeviceID> devices(deviceCount);
+    status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &prop, 0, nullptr, &dataSize, devices.data());
+    if (status != noErr) return result;
+
+    for (AudioDeviceID devId : devices) {
+        // Get device name
+        CFStringRef nameRef = nullptr;
+        AudioObjectPropertyAddress nameProp = {
+            kAudioDevicePropertyDeviceNameCFString,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        UInt32 nameSize = sizeof(CFStringRef);
+        AudioObjectGetPropertyData(devId, &nameProp, 0, nullptr, &nameSize, &nameRef);
+        std::string name = cfStringToStd(nameRef);
+        if (nameRef) CFRelease(nameRef);
+
+        // Get device UID
+        CFStringRef uidRef = nullptr;
+        AudioObjectPropertyAddress uidProp = {
+            kAudioDevicePropertyDeviceUID,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        UInt32 uidSize = sizeof(CFStringRef);
+        AudioObjectGetPropertyData(devId, &uidProp, 0, nullptr, &uidSize, &uidRef);
+        std::string uid = cfStringToStd(uidRef);
+        if (uidRef) CFRelease(uidRef);
+
+        // Check if device has input channels (microphone/capture)
+        AudioObjectPropertyAddress inputProp = {
+            kAudioDevicePropertyStreamConfiguration,
+            kAudioDevicePropertyScopeInput,
+            kAudioObjectPropertyElementMain
+        };
+        UInt32 inputSize = 0;
+        bool hasInput = false;
+        if (AudioObjectGetPropertyDataSize(devId, &inputProp, 0, nullptr, &inputSize) == noErr && inputSize > 0) {
+            std::vector<uint8_t> buf(inputSize);
+            auto* bufList = (AudioBufferList*)buf.data();
+            if (AudioObjectGetPropertyData(devId, &inputProp, 0, nullptr, &inputSize, bufList) == noErr) {
+                for (UInt32 i = 0; i < bufList->mNumberBuffers; i++) {
+                    if (bufList->mBuffers[i].mNumberChannels > 0) { hasInput = true; break; }
+                }
+            }
+        }
+
+        // Check if device has output channels
+        AudioObjectPropertyAddress outputProp = {
+            kAudioDevicePropertyStreamConfiguration,
+            kAudioDevicePropertyScopeOutput,
+            kAudioObjectPropertyElementMain
+        };
+        UInt32 outputSize = 0;
+        bool hasOutput = false;
+        if (AudioObjectGetPropertyDataSize(devId, &outputProp, 0, nullptr, &outputSize) == noErr && outputSize > 0) {
+            std::vector<uint8_t> buf(outputSize);
+            auto* bufList = (AudioBufferList*)buf.data();
+            if (AudioObjectGetPropertyData(devId, &outputProp, 0, nullptr, &outputSize, bufList) == noErr) {
+                for (UInt32 i = 0; i < bufList->mNumberBuffers; i++) {
+                    if (bufList->mBuffers[i].mNumberChannels > 0) { hasOutput = true; break; }
+                }
+            }
+        }
+
+        if (hasInput) {
+            RecAudioDevice dev;
+            dev.name = name;
+            dev.id = uid;
+            dev.isCapture = true;
+            result.push_back(dev);
+        }
+        if (hasOutput) {
+            RecAudioDevice dev;
+            dev.name = name;
+            dev.id = uid;
+            dev.isCapture = false;
+            result.push_back(dev);
+        }
+    }
+
+    return result;
+}
 #else
 std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     return {};
