@@ -40,18 +40,21 @@ void AudioAnalyzer::setDeviceId(const std::string& id, bool isCapture) {
 void AudioAnalyzer::update(float dt) {
     if (dt <= 0) return;
 
-    // Reinit capture if device changed or previous init failed
-    bool deviceChanged = (m_deviceIdx != m_requestedDevice) || (m_deviceId != m_requestedDeviceId);
-    if (deviceChanged || (!m_initialized && m_deviceIdx != -2)) {
-        cleanupCapture();
-        m_deviceIdx = m_requestedDevice;
-        m_deviceId = m_requestedDeviceId;
-        initCapture();
-    }
+    // When external feed is active (e.g., AudioMixer), skip internal WASAPI capture
+    if (!m_externalFeed) {
+        // Reinit capture if device changed or previous init failed
+        bool deviceChanged = (m_deviceIdx != m_requestedDevice) || (m_deviceId != m_requestedDeviceId);
+        if (deviceChanged || (!m_initialized && m_deviceIdx != -2)) {
+            cleanupCapture();
+            m_deviceIdx = m_requestedDevice;
+            m_deviceId = m_requestedDeviceId;
+            initCapture();
+        }
 
-    // Drain WASAPI packets (non-blocking)
-    if (m_initialized) {
-        drainPackets();
+        // Drain WASAPI packets (non-blocking)
+        if (m_initialized) {
+            drainPackets();
+        }
     }
 
     // Run analysis if we have enough samples

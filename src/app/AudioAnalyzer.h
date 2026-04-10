@@ -50,7 +50,12 @@ public:
     // FFT texture (128x1 GL_R8, power spectrum normalized 0-255)
     GLuint fftTexture() const { return m_fftTex.id(); }
 
-    // Test injection: feed synthetic samples (bypasses WASAPI)
+    // External feed mode: when true, skip internal WASAPI capture and
+    // rely on feedSamples() from an external source (e.g., AudioMixer)
+    void setExternalFeed(bool enabled) { m_externalFeed = enabled; }
+    bool externalFeed() const { return m_externalFeed; }
+
+    // Feed samples externally (bypasses WASAPI) — used by AudioMixer and tests
     void feedSamples(const float* mono, int count);
 
     // Expose raw values for testing
@@ -73,6 +78,7 @@ private:
     int m_sampleRate = 48000;
     int m_channels = 2;
     bool m_initialized = false;
+    bool m_externalFeed = false;
 
     void initCapture();
     void cleanupCapture();

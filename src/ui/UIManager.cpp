@@ -317,6 +317,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGui::DockBuilderDockWindow("Etherea", rightTopId);
         ImGui::DockBuilderDockWindow("NDI", rightTopId);
         ImGui::DockBuilderDockWindow("Capture", rightTopId);
+        ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
         ImGui::DockBuilderDockWindow("Properties", rightBottomId);
         ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
 

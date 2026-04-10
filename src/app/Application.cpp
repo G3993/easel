@@ -340,12 +340,23 @@ void Application::run() {
             double now = glfwGetTime();
             float dt = (float)(now - lastTime);
             lastTime = now;
-            m_audioAnalyzer.setDevice(m_selectedAudioDevice);
-            if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
-                m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
-                                            m_audioDevices[m_selectedAudioDevice].isCapture);
+
+            if (m_mixerEnabled && m_audioMixer.isRunning()) {
+                // Mixer mode: drain mixed mono from mixer thread → feed to analyzer
+                float monoBuf[4096];
+                int count = m_audioMixer.drainMixedMono(monoBuf, 4096);
+                if (count > 0) {
+                    m_audioAnalyzer.feedSamples(monoBuf, count);
+                }
             } else {
-                m_audioAnalyzer.setDeviceId("", false);
+                // Legacy single-device mode
+                m_audioAnalyzer.setDevice(m_selectedAudioDevice);
+                if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                    m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
+                                                m_audioDevices[m_selectedAudioDevice].isCapture);
+                } else {
+                    m_audioAnalyzer.setDeviceId("", false);
+                }
             }
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
@@ -472,6 +483,7 @@ void Application::shutdown() {
         std::cout << "[Easel] Auto-saved default project" << std::endl;
     }
 
+    m_audioMixer.stop();
 #ifdef HAS_FFMPEG
     m_recorder.stop();
     m_rtmpOutput.stop();
@@ -2427,7 +2439,125 @@ void Application::renderUI() {
     m_scanPanel.render(m_scanner, m_webcam);
 #endif
 
+    // Audio Mixer panel
 #ifdef HAS_FFMPEG
+    ImGui::Begin("Audio Mixer");
+    {
+        // Enable/disable toggle
+        if (ImGui::Checkbox("Enable Mixer", &m_mixerEnabled)) {
+            if (m_mixerEnabled) {
+                m_audioAnalyzer.setExternalFeed(true);
+                if (m_audioMixer.inputCount() == 0)
+                    m_audioMixer.addInput("", "System Audio", false);
+                m_audioMixer.start();
+            } else {
+                m_audioMixer.stop();
+                m_audioAnalyzer.setExternalFeed(false);
+            }
+        }
+
+        if (m_mixerEnabled) {
+            ImGui::Dummy(ImVec2(0, 4));
+
+            // Output device selector
+            {
+                std::string outName = m_audioMixer.outputDeviceName();
+                if (outName.empty()) outName = "Default Output";
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##MixerOut", outName.c_str())) {
+                    if (ImGui::Selectable("Default Output", m_mixerOutputDevice == -1)) {
+                        m_mixerOutputDevice = -1;
+                        m_audioMixer.setOutputDevice("", "Default Output");
+                    }
+                    if (ImGui::Selectable("None (NDI only)", m_mixerOutputDevice == -2)) {
+                        m_mixerOutputDevice = -2;
+                        m_audioMixer.setOutputDevice("__none__", "None");
+                    }
+                    for (int i = 0; i < (int)m_outputDevices.size(); i++) {
+                        ImGui::PushID(i + 1000);
+                        if (ImGui::Selectable(m_outputDevices[i].name.c_str(), m_mixerOutputDevice == i)) {
+                            m_mixerOutputDevice = i;
+                            m_audioMixer.setOutputDevice(m_outputDevices[i].id, m_outputDevices[i].name);
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+
+            // Master volume
+            float master = m_audioMixer.masterVolume() * 100.0f;
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderFloat("##Master", &master, 0.0f, 100.0f, "Master  %.0f%%")) {
+                m_audioMixer.setMasterVolume(master / 100.0f);
+            }
+
+            // NDI audio output toggle
+#ifdef HAS_NDI
+            {
+                bool ndiAudio = m_audioMixer.isNDIAudioEnabled();
+                if (ImGui::Checkbox("Send NDI Audio", &ndiAudio)) {
+                    m_audioMixer.setNDIAudioEnabled(ndiAudio);
+                }
+                if (ndiAudio) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(Easel Audio)");
+                }
+            }
+#endif
+
+            ImGui::Separator();
+
+            // Per-input channel strips
+            int numInputs = m_audioMixer.inputCount();
+            for (int i = 0; i < numInputs; i++) {
+                ImGui::PushID(i + 2000);
+                std::string iname = m_audioMixer.inputName(i);
+                if (iname.empty()) iname = "Input " + std::to_string(i);
+
+                // Mute checkbox
+                bool muted = m_audioMixer.isInputMuted(i);
+                if (ImGui::Checkbox("##mute", &muted)) {
+                    m_audioMixer.setInputMuted(i, muted);
+                }
+                ImGui::SameLine();
+
+                // Volume slider
+                float vol = m_audioMixer.inputVolume(i) * 100.0f;
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+                if (ImGui::SliderFloat(("##vol" + std::to_string(i)).c_str(), &vol, 0.0f, 100.0f, (iname + "  %.0f%%").c_str())) {
+                    m_audioMixer.setInputVolume(i, vol / 100.0f);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) {
+                    m_audioMixer.removeInput(i);
+                }
+                ImGui::PopID();
+            }
+
+            // Add input
+            ImGui::Dummy(ImVec2(0, 2));
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##AddInput", "+ Add Input")) {
+                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                    ImGui::PushID(i + 3000);
+                    if (ImGui::Selectable(m_audioDevices[i].name.c_str())) {
+                        m_audioMixer.addInput(m_audioDevices[i].id,
+                                              m_audioDevices[i].name,
+                                              m_audioDevices[i].isCapture);
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextWrapped("Enable the mixer to blend multiple audio inputs and route to an output device.");
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::End();
+
     renderTransportBar();
 #endif
 }
@@ -2656,6 +2786,11 @@ void Application::renderTransportBar() {
             if (m_audioDevices.empty() || now - lastEnum > 3.0) {
                 lastEnum = now;
                 m_audioDevices = VideoRecorder::enumerateAudioDevices();
+                // Build output-only device list for mixer
+                m_outputDevices.clear();
+                for (auto& d : m_audioDevices) {
+                    if (!d.isCapture) m_outputDevices.push_back(d);
+                }
             }
         }
 
@@ -2664,19 +2799,34 @@ void Application::renderTransportBar() {
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.08f, 0.9f));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 6));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-        std::string audioPreview = "System Audio";
-        if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+        std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
+        if (!m_mixerEnabled && m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
             audioPreview = m_audioDevices[m_selectedAudioDevice].name;
             if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
         }
         ImGui::SetNextItemWidth(150);
         if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
-            if (ImGui::Selectable("System Audio", m_selectedAudioDevice == -1)) m_selectedAudioDevice = -1;
+            if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1)) {
+                if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
+                m_selectedAudioDevice = -1;
+            }
             for (int i = 0; i < (int)m_audioDevices.size(); i++) {
                 ImGui::PushID(i);
-                if (ImGui::Selectable(m_audioDevices[i].name.c_str(), m_selectedAudioDevice == i))
+                if (ImGui::Selectable(m_audioDevices[i].name.c_str(), !m_mixerEnabled && m_selectedAudioDevice == i)) {
+                    if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
                     m_selectedAudioDevice = i;
+                }
                 ImGui::PopID();
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("Mixer", m_mixerEnabled)) {
+                if (!m_mixerEnabled) {
+                    m_mixerEnabled = true;
+                    m_audioAnalyzer.setExternalFeed(true);
+                    if (m_audioMixer.inputCount() == 0)
+                        m_audioMixer.addInput("", "System Audio", false);
+                    m_audioMixer.start();
+                }
             }
             ImGui::EndCombo();
         }

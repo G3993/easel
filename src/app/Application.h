@@ -35,6 +35,7 @@
 
 #include "speech/EthereaClient.h"
 #include "app/AudioAnalyzer.h"
+#include "app/AudioMixer.h"
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
 #include "app/OSCManager.h"
@@ -105,6 +106,9 @@ private:
 
     int m_selectedLayer = -1;
     AudioAnalyzer m_audioAnalyzer;
+    AudioMixer m_audioMixer;
+    bool m_mixerEnabled = false;        // false = legacy single-device mode
+    int m_mixerOutputDevice = -1;       // -1 = default output
     BPMSync m_bpmSync;
     SceneManager m_sceneManager;
     OSCManager m_oscManager;
@@ -191,6 +195,7 @@ private:
     int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
     VideoRecorder m_recorder;
     std::vector<RecAudioDevice> m_audioDevices;
+    std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
     void renderTransportBar();
 
     // Audio level meter (WASAPI IAudioMeterInformation)
