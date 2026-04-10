@@ -1,0 +1,5 @@
+OpenGL 4.3.0 NVIDIA 555.97
+Renderer: NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2
+[NDI] Runtime loaded successfully
+[NDI] Sender created: Easel
+[AudioAnalyzer] Capture started (rate=48000 ch=2)
