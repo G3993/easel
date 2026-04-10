@@ -256,11 +256,15 @@ if(HAS_OPENCV)
     catch_discover_tests(test_scanning)
 endif()
 
-add_executable(test_audio_analyzer
+set(TEST_AUDIO_SOURCES
     tests/test_audio_analyzer.cpp src/app/AudioAnalyzer.cpp
     src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
     external/kiss_fft/kiss_fft.c
 )
+if(APPLE)
+    list(APPEND TEST_AUDIO_SOURCES src/app/AudioAnalyzer_mac.mm)
+endif()
+add_executable(test_audio_analyzer ${TEST_AUDIO_SOURCES})
 if(WIN32)
     target_compile_definitions(test_audio_analyzer PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
@@ -270,6 +274,12 @@ target_include_directories(test_audio_analyzer PRIVATE
 target_link_libraries(test_audio_analyzer PRIVATE
     Catch2::Catch2WithMain glfw glad glm::glm nlohmann_json::nlohmann_json OpenGL::GL
 )
+if(APPLE)
+    target_link_libraries(test_audio_analyzer PRIVATE
+        "-framework ScreenCaptureKit" "-framework CoreMedia" "-framework CoreGraphics"
+        "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation"
+    )
+endif()
 
 if(HAS_NDI)
     add_executable(test_ndi_receive
