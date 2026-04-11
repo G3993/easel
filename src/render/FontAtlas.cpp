@@ -1,6 +1,5 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
-#include "stb_image_write.h"
 #include "render/FontAtlas.h"
 #include <vector>
 #include <cstdio>
@@ -30,11 +29,17 @@ void FontAtlas::generate() {
     const int atlasW = ATLAS_CHARS * cellW;
     const int atlasH = cellH;
 
-    // Try to load a Windows system font
+    // Try to load a system font
     const char* fontPaths[] = {
+#ifdef __APPLE__
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/SFNS.ttf",
+#else
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/calibri.ttf",
+#endif
         nullptr
     };
 
@@ -134,11 +139,6 @@ void FontAtlas::generate() {
 
         stbtt_FreeBitmap(bitmap, nullptr);
     }
-
-    // Debug: save atlas to disk for inspection
-    stbi_write_png("screenshots/font_atlas_debug.png", atlasW, atlasH, 1,
-                   atlas.data(), atlasW);
-    printf("FontAtlas: saved debug image to screenshots/font_atlas_debug.png\n");
 
     // Upload to GL
     glGenTextures(1, &s_texture);

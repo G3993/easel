@@ -50,13 +50,42 @@ bool Texture::loadFromFile(const std::string& path) {
     return true;
 }
 
+void Texture::formatForInternal(GLenum internalFormat, GLenum& format, GLenum& type) {
+    switch (internalFormat) {
+        case GL_R8:
+            format = GL_RED; type = GL_UNSIGNED_BYTE; break;
+        case GL_R32F:
+        case GL_R16F:
+            format = GL_RED; type = GL_FLOAT; break;
+        case GL_RG8:
+            format = GL_RG; type = GL_UNSIGNED_BYTE; break;
+        case GL_RG32F:
+        case GL_RG16F:
+            format = GL_RG; type = GL_FLOAT; break;
+        case GL_RGB8:
+            format = GL_RGB; type = GL_UNSIGNED_BYTE; break;
+        case GL_RGB32F:
+        case GL_RGB16F:
+            format = GL_RGB; type = GL_FLOAT; break;
+        case GL_RGBA16F:
+        case GL_RGBA32F:
+            format = GL_RGBA; type = GL_FLOAT; break;
+        case GL_RGBA8:
+        default:
+            format = GL_RGBA; type = GL_UNSIGNED_BYTE; break;
+    }
+}
+
 bool Texture::createEmpty(int width, int height, GLenum internalFormat) {
     destroy();
     m_width = width;
     m_height = height;
+    m_internalFormat = internalFormat;
+    GLenum format, type;
+    formatForInternal(internalFormat, format, type);
     glGenTextures(1, &m_texture);
     glBindTexture(GL_TEXTURE_2D, m_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -70,7 +99,7 @@ void Texture::updateData(const void* data, int width, int height, GLenum format,
     if (width != m_width || height != m_height) {
         m_width = width;
         m_height = height;
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, format, type, data);
+        glTexImage2D(GL_TEXTURE_2D, 0, m_internalFormat, width, height, 0, format, type, data);
     } else {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, type, data);
     }

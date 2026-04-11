@@ -25,6 +25,8 @@ private:
     GLuint m_texture = 0;
     int m_width = 0;
     int m_height = 0;
+    GLenum m_internalFormat = GL_RGBA8;
 
     void destroy();
+    static void formatForInternal(GLenum internalFormat, GLenum& format, GLenum& type);
 };

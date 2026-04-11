@@ -647,19 +647,15 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     m_shader.setFloat("audioMid", m_audioMid);
     m_shader.setFloat("audioHigh", m_audioHigh);
     m_shader.setFloat("_voiceLevel", m_audioRMS);
-    if (m_audioFFTTex) {
-        m_shader.setInt("audioFFT", 2);
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, m_audioFFTTex);
-    }
+    m_shader.setInt("audioFFT", 2);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_audioFFTTex ? m_audioFFTTex : 0);
 
     // Font atlas for text shaders
     GLuint fontAtlas = FontAtlas::texture();
-    if (fontAtlas) {
-        m_shader.setInt("fontAtlasTex", 3);
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, fontAtlas);
-    }
+    m_shader.setInt("fontAtlasTex", 3);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, fontAtlas);
 
     // User inputs
     for (const auto& input : m_inputs) {
@@ -712,6 +708,14 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
                     glm::vec2((float)it->second.width, (float)it->second.height));
                 m_shader.setBool("_flip_" + input.name, it->second.flippedV);
             } else {
+                int imgUnit = 8;
+                for (const auto& inp : m_inputs) {
+                    if (inp.type == "image" && inp.name == input.name) break;
+                    if (inp.type == "image") imgUnit++;
+                }
+                glActiveTexture(GL_TEXTURE0 + imgUnit);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                m_shader.setInt(input.name, imgUnit);
                 m_shader.setVec2("IMG_SIZE_" + input.name, glm::vec2(0.0f, 0.0f));
                 m_shader.setBool("_flip_" + input.name, false);
             }
