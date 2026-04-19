@@ -33,6 +33,12 @@ public:
     Workspace workspace() const { return m_workspace; }
     void setWorkspace(Workspace w);
 
+    // True if a panel with this title should render in the current workspace.
+    // Call sites that render panels (inline or via class.render()) should
+    // wrap with `if (m_ui.isPanelVisible("Title")) { ... }` so hidden panels
+    // don't appear as floating windows. Names must match ImGui::Begin() titles.
+    bool isPanelVisible(const char* title) const;
+
 private:
     void applyTheme(float dpiScale);
 

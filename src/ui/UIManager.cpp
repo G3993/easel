@@ -1,6 +1,8 @@
 #include "ui/UIManager.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <initializer_list>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
@@ -415,80 +417,80 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
 
-        // Every panel is docked in every workspace so none floats.
-        // Only the ORDER differs — the first DockBuilderDockWindow call for a
-        // region wins initial focus, which is how each workspace highlights a
-        // different active tab.
-        //   Stage  — tools focus Stage tab; side panels minimal.
-        //   Canvas — tools focus Mapping; sources front-and-center. (default)
-        //   Show   — tools focus Masks; live I/O grouped in right-bottom.
+        // Each workspace docks ONLY its whitelisted panels (see isPanelVisible).
+        // Hidden panels aren't rendered AND aren't docked — no stray tabs.
+        // Dock order matters: the first DockBuilderDockWindow call for a
+        // region wins initial focus.
+        auto dockIfVisible = [this](const char* name, ImGuiID node) {
+            if (isPanelVisible(name)) ImGui::DockBuilderDockWindow(name, node);
+        };
 
         // --- Canvas always gets its own dedicated region (never a tab) ---
-        ImGui::DockBuilderDockWindow("Canvas", canvasId);
+        dockIfVisible("Canvas", canvasId);
 
         switch (m_workspace) {
         case Workspace::Stage:
             // Tools: Stage tab comes first so the 3D layout view is the default.
             // Composition / Output / default display all live in the Stage tab.
-            ImGui::DockBuilderDockWindow("Stage",         toolsId);
-            ImGui::DockBuilderDockWindow("Mapping",       toolsId);
-            ImGui::DockBuilderDockWindow("Masks",         toolsId);
-            ImGui::DockBuilderDockWindow("Scene Scanner", toolsId);
+            dockIfVisible("Stage",         toolsId);
+            dockIfVisible("Mapping",       toolsId);
+            dockIfVisible("Masks",         toolsId);
+            dockIfVisible("Scene Scanner", toolsId);
             // Right top: sources (Layers focused)
-            ImGui::DockBuilderDockWindow("Layers",        rightTopId);
-            ImGui::DockBuilderDockWindow("Capture",       rightTopId);
-            ImGui::DockBuilderDockWindow("ShaderClaw",    rightTopId);
-            ImGui::DockBuilderDockWindow("Etherea",       rightTopId);
-            ImGui::DockBuilderDockWindow("Audio Mixer",   rightTopId);
+            dockIfVisible("Layers",        rightTopId);
+            dockIfVisible("Capture",       rightTopId);
+            dockIfVisible("ShaderClaw",    rightTopId);
+            dockIfVisible("Etherea",       rightTopId);
+            dockIfVisible("Audio Mixer",   rightTopId);
             // Right bottom: inspectors + I/O (Properties focused)
-            ImGui::DockBuilderDockWindow("Properties",    rightBottomId);
-            ImGui::DockBuilderDockWindow("Audio",         rightBottomId);
-            ImGui::DockBuilderDockWindow("MIDI",          rightBottomId);
-            ImGui::DockBuilderDockWindow("NDI",           rightBottomId);
-            ImGui::DockBuilderDockWindow("Spout",         rightBottomId);
-            ImGui::DockBuilderDockWindow("Stream",        rightBottomId);
+            dockIfVisible("Properties",    rightBottomId);
+            dockIfVisible("Audio",         rightBottomId);
+            dockIfVisible("MIDI",          rightBottomId);
+            dockIfVisible("NDI",           rightBottomId);
+            dockIfVisible("Spout",         rightBottomId);
+            dockIfVisible("Stream",        rightBottomId);
             break;
 
         case Workspace::Canvas:
             // Tools: authoring tools (Mapping focused — most commonly touched while designing)
-            ImGui::DockBuilderDockWindow("Mapping",       toolsId);
-            ImGui::DockBuilderDockWindow("Masks",         toolsId);
-            ImGui::DockBuilderDockWindow("Stage",         toolsId);
-            ImGui::DockBuilderDockWindow("Scene Scanner", toolsId);
+            dockIfVisible("Mapping",       toolsId);
+            dockIfVisible("Masks",         toolsId);
+            dockIfVisible("Stage",         toolsId);
+            dockIfVisible("Scene Scanner", toolsId);
             // Right top: sources (Layers focused)
-            ImGui::DockBuilderDockWindow("Layers",        rightTopId);
-            ImGui::DockBuilderDockWindow("ShaderClaw",    rightTopId);
-            ImGui::DockBuilderDockWindow("Etherea",       rightTopId);
-            ImGui::DockBuilderDockWindow("Capture",       rightTopId);
-            ImGui::DockBuilderDockWindow("Audio Mixer",   rightTopId);
+            dockIfVisible("Layers",        rightTopId);
+            dockIfVisible("ShaderClaw",    rightTopId);
+            dockIfVisible("Etherea",       rightTopId);
+            dockIfVisible("Capture",       rightTopId);
+            dockIfVisible("Audio Mixer",   rightTopId);
             // Right bottom: inspectors + I/O (Properties focused)
-            ImGui::DockBuilderDockWindow("Properties",    rightBottomId);
-            ImGui::DockBuilderDockWindow("Audio",         rightBottomId);
-            ImGui::DockBuilderDockWindow("MIDI",          rightBottomId);
-            ImGui::DockBuilderDockWindow("NDI",           rightBottomId);
-            ImGui::DockBuilderDockWindow("Spout",         rightBottomId);
-            ImGui::DockBuilderDockWindow("Stream",        rightBottomId);
+            dockIfVisible("Properties",    rightBottomId);
+            dockIfVisible("Audio",         rightBottomId);
+            dockIfVisible("MIDI",          rightBottomId);
+            dockIfVisible("NDI",           rightBottomId);
+            dockIfVisible("Spout",         rightBottomId);
+            dockIfVisible("Stream",        rightBottomId);
             break;
 
         case Workspace::Show:
             // Tools: typically untouched in show — Masks on top for quick toggles
-            ImGui::DockBuilderDockWindow("Masks",         toolsId);
-            ImGui::DockBuilderDockWindow("Stage",         toolsId);
-            ImGui::DockBuilderDockWindow("Mapping",       toolsId);
-            ImGui::DockBuilderDockWindow("Scene Scanner", toolsId);
+            dockIfVisible("Masks",         toolsId);
+            dockIfVisible("Stage",         toolsId);
+            dockIfVisible("Mapping",       toolsId);
+            dockIfVisible("Scene Scanner", toolsId);
             // Right top: monitoring (Audio focused)
-            ImGui::DockBuilderDockWindow("Audio",         rightTopId);
-            ImGui::DockBuilderDockWindow("Audio Mixer",   rightTopId);
-            ImGui::DockBuilderDockWindow("MIDI",          rightTopId);
-            ImGui::DockBuilderDockWindow("Layers",        rightTopId);
-            ImGui::DockBuilderDockWindow("Capture",       rightTopId);
-            ImGui::DockBuilderDockWindow("ShaderClaw",    rightTopId);
-            ImGui::DockBuilderDockWindow("Etherea",       rightTopId);
+            dockIfVisible("Audio",         rightTopId);
+            dockIfVisible("Audio Mixer",   rightTopId);
+            dockIfVisible("MIDI",          rightTopId);
+            dockIfVisible("Layers",        rightTopId);
+            dockIfVisible("Capture",       rightTopId);
+            dockIfVisible("ShaderClaw",    rightTopId);
+            dockIfVisible("Etherea",       rightTopId);
             // Right bottom: broadcast / feeds (NDI focused)
-            ImGui::DockBuilderDockWindow("NDI",           rightBottomId);
-            ImGui::DockBuilderDockWindow("Spout",         rightBottomId);
-            ImGui::DockBuilderDockWindow("Stream",        rightBottomId);
-            ImGui::DockBuilderDockWindow("Properties",    rightBottomId);
+            dockIfVisible("NDI",           rightBottomId);
+            dockIfVisible("Spout",         rightBottomId);
+            dockIfVisible("Stream",        rightBottomId);
+            dockIfVisible("Properties",    rightBottomId);
             break;
         }
 
@@ -527,6 +529,40 @@ void UIManager::setWorkspace(Workspace w) {
     m_workspace = w;
     // Force dock layout rebuild on next setupDockspace call
     m_firstFrame = true;
+}
+
+bool UIManager::isPanelVisible(const char* title) const {
+    // Per-workspace whitelist. Names must match ImGui::Begin() titles exactly.
+    // Stage   — spatial + output setup (one-time wiring before a show).
+    // Canvas  — content authoring (layers, sources, inspectors while composing).
+    // Show    — live ops (minimal chrome, trigger + monitor).
+    auto contains = [title](std::initializer_list<const char*> list) {
+        for (const char* s : list) {
+            if (std::strcmp(title, s) == 0) return true;
+        }
+        return false;
+    };
+
+    switch (m_workspace) {
+    case Workspace::Stage:
+        return contains({
+            "Canvas", "Stage", "Mapping", "Masks", "Scene Scanner",
+            "Properties", "NDI", "Spout", "Stream",
+        });
+    case Workspace::Canvas:
+        return contains({
+            "Canvas", "Layers", "Properties",
+            "ShaderClaw", "Etherea", "Capture",
+            "Audio", "Audio Mixer",
+        });
+    case Workspace::Show:
+        return contains({
+            "Canvas", "Layers", "Properties",
+            "MIDI", "Audio",
+            "ShaderClaw", "Etherea", "Capture",
+        });
+    }
+    return true;
 }
 
 void UIManager::renderWorkspaceBar() {

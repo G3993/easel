@@ -1609,7 +1609,9 @@ void Application::renderUI() {
 
     // Re-fetch after viewport render since m_activeZone may have changed
     auto& zone = activeZone();
-    m_layerPanel.render(m_layerStack, m_selectedLayer, &m_zones, m_activeZone);
+    if (m_ui.isPanelVisible("Layers")) {
+        m_layerPanel.render(m_layerStack, m_selectedLayer, &m_zones, m_activeZone);
+    }
 
     // Handle "+" button signals from layer panel
     if (m_layerPanel.wantsAddImage) {
@@ -1625,7 +1627,8 @@ void Application::renderUI() {
         if (!path.empty()) loadShader(path);
     }
 
-    // --- Masks panel ---
+    // --- Masks panel --- (visible only in Stage workspace per UIManager whitelist)
+    if (m_ui.isPanelVisible("Masks")) {
     ImGui::Begin("Masks");
     {
         // Edge blend sits at the top of Masks — both are output-stage refinements
@@ -1911,6 +1914,7 @@ void Application::renderUI() {
         masks_panel_done:;
     }
     ImGui::End();
+    }  // end Masks visibility guard
 
     std::shared_ptr<Layer> selectedLayer;
     if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
@@ -1942,7 +1946,9 @@ void Application::renderUI() {
         capturedPre = true;
     }
 
-    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager);
+    if (m_ui.isPanelVisible("Properties")) {
+        m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager);
+    }
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
@@ -1954,7 +1960,7 @@ void Application::renderUI() {
 
     // Render warp editor FIRST so it can set m_maskEditMode
     auto* mp = mappingForZone(zone);
-    if (mp) {
+    if (mp && m_ui.isPanelVisible("Mapping")) {
         auto prevWarpMode = mp->warpMode;
         m_warpEditor.render(*mp, m_maskEditMode, &m_mappings, zone.mappingIndex);
 
@@ -2036,7 +2042,7 @@ void Application::renderUI() {
     }
 
     // Stage View (3D pre-viz)
-    {
+    if (m_ui.isPanelVisible("Stage")) {
         // Collect zone textures for the stage view
         std::vector<GLuint> zoneTextures;
         for (auto& zp : m_zones) {
@@ -2059,6 +2065,7 @@ void Application::renderUI() {
     // via renderCompositionInlinePanel(). The standalone "Projector" window is gone.
 
     // Capture panel
+    if (m_ui.isPanelVisible("Capture")) {
     ImGui::Begin("Capture");
     {
         if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2129,8 +2136,10 @@ void Application::renderUI() {
 
     }
     ImGui::End();
+    }  // end Capture visibility guard
 
     // ShaderClaw panel — shader browser + connection
+    if (m_ui.isPanelVisible("ShaderClaw")) {
     ImGui::Begin("ShaderClaw");
     {
         if (!m_shaderClaw.isConnected()) {
@@ -2362,8 +2371,10 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end ShaderClaw visibility guard
 
     // Etherea panel — SSE connection for transcript + data
+    if (m_ui.isPanelVisible("Etherea")) {
     ImGui::Begin("Etherea");
     {
         if (!m_ethereaClient.isRunning()) {
@@ -2620,9 +2631,10 @@ void Application::renderUI() {
 #endif
     }
     ImGui::End();
+    }  // end Etherea visibility guard
 
 #ifdef HAS_NDI
-    if (NDIRuntime::instance().isAvailable()) {
+    if (NDIRuntime::instance().isAvailable() && m_ui.isPanelVisible("NDI")) {
         ImGui::Begin("NDI");
         {
             // --- Broadcasting section ---
@@ -2745,13 +2757,16 @@ void Application::renderUI() {
         ImGui::End();
     }
 #else
-    ImGui::Begin("NDI");
-    ImGui::TextDisabled("NDI SDK not installed");
-    ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
-    ImGui::End();
+    if (m_ui.isPanelVisible("NDI")) {
+        ImGui::Begin("NDI");
+        ImGui::TextDisabled("NDI SDK not installed");
+        ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
+        ImGui::End();
+    }
 #endif
 
 #ifdef HAS_SPOUT
+    if (m_ui.isPanelVisible("Spout")) {
     ImGui::Begin("Spout");
     {
         bool spoutOn = m_spoutOutputEnabled && m_spoutOutput.isActive();
@@ -2777,9 +2792,11 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end Spout visibility guard
 #endif
 
 #ifdef HAS_FFMPEG
+    if (m_ui.isPanelVisible("Stream")) {
     ImGui::Begin("Stream");
     {
         // Stream settings only — actions are in the transport bar
@@ -2818,9 +2835,11 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end Stream visibility guard
 #endif
 
     // Audio panel — device, levels, gain controls
+    if (m_ui.isPanelVisible("Audio")) {
     ImGui::Begin("Audio");
     {
         // --- Device selection ---
@@ -2964,8 +2983,10 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end Audio visibility guard
 
     // MIDI panel — device selection + mapping
+    if (m_ui.isPanelVisible("MIDI")) {
     ImGui::Begin("MIDI");
     {
         // Device selection
@@ -3125,13 +3146,17 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end MIDI visibility guard
 
 #if defined(HAS_OPENCV) && !defined(__APPLE__)
-    m_scanPanel.render(m_scanner, m_webcam);
+    if (m_ui.isPanelVisible("Scene Scanner")) {
+        m_scanPanel.render(m_scanner, m_webcam);
+    }
 #endif
 
     // Audio Mixer panel
 #ifdef HAS_FFMPEG
+    if (m_ui.isPanelVisible("Audio Mixer")) {
     ImGui::Begin("Audio Mixer");
     {
         // Enable/disable toggle
@@ -3248,6 +3273,7 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    }  // end Audio Mixer visibility guard
 
     renderTransportBar();
 #endif
