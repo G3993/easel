@@ -90,8 +90,15 @@ void CALLBACK MIDIManager::midiCallback(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dw
     std::lock_guard<std::mutex> lock(self->m_eventMutex);
     self->m_pendingEvents.push_back(evt);
 
-    if (self->m_learning) {
+    // Cache last CC value for parameter binding (normalized 0-1)
+    if (evt.type == 0) {
+        int key = (evt.channel << 8) | evt.number;
+        self->m_ccValues[key] = evt.value / 127.0f;
+    }
+
+    if (self->m_learning && evt.type == 0) { // only capture CC events
         self->m_lastLearnEvent = evt;
+        self->m_hasLearnEvent = true;
     }
 }
 #endif
@@ -101,6 +108,20 @@ std::vector<MIDIEvent> MIDIManager::pollEvents() {
     auto result = std::move(m_pendingEvents);
     m_pendingEvents.clear();
     return result;
+}
+
+float MIDIManager::getCCValue(int channel, int ccNum) const {
+    std::lock_guard<std::mutex> lock(m_eventMutex);
+    if (channel >= 0) {
+        auto it = m_ccValues.find((channel << 8) | ccNum);
+        return (it != m_ccValues.end()) ? it->second : -1.0f;
+    }
+    // Any channel: find latest value for this CC number
+    for (int ch = 0; ch < 16; ch++) {
+        auto it = m_ccValues.find((ch << 8) | ccNum);
+        if (it != m_ccValues.end()) return it->second;
+    }
+    return -1.0f;
 }
 
 void MIDIManager::addMapping(const MIDIMapping& mapping) {

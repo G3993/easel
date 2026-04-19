@@ -8,6 +8,8 @@ uniform float uOpacity = 1.0;
 uniform int uBlendMode = 0;
 uniform sampler2D uMask;
 uniform bool uHasMask = false;
+uniform float uMaskFeather = 0.0; // UV units
+uniform bool uMaskInvert = false;
 uniform mat3 uInvTransform = mat3(1.0);
 uniform float uTileX = 1.0;
 uniform float uTileY = 1.0;
@@ -51,6 +53,40 @@ vec3 blendOverlay(vec3 base, vec3 blend) {
 vec3 blendAdd(vec3 base, vec3 blend)       { return min(base + blend, 1.0); }
 vec3 blendSubtract(vec3 base, vec3 blend)  { return max(base - blend, 0.0); }
 vec3 blendDifference(vec3 base, vec3 blend){ return abs(base - blend); }
+
+float softLightCh(float b, float s) {
+    return (s <= 0.5) ? b - (1.0 - 2.0*s) * b * (1.0 - b)
+                      : b + (2.0*s - 1.0) * (sqrt(b) - b);
+}
+vec3 blendSoftLight(vec3 base, vec3 blend) {
+    return vec3(softLightCh(base.r, blend.r), softLightCh(base.g, blend.g), softLightCh(base.b, blend.b));
+}
+
+vec3 blendHardLight(vec3 base, vec3 blend) {
+    return vec3(
+        blend.r < 0.5 ? 2.0*base.r*blend.r : 1.0-2.0*(1.0-base.r)*(1.0-blend.r),
+        blend.g < 0.5 ? 2.0*base.g*blend.g : 1.0-2.0*(1.0-base.g)*(1.0-blend.g),
+        blend.b < 0.5 ? 2.0*base.b*blend.b : 1.0-2.0*(1.0-base.b)*(1.0-blend.b)
+    );
+}
+
+vec3 blendColorDodge(vec3 base, vec3 blend) {
+    return vec3(
+        blend.r >= 1.0 ? 1.0 : min(1.0, base.r / (1.0 - blend.r)),
+        blend.g >= 1.0 ? 1.0 : min(1.0, base.g / (1.0 - blend.g)),
+        blend.b >= 1.0 ? 1.0 : min(1.0, base.b / (1.0 - blend.b))
+    );
+}
+
+vec3 blendColorBurn(vec3 base, vec3 blend) {
+    return vec3(
+        blend.r <= 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.r) / blend.r),
+        blend.g <= 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.g) / blend.g),
+        blend.b <= 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.b) / blend.b)
+    );
+}
+
+vec3 blendExclusion(vec3 base, vec3 blend) { return base + blend - 2.0 * base * blend; }
 
 float cellPop(vec2 cell) {
     float h1 = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5);
@@ -189,19 +225,44 @@ void main() {
     float alpha = layer.a * uOpacity * featherAlpha;
 
     if (uHasMask) {
-        float maskVal = texture(uMask, maskUV).r;
+        float maskVal;
+        if (uMaskFeather > 0.001) {
+            // 9-tap gaussian blur for soft edges
+            float f = uMaskFeather * 0.5;
+            const vec2 offs[9] = vec2[](
+                vec2(-1,-1), vec2( 0,-1), vec2( 1,-1),
+                vec2(-1, 0), vec2( 0, 0), vec2( 1, 0),
+                vec2(-1, 1), vec2( 0, 1), vec2( 1, 1)
+            );
+            const float wts[9] = float[](
+                1.0, 2.0, 1.0, 2.0, 4.0, 2.0, 1.0, 2.0, 1.0
+            );
+            float sum = 0.0;
+            for (int i = 0; i < 9; i++) {
+                sum += texture(uMask, maskUV + offs[i] * f).r * wts[i];
+            }
+            maskVal = sum * (1.0 / 16.0);
+        } else {
+            maskVal = texture(uMask, maskUV).r;
+        }
+        if (uMaskInvert) maskVal = 1.0 - maskVal;
         alpha *= maskVal;
     }
 
     vec3 blended;
     switch (uBlendMode) {
-        case 0: blended = blendNormal(base.rgb, layer.rgb); break;
-        case 1: blended = blendMultiply(base.rgb, layer.rgb); break;
-        case 2: blended = blendScreen(base.rgb, layer.rgb); break;
-        case 3: blended = blendOverlay(base.rgb, layer.rgb); break;
-        case 4: blended = blendAdd(base.rgb, layer.rgb); break;
-        case 5: blended = blendSubtract(base.rgb, layer.rgb); break;
-        case 6: blended = blendDifference(base.rgb, layer.rgb); break;
+        case 0:  blended = blendNormal(base.rgb, layer.rgb); break;
+        case 1:  blended = blendMultiply(base.rgb, layer.rgb); break;
+        case 2:  blended = blendScreen(base.rgb, layer.rgb); break;
+        case 3:  blended = blendOverlay(base.rgb, layer.rgb); break;
+        case 4:  blended = blendAdd(base.rgb, layer.rgb); break;
+        case 5:  blended = blendSubtract(base.rgb, layer.rgb); break;
+        case 6:  blended = blendDifference(base.rgb, layer.rgb); break;
+        case 7:  blended = blendSoftLight(base.rgb, layer.rgb); break;
+        case 8:  blended = blendHardLight(base.rgb, layer.rgb); break;
+        case 9:  blended = blendColorDodge(base.rgb, layer.rgb); break;
+        case 10: blended = blendColorBurn(base.rgb, layer.rgb); break;
+        case 11: blended = blendExclusion(base.rgb, layer.rgb); break;
         default: blended = blendNormal(base.rgb, layer.rgb); break;
     }
 

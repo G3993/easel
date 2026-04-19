@@ -2,6 +2,7 @@ build/
 # Ignore large pre-built binaries but keep small source/headers
 external/ffmpeg-*/
 external/opencv/
+external/Spout2/
 CMakeCache.txt
 CMakeFiles/
 deps/

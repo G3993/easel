@@ -53,13 +53,27 @@ public:
     // Poll events (call from main thread)
     std::vector<MIDIEvent> pollEvents();
 
+    // Get last received CC value (normalized 0-1). Returns -1 if never received.
+    // channel = -1 matches any channel.
+    float getCCValue(int channel, int ccNum) const;
+
     // MIDI Learn mode
-    void startLearn() { m_learning = true; m_lastLearnEvent = {}; }
+    void startLearn() {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        m_learning = true;
+        m_lastLearnEvent = {};
+        m_hasLearnEvent = false;
+    }
     void stopLearn() { m_learning = false; }
     bool isLearning() const { return m_learning; }
     MIDIEvent lastLearnEvent() {
         std::lock_guard<std::mutex> lock(m_eventMutex);
         return m_lastLearnEvent;
+    }
+    // Returns true if a learn event was captured since startLearn()
+    bool hasLearnEvent() const {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        return m_hasLearnEvent;
     }
 
     // Mappings
@@ -89,10 +103,13 @@ private:
     bool m_open = false;
     int m_deviceIdx = -1;
 
-    std::mutex m_eventMutex;
+    mutable std::mutex m_eventMutex;
     std::vector<MIDIEvent> m_pendingEvents;
+    // Last received CC value per (channel, CC#) key. Key = (channel << 8) | ccNum.
+    std::unordered_map<int, float> m_ccValues;
 
     bool m_learning = false;
+    bool m_hasLearnEvent = false;
     MIDIEvent m_lastLearnEvent;
 
     std::vector<MIDIMapping> m_mappings;

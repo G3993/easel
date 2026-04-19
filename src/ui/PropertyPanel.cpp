@@ -1,6 +1,7 @@
 #include "ui/PropertyPanel.h"
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
+#include "app/MIDIManager.h"
 #include "compositing/BlendMode.h"
 #include "compositing/LayerStack.h"
 #include "sources/ShaderSource.h"
@@ -27,10 +28,10 @@ static void thinSep() {
 }
 
 static bool accentBtn(const char* label, float w = 0) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
     bool c = ImGui::Button(label, ImVec2(w, 0));
     ImGui::PopStyleColor(4);
     return c;
@@ -64,15 +65,15 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
                            float appTime, LayerStack* layerStack,
                            BPMSync* bpmSync, SceneManager* sceneManager,
-                           int* audioDeviceIdx) {
+                           int* audioDeviceIdx, MIDIManager* midi) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Properties");
 
     // --- Audio (BPM + bindings, always visible) ---
     if (bpmSync) {
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
         bool audioSectionOpen = ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor(3);
 
@@ -99,7 +100,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
                 else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
                 dl->AddText(ImVec2(p.x + 74, p.y + 2),
-                            currentBPM > 0 ? IM_COL32(0, 200, 255, 255) : IM_COL32(100, 115, 140, 180),
+                            currentBPM > 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(100, 115, 140, 180),
                             bpmBuf);
                 ImGui::Dummy(ImVec2(w, 18));
             }
@@ -107,10 +108,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             // TAP + BPM input + Reset
             {
                 float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("TAP", ImVec2(btnW, 0))) bpmSync->tap();
                 ImGui::PopStyleColor(4);
                 ImGui::SameLine();
@@ -178,9 +179,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
     // --- Scenes (always visible) ---
     if (sceneManager && layerStack) {
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
         bool scenesOpen = ImGui::CollapsingHeader("Scenes", ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor(3);
 
@@ -201,8 +202,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 // Recall button (full width minus delete button)
                 float w = ImGui::GetContentRegionAvail().x - 24;
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.07f, 0.10f, 0.9f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.20f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
                 if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
                     sceneManager->recallScene(s, *layerStack);
                 }
@@ -353,9 +354,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     thinSep();
 
     // --- Effects ---
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
     bool effectsOpen = ImGui::CollapsingHeader("Effects", ImGuiTreeNodeFlags_DefaultOpen);
     ImGui::PopStyleColor(3);
 
@@ -433,6 +434,17 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     ImGui::SliderFloat("##fbzm", &fx.feedbackZoom, 0.95f, 1.1f, "Zoom %.3f");
                     break;
                 }
+                case EffectType::Glow: {
+                    ImGui::SetNextItemWidth(w);
+                    ImGui::SliderFloat("##glowT", &fx.glowThreshold, 0.0f, 1.0f, "Thresh %.2f");
+                    float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##glowR", &fx.glowRadius, 1.0f, 40.0f, "Rad %.1f");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(half);
+                    ImGui::SliderFloat("##glowI", &fx.glowIntensity, 0.0f, 3.0f, "Int %.2f");
+                    break;
+                }
                 default: break;
                 }
             }
@@ -477,10 +489,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         // Audio toggle
         ImGui::SameLine();
         if (layer->audioReactive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.55f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.55f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("~ Audio", ImVec2(halfW, 0))) {
                 layer->audioReactive = false;
                 undoNeeded = true;
@@ -594,7 +606,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         }
                         if (active) {
                             draw->AddRectFilled(cMin, cMax, IM_COL32(0, 180, 235, 90), 2.0f);
-                            draw->AddRect(cMin, cMax, IM_COL32(0, 200, 255, 60), 2.0f);
+                            draw->AddRect(cMin, cMax, IM_COL32(255, 255, 255, 60), 2.0f);
                         } else if (hovered) {
                             draw->AddRectFilled(cMin, cMax, IM_COL32(0, 180, 235, 35), 2.0f);
                             draw->AddRect(cMin, cMax, IM_COL32(255, 255, 255, 15), 2.0f);
@@ -641,6 +653,38 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             undoNeeded = true;
     }
 
+    // --- Drop Shadow ---
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.04f));
+    if (ImGui::TreeNode("Drop Shadow")) {
+        if (ImGui::Checkbox("Enable##dshadow", &layer->dropShadowEnabled)) undoNeeded = true;
+        if (layer->dropShadowEnabled) {
+            if (dragPair("##DsOx", "X", &layer->dropShadowOffsetX,
+                         "##DsOy", "Y", &layer->dropShadowOffsetY,
+                         0.002f, -1.0f, 1.0f, "%.3f"))
+                undoNeeded = true;
+            ImGui::SetNextItemWidth(-1);
+            if (namedDrag("##DsBlur", "Blur", &layer->dropShadowBlur, 0.25f, 0.0f, 80.0f, "%.1f"))
+                undoNeeded = true;
+            ImGui::SetNextItemWidth(-1);
+            if (namedDrag("##DsOpac", "Opacity", &layer->dropShadowOpacity, 0.01f, 0.0f, 1.0f, "%.2f"))
+                undoNeeded = true;
+            ImGui::SetNextItemWidth(-1);
+            if (namedDrag("##DsSpread", "Spread", &layer->dropShadowSpread, 0.02f, 0.5f, 8.0f, "%.2f"))
+                undoNeeded = true;
+            // Color picker
+            float col[3] = { layer->dropShadowColorR, layer->dropShadowColorG, layer->dropShadowColorB };
+            if (ImGui::ColorEdit3("Color##dsCol", col, ImGuiColorEditFlags_NoInputs)) {
+                layer->dropShadowColorR = col[0];
+                layer->dropShadowColorG = col[1];
+                layer->dropShadowColorB = col[2];
+                undoNeeded = true;
+            }
+        }
+        ImGui::TreePop();
+    }
+    ImGui::PopStyleColor(2);
+
     // --- Crop ---
     ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.04f));
@@ -685,9 +729,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             bool muted = (vol == 0.0f);
 
             // Mute toggle button
-            ImGui::PushStyleColor(ImGuiCol_Button, muted ? ImVec4(0.6f, 0.1f, 0.1f, 0.25f) : ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, muted ? ImVec4(0.8f, 0.15f, 0.15f, 0.40f) : ImVec4(0.0f, 0.78f, 1.0f, 0.22f));
-            ImGui::PushStyleColor(ImGuiCol_Text, muted ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) : ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, muted ? ImVec4(0.6f, 0.1f, 0.1f, 0.25f) : ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, muted ? ImVec4(0.8f, 0.15f, 0.15f, 0.40f) : ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text, muted ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button(muted ? "Unmute" : "Mute", ImVec2(54, 0))) {
                 static float s_preMuteVol = 1.0f;
                 if (muted) {
@@ -804,15 +848,63 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     ImGui::PopStyleColor(3);
 
                     if (ImGui::BeginPopup("##audiobind")) {
+<<<<<<< Updated upstream
                         static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat" };
                         bool isNew = (bindings.find(input.name) == bindings.end());
+=======
+                        static const char* signalNames[] = { "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI" };
+>>>>>>> Stashed changes
                         AudioBinding& ab = bindings[input.name];
                         if (isNew) { ab.rangeMin = input.minVal; ab.rangeMax = input.maxVal; }
                         int sigIdx = (int)ab.signal;
-                        ImGui::Text("Audio Signal");
+                        ImGui::Text("Source");
                         ImGui::SetNextItemWidth(120);
-                        if (ImGui::Combo("##sig", &sigIdx, signalNames, 6)) {
+                        if (ImGui::Combo("##sig", &sigIdx, signalNames, 7)) {
                             ab.signal = (AudioSignal)sigIdx;
+                        }
+                        if (ab.signal == AudioSignal::MidiCC) {
+                            ImGui::Text("MIDI CC");
+                            ImGui::SetNextItemWidth(55);
+                            ImGui::InputInt("##cc", &ab.midiCC, 1, 1);
+                            if (ab.midiCC < -1) ab.midiCC = -1;
+                            if (ab.midiCC > 127) ab.midiCC = 127;
+                            ImGui::SameLine();
+                            ImGui::Text("Ch");
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(55);
+                            int ch1 = ab.midiChannel + 1; // display 1-16 (0 = any)
+                            if (ImGui::InputInt("##chan", &ch1, 1, 1)) {
+                                if (ch1 < 0) ch1 = 0;
+                                if (ch1 > 16) ch1 = 16;
+                                ab.midiChannel = ch1 - 1; // -1 = any
+                            }
+                            // MIDI Learn button
+                            if (midi) {
+                                bool learning = midi->isLearning();
+                                if (learning) {
+                                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.3f, 0.1f, 0.6f));
+                                    if (ImGui::Button("Learning... (move a knob)", ImVec2(-1, 0))) {
+                                        midi->stopLearn();
+                                    }
+                                    ImGui::PopStyleColor();
+                                    // Check if an event was captured
+                                    if (midi->hasLearnEvent()) {
+                                        auto evt = midi->lastLearnEvent();
+                                        ab.midiCC = evt.number;
+                                        ab.midiChannel = evt.channel;
+                                        midi->stopLearn();
+                                    }
+                                } else {
+                                    if (ImGui::Button("MIDI Learn", ImVec2(-1, 0))) {
+                                        midi->startLearn();
+                                    }
+                                }
+                                if (!midi->isOpen()) {
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
+                                    ImGui::TextWrapped("No MIDI device open");
+                                    ImGui::PopStyleColor();
+                                }
+                            }
                         }
                         if (ab.signal != AudioSignal::None) {
                             ImGui::Text("Range");
@@ -960,10 +1052,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                 }
                                 ImGui::PopStyleColor(4);
                             } else {
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                                 if (ImGui::Button("MIC", ImVec2(micW, 0))) {
                                     speech->listening = true;
                                     speech->targetSource = shaderSrc;

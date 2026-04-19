@@ -66,8 +66,8 @@ void MaskRenderer::ensureFBO(int width, int height, GLuint colorTex) {
 }
 
 void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& outTexture) {
-    if (path.count() < 3) {
-        // Less than 3 points - create a fully white (no mask) texture
+    if (path.count() < 3 || !path.closed()) {
+        // Less than 3 points or path not closed yet - fully white (no clip)
         if (outTexture.id() == 0) outTexture.createEmpty(width, height);
         std::vector<uint8_t> white(width * height * 4, 255);
         outTexture.updateData(white.data(), width, height);
@@ -85,18 +85,6 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
     auto polyVerts = path.tessellate(24);
     if (polyVerts.size() < 3) return;
 
-    // Build triangle fan: centroid + polygon vertices + closing vertex
-    glm::vec2 center = path.centroid();
-    std::vector<glm::vec2> fanVerts;
-    fanVerts.reserve(polyVerts.size() + 2);
-    fanVerts.push_back(center);
-    for (auto& v : polyVerts) fanVerts.push_back(v);
-    fanVerts.push_back(polyVerts[0]); // close the fan
-
-    // Upload vertices
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, fanVerts.size() * sizeof(glm::vec2), fanVerts.data(), GL_DYNAMIC_DRAW);
-
     // Build a full-screen quad for the fill pass (in UV space 0-1)
     glm::vec2 quadVerts[] = {
         {0, 0}, {1, 0}, {1, 1},
@@ -108,10 +96,15 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
     GLint prevViewport[4];
     glGetIntegerv(GL_VIEWPORT, prevViewport);
+    GLboolean prevColorMask[4];
+    glGetBooleanv(GL_COLOR_WRITEMASK, prevColorMask);
+    GLboolean prevStencilTest = glIsEnabled(GL_STENCIL_TEST);
+    GLboolean prevBlend = glIsEnabled(GL_BLEND);
 
     // Bind mask FBO
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, width, height);
+    glDisable(GL_BLEND);
 
     // Clear to black (fully masked out)
     glClearColor(0, 0, 0, 1);
@@ -121,7 +114,9 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
     m_shader.use();
     glBindVertexArray(m_vao);
 
-    // ---- Pass 1: Stencil fill using triangle fan ----
+    // ---- Pass 1: Stencil fill using individual triangles from origin ----
+    // Using (0,0) as fan center is more robust than centroid for concave shapes,
+    // and the even-odd stencil invert rule handles any fan center correctly.
     glEnable(GL_STENCIL_TEST);
     glStencilFunc(GL_ALWAYS, 0, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
@@ -129,10 +124,22 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
 
     m_shader.setVec4("uColor", glm::vec4(1.0f));
 
-    // Draw triangle fan (polygon fill with even-odd rule)
+    // Build triangles from origin (0,0) to each polygon edge for stencil fill.
+    // This avoids centroid issues with concave polygons.
+    std::vector<glm::vec2> triVerts;
+    triVerts.reserve(polyVerts.size() * 3);
+    glm::vec2 origin(0.0f, 0.0f);
+    for (size_t i = 0; i < polyVerts.size(); i++) {
+        size_t j = (i + 1) % polyVerts.size();
+        triVerts.push_back(origin);
+        triVerts.push_back(polyVerts[i]);
+        triVerts.push_back(polyVerts[j]);
+    }
+
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, triVerts.size() * sizeof(glm::vec2), triVerts.data(), GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, (GLsizei)fanVerts.size());
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)triVerts.size());
 
     // ---- Pass 2: Fill white where stencil is set ----
     glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
@@ -149,6 +156,9 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
     glBindVertexArray(0);
 
     // Restore GL state
+    glColorMask(prevColorMask[0], prevColorMask[1], prevColorMask[2], prevColorMask[3]);
+    if (prevStencilTest) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+    if (prevBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
 }

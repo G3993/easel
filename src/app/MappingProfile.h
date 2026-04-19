@@ -9,11 +9,13 @@
 #include <memory>
 #include <vector>
 
-// A named mask within a mapping profile
+// A named mask within a mapping profile (canvas/output-level)
 struct MappingMask {
     std::string name = "Mask";
     MaskPath path;
     std::shared_ptr<Texture> texture; // rendered by MaskRenderer
+    float feather = 0.0f;
+    bool invert = false;
 };
 
 struct MappingProfile {

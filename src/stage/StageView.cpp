@@ -1,6 +1,8 @@
 #include "stage/StageView.h"
 #include <imgui.h>
+#include "ui/ImGuizmo.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -100,6 +102,140 @@ void StageView::removeSurface(int index) {
     }
 }
 
+// --- ScreenCluster ---
+
+glm::mat4 ScreenCluster::getTransform() const {
+    glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
+    t = glm::rotate(t, glm::radians(rotation.y), glm::vec3(0, 1, 0));
+    t = glm::rotate(t, glm::radians(rotation.x), glm::vec3(1, 0, 0));
+    t = glm::rotate(t, glm::radians(rotation.z), glm::vec3(0, 0, 1));
+    t = glm::scale(t, glm::vec3(scale));
+    return t;
+}
+
+int StageView::addCluster(const std::string& name) {
+    ScreenCluster cluster;
+    cluster.name = name;
+    m_clusters.push_back(cluster);
+    return (int)m_clusters.size() - 1;
+}
+
+void StageView::removeCluster(int index) {
+    if (index >= 0 && index < (int)m_clusters.size()) {
+        // Unlink any surfaces belonging to this cluster
+        for (auto& surf : m_surfaces) {
+            if (surf.clusterIndex == index) surf.clusterIndex = -1;
+            else if (surf.clusterIndex > index) surf.clusterIndex--;
+        }
+        m_clusters.erase(m_clusters.begin() + index);
+        if (m_selectedCluster >= (int)m_clusters.size()) m_selectedCluster = -1;
+    }
+}
+
+void StageView::populateClusterGrid(int clusterIdx, int startZone) {
+    if (clusterIdx < 0 || clusterIdx >= (int)m_clusters.size()) return;
+    auto& cl = m_clusters[clusterIdx];
+
+    // Remove existing surfaces in this cluster
+    for (int i = (int)m_surfaces.size() - 1; i >= 0; i--) {
+        if (m_surfaces[i].clusterIndex == clusterIdx)
+            m_surfaces.erase(m_surfaces.begin() + i);
+    }
+
+    // Create grid surfaces
+    int zone = startZone;
+    for (int r = 0; r < cl.gridRows; r++) {
+        for (int c = 0; c < cl.gridCols; c++) {
+            ProjectionSurface surf;
+            surf.name = cl.name + " " + std::to_string(r * cl.gridCols + c + 1);
+            surf.clusterIndex = clusterIdx;
+            surf.projectorIndex = std::min(zone, (int)m_projectors.size() - 1);
+            if (surf.projectorIndex < 0) surf.projectorIndex = 0;
+            m_surfaces.push_back(surf);
+            zone++;
+        }
+    }
+}
+
+// --- StageDisplay ---
+
+glm::mat4 StageDisplay::getTransform() const {
+    glm::mat4 t = glm::translate(glm::mat4(1.0f), position);
+    t = glm::rotate(t, glm::radians(rotation.y), glm::vec3(0, 1, 0));
+    t = glm::rotate(t, glm::radians(rotation.x), glm::vec3(1, 0, 0));
+    t = glm::rotate(t, glm::radians(rotation.z), glm::vec3(0, 0, 1));
+    // Scale the unit quad (-1..1) to actual display dimensions (half-extents)
+    t = glm::scale(t, glm::vec3(width * 0.5f, height * 0.5f, 1.0f));
+    return t;
+}
+
+int StageView::addDisplay(const std::string& name, StageDisplay::Type type) {
+    StageDisplay d;
+    d.name = name;
+    d.type = type;
+    d.zoneIndex = 0;
+    // Spread displays out along X so they don't overlap
+    d.position.x = (float)m_displays.size() * 2.5f;
+    m_displays.push_back(d);
+    m_selectedDisplay = (int)m_displays.size() - 1;
+    return m_selectedDisplay;
+}
+
+void StageView::removeDisplay(int index) {
+    if (index >= 0 && index < (int)m_displays.size()) {
+        m_displays.erase(m_displays.begin() + index);
+        if (m_selectedDisplay >= (int)m_displays.size()) m_selectedDisplay = -1;
+    }
+}
+
+void StageView::renderDisplays(const std::vector<GLuint>& zoneTextures, const glm::mat4& viewProj) {
+    if (m_displays.empty()) return;
+
+    // Load display shader on first use
+    if (!m_displayShaderReady) {
+        if (m_displayShader.loadFromFiles("shaders/display3d.vert", "shaders/display3d.frag")) {
+            m_displayShaderReady = true;
+            m_displayQuad.createQuad(); // unit quad -1..1
+        }
+    }
+    if (!m_displayShaderReady) return;
+
+    glEnable(GL_DEPTH_TEST);
+
+    for (int i = 0; i < (int)m_displays.size(); i++) {
+        auto& d = m_displays[i];
+        if (!d.visible) continue;
+
+        glm::mat4 model = d.getTransform();
+        glm::mat4 mvp = viewProj * model;
+
+        m_displayShader.use();
+        m_displayShader.setMat4("uMVP", mvp);
+        m_displayShader.setFloat("uOpacity", 1.0f);
+        m_displayShader.setInt("uTexture", 0);
+
+        // Border color: cyan normally, yellow when selected
+        bool sel = (i == m_selectedDisplay);
+        if (sel) {
+            m_displayShader.setVec4("uBorderColor", glm::vec4(1.0f, 0.85f, 0.2f, 1.0f));
+            m_displayShader.setFloat("uBorderWidth", 0.015f);
+        } else {
+            m_displayShader.setVec4("uBorderColor", glm::vec4(1.0f, 1.0f, 1.0f, 0.6f));
+            m_displayShader.setFloat("uBorderWidth", 0.008f);
+        }
+
+        // Bind zone texture
+        glActiveTexture(GL_TEXTURE0);
+        if (d.zoneIndex >= 0 && d.zoneIndex < (int)zoneTextures.size() && zoneTextures[d.zoneIndex]) {
+            glBindTexture(GL_TEXTURE_2D, zoneTextures[d.zoneIndex]);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        m_displayQuad.draw();
+    }
+}
+
 void StageView::renderScene(const std::vector<GLuint>& zoneTextures, float aspect) {
     glm::mat4 mdl = glm::scale(glm::mat4(1.0f), glm::vec3(m_modelScale));
     glm::mat4 view = m_camera.viewMatrix();
@@ -160,6 +296,9 @@ void StageView::renderScene(const std::vector<GLuint>& zoneTextures, float aspec
         renderFrustum(m_projectors[i], viewProjStage, i == m_selectedProjector);
     }
 
+    // Draw display planes (textured quads in 3D space)
+    renderDisplays(zoneTextures, viewProjStage);
+
     glDisable(GL_DEPTH_TEST);
 }
 
@@ -199,8 +338,8 @@ void StageView::renderFrustum(const VirtualProjector& proj, const glm::mat4& sta
         return ImVec2(sx, sy);
     };
 
-    ImU32 col = selected ? IM_COL32(255, 200, 50, 200) : IM_COL32(0, 200, 255, 120);
-    ImU32 colDim = selected ? IM_COL32(255, 200, 50, 60) : IM_COL32(0, 200, 255, 40);
+    ImU32 col = selected ? IM_COL32(255, 200, 50, 200) : IM_COL32(255, 255, 255, 120);
+    ImU32 colDim = selected ? IM_COL32(255, 200, 50, 60) : IM_COL32(255, 255, 255, 40);
 
     // Near plane
     for (int i = 0; i < 4; i++) {
@@ -225,9 +364,23 @@ void StageView::renderFrustum(const VirtualProjector& proj, const glm::mat4& sta
     draw->AddText(ImVec2(posScreen.x + 10, posScreen.y - 8), col, proj.name.c_str());
 }
 
-void StageView::render(const std::vector<GLuint>& zoneTextures) {
+void StageView::render(const std::vector<GLuint>& zoneTextures,
+                       std::function<void()> inlineTopSection) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(300, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Stage");
+
+    // Composition/output inline sections from Application live at the top
+    // of the Stage tab so that canvas size and output target are set where
+    // you're physically staging the projection.
+    if (inlineTopSection) {
+        inlineTopSection();
+        ImGui::Dummy(ImVec2(0, 2));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x;
+        dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 25));
+        ImGui::Dummy(ImVec2(0, 4));
+    }
 
     renderUI(zoneTextures);
 
@@ -244,9 +397,9 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         ImGui::Dummy(ImVec2(0, panelH * 0.3f));
         float btnW = 200.0f;
         ImGui::SetCursorPosX((panelW - btnW) * 0.5f);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.10f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         if (ImGui::Button("Import 3D Model", ImVec2(btnW, 40))) {
             // Open file dialog - handled by signal
             m_wantsImport = true;
@@ -262,10 +415,16 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
 
     // Toolbar row
     {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.20f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 0.9f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
 
+        if (ImGui::SmallButton("+ Display")) {
+            char name[32];
+            snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
+            addDisplay(name, StageDisplay::Type::LED);
+        }
+        ImGui::SameLine();
         if (ImGui::SmallButton("+ Projector")) {
             char name[32];
             snprintf(name, sizeof(name), "Proj %d", (int)m_projectors.size() + 1);
@@ -315,49 +474,293 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
     // Display FBO as ImGui image
     ImGui::Image((ImTextureID)(intptr_t)m_fbo.textureId(), ImVec2(viewSize.x, viewSize.y),
                  ImVec2(0, 1), ImVec2(1, 0));
+    // Capture the viewport-image hover state NOW, before subsequent toolbar buttons
+    // overwrite ImGui's "last item" — without this, zoom/pan/orbit only register
+    // when the mouse happens to be over the "Scale" toolbar button.
+    bool viewportHovered = ImGui::IsItemHovered();
 
-    // Orbit camera interaction
-    bool hovered = ImGui::IsItemHovered();
+    // --- Gizmo mode toolbar ---
+    {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        auto gizBtn = [&](const char* label, int op) {
+            bool active = (m_gizmoOp == op);
+            if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            else ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+            if (ImGui::SmallButton(label)) m_gizmoOp = op;
+            ImGui::PopStyleColor();
+        };
+        gizBtn("Move", 0); ImGui::SameLine();
+        gizBtn("Rotate", 1); ImGui::SameLine();
+        gizBtn("Scale", 2);
+        // Keyboard shortcuts: V=Move, R=Rotate, S=Scale (Spline-style)
+        if (!ImGui::GetIO().WantTextInput) {
+            if (ImGui::IsKeyPressed(ImGuiKey_V)) m_gizmoOp = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) m_gizmoOp = 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_S)) m_gizmoOp = 2;
+        }
+        ImGui::PopStyleColor(2);
+    }
+
+    // --- 3D Gizmo overlay ---
+    {
+        glm::mat4 view = m_camera.viewMatrix();
+        glm::mat4 proj = m_camera.projMatrix(aspect);
+
+        ImGuizmo::SetDrawlist();
+        ImGuizmo::SetRect(viewStart.x, viewStart.y, viewSize.x, viewSize.y);
+
+        // Determine gizmo operation
+        ImGuizmo::OPERATION op = ImGuizmo::TRANSLATE;
+        if (m_gizmoOp == 1) op = ImGuizmo::ROTATE;
+        else if (m_gizmoOp == 2) op = ImGuizmo::SCALE;
+
+        // Apply gizmo to selected Display
+        if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
+            auto& d = m_displays[m_selectedDisplay];
+            glm::mat4 model = d.getTransform();
+            float* vPtr = glm::value_ptr(view);
+            float* pPtr = glm::value_ptr(proj);
+            float* mPtr = glm::value_ptr(model);
+
+            ImGuizmo::Manipulate(vPtr, pPtr, op, ImGuizmo::WORLD, mPtr);
+            if (ImGuizmo::IsUsing()) {
+                // Decompose back to position/rotation/scale
+                float matDecompTranslation[3], matDecompRotation[3], matDecompScale[3];
+                ImGuizmo::DecomposeMatrixToComponents(mPtr, matDecompTranslation, matDecompRotation, matDecompScale);
+                d.position = {matDecompTranslation[0], matDecompTranslation[1], matDecompTranslation[2]};
+                d.rotation = {matDecompRotation[0], matDecompRotation[1], matDecompRotation[2]};
+                if (op == ImGuizmo::SCALE) {
+                    d.width = std::abs(matDecompScale[0]) * 2.0f;
+                    d.height = std::abs(matDecompScale[1]) * 2.0f;
+                }
+                m_orbitDragging = false;
+            }
+        }
+        // Apply gizmo to selected Projector
+        else if (m_selectedProjector >= 0 && m_selectedProjector < (int)m_projectors.size()) {
+            auto& p = m_projectors[m_selectedProjector];
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), p.position);
+            float* vPtr = glm::value_ptr(view);
+            float* pPtr = glm::value_ptr(proj);
+            float* mPtr = glm::value_ptr(model);
+
+            ImGuizmo::Manipulate(vPtr, pPtr, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, mPtr);
+            if (ImGuizmo::IsUsing()) {
+                float t[3], r[3], s[3];
+                ImGuizmo::DecomposeMatrixToComponents(mPtr, t, r, s);
+                p.position = {t[0], t[1], t[2]};
+                m_orbitDragging = false;
+            }
+        }
+    }
+
+    // --- Viewport interaction (UE5/Spline hybrid) ---
+    // Right-drag = orbit, Middle-drag/Space+Left = pan, Scroll = distance-proportional zoom
+    // Left-click = select object, Left-drag on gizmo = manipulate
+    bool hovered = viewportHovered && !ImGuizmo::IsOver();
+    bool gizmoUsing = ImGuizmo::IsUsing();
     ImVec2 mouse = ImGui::GetMousePos();
+    float dt = ImGui::GetIO().DeltaTime;
 
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    // --- Smooth camera animation (F to frame) ---
+    if (m_cameraAnimating) {
+        m_cameraAnimTime += dt;
+        float t = std::min(1.0f, m_cameraAnimTime / m_cameraAnimDuration);
+        // Ease-out cubic: 1 - (1-t)^3
+        float ease = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+        m_camera.target = m_cameraAnimStartTarget + (m_cameraAnimEndTarget - m_cameraAnimStartTarget) * ease;
+        m_camera.distance = m_cameraAnimStartDist + (m_cameraAnimEndDist - m_cameraAnimStartDist) * ease;
+        if (t >= 1.0f) m_cameraAnimating = false;
+    }
+
+    // Right-drag: Orbit camera (UE5 style - direct 1:1 mapping, no inertia)
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         m_orbitDragging = true;
         m_orbitDragStart = {mouse.x, mouse.y};
         m_orbitStartAzimuth = m_camera.azimuth;
         m_orbitStartElevation = m_camera.elevation;
+        m_cameraAnimating = false; // cancel any animation
     }
-    if (m_orbitDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (m_orbitDragging && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         float dx = mouse.x - m_orbitDragStart.x;
         float dy = mouse.y - m_orbitDragStart.y;
         m_camera.azimuth = m_orbitStartAzimuth - dx * 0.005f;
         m_camera.elevation = std::max(-1.5f, std::min(1.5f, m_orbitStartElevation + dy * 0.005f));
     }
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        m_orbitDragging = false;
-    }
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) m_orbitDragging = false;
 
-    // Middle mouse pan
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+    // Middle-drag OR Space+Left-drag: Pan camera
+    // Pan speed proportional to distance (feels natural at any zoom level)
+    bool spaceHeld = ImGui::IsKeyDown(ImGuiKey_Space);
+    bool panStart = (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) ||
+                    (hovered && spaceHeld && ImGui::IsMouseClicked(ImGuiMouseButton_Left));
+    bool panHold = (m_panDragging && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) ||
+                   (m_panDragging && spaceHeld && ImGui::IsMouseDown(ImGuiMouseButton_Left));
+    if (panStart) {
         m_panDragging = true;
         m_panDragStart = {mouse.x, mouse.y};
         m_panStartTarget = m_camera.target;
+        m_cameraAnimating = false;
     }
-    if (m_panDragging && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
-        float dx = (mouse.x - m_panDragStart.x) * 0.01f;
-        float dy = (mouse.y - m_panDragStart.y) * 0.01f;
-        m_camera.target = m_panStartTarget + glm::vec3(-dx, dy, 0.0f);
+    if (m_panDragging && panHold) {
+        // Pan speed scales with distance (infinite canvas feel)
+        float panScale = m_camera.distance * 0.002f;
+        float dx = (mouse.x - m_panDragStart.x) * panScale;
+        float dy = (mouse.y - m_panDragStart.y) * panScale;
+        // Pan in camera-local right/up axes
+        float ca = cosf(m_camera.azimuth), sa = sinf(m_camera.azimuth);
+        glm::vec3 right = {ca, 0.0f, sa};
+        glm::vec3 up = {0.0f, 1.0f, 0.0f};
+        m_camera.target = m_panStartTarget - right * dx + up * dy;
     }
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle)) {
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle) ||
+        (m_panDragging && !spaceHeld && !ImGui::IsMouseDown(ImGuiMouseButton_Middle))) {
         m_panDragging = false;
     }
 
-    // Scroll zoom
+    // Scroll: Distance-proportional zoom (THE key to infinite canvas feel)
+    // Zoom speed = 10% of current distance per scroll notch
     if (hovered) {
         float scroll = ImGui::GetIO().MouseWheel;
         if (scroll != 0.0f) {
-            m_camera.distance = std::max(0.5f, std::min(50.0f, m_camera.distance - scroll * 0.5f));
+            float zoomFactor = 1.0f - scroll * 0.1f; // 10% per notch
+            float newDist = m_camera.distance * zoomFactor;
+            // Soft clamp: no hard limits, just very gentle resistance at extremes
+            newDist = std::max(0.01f, std::min(1000.0f, newDist));
+            m_camera.distance = newDist;
+            m_cameraAnimating = false;
         }
     }
+
+    // Left-click: Select display/projector in viewport (when not using gizmo or panning)
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoUsing && !spaceHeld) {
+        glm::mat4 vp = m_camera.projMatrix(aspect) * m_camera.viewMatrix();
+        float bestDist = 40.0f; // pixel threshold
+        int bestIdx = -1;
+        // Check displays
+        for (int i = 0; i < (int)m_displays.size(); i++) {
+            if (!m_displays[i].visible) continue;
+            glm::vec4 clip = vp * glm::vec4(m_displays[i].position, 1.0f);
+            if (clip.w <= 0) continue;
+            float sx = viewStart.x + (clip.x / clip.w * 0.5f + 0.5f) * viewSize.x;
+            float sy = viewStart.y + (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * viewSize.y;
+            float d = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
+            if (d < bestDist) { bestDist = d; bestIdx = i; }
+        }
+        // Check projectors
+        for (int i = 0; i < (int)m_projectors.size(); i++) {
+            if (!m_projectors[i].visible) continue;
+            glm::vec4 clip = vp * glm::vec4(m_projectors[i].position, 1.0f);
+            if (clip.w <= 0) continue;
+            float sx = viewStart.x + (clip.x / clip.w * 0.5f + 0.5f) * viewSize.x;
+            float sy = viewStart.y + (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * viewSize.y;
+            float d = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
+            if (d < bestDist) { bestDist = d; bestIdx = -(i + 100); }
+        }
+        if (bestIdx >= 0) { m_selectedDisplay = bestIdx; m_selectedProjector = -1; }
+        else if (bestIdx <= -100) { m_selectedProjector = -(bestIdx + 100); m_selectedDisplay = -1; }
+        else { m_selectedDisplay = -1; m_selectedProjector = -1; }
+    }
+
+    // F: Frame selected (smooth animated fly-to)
+    if (hovered && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F)) {
+        glm::vec3 targetPos = {0, 0, 0};
+        float targetDist = 5.0f;
+        bool found = false;
+        if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
+            targetPos = m_displays[m_selectedDisplay].position;
+            targetDist = std::max(m_displays[m_selectedDisplay].width, m_displays[m_selectedDisplay].height) * 2.5f;
+            found = true;
+        } else if (m_selectedProjector >= 0 && m_selectedProjector < (int)m_projectors.size()) {
+            targetPos = m_projectors[m_selectedProjector].position;
+            targetDist = 5.0f;
+            found = true;
+        }
+        if (found) {
+            m_cameraAnimating = true;
+            m_cameraAnimTime = 0.0f;
+            m_cameraAnimStartTarget = m_camera.target;
+            m_cameraAnimEndTarget = targetPos;
+            m_cameraAnimStartDist = m_camera.distance;
+            m_cameraAnimEndDist = targetDist;
+        }
+    }
+
+    // Delete/Backspace: Remove selected object
+    if (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace))) {
+        if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
+            removeDisplay(m_selectedDisplay);
+        } else if (m_selectedProjector >= 0 && m_selectedProjector < (int)m_projectors.size()) {
+            removeProjector(m_selectedProjector);
+            m_selectedProjector = -1;
+        }
+    }
+
+    // --- Displays list ---
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    ImGui::Text("Displays");
+    ImGui::PopStyleColor();
+
+    int dispRemove = -1;
+    for (int i = 0; i < (int)m_displays.size(); i++) {
+        ImGui::PushID(53000 + i);
+        auto& d = m_displays[i];
+        bool sel = (i == m_selectedDisplay);
+
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, sel ? 0.15f : 0.0f));
+        char dlabel[128];
+        snprintf(dlabel, sizeof(dlabel), "%s  [%s]", d.name.c_str(), StageDisplay::typeName(d.type));
+        if (ImGui::Selectable(dlabel, sel)) {
+            m_selectedDisplay = i;
+        }
+        ImGui::PopStyleColor();
+
+        if (sel) {
+            // Type selector
+            static const char* typeNames[] = { "Projector", "LED Screen", "TV", "Monitor", "Custom" };
+            int typeIdx = (int)d.type;
+            ImGui::SetNextItemWidth(120);
+            if (ImGui::Combo("Type##disp", &typeIdx, typeNames, 5)) {
+                d.type = (StageDisplay::Type)typeIdx;
+            }
+
+            // Zone assignment
+            ImGui::SetNextItemWidth(-1);
+            char zoneLabel[32];
+            snprintf(zoneLabel, sizeof(zoneLabel), "Zone %d", d.zoneIndex);
+            if (ImGui::BeginCombo("Zone##disp", zoneLabel)) {
+                for (int zi = 0; zi < std::max(1, (int)zoneTextures.size()); zi++) {
+                    char zl[32]; snprintf(zl, sizeof(zl), "Zone %d", zi);
+                    if (ImGui::Selectable(zl, d.zoneIndex == zi)) d.zoneIndex = zi;
+                }
+                ImGui::EndCombo();
+            }
+
+            // Transform
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Pos##disp", &d.position[0], 0.05f, -50.0f, 50.0f, "%.2f");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Rot##disp", &d.rotation[0], 0.5f, -180.0f, 180.0f, "%.1f");
+
+            float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            ImGui::SetNextItemWidth(halfW);
+            ImGui::DragFloat("W##disp", &d.width, 0.01f, 0.1f, 20.0f, "%.2fm");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(halfW);
+            ImGui::DragFloat("H##disp", &d.height, 0.01f, 0.1f, 20.0f, "%.2fm");
+
+            ImGui::Checkbox("Visible##disp", &d.visible);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            if (ImGui::SmallButton("Delete##disp")) dispRemove = i;
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+    if (dispRemove >= 0) removeDisplay(dispRemove);
+
+    ImGui::Dummy(ImVec2(0, 4));
 
     // --- Projector list ---
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
@@ -370,7 +773,7 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         auto& p = m_projectors[i];
         bool sel = (i == m_selectedProjector);
 
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, sel ? 0.15f : 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, sel ? 0.15f : 0.0f));
         if (ImGui::Selectable(p.name.c_str(), sel)) {
             m_selectedProjector = i;
         }
@@ -400,7 +803,7 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         auto& s = m_surfaces[i];
         bool sel = (i == m_selectedSurface);
 
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.78f, 1.0f, sel ? 0.15f : 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, sel ? 0.15f : 0.0f));
         if (ImGui::Selectable(s.name.c_str(), sel)) {
             m_selectedSurface = i;
         }
@@ -435,4 +838,99 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         ImGui::PopID();
     }
     if (surfRemove >= 0) removeSurface(surfRemove);
+
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // --- Screen Clusters ---
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+    ImGui::Text("Screen Clusters");
+    ImGui::PopStyleColor();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    if (ImGui::SmallButton("+Cluster")) {
+        int idx = addCluster("Cluster " + std::to_string(m_clusters.size() + 1));
+        m_selectedCluster = idx;
+    }
+    ImGui::PopStyleColor(3);
+
+    int clRemove = -1;
+    for (int ci = 0; ci < (int)m_clusters.size(); ci++) {
+        ImGui::PushID(52000 + ci);
+        auto& cl = m_clusters[ci];
+        bool sel = (ci == m_selectedCluster);
+
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, sel ? 0.15f : 0.0f));
+        if (ImGui::Selectable(cl.name.c_str(), sel)) {
+            m_selectedCluster = ci;
+        }
+        ImGui::PopStyleColor();
+
+        if (sel) {
+            // Position
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Pos##cl", &cl.position[0], 0.05f, -50.0f, 50.0f, "%.2f");
+            // Rotation
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat3("Rot##cl", &cl.rotation[0], 0.5f, -180.0f, 180.0f, "%.1f");
+            // Scale
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("Scale##cl", &cl.scale, 0.01f, 0.01f, 10.0f, "%.2f");
+
+            ImGui::Dummy(ImVec2(0, 3));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+            ImGui::Text("Grid");
+            ImGui::PopStyleColor();
+
+            // Grid layout
+            int prevCols = cl.gridCols, prevRows = cl.gridRows;
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputInt("Cols##cl", &cl.gridCols, 1, 1);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputInt("Rows##cl", &cl.gridRows, 1, 1);
+            cl.gridCols = std::max(1, std::min(8, cl.gridCols));
+            cl.gridRows = std::max(1, std::min(8, cl.gridRows));
+
+            // Screen dimensions
+            ImGui::SetNextItemWidth(60);
+            ImGui::DragFloat("W##clsw", &cl.screenW, 0.01f, 0.1f, 20.0f, "%.2f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::DragFloat("H##clsh", &cl.screenH, 0.01f, 0.1f, 20.0f, "%.2f");
+
+            // Gap
+            ImGui::SetNextItemWidth(60);
+            ImGui::DragFloat("Gap X##clg", &cl.gapX, 0.005f, 0.0f, 1.0f, "%.3f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::DragFloat("Gap Y##clg", &cl.gapY, 0.005f, 0.0f, 1.0f, "%.3f");
+
+            // Populate grid button
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            char gridLabel[64];
+            snprintf(gridLabel, sizeof(gridLabel), "Generate %dx%d Grid", cl.gridCols, cl.gridRows);
+            if (ImGui::Button(gridLabel, ImVec2(-1, 0))) {
+                populateClusterGrid(ci, 0);
+            }
+            ImGui::PopStyleColor(3);
+
+            // Count surfaces in this cluster
+            int surfCount = 0;
+            for (auto& s : m_surfaces) if (s.clusterIndex == ci) surfCount++;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+            ImGui::Text("%d screens", surfCount);
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            if (ImGui::SmallButton("Del##cl")) clRemove = ci;
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+    if (clRemove >= 0) removeCluster(clRemove);
 }

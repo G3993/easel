@@ -142,7 +142,7 @@ bool Application::init() {
     glfwSetDropCallback(m_window, Application::dropCallback);
 
     glfwMakeContextCurrent(m_window);
-    glfwSwapInterval(0); // uncapped — NDI needs low-latency updates
+    glfwSwapInterval(1); // vsync — saves CPU, NDI sends after swap
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD" << std::endl;
@@ -297,8 +297,15 @@ void Application::run() {
     while (!glfwWindowShouldClose(m_window)) {
         glfwPollEvents();
 
-        // Escape on main window closes all projectors and resets fullscreen zones
+        // Escape exits presentation fullscreen first, then closes projectors
         if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+            if (m_editorFullscreen) {
+                glfwSetWindowMonitor(m_window, nullptr,
+                                     m_savedWindowX, m_savedWindowY,
+                                     m_savedWindowW, m_savedWindowH, 0);
+                m_editorFullscreen = false;
+                continue;
+            }
             bool hadOutput = !m_projectors.empty();
             for (auto& [idx, proj] : m_projectors) proj->destroy();
             m_projectors.clear();
@@ -309,7 +316,6 @@ void Application::run() {
                     hadOutput = true;
                 }
             }
-            // Consume key only if we actually closed something
             if (hadOutput) continue;
         }
 
@@ -328,6 +334,47 @@ void Application::run() {
             f12WasPressed = f12Now;
         }
 
+        // F11 = toggle editor fullscreen (borderless on current monitor)
+        {
+            static bool f11WasPressed = false;
+            bool f11Now = glfwGetKey(m_window, GLFW_KEY_F11) == GLFW_PRESS;
+            if (f11Now && !f11WasPressed) {
+                if (!m_editorFullscreen) {
+                    // Save windowed position/size
+                    glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
+                    glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
+
+                    // Find which monitor the window is on
+                    int monCount = 0;
+                    GLFWmonitor** monitors = glfwGetMonitors(&monCount);
+                    GLFWmonitor* best = glfwGetPrimaryMonitor();
+                    int wx, wy;
+                    glfwGetWindowPos(m_window, &wx, &wy);
+                    for (int mi = 0; mi < monCount; mi++) {
+                        int mx, my;
+                        glfwGetMonitorPos(monitors[mi], &mx, &my);
+                        const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
+                        if (wx >= mx && wx < mx + mode->width &&
+                            wy >= my && wy < my + mode->height) {
+                            best = monitors[mi];
+                            break;
+                        }
+                    }
+                    const GLFWvidmode* mode = glfwGetVideoMode(best);
+                    glfwSetWindowMonitor(m_window, best, 0, 0,
+                                         mode->width, mode->height, mode->refreshRate);
+                    m_editorFullscreen = true;
+                } else {
+                    // Restore windowed mode
+                    glfwSetWindowMonitor(m_window, nullptr,
+                                         m_savedWindowX, m_savedWindowY,
+                                         m_savedWindowW, m_savedWindowH, 0);
+                    m_editorFullscreen = false;
+                }
+            }
+            f11WasPressed = f11Now;
+        }
+
         int w, h;
         glfwGetFramebufferSize(m_window, &w, &h);
         if (w != m_windowWidth || h != m_windowHeight) {
@@ -335,10 +382,21 @@ void Application::run() {
             m_windowHeight = h;
         }
 
-        // Auto-detect monitor hotplug — set active zone to fullscreen on secondary
+        // Auto-detect monitor hotplug — set active zone to fullscreen on secondary.
+        // Debounced: GLFW transiently reports different monitor counts while new
+        // windows (projectors) are being created. React only after the count has
+        // stayed the same for ~1s to avoid nuking zone outputs on spurious blips.
         if (m_projectorAutoConnect) {
+            static int s_pendingCount = -1;
+            static int s_stableFrames = 0;
             int monitorCount = (int)ProjectorOutput::enumerateMonitors().size();
-            if (monitorCount != m_lastMonitorCount) {
+            if (s_pendingCount != monitorCount) {
+                s_pendingCount = monitorCount;
+                s_stableFrames = 0;
+            } else if (s_stableFrames < 1000) {
+                s_stableFrames++;
+            }
+            if (s_stableFrames >= 60 && monitorCount != m_lastMonitorCount) {
                 if (monitorCount > 1 && activeZone().outputDest == OutputDest::None) {
                     int sec = ProjectorOutput::findSecondaryMonitor(m_window);
                     if (sec >= 0) {
@@ -410,32 +468,75 @@ void Application::run() {
         }
 
         glViewport(0, 0, m_windowWidth, m_windowHeight);
-        glClearColor(0.055f, 0.063f, 0.082f, 1.0f);
+        glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        m_ui.beginFrame();
+        if (m_editorFullscreen) {
+            // Presentation mode: draw active zone output fullscreen, no UI
+            auto& z = activeZone();
+            GLuint outTex = z.warpFBO.textureId();
+            if (outTex) {
+                // Letterbox to preserve aspect ratio
+                float srcAspect = (float)z.width / (float)z.height;
+                float winAspect = (float)m_windowWidth / (float)m_windowHeight;
+                int vpW, vpH, vpX, vpY;
+                if (srcAspect > winAspect) {
+                    vpW = m_windowWidth;
+                    vpH = (int)(m_windowWidth / srcAspect);
+                    vpX = 0;
+                    vpY = (m_windowHeight - vpH) / 2;
+                } else {
+                    vpH = m_windowHeight;
+                    vpW = (int)(m_windowHeight * srcAspect);
+                    vpX = (m_windowWidth - vpW) / 2;
+                    vpY = 0;
+                }
+                glViewport(vpX, vpY, vpW, vpH);
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, outTex);
+                m_quad.draw();
+            }
+            // Still need ImGui frame for F11/Escape handling
+            m_ui.beginFrame();
+            m_ui.endFrame();
+        } else {
+            glClearColor(0.031f, 0.035f, 0.039f, 1.0f); // #08090a — Linear marketing black, so translucent panels blend correctly
+            glClear(GL_COLOR_BUFFER_BIT);
 
-        // Undo / Redo keybinds — use GLFW for reliable detection
-        if (!ImGui::GetIO().WantTextInput) {
-            static bool sUndoPrev = false, sRedoPrev = false;
-            bool ctrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                        glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
-            bool shift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-            bool z = glfwGetKey(m_window, GLFW_KEY_Z) == GLFW_PRESS;
-            bool y = glfwGetKey(m_window, GLFW_KEY_Y) == GLFW_PRESS;
+            m_ui.beginFrame();
 
-            bool undoNow = ctrl && z && !shift;
-            bool redoNow = ctrl && ((z && shift) || y);
+            // Undo / Redo keybinds — use GLFW for reliable detection
+            if (!ImGui::GetIO().WantTextInput) {
+                static bool sUndoPrev = false, sRedoPrev = false;
+                bool ctrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                            glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+                bool shift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                             glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+                bool z = glfwGetKey(m_window, GLFW_KEY_Z) == GLFW_PRESS;
+                bool y = glfwGetKey(m_window, GLFW_KEY_Y) == GLFW_PRESS;
 
-            if (undoNow && !sUndoPrev) m_undoStack.undo(m_layerStack, m_selectedLayer);
-            if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer);
-            sUndoPrev = undoNow;
-            sRedoPrev = redoNow;
+                bool undoNow = ctrl && z && !shift;
+                bool redoNow = ctrl && ((z && shift) || y);
+
+                if (undoNow && !sUndoPrev) m_undoStack.undo(m_layerStack, m_selectedLayer);
+                if (redoNow && !sRedoPrev) m_undoStack.redo(m_layerStack, m_selectedLayer);
+                sUndoPrev = undoNow;
+                sRedoPrev = redoNow;
+            }
+
+            renderUI();
+            m_ui.endFrame();
         }
-
-        renderUI();
-        m_ui.endFrame();
 
         // Check for agent screenshot trigger (after UI is rendered)
         pollScreenshotTrigger();
@@ -534,6 +635,12 @@ void Application::shutdown() {
     m_ndiOutput.destroy();
     NDIRuntime::instance().shutdown();
 #endif
+#ifdef HAS_SPOUT
+    for (auto& zp : m_zones) {
+        zp->spoutOutput.destroy();
+    }
+    m_spoutOutput.destroy();
+#endif
     m_ethereaClient.disconnect();
 #ifdef HAS_OPENCV
     m_scanner.cancelScan();
@@ -595,7 +702,8 @@ void Application::updateSources() {
                     m_audioAnalyzer.bass(),
                     (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
                     m_audioAnalyzer.treble(),
-                    m_audioAnalyzer.beatDecay()
+                    m_audioAnalyzer.beatDecay(),
+                    &m_midiManager
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
@@ -605,7 +713,9 @@ void Application::updateSources() {
                     for (int j = 0; j < m_layerStack.count(); j++) {
                         auto& srcLayer = m_layerStack[j];
                         if (srcLayer->id == binding.sourceLayerId && srcLayer->source) {
-                            binding.textureId = srcLayer->source->textureId();
+                            GLuint srcTex = srcLayer->source->textureId();
+                            if (srcTex == 0) break; // source not yet initialized
+                            binding.textureId = srcTex;
                             binding.width = srcLayer->source->width();
                             binding.height = srcLayer->source->height();
                             binding.flippedV = srcLayer->source->isFlippedV();
@@ -724,7 +834,21 @@ void Application::compositeAndWarp() {
     }
 #endif
 
-    // Re-render any dirty masks in mapping profiles
+    // Re-render any dirty masks on layers
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& layer = m_layerStack[i];
+        for (auto& mask : layer->masks) {
+            if (mask.path.isDirty() && mask.path.count() >= 3) {
+                if (!mask.texture) {
+                    mask.texture = std::make_shared<Texture>();
+                }
+                m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture);
+                mask.path.clearDirty();
+            }
+        }
+    }
+
+    // Re-render any dirty canvas-level masks (MappingProfile)
     for (auto& mp : m_mappings) {
         for (auto& mask : mp->masks) {
             if (mask.path.isDirty() && mask.path.count() >= 3) {
@@ -780,32 +904,35 @@ void Application::compositeZone(OutputZone& zone) {
         sourceTex = m_testPattern.id();
     }
 
-    // Apply mapping masks to the composite BEFORE warping
-    // Multiple masks are combined as union (additive), then applied once
+    // Per-layer masks are applied during compositing (CompositeEngine).
+    // Canvas-level masks (MappingProfile) are applied here, after compositing, before warp.
     auto* mpMask = mappingForZone(zone);
     if (mpMask && !mpMask->masks.empty()) {
-        // Count valid masks
         int validCount = 0;
-        for (auto& mask : mpMask->masks)
-            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) validCount++;
-
+        GLuint singleMaskTex = 0;
+        float singleFeather = 0.0f;
+        bool singleInvert = false;
+        for (auto& mask : mpMask->masks) {
+            if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                validCount++;
+                singleMaskTex = mask.texture->id();
+                if (validCount == 1) {
+                    singleFeather = mask.feather;
+                    singleInvert = mask.invert;
+                }
+            }
+        }
         if (validCount > 0) {
-            if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height)
-                m_edgeBlendFBO.create(zone.width, zone.height);
-
+            GLuint combinedMaskTex = singleMaskTex;
             if (validCount > 1) {
-                // Combine all mask textures into one via additive blending (union)
                 if (m_maskPingPongFBO.width() != zone.width || m_maskPingPongFBO.height() != zone.height)
                     m_maskPingPongFBO.create(zone.width, zone.height);
-
                 m_maskPingPongFBO.bind();
                 glViewport(0, 0, zone.width, zone.height);
-                glClearColor(0, 0, 0, 1); // black = fully masked
+                glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
-
                 glEnable(GL_BLEND);
-                glBlendFunc(GL_ONE, GL_ONE); // additive (saturates at white)
-
+                glBlendFunc(GL_ONE, GL_ONE);
                 m_passthroughShader.use();
                 m_passthroughShader.setInt("uTexture", 0);
                 m_passthroughShader.setFloat("uOpacity", 1.0f);
@@ -816,7 +943,8 @@ void Application::compositeZone(OutputZone& zone) {
                 m_passthroughShader.setFloat("uTileY", 1.0f);
                 m_passthroughShader.setInt("uMosaicMode", 0);
                 m_passthroughShader.setFloat("uFeather", 0.0f);
-
+                m_passthroughShader.setFloat("uMaskFeather", 0.0f);
+                m_passthroughShader.setBool("uMaskInvert", false);
                 for (auto& mask : mpMask->masks) {
                     if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
                         glActiveTexture(GL_TEXTURE0);
@@ -824,25 +952,13 @@ void Application::compositeZone(OutputZone& zone) {
                         m_quad.draw();
                     }
                 }
-
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // restore default
+                glDisable(GL_BLEND);
                 Framebuffer::unbind();
-            }
-
-            // Determine which mask texture to use (single mask or combined)
-            GLuint combinedMaskTex = 0;
-            if (validCount == 1) {
-                for (auto& mask : mpMask->masks) {
-                    if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
-                        combinedMaskTex = mask.texture->id();
-                        break;
-                    }
-                }
-            } else {
                 combinedMaskTex = m_maskPingPongFBO.textureId();
             }
-
-            // Apply the combined mask to the source
+            // Apply the canvas mask to the composite
+            if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height)
+                m_edgeBlendFBO.create(zone.width, zone.height);
             m_edgeBlendFBO.bind();
             glViewport(0, 0, zone.width, zone.height);
             glClearColor(0, 0, 0, 0);
@@ -858,6 +974,8 @@ void Application::compositeZone(OutputZone& zone) {
             m_passthroughShader.setFloat("uTileY", 1.0f);
             m_passthroughShader.setInt("uMosaicMode", 0);
             m_passthroughShader.setFloat("uFeather", 0.0f);
+            m_passthroughShader.setFloat("uMaskFeather", singleFeather);
+            m_passthroughShader.setBool("uMaskInvert", singleInvert);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, sourceTex);
             glActiveTexture(GL_TEXTURE1);
@@ -868,7 +986,7 @@ void Application::compositeZone(OutputZone& zone) {
         }
     }
 
-    // Store post-mask texture for canvas preview
+    // Store composite texture for canvas preview
     zone.canvasTexture = sourceTex;
 
     zone.warpFBO.bind();
@@ -951,7 +1069,6 @@ void Application::compositeZone(OutputZone& zone) {
         Framebuffer::unbind();
     }
 
-    // Masks are now applied pre-warp (above), so they're visible in the canvas preview
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
@@ -985,32 +1102,50 @@ void Application::presentOutputs() {
         auto& zone = *m_zones[i];
 
         if (zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0) {
-            // Verify monitor still exists before using it
+            // Verify monitor still exists before using it.
             auto monitors = ProjectorOutput::enumerateMonitors();
             if (zone.outputMonitor >= (int)monitors.size()) {
-                // Monitor disconnected -- clear destination to avoid crash
-                zone.outputDest = OutputDest::None;
-                zone.outputMonitor = -1;
-                // Destroy any stale projector
-                auto stale = m_projectors.find(zone.outputMonitor);
-                if (stale != m_projectors.end()) {
-                    stale->second->destroy();
-                    m_projectors.erase(stale);
-                }
+                // Monitor index out of range this frame. GLFW can report a
+                // transiently shrunk monitor list while new windows are being
+                // created — do NOT wipe the zone's saved destination. Just
+                // skip rendering this frame; it will recover once the monitor
+                // list stabilises. Keep the projector in neededMonitors so the
+                // cleanup pass below doesn't destroy it either.
+                neededMonitors.insert(zone.outputMonitor);
             } else {
                 neededMonitors.insert(zone.outputMonitor);
                 // Ensure a projector exists on this monitor
                 auto it = m_projectors.find(zone.outputMonitor);
                 if (it == m_projectors.end() || !it->second->isActive()) {
-                    auto proj = std::make_unique<ProjectorOutput>();
-                    if (proj->create(m_window, zone.outputMonitor)) {
-                        zone.resize(proj->projectorWidth(), proj->projectorHeight());
-                        m_projectors[zone.outputMonitor] = std::move(proj);
+                    // Rate-limit retries so a persistently-failing monitor
+                    // (e.g. editor's own) doesn't hammer glfwCreateWindow
+                    // every frame. Retry no more often than once per ~60
+                    // frames; after too many failures, give up and clear.
+                    static std::unordered_map<int, int> s_retryCountdown;
+                    static std::unordered_map<int, int> s_failureCount;
+                    int key = zone.outputMonitor;
+                    int& countdown = s_retryCountdown[key];
+                    if (countdown > 0) {
+                        countdown--;
                     } else {
-                        // Failed (e.g. tried to project on editor's own monitor)
-                        // -- reset zone so we don't retry every frame
-                        zone.outputDest = OutputDest::None;
-                        zone.outputMonitor = -1;
+                        auto proj = std::make_unique<ProjectorOutput>();
+                        if (proj->create(m_window, zone.outputMonitor)) {
+                            zone.resize(proj->projectorWidth(), proj->projectorHeight());
+                            m_projectors[zone.outputMonitor] = std::move(proj);
+                            s_failureCount[key] = 0;
+                        } else {
+                            // Back off for ~1s before next retry.
+                            countdown = 60;
+                            if (++s_failureCount[key] >= 10) {
+                                // 10 consecutive failures (~10s) — give up.
+                                std::cerr << "Projector on monitor " << key
+                                          << " failed 10 times; clearing zone output."
+                                          << std::endl;
+                                zone.outputDest = OutputDest::None;
+                                zone.outputMonitor = -1;
+                                s_failureCount[key] = 0;
+                            }
+                        }
                     }
                 }
                 auto it2 = m_projectors.find(zone.outputMonitor);
@@ -1034,6 +1169,21 @@ void Application::presentOutputs() {
             // Destroy NDI sender if no longer needed
             if (zone.ndiOutput.isActive()) {
                 zone.ndiOutput.destroy();
+            }
+        }
+#endif
+#ifdef HAS_SPOUT
+        if (zone.outputDest == OutputDest::Spout) {
+            if (!zone.spoutOutput.isActive()) {
+                std::string name = "Easel - " + (zone.spoutStreamName.empty() ? zone.name : zone.spoutStreamName);
+                zone.spoutOutput.create(name, zone.warpFBO.width(), zone.warpFBO.height());
+            }
+            if (zone.spoutOutput.isActive()) {
+                zone.spoutOutput.send(zone.warpFBO.textureId(), zone.warpFBO.width(), zone.warpFBO.height());
+            }
+        } else {
+            if (zone.spoutOutput.isActive()) {
+                zone.spoutOutput.destroy();
             }
         }
 #endif
@@ -1068,6 +1218,11 @@ void Application::presentOutputs() {
         m_ndiOutput.send(active.readbackFBO.textureId(), active.width, active.height);
     }
 #endif
+#ifdef HAS_SPOUT
+    if (m_spoutOutputEnabled && m_spoutOutput.isActive()) {
+        m_spoutOutput.send(active.warpFBO.textureId(), active.warpFBO.width(), active.warpFBO.height());
+    }
+#endif
 
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive()) {
@@ -1087,7 +1242,12 @@ void Application::addZone() {
         zone->width = m_zones[0]->width;
         zone->height = m_zones[0]->height;
     }
-    zone->mappingIndex = 0; // default to first mapping
+    // Create a fresh mapping profile for this zone (independent masks/warp)
+    auto mp = std::make_unique<MappingProfile>();
+    mp->name = zone->name;
+    mp->init();
+    zone->mappingIndex = (int)m_mappings.size();
+    m_mappings.push_back(std::move(mp));
     zone->init();
     m_zones.push_back(std::move(zone));
 }
@@ -1182,6 +1342,11 @@ void Application::removeZone(int index) {
         zone.ndiOutput.destroy();
     }
 #endif
+#ifdef HAS_SPOUT
+    if (zone.spoutOutput.isActive()) {
+        zone.spoutOutput.destroy();
+    }
+#endif
 
     m_zones.erase(m_zones.begin() + index);
     if (m_activeZone >= (int)m_zones.size()) {
@@ -1198,21 +1363,62 @@ void Application::duplicateZone(int index) {
     z->width = src.width;
     z->height = src.height;
     z->compPreset = src.compPreset;
-    z->mappingIndex = src.mappingIndex; // share the same mapping profile
     z->showAllLayers = src.showAllLayers;
     z->visibleLayerIds = src.visibleLayerIds;
     z->outputDest = OutputDest::None; // user picks new output for copy
     z->outputMonitor = -1;
 
-    z->init();
+    // Deep-copy the source zone's mapping profile (independent masks/warp)
+    auto* srcMapping = mappingForZone(src);
+    auto mp = std::make_unique<MappingProfile>();
+    mp->name = z->name;
+    mp->init();
+    if (srcMapping) {
+        mp->warpMode = srcMapping->warpMode;
+        mp->cornerPin.setCorners(srcMapping->cornerPin.corners());
+        mp->edgeBlendLeft = srcMapping->edgeBlendLeft;
+        mp->edgeBlendRight = srcMapping->edgeBlendRight;
+        mp->edgeBlendTop = srcMapping->edgeBlendTop;
+        mp->edgeBlendBottom = srcMapping->edgeBlendBottom;
+        mp->edgeBlendGamma = srcMapping->edgeBlendGamma;
+        // Copy masks
+        for (auto& srcMask : srcMapping->masks) {
+            MappingMask m;
+            m.name = srcMask.name;
+            m.path = srcMask.path;
+            m.feather = srcMask.feather;
+            m.invert = srcMask.invert;
+            // Texture will be re-rendered on next frame
+            mp->masks.push_back(std::move(m));
+        }
+    }
+    z->mappingIndex = (int)m_mappings.size();
+    m_mappings.push_back(std::move(mp));
 
+    z->init();
     m_zones.push_back(std::move(z));
 }
 
 void Application::renderUI() {
-    // Escape key deselects current layer
-    if (m_selectedLayer >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsAnyItemActive()) {
+    // Escape key deselects current layer — but NOT while we're in mask edit mode,
+    // where Esc belongs to the mask editor (see ViewportPanel::renderMaskOverlay).
+    if (!m_maskEditMode && m_selectedLayer >= 0 &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsAnyItemActive()) {
         m_selectedLayer = -1;
+    }
+
+    // Keep mapping profile names in sync with their owning zone's name. When
+    // the user renames a zone (via double-click on its tab), the mapping that
+    // the zone points to should adopt the same name so the Mapping dropdown
+    // reads meaningfully ("Main", "Floor screen", …) instead of stale defaults.
+    for (auto& zPtr : m_zones) {
+        if (!zPtr) continue;
+        int mi = zPtr->mappingIndex;
+        if (mi >= 0 && mi < (int)m_mappings.size() && m_mappings[mi]) {
+            if (m_mappings[mi]->name != zPtr->name) {
+                m_mappings[mi]->name = zPtr->name;
+            }
+        }
     }
     // Click on any non-interactive area deselects (Escape already handles keyboard)
     // Viewport and LayerPanel handle their own deselect on empty-space click.
@@ -1321,6 +1527,13 @@ void Application::renderUI() {
     m_ui.setupDockspace(transportBarH);
     renderMenuBar();
 
+    // Reset editing state when switching zones
+    if (m_activeZone != m_prevActiveZone) {
+        m_maskEditMode = false;
+        m_viewportPanel.resetDragState();
+        m_prevActiveZone = m_activeZone;
+    }
+
     // Scoped: zone tab clicks inside viewport render may change m_activeZone
     {
         auto& z = activeZone();
@@ -1350,9 +1563,10 @@ void Application::renderUI() {
                 }
             }
         }
-        // Show the flat (pre-warp) composite in the viewport so layer bboxes match.
-        // Warp is only applied to projector/NDI output.
-        GLuint previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
+        // Show the warped output in the viewport so corner pin / mesh warp
+        // edits are visible.  Fall back to pre-warp canvas when no warp FBO.
+        GLuint previewTex = z.warpFBO.textureId() ? z.warpFBO.textureId()
+                          : (z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture());
         if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
@@ -1404,19 +1618,154 @@ void Application::renderUI() {
         if (!path.empty()) loadShader(path);
     }
 
-    // --- Masks panel (next to Layers) ---
+    // --- Masks panel ---
     ImGui::Begin("Masks");
     {
-        auto* zoneMapping = mappingForZone(zone);
-        if (zoneMapping) {
-            for (int mi = 0; mi < (int)zoneMapping->masks.size(); mi++) {
-                ImGui::PushID(8000 + mi);
-                auto& mask = zoneMapping->masks[mi];
-                bool isActive = (zoneMapping->activeMaskIndex == mi && m_maskEditMode);
+        // Edge blend sits at the top of Masks — both are output-stage refinements
+        // that clip / blend the composited zone before it's sent to the projector.
+        renderEdgeBlendInline(zone);
+        ImGui::Dummy(ImVec2(0, 4));
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float w = ImGui::GetContentRegionAvail().x;
+            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 25));
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // ===== Canvas Masks (output-level, applied to entire composite) =====
+        auto* canvasMaskMapping = mappingForZone(zone);
+        // Zone-colored header
+        // Monochrome zone indicators — distinguish zones by lightness, not hue
+        static const float zcols[][3] = {
+            {0.96f,0.96f,0.96f}, {0.86f,0.86f,0.86f}, {0.76f,0.76f,0.76f}, {0.66f,0.66f,0.66f},
+            {0.56f,0.56f,0.56f}, {0.46f,0.46f,0.46f}, {0.80f,0.80f,0.80f}, {0.70f,0.70f,0.70f},
+        };
+        const float* zc = zcols[m_activeZone % 8];
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
+        ImGui::Text("Canvas Masks");
+        ImGui::PopStyleColor();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+        ImGui::Text("Clips entire output before warp");
+        ImGui::PopStyleColor();
+        if (canvasMaskMapping) {
+            for (int mi = 0; mi < (int)canvasMaskMapping->masks.size(); mi++) {
+                ImGui::PushID(9000 + mi);
+                auto& mask = canvasMaskMapping->masks[mi];
+                bool isActive = (canvasMaskMapping->activeMaskIndex == mi && m_maskEditMode && m_selectedLayer < 0);
 
                 if (isActive) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.25f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+                }
+                char label[128];
+                snprintf(label, sizeof(label), "%s (%d pts)", mask.name.c_str(), mask.path.count());
+                float btnW = ImGui::GetContentRegionAvail().x - 28;
+                if (ImGui::Button(label, ImVec2(btnW, 0))) {
+                    if (isActive) {
+                        m_maskEditMode = false;
+                        canvasMaskMapping->activeMaskIndex = -1;
+                    } else {
+                        canvasMaskMapping->activeMaskIndex = mi;
+                        m_maskEditMode = true;
+                        m_selectedLayer = -1; // deselect layer to signal canvas mask mode
+                    }
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+                if (ImGui::Button("X", ImVec2(24, 0))) {
+                    if (canvasMaskMapping->activeMaskIndex == mi) { m_maskEditMode = false; canvasMaskMapping->activeMaskIndex = -1; }
+                    else if (canvasMaskMapping->activeMaskIndex > mi) canvasMaskMapping->activeMaskIndex--;
+                    canvasMaskMapping->masks.erase(canvasMaskMapping->masks.begin() + mi);
+                    ImGui::PopStyleColor(2);
+                    ImGui::PopID();
+                    goto masks_panel_done;
+                }
+                ImGui::PopStyleColor(2);
+
+                // Feather + Invert inline (when active)
+                if (isActive) {
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("Feather##cmf", &mask.feather, 0.0f, 0.15f, "%.3f");
+                    ImGui::Checkbox("Invert##cmi", &mask.invert);
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(zc[0], zc[1], zc[2], 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
+            if (ImGui::Button("+ Canvas Mask", ImVec2(-1, 0))) {
+                MappingMask newMask;
+                newMask.name = "Canvas " + std::to_string(canvasMaskMapping->masks.size() + 1);
+                canvasMaskMapping->masks.push_back(std::move(newMask));
+                canvasMaskMapping->activeMaskIndex = (int)canvasMaskMapping->masks.size() - 1;
+                m_maskEditMode = true;
+                m_selectedLayer = -1;
+            }
+            ImGui::PopStyleColor(4);
+
+            // Shape presets for active canvas mask
+            if (m_maskEditMode && m_selectedLayer < 0 && canvasMaskMapping->activeMaskIndex >= 0 &&
+                canvasMaskMapping->activeMaskIndex < (int)canvasMaskMapping->masks.size()) {
+                auto& mask = canvasMaskMapping->masks[canvasMaskMapping->activeMaskIndex];
+                float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(zc[0], zc[1], zc[2], 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
+                if (ImGui::Button("Rect##c", ImVec2(shapeW, 0))) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
+                ImGui::SameLine();
+                if (ImGui::Button("Circle##c", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
+                ImGui::SameLine();
+                if (ImGui::Button("Tri##c", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); }
+                ImGui::SameLine();
+                if (ImGui::Button("Oct##c", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); }
+                ImGui::SameLine();
+                if (ImGui::Button("Star##c", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
+                ImGui::PopStyleColor(4);
+            }
+        }
+
+        // Divider between canvas and layer masks
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            dl->AddLine(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y), IM_COL32(255, 255, 255, 40));
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // ===== Layer Masks (per-layer, follow layer transform) =====
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        ImGui::Text("Layer Masks");
+        ImGui::PopStyleColor();
+        {
+        // Get selected layer for mask editing
+        std::shared_ptr<Layer> maskLayer;
+        if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+            maskLayer = m_layerStack[m_selectedLayer];
+        }
+        if (maskLayer) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("%s", maskLayer->name.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0, 2));
+
+            for (int mi = 0; mi < (int)maskLayer->masks.size(); mi++) {
+                ImGui::PushID(8000 + mi);
+                auto& mask = maskLayer->masks[mi];
+                bool isActive = (maskLayer->activeMaskIndex == mi && m_maskEditMode);
+
+                if (isActive) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 } else {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
@@ -1428,9 +1777,9 @@ void Application::renderUI() {
                 if (ImGui::Button(label, ImVec2(btnW, 0))) {
                     if (isActive) {
                         m_maskEditMode = false;
-                        zoneMapping->activeMaskIndex = -1;
+                        maskLayer->activeMaskIndex = -1;
                     } else {
-                        zoneMapping->activeMaskIndex = mi;
+                        maskLayer->activeMaskIndex = mi;
                         m_maskEditMode = true;
                     }
                 }
@@ -1440,9 +1789,9 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.1f, 0.1f, 0.15f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
                 if (ImGui::Button("X", ImVec2(24, 0))) {
-                    if (zoneMapping->activeMaskIndex == mi) { m_maskEditMode = false; zoneMapping->activeMaskIndex = -1; }
-                    else if (zoneMapping->activeMaskIndex > mi) zoneMapping->activeMaskIndex--;
-                    zoneMapping->masks.erase(zoneMapping->masks.begin() + mi);
+                    if (maskLayer->activeMaskIndex == mi) { m_maskEditMode = false; maskLayer->activeMaskIndex = -1; }
+                    else if (maskLayer->activeMaskIndex > mi) maskLayer->activeMaskIndex--;
+                    maskLayer->masks.erase(maskLayer->masks.begin() + mi);
                     ImGui::PopStyleColor(2);
                     ImGui::PopID();
                     goto masks_panel_done;
@@ -1452,28 +1801,28 @@ void Application::renderUI() {
             }
 
             // Add mask button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("+ Add Mask", ImVec2(-1, 0))) {
-                MappingMask newMask;
-                newMask.name = "Mask " + std::to_string(zoneMapping->masks.size() + 1);
-                zoneMapping->masks.push_back(std::move(newMask));
-                zoneMapping->activeMaskIndex = (int)zoneMapping->masks.size() - 1;
+                Layer::LayerMask newMask;
+                newMask.name = "Mask " + std::to_string(maskLayer->masks.size() + 1);
+                maskLayer->masks.push_back(std::move(newMask));
+                maskLayer->activeMaskIndex = (int)maskLayer->masks.size() - 1;
                 m_maskEditMode = true;
             }
             ImGui::PopStyleColor(4);
 
             // Shape presets for active mask
-            if (m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
-                zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
-                auto& mask = zoneMapping->masks[zoneMapping->activeMaskIndex];
+            if (m_maskEditMode && maskLayer->activeMaskIndex >= 0 &&
+                maskLayer->activeMaskIndex < (int)maskLayer->masks.size()) {
+                auto& mask = maskLayer->masks[maskLayer->activeMaskIndex];
                 float shapeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("Rect", ImVec2(shapeW, 0))) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
                 ImGui::SameLine();
                 if (ImGui::Button("Circle", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
@@ -1485,11 +1834,73 @@ void Application::renderUI() {
                 if (ImGui::Button("Star", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
                 ImGui::PopStyleColor(4);
 
+                // Feather + Invert controls (per-mask)
+                ImGui::Dummy(ImVec2(0, 3));
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("Feather##mf", &mask.feather, 0.0f, 0.15f, "%.3f");
+                ImGui::Checkbox("Invert##mi", &mask.invert);
+
+                // Alignment tools (visible when 2+ points selected)
+                auto& selPts = m_viewportPanel.maskSelectedPoints();
+                if (selPts.size() >= 2 && mask.path.count() >= 2) {
+                    ImGui::Dummy(ImVec2(0, 3));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::Text("Align (%d pts)", (int)selPts.size());
+                    ImGui::PopStyleColor();
+
+                    float alignW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 4) / 5.0f;
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+                    auto& mpts = mask.path.points();
+                    if (ImGui::Button("Left##al", ImVec2(alignW, 0))) {
+                        float minX = 1.0f;
+                        for (int si : selPts) if (si < (int)mpts.size()) minX = std::min(minX, mpts[si].position.x);
+                        for (int si : selPts) if (si < (int)mpts.size()) mpts[si].position.x = minX;
+                        mask.path.markDirty();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("CtrX##al", ImVec2(alignW, 0))) {
+                        float avgX = 0; int c = 0;
+                        for (int si : selPts) if (si < (int)mpts.size()) { avgX += mpts[si].position.x; c++; }
+                        if (c > 0) { avgX /= c; for (int si : selPts) if (si < (int)mpts.size()) mpts[si].position.x = avgX; }
+                        mask.path.markDirty();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Right##al", ImVec2(alignW, 0))) {
+                        float maxX = 0.0f;
+                        for (int si : selPts) if (si < (int)mpts.size()) maxX = std::max(maxX, mpts[si].position.x);
+                        for (int si : selPts) if (si < (int)mpts.size()) mpts[si].position.x = maxX;
+                        mask.path.markDirty();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Top##al", ImVec2(alignW, 0))) {
+                        float maxY = 0.0f;
+                        for (int si : selPts) if (si < (int)mpts.size()) maxY = std::max(maxY, mpts[si].position.y);
+                        for (int si : selPts) if (si < (int)mpts.size()) mpts[si].position.y = maxY;
+                        mask.path.markDirty();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Bot##al", ImVec2(alignW, 0))) {
+                        float minY = 1.0f;
+                        for (int si : selPts) if (si < (int)mpts.size()) minY = std::min(minY, mpts[si].position.y);
+                        for (int si : selPts) if (si < (int)mpts.size()) mpts[si].position.y = minY;
+                        mask.path.markDirty();
+                    }
+                    ImGui::PopStyleColor(3);
+                }
+
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
-                ImGui::TextWrapped("Click: add  |  Drag: move  |  R-click: del");
+                ImGui::TextWrapped("Shift+Click: multi-select  |  R-click: del");
                 ImGui::PopStyleColor();
             }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+            ImGui::Text("Select a layer to add masks");
+            ImGui::PopStyleColor();
         }
+        } // end layer masks scope
         masks_panel_done:;
     }
     ImGui::End();
@@ -1524,7 +1935,7 @@ void Application::renderUI() {
         capturedPre = true;
     }
 
-    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice);
+    m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager);
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
     if (m_propertyPanel.undoNeeded) {
@@ -1557,19 +1968,63 @@ void Application::renderUI() {
 
     // Set viewport edit mode AFTER warp editor (which may toggle m_maskEditMode)
     {
-        auto* zoneMapping = mappingForZone(zone);
-        MappingMask* activeMask = nullptr;
-        if (zoneMapping && m_maskEditMode && zoneMapping->activeMaskIndex >= 0 &&
-            zoneMapping->activeMaskIndex < (int)zoneMapping->masks.size()) {
-            activeMask = &zoneMapping->masks[zoneMapping->activeMaskIndex];
+        MaskPath* editMaskPath = nullptr;
+        glm::mat3 editMaskXform(1.0f);
+
+        // Check for active layer mask
+        if (m_maskEditMode && selectedLayer && selectedLayer->activeMaskIndex >= 0 &&
+            selectedLayer->activeMaskIndex < (int)selectedLayer->masks.size()) {
+            editMaskPath = &selectedLayer->masks[selectedLayer->activeMaskIndex].path;
+            // Build the same transform the compositor uses
+            editMaskXform = selectedLayer->getTransformMatrix();
+            bool mosaicFill = (selectedLayer->tileX > 1.0f || selectedLayer->tileY > 1.0f ||
+                               selectedLayer->mosaicMode != MosaicMode::Mirror);
+            if (!mosaicFill) {
+                int lw = selectedLayer->width(), lh = selectedLayer->height();
+                if (lw > 0 && lh > 0 && zone.width > 0 && zone.height > 0) {
+                    float srcAspect = (float)lw / lh;
+                    float canvasAspect = (float)zone.width / zone.height;
+                    glm::mat3 nativeScale(1.0f);
+                    nativeScale[0][0] = srcAspect / canvasAspect;
+                    nativeScale[1][1] = 1.0f;
+                    editMaskXform = editMaskXform * nativeScale;
+                }
+            }
         }
-        if (m_maskEditMode && activeMask) {
+
+        // Check for active canvas mask (m_selectedLayer < 0 signals canvas mask mode)
+        auto* canvasMapping = mappingForZone(zone);
+        if (!editMaskPath && m_maskEditMode && m_selectedLayer < 0 && canvasMapping &&
+            canvasMapping->activeMaskIndex >= 0 &&
+            canvasMapping->activeMaskIndex < (int)canvasMapping->masks.size()) {
+            editMaskPath = &canvasMapping->masks[canvasMapping->activeMaskIndex].path;
+            editMaskXform = glm::mat3(1.0f); // canvas masks are in canvas UV (identity)
+        }
+
+        if (m_maskEditMode && editMaskPath) {
             m_viewportPanel.setEditMode(ViewportPanel::EditMode::Mask);
-            m_viewportPanel.renderMaskOverlay(activeMask->path, glm::mat3(1.0f));
+            // Canvas masks get zone-colored overlay; layer masks get default (gold)
+            int maskZoneIdx = (m_selectedLayer < 0) ? m_activeZone : -1;
+            m_viewportPanel.renderMaskOverlay(*editMaskPath, editMaskXform, maskZoneIdx);
+
+            // Save button / Esc handler in the mask banner fires this.
+            if (m_viewportPanel.wantsExitMaskMode()) {
+                m_viewportPanel.clearExitMaskSignal();
+                m_maskEditMode = false;
+                // Clear the active mask index so the mask row stops showing as "edit"
+                auto* cm = mappingForZone(zone);
+                if (cm && m_selectedLayer < 0) cm->activeMaskIndex = -1;
+                if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+                    auto& layer = m_layerStack[m_selectedLayer];
+                    if (layer) layer->activeMaskIndex = -1;
+                }
+            }
         } else {
             m_viewportPanel.setEditMode(ViewportPanel::EditMode::Normal);
             m_viewportPanel.renderLayerOverlay(m_layerStack, m_selectedLayer, zone.width, zone.height);
             m_maskEditMode = false;
+            // Drop any stray exit signal so it doesn't fire later
+            m_viewportPanel.clearExitMaskSignal();
         }
     }
 
@@ -1580,7 +2035,8 @@ void Application::renderUI() {
         for (auto& zp : m_zones) {
             zoneTextures.push_back(zp->warpFBO.textureId());
         }
-        m_stageView.render(zoneTextures);
+        m_stageView.render(zoneTextures,
+                           [this]() { renderStageInlineSetup(activeZone()); });
 
         // Handle import request from StageView
         if (m_stageView.wantsImport()) {
@@ -1592,136 +2048,8 @@ void Application::renderUI() {
         }
     }
 
-    // Projector panel
-    ImGui::Begin("Projector");
-    {
-        // --- Composition Resolution ---
-        {
-            static const char* presetLabels[] = {
-                "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
-                "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
-            };
-            static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
-            static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
-            const int presetCount = 7;
-
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::Text("Composition");
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            ImGui::Text("%dx%d", zone.width, zone.height);
-
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##CompRes", &zone.compPreset, presetLabels, presetCount)) {
-                if (zone.compPreset < presetCount - 1) {
-                    int nw = presetW[zone.compPreset];
-                    int nh = presetH[zone.compPreset];
-                    zone.resize(nw, nh);
-                }
-            }
-
-            // Custom resolution input
-            if (zone.compPreset == presetCount - 1) {
-                float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-                ImGui::SetNextItemWidth(half);
-                int cw = zone.width;
-                if (ImGui::DragInt("##CW", &cw, 1, 128, 16384, "%d")) {
-                    if (cw >= 128 && cw <= 16384) {
-                        zone.resize(cw, zone.height);
-                    }
-                }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(half);
-                int ch = zone.height;
-                if (ImGui::DragInt("##CH", &ch, 1, 128, 16384, "%d")) {
-                    if (ch >= 128 && ch <= 16384) {
-                        zone.resize(zone.width, ch);
-                    }
-                }
-            }
-
-            ImGui::Dummy(ImVec2(0, 4));
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                float w = ImGui::GetContentRegionAvail().x;
-                dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
-            }
-            ImGui::Dummy(ImVec2(0, 6));
-        }
-
-        // Edge Blend
-        {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-            ImGui::Text("Edge Blend");
-            ImGui::PopStyleColor();
-
-            auto* ebm = mappingForZone(zone);
-            if (ebm) {
-                float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-                ImGui::SetNextItemWidth(half);
-                ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(half);
-                ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
-
-                ImGui::SetNextItemWidth(half);
-                ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(half);
-                ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
-
-                ImGui::SetNextItemWidth(-1);
-                ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
-            }
-
-            ImGui::Dummy(ImVec2(0, 4));
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                float w = ImGui::GetContentRegionAvail().x;
-                dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
-            }
-            ImGui::Dummy(ImVec2(0, 6));
-        }
-
-        // Output routing status (read-only — routing is done via Output dropdown in viewport)
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Output");
-        ImGui::PopStyleColor();
-
-        if (zone.outputDest == OutputDest::None) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
-            ImGui::Text("Preview only");
-            ImGui::PopStyleColor();
-        } else if (zone.outputDest == OutputDest::Fullscreen) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-            auto monitors = ProjectorOutput::enumerateMonitors();
-            if (zone.outputMonitor >= 0 && zone.outputMonitor < (int)monitors.size()) {
-                ImGui::Text("Fullscreen: %s", monitors[zone.outputMonitor].name.c_str());
-            } else {
-                ImGui::Text("Fullscreen");
-            }
-            ImGui::PopStyleColor();
-        } else if (zone.outputDest == OutputDest::NDI) {
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-            ImGui::Text("NDI: %s", zone.ndiStreamName.empty() ? zone.name.c_str() : zone.ndiStreamName.c_str());
-            ImGui::PopStyleColor();
-        }
-
-        ImGui::Checkbox("Auto-detect", &m_projectorAutoConnect);
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("(?)");
-        ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Automatically open projector when a\nsecond display is connected");
-        }
-    }
-    ImGui::End();
+    // Projector settings are now rendered inline inside the Canvas tab
+    // via renderCompositionInlinePanel(). The standalone "Projector" window is gone.
 
     // Capture panel
     ImGui::Begin("Capture");
@@ -1737,10 +2065,10 @@ void Application::renderUI() {
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
 
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("Add")) {
                     addScreenCapture(i);
                 }
@@ -1751,10 +2079,10 @@ void Application::renderUI() {
         }
 
         if (ImGui::CollapsingHeader("Window Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Refresh Windows", ImVec2(-1, 0))) {
                 m_windowList = WindowCaptureSource::enumerateWindows();
             }
@@ -1775,10 +2103,10 @@ void Application::renderUI() {
                 ImGui::Text("%s", title.c_str());
                 ImGui::SameLine();
 
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("Add")) {
 #ifdef _WIN32
                     addWindowCapture(m_windowList[i].hwnd, m_windowList[i].title);
@@ -1837,10 +2165,10 @@ void Application::renderUI() {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputText("##SCPath", scPath, sizeof(scPath));
 
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Connect", ImVec2(-1, 0))) {
                 m_shaderClaw.connect(scPath);
             }
@@ -1870,10 +2198,10 @@ void Application::renderUI() {
             ImGui::PopStyleColor(4);
 
             // Refresh button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.12f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.45f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
                 m_shaderClaw.refreshManifest();
             }
@@ -1883,7 +2211,7 @@ void Application::renderUI() {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
             float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
+            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 40));
             ImGui::Dummy(ImVec2(0, 6));
 
             // Update animated preview shader (for hovered item)
@@ -1910,16 +2238,18 @@ void Application::renderUI() {
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
                     // ShaderSource renders to its own FBO, read from its texture
                     GLuint thumbTex = m_scThumbRenderer->textureId();
-                    GLuint tempFBO;
-                    glGenFramebuffers(1, &tempFBO);
-                    glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
-                    glReadPixels(0, 0, 48, 48, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-                    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-                    glDeleteFramebuffers(1, &tempFBO);
-                    entry.texture->createEmpty(48, 48);
-                    entry.texture->updateData(pixels.data(), 48, 48);
-                    entry.ready = true;
+                    if (thumbTex != 0) {
+                        GLuint tempFBO;
+                        glGenFramebuffers(1, &tempFBO);
+                        glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
+                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
+                        glReadPixels(0, 0, 48, 48, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                        glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                        glDeleteFramebuffers(1, &tempFBO);
+                        entry.texture->createEmpty(48, 48);
+                        entry.texture->updateData(pixels.data(), 48, 48);
+                        entry.ready = true;
+                    }
                     m_scThumbRenderer.reset();
                     m_scThumbRenderPath.clear();
                 }
@@ -1974,10 +2304,10 @@ void Application::renderUI() {
                 }
 
                 ImGui::BeginGroup();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::SmallButton("+")) {
                     loadShader(shader.fullPath);
                 }
@@ -1985,7 +2315,7 @@ void Application::renderUI() {
 
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Text, isHoveredShader
-                    ? ImVec4(0.0f, 0.85f, 1.0f, 1.0f)
+                    ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
                     : ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
                 ImGui::Text("%s", shader.title.c_str());
                 ImGui::PopStyleColor();
@@ -2043,10 +2373,10 @@ void Application::renderUI() {
             ImGui::InputText("##EtUrl", etUrl, sizeof(etUrl));
 
             // Fetch sessions button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.12f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.45f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.45f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Refresh Sessions", ImVec2(-1, 0))) {
                 sessions = EthereaClient::fetchSessions(etUrl);
                 // Sort: active with transcript first, then by idle time
@@ -2090,10 +2420,10 @@ void Application::renderUI() {
             }
 
             ImGui::Dummy(ImVec2(0, 4));
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button("Connect", ImVec2(-1, 0))) {
                 std::string sid = (selectedSession >= 0 && selectedSession < (int)sessions.size())
                     ? sessions[selectedSession].id : "";
@@ -2133,7 +2463,7 @@ void Application::renderUI() {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p = ImGui::GetCursorScreenPos();
             float w = ImGui::GetContentRegionAvail().x;
-            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 40));
+            dl->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 40));
             ImGui::Dummy(ImVec2(0, 6));
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -2236,10 +2566,10 @@ void Application::renderUI() {
 
             // --- Receive section ---
             if (ImGui::CollapsingHeader("Receive", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
                     m_ndiSources = m_ndiFinder.sources();
                 }
@@ -2273,10 +2603,10 @@ void Application::renderUI() {
                     ImGui::PopStyleColor();
                     ImGui::SameLine();
 
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                     if (ImGui::SmallButton("Add")) {
                         addNDISource(m_ndiSources[i].name);
                     }
@@ -2309,6 +2639,34 @@ void Application::renderUI() {
     ImGui::Begin("NDI");
     ImGui::TextDisabled("NDI SDK not installed");
     ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
+    ImGui::End();
+#endif
+
+#ifdef HAS_SPOUT
+    ImGui::Begin("Spout");
+    {
+        bool spoutOn = m_spoutOutputEnabled && m_spoutOutput.isActive();
+        if (spoutOn) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        }
+        if (ImGui::Checkbox("Easel  (composition)", &m_spoutOutputEnabled)) {
+            if (m_spoutOutputEnabled && !m_spoutOutput.isActive()) {
+                auto& az = activeZone();
+                m_spoutOutput.create("Easel", az.warpFBO.width(), az.warpFBO.height());
+            } else if (!m_spoutOutputEnabled && m_spoutOutput.isActive()) {
+                m_spoutOutput.destroy();
+            }
+        }
+        ImGui::PopStyleColor();
+
+        if (spoutOn) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 0.7f));
+            ImGui::Text("Sending: %s", m_spoutOutput.name().c_str());
+            ImGui::PopStyleColor();
+        }
+    }
     ImGui::End();
 #endif
 
@@ -2352,6 +2710,151 @@ void Application::renderUI() {
     }
     ImGui::End();
 #endif
+
+    // Audio panel — device, levels, gain controls
+    ImGui::Begin("Audio");
+    {
+        // --- Device selection ---
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Input");
+        ImGui::PopStyleColor();
+
+#ifdef HAS_FFMPEG
+        if (m_audioDevices.empty()) {
+            m_audioDevices = VideoRecorder::enumerateAudioDevices();
+        }
+        const char* currentName = "System Audio (loopback)";
+        if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+            currentName = m_audioDevices[m_selectedAudioDevice].name.c_str();
+        }
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##AudioInput", currentName)) {
+            if (ImGui::Selectable("System Audio (loopback)", m_selectedAudioDevice == -1)) {
+                m_selectedAudioDevice = -1;
+            }
+            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                const auto& d = m_audioDevices[i];
+                char label[256];
+                snprintf(label, sizeof(label), "%s%s", d.name.c_str(),
+                         d.isCapture ? "  (mic)" : "  (loopback)");
+                if (ImGui::Selectable(label, m_selectedAudioDevice == i)) {
+                    m_selectedAudioDevice = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::SmallButton("Refresh##audio")) {
+            m_audioDevices = VideoRecorder::enumerateAudioDevices();
+        }
+#else
+        ImGui::TextDisabled("Audio device selection requires FFmpeg build");
+#endif
+
+        ImGui::Dummy(ImVec2(0, 4));
+
+        // --- Big 4-band meters (Bass / LowMid / HighMid / Treble) ---
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Levels");
+        ImGui::PopStyleColor();
+
+        {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float barH = 80.0f;
+            float bandW = (avail - 9.0f) / 4.0f; // 3px gaps between bars
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+
+            struct BandInfo { const char* name; float level; ImU32 color; };
+            BandInfo bands[4] = {
+                { "BASS", m_audioAnalyzer.bass(),    IM_COL32(220, 60, 60, 230) },
+                { "LOW",  m_audioAnalyzer.lowMid(),  IM_COL32(230, 150, 30, 230) },
+                { "HI",   m_audioAnalyzer.highMid(), IM_COL32(60, 200, 90, 230) },
+                { "TREB", m_audioAnalyzer.treble(),  IM_COL32(30, 200, 220, 230) },
+            };
+
+            for (int b = 0; b < 4; b++) {
+                float x0 = origin.x + b * (bandW + 3.0f);
+                float x1 = x0 + bandW;
+                // Background
+                draw->AddRectFilled(ImVec2(x0, origin.y), ImVec2(x1, origin.y + barH),
+                                    IM_COL32(18, 22, 30, 255), 3.0f);
+                // Level fill (bottom-up)
+                float h = bands[b].level * barH;
+                draw->AddRectFilled(ImVec2(x0 + 1, origin.y + barH - h),
+                                    ImVec2(x1 - 1, origin.y + barH - 1),
+                                    bands[b].color, 2.0f);
+                // Border
+                draw->AddRect(ImVec2(x0, origin.y), ImVec2(x1, origin.y + barH),
+                              IM_COL32(255, 255, 255, 40), 3.0f);
+                // Label at bottom
+                ImVec2 ts = ImGui::CalcTextSize(bands[b].name);
+                draw->AddText(ImVec2(x0 + (bandW - ts.x) * 0.5f, origin.y + barH + 2),
+                              IM_COL32(150, 160, 180, 255), bands[b].name);
+                // Numeric value at top
+                char vbuf[16];
+                snprintf(vbuf, sizeof(vbuf), "%.2f", bands[b].level);
+                ImVec2 vts = ImGui::CalcTextSize(vbuf);
+                draw->AddText(ImVec2(x0 + (bandW - vts.x) * 0.5f, origin.y + 2),
+                              IM_COL32(220, 230, 245, 200), vbuf);
+            }
+            ImGui::Dummy(ImVec2(avail, barH + ImGui::GetFontSize() + 6));
+        }
+
+        // --- RMS + Beat indicator ---
+        {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float h = 14.0f;
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            // RMS bar
+            float rmsW = avail - 26.0f;
+            draw->AddRectFilled(origin, ImVec2(origin.x + rmsW, origin.y + h),
+                                IM_COL32(18, 22, 30, 255), 2.0f);
+            float rms = m_audioAnalyzer.smoothedRMS();
+            draw->AddRectFilled(ImVec2(origin.x + 1, origin.y + 1),
+                                ImVec2(origin.x + 1 + (rmsW - 2) * rms, origin.y + h - 1),
+                                IM_COL32(100, 160, 255, 220), 2.0f);
+            // Beat dot (right side)
+            float beat = m_audioAnalyzer.beatDecay();
+            ImU32 beatCol = IM_COL32((int)(50 + 205 * beat), (int)(50 + 100 * beat),
+                                     (int)(50 + 50 * beat), 255);
+            draw->AddCircleFilled(ImVec2(origin.x + avail - 10, origin.y + h * 0.5f),
+                                  5.0f + beat * 4.0f, beatCol);
+            ImGui::Dummy(ImVec2(avail, h + 2));
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // --- Gain controls ---
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Gain");
+        ImGui::PopStyleColor();
+
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("Input##masterGain", &m_audioAnalyzer.inputGain(), 0.0f, 10.0f, "%.2fx");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("Bass##bGain", &m_audioAnalyzer.bassGain(), 0.0f, 5.0f, "%.2fx");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("Low##lmGain", &m_audioAnalyzer.lowMidGain(), 0.0f, 5.0f, "%.2fx");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("High##hmGain", &m_audioAnalyzer.highMidGain(), 0.0f, 5.0f, "%.2fx");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("Treble##tGain", &m_audioAnalyzer.trebleGain(), 0.0f, 5.0f, "%.2fx");
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::SetNextItemWidth(-1);
+        ImGui::SliderFloat("Gate##nGate", &m_audioAnalyzer.noiseGate(), 0.0f, 0.5f, "%.2f");
+
+        if (ImGui::SmallButton("Reset Gains")) {
+            m_audioAnalyzer.inputGain() = 1.0f;
+            m_audioAnalyzer.bassGain() = 1.0f;
+            m_audioAnalyzer.lowMidGain() = 1.0f;
+            m_audioAnalyzer.highMidGain() = 1.0f;
+            m_audioAnalyzer.trebleGain() = 1.0f;
+            m_audioAnalyzer.noiseGate() = 0.0f;
+        }
+    }
+    ImGui::End();
 
     // MIDI panel — device selection + mapping
     ImGui::Begin("MIDI");
@@ -2404,10 +2907,10 @@ void Application::renderUI() {
 
             // Add mapping with learn mode
             if (!m_midiManager.isLearning()) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("+ Learn Mapping", ImVec2(-1, 0))) {
                     m_midiManager.startLearn();
                 }
@@ -2446,9 +2949,9 @@ void Application::renderUI() {
                         }
                     }
 
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                     if (ImGui::Button("Assign", ImVec2(-1, 0))) {
                         MIDIMapping map;
                         map.channel = learned.channel;
@@ -2776,10 +3279,10 @@ void Application::renderTransportBar() {
     ImVec2 barSize(vp->WorkSize.x, barH);
 
     // Color palette: cyan accent + neutral gray
-    const ImU32 kAccent     = IM_COL32(0, 200, 255, 255);
-    const ImU32 kAccentDim  = IM_COL32(0, 200, 255, 100);
-    const ImU32 kAccentBg   = IM_COL32(0, 200, 255, 15);
-    const ImU32 kAccentHov  = IM_COL32(0, 200, 255, 30);
+    const ImU32 kAccent     = IM_COL32(255, 255, 255, 255);
+    const ImU32 kAccentDim  = IM_COL32(255, 255, 255, 100);
+    const ImU32 kAccentBg   = IM_COL32(255, 255, 255, 15);
+    const ImU32 kAccentHov  = IM_COL32(255, 255, 255, 30);
     const ImU32 kText       = IM_COL32(200, 210, 225, 255);
     const ImU32 kTextDim    = IM_COL32(100, 115, 140, 180);
     const ImU32 kDivider    = IM_COL32(255, 255, 255, 15);
@@ -2959,7 +3462,7 @@ void Application::renderTransportBar() {
             ImGui::SetTooltip("Set stream key in the Stream tab");
     } else {
         float pulse = 0.5f + 0.5f * sinf(time * 3.0f);
-        draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(0, 200, 255, (int)(pulse * 255)));
+        draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(255, 255, 255, (int)(pulse * 255)));
         int secs = (int)m_rtmpOutput.uptimeSeconds();
         char timeBuf[16];
         snprintf(timeBuf, sizeof(timeBuf), "LIVE %02d:%02d", (secs / 60) % 60, secs % 60);
@@ -3123,7 +3626,48 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
+        // Fullscreen toggle in menu bar
+        ImGui::Separator();
+        if (ImGui::MenuItem(m_editorFullscreen ? "Exit Fullscreen" : "Fullscreen", "F11")) {
+            if (!m_editorFullscreen) {
+                glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
+                glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
+                int monCount = 0;
+                GLFWmonitor** monitors = glfwGetMonitors(&monCount);
+                GLFWmonitor* best = glfwGetPrimaryMonitor();
+                int wx, wy;
+                glfwGetWindowPos(m_window, &wx, &wy);
+                for (int mi = 0; mi < monCount; mi++) {
+                    int mx, my;
+                    glfwGetMonitorPos(monitors[mi], &mx, &my);
+                    const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
+                    if (wx >= mx && wx < mx + mode->width &&
+                        wy >= my && wy < my + mode->height) {
+                        best = monitors[mi];
+                        break;
+                    }
+                }
+                const GLFWvidmode* mode = glfwGetVideoMode(best);
+                glfwSetWindowMonitor(m_window, best, 0, 0,
+                                     mode->width, mode->height, mode->refreshRate);
+                m_editorFullscreen = true;
+            } else {
+                glfwSetWindowMonitor(m_window, nullptr,
+                                     m_savedWindowX, m_savedWindowY,
+                                     m_savedWindowW, m_savedWindowH, 0);
+                m_editorFullscreen = false;
+            }
+        }
+
         ImGui::EndMainMenuBar();
+    }
+}
+
+void Application::registerLayerWithZones(uint32_t layerId) {
+    for (auto& z : m_zones) {
+        if (!z->showAllLayers) {
+            z->visibleLayerIds.insert(layerId);
+        }
     }
 }
 
@@ -3143,6 +3687,7 @@ void Application::loadImage(const std::string& path) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 
 void Application::loadVideo(const std::string& path) {
@@ -3162,6 +3707,7 @@ void Application::loadVideo(const std::string& path) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
     source->play();
 #else
     std::cerr << "Video support not available (FFmpeg not found)" << std::endl;
@@ -3183,6 +3729,7 @@ void Application::addScreenCapture(int monitorIndex) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 
 #ifdef _WIN32
@@ -3201,6 +3748,7 @@ void Application::addWindowCapture(HWND hwnd, const std::string& title) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 #elif defined(__APPLE__)
 void Application::addWindowCapture(uint32_t windowID, const std::string& title) {
@@ -3237,6 +3785,7 @@ void Application::loadShader(const std::string& path) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 
     // Register with ShaderClaw bridge for hot-reload
     if (m_shaderClaw.isConnected()) {
@@ -3262,6 +3811,7 @@ void Application::addNDISource(const std::string& senderName) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 #endif
 
@@ -3282,6 +3832,7 @@ void Application::addWHEPSource(const std::string& whepUrl) {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 
 void Application::addScopeRTMP() {
@@ -3327,6 +3878,7 @@ void Application::addScopeRTMP() {
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
 }
 #endif
 
@@ -3419,13 +3971,15 @@ void Application::saveProject(const std::string& path) {
             mj["edgeBlendGamma"] = m.edgeBlendGamma;
         }
 
-        // Masks within this mapping profile
+        // Canvas-level masks
         if (!m.masks.empty()) {
             json masksArr = json::array();
             for (auto& mask : m.masks) {
                 json mkj;
                 mkj["name"] = mask.name;
                 mkj["closed"] = mask.path.closed();
+                mkj["feather"] = mask.feather;
+                mkj["invert"] = mask.invert;
                 json pts = json::array();
                 for (const auto& pt : mask.path.points()) {
                     json pj;
@@ -3491,6 +4045,19 @@ void Application::saveProject(const std::string& path) {
         layerJson["audioReactive"] = layer->audioReactive;
         layerJson["audioStrength"] = layer->audioStrength;
         layerJson["feather"] = layer->feather;
+        if (layer->dropShadowEnabled) {
+            json ds;
+            ds["enabled"] = true;
+            ds["offsetX"] = layer->dropShadowOffsetX;
+            ds["offsetY"] = layer->dropShadowOffsetY;
+            ds["blur"] = layer->dropShadowBlur;
+            ds["opacity"] = layer->dropShadowOpacity;
+            ds["spread"] = layer->dropShadowSpread;
+            ds["colorR"] = layer->dropShadowColorR;
+            ds["colorG"] = layer->dropShadowColorG;
+            ds["colorB"] = layer->dropShadowColorB;
+            layerJson["dropShadow"] = ds;
+        }
         if (layer->shaderWidth > 0 && layer->shaderHeight > 0) {
             layerJson["shaderWidth"] = layer->shaderWidth;
             layerJson["shaderHeight"] = layer->shaderHeight;
@@ -3541,6 +4108,10 @@ void Application::saveProject(const std::string& path) {
                         abj["rangeMin"] = ab.rangeMin;
                         abj["rangeMax"] = ab.rangeMax;
                         abj["smoothing"] = ab.smoothing;
+                        if (ab.signal == AudioSignal::MidiCC) {
+                            abj["midiCC"] = ab.midiCC;
+                            abj["midiChannel"] = ab.midiChannel;
+                        }
                         abJson.push_back(abj);
                     }
                     if (!abJson.empty()) {
@@ -3562,6 +4133,30 @@ void Application::saveProject(const std::string& path) {
                     }
                 }
             }
+        }
+
+        // Save per-layer masks
+        if (!layer->masks.empty()) {
+            json masksJson = json::array();
+            for (auto& mask : layer->masks) {
+                json mkj;
+                mkj["name"] = mask.name;
+                mkj["closed"] = mask.path.closed();
+                mkj["feather"] = mask.feather;
+                mkj["invert"] = mask.invert;
+                json pts = json::array();
+                for (const auto& pt : mask.path.points()) {
+                    json pj;
+                    pj["pos"] = {pt.position.x, pt.position.y};
+                    pj["in"] = {pt.handleIn.x, pt.handleIn.y};
+                    pj["out"] = {pt.handleOut.x, pt.handleOut.y};
+                    pj["smooth"] = pt.smooth;
+                    pts.push_back(pj);
+                }
+                mkj["points"] = pts;
+                masksJson.push_back(mkj);
+            }
+            layerJson["masks"] = masksJson;
         }
 
         layers.push_back(layerJson);
@@ -3688,6 +4283,8 @@ void Application::loadProject(const std::string& path) {
             for (const auto& mkj : mj["masks"]) {
                 MappingMask mask;
                 mask.name = mkj.value("name", "Mask");
+                mask.feather = mkj.value("feather", 0.0f);
+                mask.invert = mkj.value("invert", false);
                 if (mkj.contains("closed")) mask.path.setClosed(mkj["closed"].get<bool>());
                 if (mkj.contains("points")) {
                     for (const auto& pj : mkj["points"]) {
@@ -3797,6 +4394,29 @@ void Application::loadProject(const std::string& path) {
         m_mappings.push_back(std::move(mp));
     }
 
+    // Safety fixup: ensure each zone owns its own mapping profile. Old projects
+    // (or mis-saved state) sometimes have two zones pointing at the same
+    // mappingIndex — that makes canvas masks from one zone appear on the other
+    // because they're literally the same MappingProfile. Give any duplicate a
+    // fresh empty profile so its masks are independent.
+    {
+        std::vector<bool> used(m_mappings.size(), false);
+        for (auto& zPtr : m_zones) {
+            if (!zPtr) continue;
+            int mi = zPtr->mappingIndex;
+            if (mi < 0 || mi >= (int)m_mappings.size() || used[mi]) {
+                auto mp = std::make_unique<MappingProfile>();
+                mp->name = zPtr->name;
+                mp->init();
+                zPtr->mappingIndex = (int)m_mappings.size();
+                m_mappings.push_back(std::move(mp));
+                used.push_back(true);
+            } else {
+                used[mi] = true;
+            }
+        }
+    }
+
     // Load layers
     if (j.contains("layers")) {
         for (const auto& layerJson : j["layers"]) {
@@ -3817,6 +4437,18 @@ void Application::loadProject(const std::string& path) {
             layer->audioReactive = layerJson.value("audioReactive", false);
             layer->audioStrength = layerJson.value("audioStrength", 0.15f);
             layer->feather = layerJson.value("feather", 0.0f);
+            if (layerJson.contains("dropShadow")) {
+                const auto& ds = layerJson["dropShadow"];
+                layer->dropShadowEnabled = ds.value("enabled", false);
+                layer->dropShadowOffsetX = ds.value("offsetX", 0.05f);
+                layer->dropShadowOffsetY = ds.value("offsetY", 0.05f);
+                layer->dropShadowBlur = ds.value("blur", 8.0f);
+                layer->dropShadowOpacity = ds.value("opacity", 0.7f);
+                layer->dropShadowSpread = ds.value("spread", 1.0f);
+                layer->dropShadowColorR = ds.value("colorR", 0.0f);
+                layer->dropShadowColorG = ds.value("colorG", 0.0f);
+                layer->dropShadowColorB = ds.value("colorB", 0.0f);
+            }
             layer->shaderWidth = layerJson.value("shaderWidth", 0);
             layer->shaderHeight = layerJson.value("shaderHeight", 0);
             layer->groupId = layerJson.value("groupId", (uint32_t)0);
@@ -3885,6 +4517,8 @@ void Application::loadProject(const std::string& path) {
                             ab.rangeMin = abj.value("rangeMin", 0.0f);
                             ab.rangeMax = abj.value("rangeMax", 1.0f);
                             ab.smoothing = abj.value("smoothing", 0.3f);
+                            ab.midiCC = abj.value("midiCC", -1);
+                            ab.midiChannel = abj.value("midiChannel", -1);
                             src->audioBindings()[abj.value("param", "")] = ab;
                         }
                     }
@@ -3904,6 +4538,29 @@ void Application::loadProject(const std::string& path) {
                     layer->source = src;
                 }
 #endif
+            }
+
+            // Load per-layer masks
+            if (layerJson.contains("masks")) {
+                for (const auto& mkj : layerJson["masks"]) {
+                    Layer::LayerMask mask;
+                    mask.name = mkj.value("name", "Mask");
+                    mask.feather = mkj.value("feather", 0.0f);
+                    mask.invert = mkj.value("invert", false);
+                    if (mkj.contains("closed")) mask.path.setClosed(mkj["closed"].get<bool>());
+                    if (mkj.contains("points")) {
+                        for (const auto& pj : mkj["points"]) {
+                            MaskPoint pt;
+                            pt.position = {pj["pos"][0].get<float>(), pj["pos"][1].get<float>()};
+                            pt.handleIn = {pj["in"][0].get<float>(), pj["in"][1].get<float>()};
+                            pt.handleOut = {pj["out"][0].get<float>(), pj["out"][1].get<float>()};
+                            pt.smooth = pj.value("smooth", true);
+                            mask.path.points().push_back(pt);
+                        }
+                    }
+                    mask.path.markDirty();
+                    layer->masks.push_back(std::move(mask));
+                }
             }
 
             if (layer->source) {
@@ -3967,6 +4624,27 @@ void Application::loadProject(const std::string& path) {
 
     if (m_layerStack.count() > 0) {
         m_selectedLayer = 0;
+    }
+
+    // Backward compat: migrate old MappingProfile masks to first layer ONLY for
+    // legacy v1 files. In v2+ "masks" on a MappingProfile are real canvas masks
+    // (a first-class feature) and must NOT be clobbered — that was the bug that
+    // made masks disappear on every reload.
+    if (version < 2 && m_layerStack.count() > 0) {
+        for (auto& mp : m_mappings) {
+            if (!mp->masks.empty()) {
+                auto& firstLayer = m_layerStack[0];
+                for (auto& oldMask : mp->masks) {
+                    Layer::LayerMask lm;
+                    lm.name = oldMask.name;
+                    lm.path = oldMask.path;
+                    lm.texture = oldMask.texture;
+                    firstLayer->masks.push_back(std::move(lm));
+                }
+                mp->masks.clear();
+                std::cout << "Migrated v1 mapping masks to layer: " << firstLayer->name << std::endl;
+            }
+        }
     }
 
     std::cout << "Project loaded: " << path << std::endl;
@@ -4037,5 +4715,107 @@ void Application::pollScreenshotTrigger() {
         std::filesystem::remove(trigger);
         std::filesystem::create_directories("screenshots");
         captureWindow("screenshots/claude_capture.png");
+    }
+}
+
+// Stage tab: Composition resolution + Output destination (collapsible sections).
+void Application::renderStageInlineSetup(OutputZone& zone) {
+    if (ImGui::CollapsingHeader("Composition")) {
+        static const char* presetLabels[] = {
+            "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
+            "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
+        };
+        static const int presetW[] = { 1920, 3840, 1280, 2560, 8000, 1024, 0 };
+        static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
+        const int presetCount = 7;
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Resolution");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::Text("%dx%d", zone.width, zone.height);
+
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##CompRes", &zone.compPreset, presetLabels, presetCount)) {
+            if (zone.compPreset < presetCount - 1) {
+                int nw = presetW[zone.compPreset];
+                int nh = presetH[zone.compPreset];
+                zone.resize(nw, nh);
+            }
+        }
+
+        if (zone.compPreset == presetCount - 1) {
+            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            ImGui::SetNextItemWidth(half);
+            int cw = zone.width;
+            if (ImGui::DragInt("##CW", &cw, 1, 128, 16384, "%d")) {
+                if (cw >= 128 && cw <= 16384) zone.resize(cw, zone.height);
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(half);
+            int ch = zone.height;
+            if (ImGui::DragInt("##CH", &ch, 1, 128, 16384, "%d")) {
+                if (ch >= 128 && ch <= 16384) zone.resize(zone.width, ch);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Output")) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("Destination");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+
+        if (zone.outputDest == OutputDest::None) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+            ImGui::Text("Preview only");
+            ImGui::PopStyleColor();
+        } else if (zone.outputDest == OutputDest::Fullscreen) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            auto monitors = ProjectorOutput::enumerateMonitors();
+            if (zone.outputMonitor >= 0 && zone.outputMonitor < (int)monitors.size()) {
+                ImGui::Text("Fullscreen: %s", monitors[zone.outputMonitor].name.c_str());
+            } else {
+                ImGui::Text("Fullscreen");
+            }
+            ImGui::PopStyleColor();
+        } else if (zone.outputDest == OutputDest::NDI) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            ImGui::Text("NDI: %s", zone.ndiStreamName.empty() ? zone.name.c_str() : zone.ndiStreamName.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Checkbox("Auto-detect", &m_projectorAutoConnect);
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::Text("(?)");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Automatically open projector when a\nsecond display is connected");
+        }
+    }
+}
+
+// Masks tab: Edge Blend (collapsible).
+void Application::renderEdgeBlendInline(OutputZone& zone) {
+    if (ImGui::CollapsingHeader("Edge Blend")) {
+        auto* ebm = mappingForZone(zone);
+        if (ebm) {
+            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
+
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(half);
+            ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
+
+            ImGui::SetNextItemWidth(-1);
+            ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
+        }
     }
 }

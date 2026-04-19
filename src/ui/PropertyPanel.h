@@ -10,6 +10,7 @@ class DataBus;
 class LayerStack;
 class BPMSync;
 class SceneManager;
+class MIDIManager;
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {
@@ -42,7 +43,7 @@ public:
                 SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
                 float appTime = 0.0f, LayerStack* layerStack = nullptr,
                 BPMSync* bpmSync = nullptr, SceneManager* sceneManager = nullptr,
-                int* audioDeviceIdx = nullptr);
+                int* audioDeviceIdx = nullptr, MIDIManager* midi = nullptr);
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;

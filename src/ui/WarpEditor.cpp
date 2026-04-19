@@ -3,7 +3,7 @@
 #include <imgui.h>
 #include <filesystem>
 
-static const ImU32  kSectionLine = IM_COL32(0, 200, 255, 40);
+static const ImU32  kSectionLine = IM_COL32(255, 255, 255, 40);
 
 static void sectionSep() {
     ImGui::Dummy(ImVec2(0, 2));
@@ -15,10 +15,10 @@ static void sectionSep() {
 }
 
 static bool accentButton(const char* label, float width = 0) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.15f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.30f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.50f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
     bool clicked = ImGui::Button(label, ImVec2(width, 0));
     ImGui::PopStyleColor(4);
     return clicked;
@@ -27,8 +27,8 @@ static bool accentButton(const char* label, float width = 0) {
 static void modeButton(const char* label, int thisMode, int& currentMode, float width) {
     bool active = (currentMode == thisMode);
     if (active) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
     } else {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
@@ -61,7 +61,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             }
             if (!ImGui::IsItemActive() && ImGui::IsMouseClicked(0)) m_renaming = false;
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             ImGui::Text("%s", mapping.name.c_str());
             ImGui::PopStyleColor();
             if (ImGui::IsItemClicked()) {
@@ -96,7 +96,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
         const char* labels[] = {"BL", "BR", "TR", "TL"};
         for (int i = 0; i < 4; i++) {
             ImGui::PushID(i);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.78f, 1.0f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.7f));
             ImGui::Text("%s", labels[i]);
             ImGui::PopStyleColor();
             ImGui::SameLine(28);
@@ -130,7 +130,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
         // Mesh file display
         if (objMeshWarp.isLoaded()) {
             std::string filename = std::filesystem::path(objMeshWarp.meshPath()).filename().string();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.78f, 1.0f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.7f));
             ImGui::Text("%s", filename.c_str());
             ImGui::PopStyleColor();
         } else {
@@ -191,7 +191,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
                 ImGui::PopStyleColor();
 
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.0f, 0.85f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 for (int mi = 0; mi < (int)mats.size(); mi++) {
                     ImGui::PushID(5000 + mi);
                     ImGui::Checkbox(mats[mi].name.c_str(), &mats[mi].textured);

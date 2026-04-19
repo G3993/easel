@@ -63,6 +63,6 @@ public:
 
 private:
     std::vector<MaskPoint> m_points;
-    bool m_closed = true;
+    bool m_closed = false; // starts open; user closes by clicking first point
     bool m_dirty = true;
 };

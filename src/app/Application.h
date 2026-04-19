@@ -52,6 +52,10 @@
 #include "app/NDIOutput.h"
 #endif
 
+#ifdef HAS_SPOUT
+#include "app/SpoutIO.h"
+#endif
+
 #ifdef HAS_WHEP
 #include "sources/WHEPSource.h"
 #endif
@@ -89,6 +93,7 @@ private:
     // Output zones (replaces singular compositor/warp/FBO)
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
+    int m_prevActiveZone = 0;
     uint32_t m_nextLayerId = 1;
     OutputZone& activeZone() {
         if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
@@ -124,6 +129,11 @@ private:
     int m_lastMonitorCount = 0;
     bool m_maskEditMode = false;
 
+    // Editor fullscreen toggle (F11)
+    bool m_editorFullscreen = false;
+    int m_savedWindowX = 0, m_savedWindowY = 0;
+    int m_savedWindowW = 1280, m_savedWindowH = 720;
+
     void updateSources();
     void compositeAndWarp();
     void compositeZone(OutputZone& zone);
@@ -131,6 +141,11 @@ private:
     void renderReadbackFBO(OutputZone& zone);
     void renderUI();
     void renderMenuBar();
+
+    // Inline (no Begin/End) section renderers — called from inside their host
+    // tab so each control lives with the workflow step it belongs to.
+    void renderStageInlineSetup(OutputZone& zone);   // Composition + Output, rendered in Stage tab
+    void renderEdgeBlendInline(OutputZone& zone);    // Edge blend, rendered in Masks tab
     void addZone();
     void removeZone(int index);
     void duplicateZone(int index);
@@ -144,6 +159,7 @@ private:
     void addWindowCapture(uint32_t windowID, const std::string& title);
 #endif
     void loadShader(const std::string& path);
+    void registerLayerWithZones(uint32_t layerId);
 
     std::vector<WindowInfo> m_windowList;
     ShaderClawBridge m_shaderClaw;
@@ -189,6 +205,11 @@ private:
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);
+#endif
+
+#ifdef HAS_SPOUT
+    EaselSpoutSender m_spoutOutput;
+    bool m_spoutOutputEnabled = false;
 #endif
 
 #ifdef HAS_WHEP

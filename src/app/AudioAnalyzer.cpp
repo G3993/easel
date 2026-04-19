@@ -298,7 +298,7 @@ void AudioAnalyzer::runFFT() {
     }
     m_rawRMS = std::sqrt(sumSq / kFFTSize);
     // Clamp to 0-1 (typically peaks around 0.5 for loud audio)
-    m_rawRMS = std::min(m_rawRMS * 2.0f, 1.0f);
+    m_rawRMS = std::min(m_rawRMS * 2.0f * m_inputGain, 1.0f);
 }
 
 // --- Band computation ---
@@ -328,10 +328,25 @@ void AudioAnalyzer::computeBands() {
     // Scale each band to useful 0-1 range
     // Using magnitude spectrum (linear), so gains are higher than power-based.
     // Tuned for typical system audio at moderate listening volume.
-    m_rawBass = std::min(bass * 60.0f, 1.0f);
-    m_rawLowMid = std::min(lowMid * 100.0f, 1.0f);
-    m_rawHighMid = std::min(highMid * 200.0f, 1.0f);
-    m_rawTreble = std::min(treble * 400.0f, 1.0f);
+    // User gains: master m_inputGain + per-band trim.
+    float masterG = m_inputGain;
+    m_rawBass    = std::min(bass    * 60.0f  * masterG * m_bassGain,    1.0f);
+    m_rawLowMid  = std::min(lowMid  * 100.0f * masterG * m_lowMidGain,  1.0f);
+    m_rawHighMid = std::min(highMid * 200.0f * masterG * m_highMidGain, 1.0f);
+    m_rawTreble  = std::min(treble  * 400.0f * masterG * m_trebleGain,  1.0f);
+
+    // Noise gate: values below threshold collapse to 0
+    if (m_noiseGate > 0.0f) {
+        auto gate = [&](float v) {
+            if (v < m_noiseGate) return 0.0f;
+            // Rescale remaining range to 0-1 for smooth transition
+            return (v - m_noiseGate) / std::max(0.001f, 1.0f - m_noiseGate);
+        };
+        m_rawBass    = gate(m_rawBass);
+        m_rawLowMid  = gate(m_rawLowMid);
+        m_rawHighMid = gate(m_rawHighMid);
+        m_rawTreble  = gate(m_rawTreble);
+    }
 }
 
 // --- Beat detection ---

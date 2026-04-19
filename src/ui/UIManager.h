@@ -15,6 +15,7 @@ public:
 
     ImFont* smallFont() const { return m_smallFont; }
     ImFont* boldFont() const { return m_boldFont; }
+    ImFont* monoFont() const { return m_monoFont; }
 
     void handleZoom();  // call each frame to handle Cmd+/- zoom
     float uiScale() const { return m_uiZoom; }
@@ -28,6 +29,10 @@ private:
     float m_lastDockH = 0;
     ImFont* m_smallFont = nullptr;
     ImFont* m_boldFont = nullptr;
+<<<<<<< Updated upstream
     float m_uiZoom = 1.0f;
     float m_baseFontGlobalScale = 1.0f;
+=======
+    ImFont* m_monoFont = nullptr;
+>>>>>>> Stashed changes
 };

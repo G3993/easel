@@ -52,10 +52,16 @@ private:
     ShaderProgram m_compositeShader;
     ShaderProgram m_passthroughShader;
     ShaderProgram m_effectShader;
+    ShaderProgram m_shadowShader; // silhouette renderer for drop shadows
     Mesh m_quad;
 
     // Effect chain temp FBOs (ping-pong)
     Framebuffer m_effectFBO[2];
+    // Per-layer mask combination FBOs (ping-pong for multi-mask union)
+    Framebuffer m_maskFBO[2];
+    // Drop shadow ping-pong FBOs (full-res silhouette + quarter-res for soft blur)
+    Framebuffer m_shadowFBO[2];
+    Framebuffer m_shadowLoRes[2]; // quarter resolution for smooth large blurs
     // Per-layer feedback FBO (keyed by layer ID)
     std::unordered_map<uint32_t, Framebuffer> m_feedbackFBOs;
 
