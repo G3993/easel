@@ -8,6 +8,11 @@ enum class BlendMode {
     Add,
     Subtract,
     Difference,
+    SoftLight,
+    HardLight,
+    ColorDodge,
+    ColorBurn,
+    Exclusion,
     COUNT
 };
 
@@ -20,6 +25,11 @@ inline const char* blendModeName(BlendMode mode) {
         case BlendMode::Add:        return "Add";
         case BlendMode::Subtract:   return "Subtract";
         case BlendMode::Difference: return "Difference";
+        case BlendMode::SoftLight:  return "Soft Light";
+        case BlendMode::HardLight:  return "Hard Light";
+        case BlendMode::ColorDodge: return "Color Dodge";
+        case BlendMode::ColorBurn:  return "Color Burn";
+        case BlendMode::Exclusion:  return "Exclusion";
         default:                    return "Unknown";
     }
 }

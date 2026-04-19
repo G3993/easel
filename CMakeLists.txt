@@ -65,6 +65,17 @@ endif()
 set(HAS_WHISPER FALSE)
 message(STATUS "whisper.cpp disabled")
 
+# Spout2 (compiled from source)
+set(SPOUT_DIR "${CMAKE_SOURCE_DIR}/external/Spout2/SPOUTSDK/SpoutGL")
+if(EXISTS "${SPOUT_DIR}/Spout.h")
+    set(HAS_SPOUT TRUE)
+    file(GLOB SPOUT_SOURCES "${SPOUT_DIR}/*.cpp")
+    message(STATUS "Spout2 SDK found at ${SPOUT_DIR}")
+else()
+    set(HAS_SPOUT FALSE)
+    message(STATUS "Spout2 SDK not found - Spout support disabled")
+endif()
+
 # NDI (headers only - runtime loaded dynamically)
 set(NDI_DIR "${CMAKE_SOURCE_DIR}/external/ndi")
 if(EXISTS "${NDI_DIR}/include/Processing.NDI.Lib.h")
@@ -131,12 +142,17 @@ endif()
 set(KISS_FFT_SRC "${CMAKE_SOURCE_DIR}/external/kiss_fft/kiss_fft.c")
 
 # Main executable
-if(WIN32)
-    file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
-    add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
-else()
-    add_executable(${PROJECT_NAME} ${SOURCES} ${KISS_FFT_SRC})
+# Icon RC is harmless on non-Windows; the WIN32 keyword in add_executable
+# is also a no-op outside Windows.
+file(WRITE "${CMAKE_BINARY_DIR}/easel_icon.rc" "1 ICON \"${CMAKE_SOURCE_DIR}/resources/icon.ico\"\n")
+if(HAS_SPOUT)
+    add_library(spout_gl STATIC ${SPOUT_SOURCES})
+    target_include_directories(spout_gl PUBLIC "${SPOUT_DIR}")
+    # Spout needs full Windows headers (no LEAN_AND_MEAN) for multimedia timer APIs
+    target_compile_definitions(spout_gl PRIVATE NOMINMAX)
+    target_link_libraries(spout_gl PRIVATE d3d11 d3d9 dxguid shlwapi winmm)
 endif()
+add_executable(${PROJECT_NAME} WIN32 ${SOURCES} ${KISS_FFT_SRC} "${CMAKE_BINARY_DIR}/easel_icon.rc")
 
 find_package(OpenGL REQUIRED)
 
@@ -249,6 +265,13 @@ if(HAS_WHEP)
     if(APPLE)
         target_link_libraries(${PROJECT_NAME} PRIVATE "-framework WebKit")
     endif()
+endif()
+
+# Spout2 (static lib, uses DirectX shared textures)
+if(HAS_SPOUT)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${SPOUT_DIR}")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_SPOUT=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE spout_gl)
 endif()
 
 # Test suites

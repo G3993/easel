@@ -34,8 +34,20 @@ struct WSADATA { int dummy; };
 // ─── Logging ───────────────────────────────────────────────────────────────
 
 static void etLog(const std::string& msg) {
+    static int suppressCount = 0;
+    static std::string lastMsg;
+    // Suppress repeated messages (log every 10th repeat)
+    if (msg == lastMsg) {
+        suppressCount++;
+        if (suppressCount % 10 != 0) return;
+    } else {
+        suppressCount = 0;
+        lastMsg = msg;
+    }
     std::ofstream f("etherea_debug.log", std::ios::app);
-    f << msg << std::endl;
+    f << msg;
+    if (suppressCount > 0) f << " (x" << suppressCount << ")";
+    f << std::endl;
 }
 
 // ─── Minimal JSON helpers ──────────────────────────────────────────────────
@@ -385,6 +397,7 @@ void EthereaClient::wsLoop() {
         return;
     }
 
+    int wsBackoff = 3; // seconds, grows exponentially on repeated failures
     while (m_running.load()) {
         struct addrinfo hints = {}, *result = nullptr;
         hints.ai_family = AF_INET;
@@ -392,19 +405,22 @@ void EthereaClient::wsLoop() {
         std::string portStr = std::to_string(m_port);
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
             etLog("EthereaClient WS: DNS failed");
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(wsBackoff));
+            wsBackoff = std::min(wsBackoff * 2, 60);
             continue;
         }
 
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
+        if (sock == INVALID_SOCKET) { freeaddrinfo(result); std::this_thread::sleep_for(std::chrono::seconds(wsBackoff)); wsBackoff = std::min(wsBackoff * 2, 60); continue; }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             etLog("EthereaClient WS: connect failed (is Etherea running?)");
             closesocket(sock); freeaddrinfo(result);
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(wsBackoff));
+            wsBackoff = std::min(wsBackoff * 2, 60);
             continue;
         }
         freeaddrinfo(result);
+        wsBackoff = 3; // reset backoff on successful connect
 
         // Generate WebSocket key
         uint8_t keyBytes[16];
@@ -508,8 +524,9 @@ void EthereaClient::wsLoop() {
         m_wsConnected.store(false);
         closesocket(sock);
         if (m_running.load()) {
-            etLog("EthereaClient WS: reconnecting in 3s...");
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            etLog("EthereaClient WS: disconnected, reconnecting...");
+            std::this_thread::sleep_for(std::chrono::seconds(wsBackoff));
+            wsBackoff = std::min(wsBackoff * 2, 60);
         }
     }
 
@@ -528,6 +545,7 @@ void EthereaClient::sseLoop() {
     std::string path = "/stream";
     if (!m_sessionId.empty()) path += "?session_id=" + m_sessionId;
 
+    int sseBackoff = 3;
     while (m_running.load()) {
         struct addrinfo hints = {}, *result = nullptr;
         hints.ai_family = AF_INET;
@@ -535,17 +553,20 @@ void EthereaClient::sseLoop() {
         hints.ai_protocol = IPPROTO_TCP;
         std::string portStr = std::to_string(m_port);
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(sseBackoff));
+            sseBackoff = std::min(sseBackoff * 2, 60);
             continue;
         }
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); std::this_thread::sleep_for(std::chrono::seconds(3)); continue; }
+        if (sock == INVALID_SOCKET) { freeaddrinfo(result); std::this_thread::sleep_for(std::chrono::seconds(sseBackoff)); sseBackoff = std::min(sseBackoff * 2, 60); continue; }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             closesocket(sock); freeaddrinfo(result);
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::this_thread::sleep_for(std::chrono::seconds(sseBackoff));
+            sseBackoff = std::min(sseBackoff * 2, 60);
             continue;
         }
         freeaddrinfo(result);
+        sseBackoff = 3; // reset on successful connect
 
         std::string request =
             "GET " + path + " HTTP/1.1\r\n"

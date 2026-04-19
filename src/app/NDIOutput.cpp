@@ -48,8 +48,18 @@ void NDIOutput::destroy() {
     m_bufferIndex = 0;
 }
 
+bool NDIOutput::hasReceivers() const {
+    if (!m_send) return false;
+    auto& rt = NDIRuntime::instance();
+    return rt.api()->send_get_no_connections(m_send, 0) > 0;
+}
+
 void NDIOutput::send(GLuint texture, int w, int h) {
-    if (!m_send || w <= 0 || h <= 0) return;
+    if (!m_send || w <= 0 || h <= 0 || texture == 0) return;
+
+    // Skip frames when no receivers are connected (avoid expensive readback)
+    auto& rt = NDIRuntime::instance();
+    if (rt.api()->send_get_no_connections(m_send, 0) == 0) return;
 
     size_t bytes = (size_t)w * h * 4;
 

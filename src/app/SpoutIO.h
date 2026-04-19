@@ -1,16 +1,14 @@
 #pragma once
-// Spout I/O stub - requires Spout2 SDK to be installed
-// When HAS_SPOUT is defined, provides SpoutSender and SpoutReceiver wrappers
-// For now, this is a conditional feature that can be enabled when the SDK is available
 
-#include "render/Texture.h"
+#include <glad/glad.h>
 #include <string>
 
 #ifdef HAS_SPOUT
-#include "SpoutLibrary.h"
+#include "SpoutSender.h"
+#include "SpoutReceiver.h"
 #endif
 
-class SpoutSender {
+class EaselSpoutSender {
 public:
     bool create(const std::string& name, int width, int height);
     void send(GLuint texture, int width, int height);
@@ -22,11 +20,11 @@ private:
     std::string m_name;
     bool m_active = false;
 #ifdef HAS_SPOUT
-    SPOUTLIBRARY* m_spout = nullptr;
+    SpoutSender m_sender;
 #endif
 };
 
-class SpoutReceiver {
+class EaselSpoutReceiver {
 public:
     bool connect(const std::string& name = "");
     GLuint receive(int& width, int& height);
@@ -37,8 +35,9 @@ public:
 private:
     std::string m_senderName;
     bool m_active = false;
-    Texture m_texture;
+    GLuint m_texture = 0;
+    int m_width = 0, m_height = 0;
 #ifdef HAS_SPOUT
-    SPOUTLIBRARY* m_spout = nullptr;
+    SpoutReceiver m_receiver;
 #endif
 };

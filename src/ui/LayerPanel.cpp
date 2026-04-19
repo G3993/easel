@@ -7,18 +7,18 @@
 #include <set>
 
 // Theme
-static const ImU32 kAccent       = IM_COL32(0, 200, 255, 255);
+static const ImU32 kAccent       = IM_COL32(255, 255, 255, 255);
 static const ImU32 kTextPrimary  = IM_COL32(230, 235, 245, 255);
 static const ImU32 kTextDim      = IM_COL32(140, 153, 173, 255);
 static const ImU32 kTextMuted    = IM_COL32(90, 100, 120, 255);
 static const ImU32 kRowBg        = IM_COL32(22, 26, 36, 255);
 static const ImU32 kRowBgAlt     = IM_COL32(25, 30, 42, 255);
 static const ImU32 kRowHover     = IM_COL32(32, 40, 58, 255);
-static const ImU32 kRowSelected  = IM_COL32(0, 200, 255, 22);
-static const ImU32 kEyeOn        = IM_COL32(0, 200, 255, 220);
+static const ImU32 kRowSelected  = IM_COL32(255, 255, 255, 22);
+static const ImU32 kEyeOn        = IM_COL32(255, 255, 255, 220);
 static const ImU32 kEyeOff       = IM_COL32(70, 75, 90, 140);
-static const ImU32 kInsertLine   = IM_COL32(0, 200, 255, 200);
-static const ImU32 kInsertGlow   = IM_COL32(0, 200, 255, 50);
+static const ImU32 kInsertLine   = IM_COL32(255, 255, 255, 200);
+static const ImU32 kInsertGlow   = IM_COL32(255, 255, 255, 50);
 static const ImU32 kThumbBorder  = IM_COL32(50, 58, 80, 200);
 static const ImU32 kThumbBg      = IM_COL32(15, 18, 25, 255);
 static const ImU32 kOpacityBg    = IM_COL32(30, 35, 50, 200);
@@ -126,17 +126,19 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     }
 }
 
-// Zone indicator colors (up to 8 zones)
+// Zone / layer-row accent colors — vibrant so layers assigned to different
+// zones are easy to tell apart at a glance. Avoids cyan (project-wide ban)
+// but uses a distinct rainbow set for clarity.
 static ImU32 zoneColor(int idx) {
     static const ImU32 colors[] = {
-        IM_COL32(0, 200, 255, 220),    // cyan
-        IM_COL32(255, 140, 50, 220),   // orange
-        IM_COL32(80, 220, 120, 220),   // green
-        IM_COL32(220, 80, 200, 220),   // magenta
-        IM_COL32(255, 220, 60, 220),   // yellow
-        IM_COL32(100, 140, 255, 220),  // blue
-        IM_COL32(255, 100, 100, 220),  // red
-        IM_COL32(180, 180, 180, 220),  // grey
+        IM_COL32(255, 100, 180, 230),  // pink
+        IM_COL32(255, 150, 60,  230),  // orange
+        IM_COL32(110, 220, 130, 230),  // green
+        IM_COL32(200, 120, 255, 230),  // purple
+        IM_COL32(255, 220, 80,  230),  // yellow
+        IM_COL32(255, 110, 110, 230),  // red
+        IM_COL32(120, 200, 255, 230),  // soft sky (non-cyan)
+        IM_COL32(190, 190, 190, 230),  // neutral
     };
     return colors[idx % 8];
 }
@@ -156,10 +158,10 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
 
     // "+" add layer button (full width)
     {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.78f, 1.0f, 0.40f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
         if (ImGui::Button("+ Add Layer", ImVec2(-1, 0))) {
             ImGui::OpenPopup("##AddLayer");
         }
@@ -410,7 +412,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         // Border glow
         fg->AddRect(ImVec2(listStart.x, floatY),
                     ImVec2(listStart.x + panelWidth, floatY + rowHeight),
-                    IM_COL32(0, 200, 255, 80), 4.0f, 0, 1.5f);
+                    IM_COL32(255, 255, 255, 80), 4.0f, 0, 1.5f);
 
         drawLayerRow(fg, dragLayer, listStart.x, floatY, panelWidth, rowHeight,
                      true, false, false, thumbSize);
@@ -458,7 +460,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             float rowY = listStart.y + displayIdx * rowHeight;
             // Draw a subtle group bar above the first grouped layer
             float barY = rowY - 2;
-            ImU32 grpCol = IM_COL32(0, 200, 255, 100);
+            ImU32 grpCol = IM_COL32(255, 255, 255, 100);
             draw->AddRectFilled(ImVec2(listStart.x, barY - 14),
                                 ImVec2(listStart.x + panelWidth, barY),
                                 IM_COL32(0, 180, 235, 20), 2.0f);
@@ -492,7 +494,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             // Left accent line for group membership
             draw->AddRectFilled(ImVec2(listStart.x, rowY),
                                 ImVec2(listStart.x + 2, rowY + rowHeight),
-                                IM_COL32(0, 200, 255, 60));
+                                IM_COL32(255, 255, 255, 60));
         }
     }
 

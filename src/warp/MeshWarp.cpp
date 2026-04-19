@@ -90,6 +90,13 @@ void MeshWarp::render(GLuint sourceTexture) {
     m_shader.use();
     m_shader.setInt("uTexture", 0);
     m_shader.setFloat("uOpacity", 1.0f);
+    m_shader.setBool("uHasMask", false);
+    m_shader.setFloat("uFeather", 0.0f);
+    m_shader.setFloat("uTileX", 1.0f);
+    m_shader.setFloat("uTileY", 1.0f);
+    m_shader.setInt("uMosaicMode", 0);
+    m_shader.setFloat("uMosaicTransition", 1.0f);
+    m_shader.setVec4("uCrop", glm::vec4(0.0f));
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sourceTexture);

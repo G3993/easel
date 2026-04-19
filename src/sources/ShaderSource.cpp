@@ -1,4 +1,5 @@
 #include "sources/ShaderSource.h"
+#include "app/MIDIManager.h"
 #include "render/FontAtlas.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -790,20 +791,33 @@ void ShaderSource::unbindImageInput(const std::string& name) {
     m_imageBindings.erase(name);
 }
 
-void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat) {
+void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat,
+                                      MIDIManager* midi) {
     for (auto& [paramName, binding] : m_audioBindings) {
         if (binding.signal == AudioSignal::None) continue;
 
         // Get raw signal value (0-1)
         float raw = 0.0f;
+        bool haveRaw = true;
         switch (binding.signal) {
             case AudioSignal::Level: raw = level; break;
             case AudioSignal::Bass:  raw = bass; break;
             case AudioSignal::Mid:   raw = mid; break;
             case AudioSignal::High:  raw = high; break;
             case AudioSignal::Beat:  raw = beat; break;
-            default: break;
+            case AudioSignal::MidiCC: {
+                if (midi && binding.midiCC >= 0) {
+                    float v = midi->getCCValue(binding.midiChannel, binding.midiCC);
+                    if (v < 0.0f) { haveRaw = false; } // no value received yet
+                    else raw = v;
+                } else {
+                    haveRaw = false;
+                }
+                break;
+            }
+            default: haveRaw = false; break;
         }
+        if (!haveRaw) continue;
 
         // Asymmetric smoothing: fast attack, slow release
         float attackAlpha = 1.0f - binding.smoothing * 0.8f;

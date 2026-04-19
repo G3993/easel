@@ -13,6 +13,7 @@ public:
     bool create(const std::string& name = "Easel");
     void destroy();
     bool isActive() const { return m_send != nullptr; }
+    bool hasReceivers() const;
 
     // Read back the warp FBO texture and send it over NDI.
     // Call this after compositeAndWarp() each frame.

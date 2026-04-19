@@ -67,6 +67,14 @@ public:
     float rawTreble() const { return m_rawTreble; }
     float rawRMS() const { return m_rawRMS; }
 
+    // User-adjustable gains (applied on top of default band scaling)
+    float& inputGain() { return m_inputGain; }
+    float& bassGain() { return m_bassGain; }
+    float& lowMidGain() { return m_lowMidGain; }
+    float& highMidGain() { return m_highMidGain; }
+    float& trebleGain() { return m_trebleGain; }
+    float& noiseGate() { return m_noiseGate; }
+
 private:
 #ifdef _WIN32
     // WASAPI capture
@@ -101,6 +109,14 @@ private:
     // Raw band energies (before smoothing)
     float m_rawBass = 0, m_rawLowMid = 0, m_rawHighMid = 0, m_rawTreble = 0;
     float m_rawRMS = 0;
+
+    // User gains
+    float m_inputGain = 1.0f;   // master input multiplier (applied to RMS + bands)
+    float m_bassGain = 1.0f;
+    float m_lowMidGain = 1.0f;
+    float m_highMidGain = 1.0f;
+    float m_trebleGain = 1.0f;
+    float m_noiseGate = 0.0f;   // values below this threshold are squashed to 0
 
     // Smoothed values
     float m_smoothBass = 0, m_smoothLowMid = 0, m_smoothHighMid = 0, m_smoothTreble = 0;

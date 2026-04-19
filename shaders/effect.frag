@@ -24,6 +24,10 @@ uniform sampler2D uFeedback;
 uniform float uFeedbackMix = 0.8;
 uniform float uFeedbackZoom = 1.01;
 
+// Glow
+uniform float uGlowThreshold = 0.6;
+uniform float uGlowIntensity = 1.0;
+
 vec3 rgb2hsv(vec3 c) {
     vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
     vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
@@ -90,5 +94,18 @@ void main() {
         vec2 fbUV = (vTexCoord - 0.5) / uFeedbackZoom + 0.5;
         vec4 prev = texture(uFeedback, fbUV);
         FragColor = mix(current, prev, uFeedbackMix);
+
+    } else if (uEffectType == 5) {
+        // Glow: threshold pass (extract bright areas)
+        vec4 c = texture(uTexture, vTexCoord);
+        float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+        float t = smoothstep(uGlowThreshold - 0.05, uGlowThreshold + 0.05, lum);
+        FragColor = vec4(c.rgb * t, c.a);
+
+    } else if (uEffectType == 6) {
+        // Glow: additive combine (original + blurred glow)
+        vec4 original = texture(uTexture, vTexCoord);
+        vec4 glow = texture(uFeedback, vTexCoord); // reusing uFeedback sampler for glow tex
+        FragColor = vec4(original.rgb + glow.rgb * uGlowIntensity, original.a);
     }
 }

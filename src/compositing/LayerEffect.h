@@ -7,6 +7,7 @@ enum class EffectType {
     Invert,
     Pixelate,
     Feedback,      // trails / echo
+    Glow,          // threshold + blur + additive blend
     COUNT
 };
 
@@ -17,6 +18,7 @@ inline const char* effectTypeName(EffectType t) {
         case EffectType::Invert: return "Invert";
         case EffectType::Pixelate: return "Pixelate";
         case EffectType::Feedback: return "Feedback";
+        case EffectType::Glow: return "Glow";
         default: return "Unknown";
     }
 }
@@ -40,4 +42,9 @@ struct LayerEffect {
     // Feedback
     float feedbackMix = 0.8f;   // 0-1
     float feedbackZoom = 1.01f;  // 0.95-1.1
+
+    // Glow
+    float glowThreshold = 0.6f; // brightness threshold (0-1)
+    float glowRadius = 8.0f;    // blur radius
+    float glowIntensity = 1.0f; // additive strength (0-3)
 };

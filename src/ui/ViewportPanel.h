@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <functional>
 
 class CornerPinWarp;
 class MeshWarp;
@@ -26,7 +27,8 @@ public:
                 const std::vector<MonitorInfo>* monitors = nullptr,
                 bool ndiAvailable = false,
                 int editorMonitor = -1,
-                const std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr);
+                const std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr,
+                std::function<void()> inlineSetupSection = nullptr);
 
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
@@ -34,7 +36,8 @@ public:
     // Mask editing overlay
     // layerTransform: the full layer transform (getTransformMatrix() * nativeScale)
     // used to convert between canvas UV and layer UV for correct mask placement.
-    void renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform = glm::mat3(1.0f));
+    // zoneIndex: used for zone-colored mask overlays (-1 = layer mask, uses white)
+    void renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform = glm::mat3(1.0f), int zoneIndex = -1);
 
     void setEditMode(EditMode m) { m_editMode = m; }
     EditMode editMode() const { return m_editMode; }
@@ -43,6 +46,11 @@ public:
     bool wantsMaskEdit() const { return m_wantsMaskEdit; }
     void clearMaskEditSignal() { m_wantsMaskEdit = false; }
     glm::vec2 maskEditClickUV() const { return m_maskEditClickUV; }  // where the edge click happened
+
+    // Signal: user clicked Save in the mask edit banner (or pressed Esc while editing).
+    // Application should respond by exiting mask edit mode.
+    bool wantsExitMaskMode() const { return m_wantsExitMaskMode; }
+    void clearExitMaskSignal() { m_wantsExitMaskMode = false; }
 
     void setLayerSelected(bool sel) { m_layerSelected = sel; }
     bool isHovered() const { return m_hovered; }
@@ -53,6 +61,23 @@ public:
     // Canvas zoom
     float zoom() const { return m_zoom; }
     void resetZoom() { m_zoom = 1.0f; m_pan = {0, 0}; }
+
+    // Reset ALL drag/interaction state (called on zone switch). Covers every
+    // stateful flag so the canvas never gets stuck thinking a drag is in progress
+    // after the user clicks away mid-drag (e.g. to switch zones or focus a tab).
+    void resetDragState() {
+        m_warpDragIndex = -1;
+        m_warpDragging = false;
+        m_maskDragIndex = -1;
+        m_maskDragType = 0;
+        m_maskSelectedPoint = -1;
+        m_maskSelectedPoints.clear();
+        m_maskBoxSelecting = false;
+        m_panDragging = false;
+        m_layerDragging = false;
+        m_handleDrag = HandleType::None;
+        m_orbitDragging = false;
+    }
 
 private:
     glm::vec2 m_size = {800, 600};
@@ -68,6 +93,12 @@ private:
     int m_maskDragIndex = -1;
     int m_maskDragType = 0;
     int m_maskSelectedPoint = -1;
+    std::vector<int> m_maskSelectedPoints; // multi-select (indices into MaskPath)
+    bool m_maskBoxSelecting = false;
+    glm::vec2 m_maskBoxStart = {0, 0};
+public:
+    std::vector<int>& maskSelectedPoints() { return m_maskSelectedPoints; }
+private:
 
     // Layer transform state
     enum class HandleType { None, Move, TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left };
@@ -76,10 +107,12 @@ private:
     glm::vec2 m_dragStartMouse = {0, 0};
     glm::vec2 m_dragStartPos = {0, 0};
     glm::vec2 m_dragStartScale = {1, 1};
+    float m_dragStartRotation = 0.0f; // rotation at drag start (for local-space projection)
     float m_dragStartRatio = 1.0f;  // aspect ratio at drag start (for shift-constrain)
 
     // Signal: double-click corner or edge-click to enter mask edit
     bool m_wantsMaskEdit = false;
+    bool m_wantsExitMaskMode = false;
     glm::vec2 m_maskEditClickUV = {0, 0};
 
     // Orbit camera drag state (ObjMesh mode)

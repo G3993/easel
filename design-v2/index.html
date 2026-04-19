@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Easel · Design Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;510;590;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Linear tokens */
+    --bg-deep: #010102;
+    --bg-marketing: #08090a;
+    --bg-panel: #0f1011;
+    --bg-surface: #191a1b;
+    --bg-surface-2: #28282c;
+
+    --text-primary: #f7f8f8;
+    --text-secondary: #d0d6e0;
+    --text-tertiary: #8a8f98;
+    --text-quaternary: #62666d;
+
+    --brand-indigo: #5e6ad2;
+    --accent-violet: #7170ff;
+    --accent-hover: #828fff;
+
+    --success: #10b981;
+    --success-solid: #27a644;
+
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --border-standard: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --border-solid: #23252a;
+
+    --glass-bg: rgba(15, 16, 17, 0.55);
+    --glass-bg-strong: rgba(25, 26, 27, 0.72);
+    --glass-highlight: rgba(255, 255, 255, 0.04);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-feature-settings: "cv01", "ss03", "kern";
+    font-weight: 400;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: 44px 1fr 28px;
+    grid-template-columns: 260px 1fr 320px;
+    grid-template-areas:
+      "topbar topbar topbar"
+      "layers canvas inspector"
+      "statusbar statusbar statusbar";
+    height: 100vh;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  /* ============================
+     CANVAS — beautiful aurora bg
+     so glass panels have something
+     to blur through
+  ============================= */
+  .canvas {
+    grid-area: canvas;
+    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    isolation: isolate;
+    border: 1px solid var(--border-standard);
+    box-shadow:
+      rgba(0,0,0,0.4) 0 20px 48px,
+      rgba(0,0,0,0.3) 0 6px 12px,
+      inset 0 0 0 1px rgba(255,255,255,0.02);
+  }
+  .canvas::before,
+  .canvas::after {
+    content: "";
+    position: absolute;
+    inset: -20%;
+    pointer-events: none;
+    filter: blur(60px);
+    opacity: 0.9;
+    animation: aurora 22s ease-in-out infinite alternate;
+  }
+  .canvas::before {
+    background:
+      radial-gradient(40% 55% at 30% 40%, #7170ff 0%, transparent 60%),
+      radial-gradient(50% 60% at 75% 25%, #ff4fb6 0%, transparent 55%),
+      radial-gradient(45% 50% at 20% 80%, #22d3ee 0%, transparent 60%);
+  }
+  .canvas::after {
+    background:
+      radial-gradient(35% 45% at 80% 75%, #f59e0b 0%, transparent 55%),
+      radial-gradient(45% 50% at 55% 50%, #5e6ad2 0%, transparent 60%);
+    animation-duration: 28s;
+    animation-delay: -6s;
+    mix-blend-mode: screen;
+  }
+  @keyframes aurora {
+    0%   { transform: translate(0,0) scale(1); }
+    50%  { transform: translate(3%, -2%) scale(1.06); }
+    100% { transform: translate(-2%, 3%) scale(1.03); }
+  }
+  .canvas-grid {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(80% 80% at 50% 50%, black 40%, transparent 100%);
+    pointer-events: none;
+  }
+  .canvas-safe-area {
+    position: absolute;
+    inset: 48px;
+    border: 1px dashed rgba(255,255,255,0.18);
+    border-radius: 6px;
+    pointer-events: none;
+  }
+  .canvas-safe-area::before {
+    content: "OUTPUT · 1920 × 1080";
+    position: absolute;
+    top: -10px;
+    left: 14px;
+    background: var(--bg-panel);
+    padding: 0 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+  }
+
+  /* Floating canvas HUD */
+  .canvas-hud {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    display: flex;
+    gap: 8px;
+    z-index: 2;
+  }
+  .canvas-hud .chip {
+    backdrop-filter: blur(18px) saturate(180%);
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    background: rgba(8, 9, 10, 0.55);
+    border: 1px solid var(--border-standard);
+    border-radius: 9999px;
+    padding: 5px 10px 5px 8px;
+    font-size: 11px;
+    font-weight: 510;
+    color: var(--text-secondary);
+    letter-spacing: -0.1px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: rgba(0,0,0,0.2) 0 2px 6px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 8px var(--success); }
+  .dot.accent { background: var(--accent-violet); box-shadow: 0 0 8px var(--accent-violet); }
+
+  /* ============================
+     GLASS PANEL BASE
+  ============================= */
+  .panel {
+    position: relative;
+    background: var(--glass-bg);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--border-standard);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow:
+      rgba(0,0,0,0.4) 0 8px 32px,
+      rgba(0,0,0,0.2) 0 2px 4px,
+      inset 0 1px 0 rgba(255,255,255,0.05);
+  }
+  .panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, transparent 30%);
+  }
+
+  /* ============================
+     TOPBAR
+  ============================= */
+  .topbar {
+    grid-area: topbar;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    gap: 16px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 590;
+    letter-spacing: -0.2px;
+    color: var(--text-primary);
+    font-size: 14px;
+  }
+  .logo {
+    width: 20px; height: 20px; border-radius: 6px;
+    background: linear-gradient(135deg, #7170ff 0%, #5e6ad2 50%, #ff4fb6 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 2px 6px rgba(113,112,255,0.35);
+  }
+  .breadcrumb {
+    color: var(--text-tertiary);
+    font-size: 13px;
+    font-weight: 510;
+    letter-spacing: -0.1px;
+  }
+  .breadcrumb b { color: var(--text-primary); font-weight: 510; }
+  .topbar-sep { flex: 1; }
+
+  .transport {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+  }
+  .tbtn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    width: 28px; height: 26px;
+    border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 120ms ease;
+  }
+  .tbtn:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); }
+  .tbtn.active {
+    background: var(--brand-indigo);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(94,106,210,0.4), inset 0 1px 0 rgba(255,255,255,0.2);
+  }
+  .tbtn.record { color: #ff5d7c; }
+  .tbtn.record.active { background: #ef3657; color: #fff; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-standard);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 510;
+    letter-spacing: -0.1px;
+    cursor: pointer;
+    transition: all 140ms ease;
+  }
+  .btn:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); border-color: var(--border-strong); }
+  .btn.primary {
+    background: var(--brand-indigo);
+    color: #fff;
+    border-color: transparent;
+    box-shadow: 0 0 0 1px var(--brand-indigo), 0 0 16px rgba(94,106,210,0.3), inset 0 1px 0 rgba(255,255,255,0.2);
+  }
+  .btn.primary:hover { background: var(--accent-hover); box-shadow: 0 0 0 1px var(--accent-hover), 0 0 24px rgba(130,143,255,0.45); }
+  .btn .kbd {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    color: var(--text-quaternary);
+    padding: 1px 5px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    background: rgba(255,255,255,0.02);
+  }
+
+  /* ============================
+     LAYERS PANEL
+  ============================= */
+  .layers {
+    grid-area: layers;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .panel-title {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+  }
+  .icon-btn {
+    width: 22px; height: 22px;
+    border-radius: 5px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.02);
+    color: var(--text-tertiary);
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    transition: all 120ms ease;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); }
+
+  .layers-list { padding: 8px; overflow-y: auto; flex: 1; }
+  .layer {
+    display: grid;
+    grid-template-columns: 16px 24px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .layer:hover { background: rgba(255,255,255,0.02); }
+  .layer.selected {
+    background: rgba(113,112,255,0.07);
+    border-color: rgba(113,112,255,0.25);
+    box-shadow: inset 0 0 0 1px rgba(113,112,255,0.1);
+  }
+  .layer .vis {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1;
+  }
+  .layer.selected .vis { color: var(--accent-violet); }
+  .layer .thumb {
+    width: 24px; height: 24px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--bg-surface-2), var(--bg-surface));
+    border: 1px solid var(--border-subtle);
+    position: relative;
+    overflow: hidden;
+  }
+  .layer .thumb.fisheye { background: radial-gradient(circle at 40% 40%, #7170ff 0%, #5e6ad2 40%, #08090a 85%); }
+  .layer .thumb.fluid { background: radial-gradient(circle at 60% 50%, #ff4fb6 0%, #7170ff 55%, #08090a 100%); }
+  .layer .thumb.background { background: linear-gradient(135deg, #22d3ee 0%, #5e6ad2 100%); }
+  .layer .meta { min-width: 0; }
+  .layer .name {
+    font-size: 13px;
+    font-weight: 510;
+    color: var(--text-primary);
+    letter-spacing: -0.1px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+  }
+  .layer .kind {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    color: var(--text-quaternary);
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+  .layer .blend {
+    font-size: 10px;
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--text-tertiary);
+    padding: 2px 6px;
+    border-radius: 9999px;
+    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.02);
+  }
+
+  .layer-group { margin-top: 6px; }
+  .layer-group-title {
+    padding: 10px 12px 6px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-quaternary);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .layer-group-title::after {
+    content: ""; flex: 1; height: 1px; background: var(--border-subtle);
+  }
+
+  .add-layer {
+    margin: 8px;
+    padding: 10px 12px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    background: rgba(255,255,255,0.02);
+    border: 1px dashed var(--border-standard);
+    border-radius: 8px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 510;
+    letter-spacing: -0.1px;
+    cursor: pointer;
+    transition: all 140ms ease;
+  }
+  .add-layer:hover { background: rgba(113,112,255,0.05); border-color: rgba(113,112,255,0.3); color: var(--text-primary); }
+
+  /* ============================
+     INSPECTOR PANEL
+  ============================= */
+  .inspector {
+    grid-area: inspector;
+    display: flex;
+    flex-direction: column;
+  }
+  .inspector-head {
+    padding: 14px 16px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .inspector-head .name {
+    font-size: 15px; font-weight: 590; letter-spacing: -0.2px;
+    color: var(--text-primary);
+  }
+  .inspector-head .path {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px; letter-spacing: 0.4px;
+    color: var(--text-quaternary);
+  }
+  .inspector-tabs {
+    display: flex; gap: 2px; margin-top: 6px;
+    padding: 3px; background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+  }
+  .tab {
+    flex: 1; padding: 5px 8px;
+    font-size: 11px; font-weight: 510; letter-spacing: -0.05px;
+    color: var(--text-tertiary);
+    background: transparent; border: none; border-radius: 5px;
+    cursor: pointer; transition: all 140ms ease;
+    text-align: center;
+  }
+  .tab:hover { color: var(--text-primary); }
+  .tab.active {
+    background: rgba(255,255,255,0.06);
+    color: var(--text-primary);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+  }
+
+  .inspector-body { overflow-y: auto; flex: 1; padding: 10px 14px 16px; }
+  .group { padding: 14px 0; border-bottom: 1px solid var(--border-subtle); }
+  .group:last-child { border-bottom: none; }
+  .group-title {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-quaternary);
+    margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .group-title .chev { color: var(--text-quaternary); font-size: 9px; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 90px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+  }
+  .row label {
+    font-size: 12px;
+    font-weight: 510;
+    color: var(--text-secondary);
+    letter-spacing: -0.1px;
+  }
+  .value-input {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-subtle);
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    text-align: right;
+    width: 100%;
+    transition: all 120ms ease;
+  }
+  .value-input:focus { outline: none; border-color: var(--accent-violet); box-shadow: 0 0 0 3px rgba(113,112,255,0.15); }
+
+  .slider-row { grid-template-columns: 1fr auto; }
+  .slider-row .slider {
+    height: 4px; border-radius: 2px;
+    background: rgba(255,255,255,0.06);
+    position: relative;
+  }
+  .slider-row .slider .fill {
+    height: 100%; border-radius: inherit;
+    background: linear-gradient(90deg, var(--brand-indigo), var(--accent-violet));
+    box-shadow: 0 0 8px rgba(113,112,255,0.4);
+  }
+  .slider-row .slider .thumb {
+    position: absolute; top: 50%; transform: translate(-50%, -50%);
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,0.3);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.5), 0 0 0 2px rgba(113,112,255,0.15);
+  }
+
+  .swatch-row { grid-template-columns: 1fr auto; }
+  .swatch {
+    width: 58px; height: 22px;
+    border-radius: 5px;
+    border: 1px solid var(--border-standard);
+    display: inline-flex; align-items: center; padding: 2px;
+    gap: 4px;
+    background: rgba(255,255,255,0.02);
+    cursor: pointer;
+  }
+  .swatch .dot-color { width: 16px; height: 16px; border-radius: 3px; }
+  .swatch .hex { font-family: "IBM Plex Mono", monospace; font-size: 10px; color: var(--text-tertiary); }
+
+  .toggle {
+    width: 28px; height: 16px; border-radius: 9999px;
+    background: rgba(255,255,255,0.08);
+    position: relative;
+    cursor: pointer;
+    transition: background 140ms ease;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+    transition: transform 160ms cubic-bezier(.4,0,.2,1);
+  }
+  .toggle.on { background: var(--brand-indigo); }
+  .toggle.on::after { transform: translateX(12px); }
+
+  .select {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-subtle);
+    border-radius: 5px;
+    padding: 4px 8px;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .select:hover { border-color: var(--border-standard); }
+
+  /* Preset bar */
+  .preset-bar {
+    display: flex; gap: 6px;
+    padding: 10px 0 6px;
+    overflow-x: auto;
+  }
+  .preset {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    border-radius: 9999px;
+    border: 1px solid var(--border-solid);
+    background: transparent;
+    font-size: 11px;
+    font-weight: 510;
+    letter-spacing: -0.1px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 140ms ease;
+  }
+  .preset:hover { background: rgba(255,255,255,0.03); color: var(--text-primary); }
+  .preset.active {
+    background: rgba(113,112,255,0.1);
+    border-color: rgba(113,112,255,0.4);
+    color: var(--text-primary);
+  }
+
+  /* ============================
+     STATUSBAR
+  ============================= */
+  .statusbar {
+    grid-area: statusbar;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    gap: 14px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+  }
+  .statusbar .item { display: inline-flex; align-items: center; gap: 6px; }
+  .statusbar .item.good { color: #67e8a8; }
+  .statusbar .sep { color: var(--text-quaternary); }
+  .statusbar-right { margin-left: auto; display: flex; gap: 14px; }
+
+  /* ============================
+     SCROLLBARS
+  ============================= */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.04); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.08); }
+
+  /* ============================
+     COMMAND PALETTE (floating)
+  ============================= */
+  .cmdk-trigger {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 10px 5px 12px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--border-standard);
+    border-radius: 6px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: -0.1px;
+    cursor: pointer;
+    transition: all 140ms ease;
+    min-width: 220px;
+  }
+  .cmdk-trigger:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+  .cmdk-trigger .kbd {
+    margin-left: auto;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    color: var(--text-quaternary);
+    padding: 1px 5px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    background: rgba(255,255,255,0.02);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOPBAR -->
+  <div class="topbar panel">
+    <div class="brand">
+      <div class="logo"></div>
+      <span>Easel</span>
+    </div>
+    <div class="breadcrumb">Sanctuary Install &nbsp;/&nbsp; <b>main.easel</b></div>
+
+    <div class="transport">
+      <button class="tbtn" title="Previous">⏮</button>
+      <button class="tbtn active" title="Play">▶</button>
+      <button class="tbtn" title="Next">⏭</button>
+      <button class="tbtn record" title="Record">●</button>
+    </div>
+
+    <div class="topbar-sep"></div>
+
+    <button class="cmdk-trigger">
+      Search, jump, run command…
+      <span class="kbd">⌘K</span>
+    </button>
+
+    <button class="btn"><span>⎋</span> NDI · <b style="color:var(--text-primary);font-weight:510">ethera-live</b></button>
+    <button class="btn primary">Publish</button>
+  </div>
+
+  <!-- LAYERS PANEL -->
+  <aside class="layers panel">
+    <div class="panel-header">
+      <div class="panel-title">Composition</div>
+      <button class="icon-btn" title="Add layer">+</button>
+    </div>
+    <div class="layers-list">
+
+      <div class="layer-group-title">Foreground</div>
+      <div class="layer selected">
+        <span class="vis">●</span>
+        <div class="thumb fisheye"></div>
+        <div class="meta">
+          <div class="name">Fisheye Sphere</div>
+          <div class="kind">Shader · fisheye_sphere.fs</div>
+        </div>
+        <span class="blend">screen</span>
+      </div>
+
+      <div class="layer">
+        <span class="vis">●</span>
+        <div class="thumb fluid"></div>
+        <div class="meta">
+          <div class="name">Fluid Body</div>
+          <div class="kind">Shader · fluid_body.fs</div>
+        </div>
+        <span class="blend">add</span>
+      </div>
+
+      <div class="layer-group-title">Background</div>
+      <div class="layer">
+        <span class="vis">●</span>
+        <div class="thumb background"></div>
+        <div class="meta">
+          <div class="name">Aurora Field</div>
+          <div class="kind">Shader · no_mans_sky_gradients.fs</div>
+        </div>
+        <span class="blend">normal</span>
+      </div>
+
+      <div class="layer">
+        <span class="vis" style="color:var(--text-quaternary)">○</span>
+        <div class="thumb"></div>
+        <div class="meta">
+          <div class="name" style="color:var(--text-tertiary)">Reference Photo</div>
+          <div class="kind">Image · warehouse.jpg</div>
+        </div>
+        <span class="blend">normal</span>
+      </div>
+
+      <button class="add-layer">+ Add layer</button>
+    </div>
+  </aside>
+
+  <!-- CANVAS -->
+  <main class="canvas">
+    <div class="canvas-grid"></div>
+    <div class="canvas-hud">
+      <span class="chip"><span class="dot"></span> LIVE</span>
+      <span class="chip"><span class="dot accent"></span> NDI OUT</span>
+      <span class="chip" style="font-family:'IBM Plex Mono',monospace;letter-spacing:0.4px;">60 FPS</span>
+    </div>
+    <div class="canvas-safe-area"></div>
+  </main>
+
+  <!-- INSPECTOR -->
+  <aside class="inspector panel">
+    <div class="inspector-head">
+      <div class="path">SHADER LAYER · id 452</div>
+      <div class="name">Fisheye Sphere</div>
+      <div class="inspector-tabs">
+        <button class="tab active">Params</button>
+        <button class="tab">Inputs</button>
+        <button class="tab">Bindings</button>
+      </div>
+    </div>
+
+    <div class="inspector-body">
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Source</div>
+        <div class="row"><label>Source</label><select class="select"><option>INPUT TEX</option></select></div>
+        <div class="row slider-row"><label>Scale</label><span class="value-input" style="width:58px;text-align:right">1.00</span></div>
+        <div class="row slider-row">
+          <div class="slider"><div class="fill" style="width:50%"></div><div class="thumb" style="left:50%"></div></div>
+          <span class="value-input" style="width:58px">0.00</span>
+        </div>
+        <div class="row"><label>Offset X</label><input class="value-input" value="0.00"></div>
+        <div class="row"><label>Offset Y</label><input class="value-input" value="0.00"></div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Lens</div>
+        <div class="row slider-row">
+          <label>Lens Size</label><span class="value-input" style="width:58px">1.00</span>
+        </div>
+        <div class="row slider-row">
+          <div class="slider"><div class="fill" style="width:66%"></div><div class="thumb" style="left:66%"></div></div>
+          <span></span>
+        </div>
+        <div class="row"><label>IOR</label><input class="value-input" value="1.50"></div>
+        <div class="row"><label>Chromatic Split</label><input class="value-input" value="0.04"></div>
+        <div class="row"><label>Perspective</label><input class="value-input" value="0.25"></div>
+        <div class="row"><label>Spin Speed</label><input class="value-input" value="0.00"></div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Rim &amp; Neon</div>
+        <div class="row"><label>Rim Glow</label><input class="value-input" value="0.25"></div>
+        <div class="row"><label>Neon Ring</label><input class="value-input" value="0.80"></div>
+        <div class="row"><label>Neon Width</label><input class="value-input" value="0.015"></div>
+        <div class="row"><label>Neon Bloom</label><input class="value-input" value="0.12"></div>
+        <div class="row swatch-row">
+          <label>Neon Color</label>
+          <button class="swatch">
+            <span class="dot-color" style="background:#ff33bf"></span>
+            <span class="hex">FF33BF</span>
+          </button>
+        </div>
+        <div class="row">
+          <label>Neon Pulse</label>
+          <div class="toggle on" style="justify-self:end"></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Lens Flare</div>
+        <div class="row"><label>Intensity</label><input class="value-input" value="0.40"></div>
+        <div class="row"><label>Angle</label><input class="value-input" value="−0.60"></div>
+        <div class="row"><label>Flare X</label><input class="value-input" value="0.00"></div>
+        <div class="row"><label>Flare Y</label><input class="value-input" value="0.00"></div>
+        <div class="row swatch-row">
+          <label>Flare Color</label>
+          <button class="swatch">
+            <span class="dot-color" style="background:#fae8c7"></span>
+            <span class="hex">FAE8C7</span>
+          </button>
+        </div>
+        <div class="row swatch-row">
+          <label>Ghost Color</label>
+          <button class="swatch">
+            <span class="dot-color" style="background:#99ccff"></span>
+            <span class="hex">99CCFF</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Background</div>
+        <div class="preset-bar">
+          <button class="preset">Source</button>
+          <button class="preset">Black</button>
+          <button class="preset">Transparent</button>
+          <button class="preset active">Dispersion</button>
+        </div>
+        <div class="row"><label>Dispersion Hue</label><input class="value-input" value="0.00"></div>
+        <div class="row"><label>Dispersion Intensity</label><input class="value-input" value="1.00"></div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">▾&nbsp; Shadow</div>
+        <div class="row"><label>Strength</label><input class="value-input" value="0.50"></div>
+        <div class="row"><label>Size</label><input class="value-input" value="0.35"></div>
+        <div class="row"><label>Offset X</label><input class="value-input" value="0.05"></div>
+        <div class="row"><label>Offset Y</label><input class="value-input" value="−0.08"></div>
+        <div class="row swatch-row">
+          <label>Shadow Color</label>
+          <button class="swatch">
+            <span class="dot-color" style="background:#000"></span>
+            <span class="hex">000000</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
+  <!-- STATUSBAR -->
+  <div class="statusbar panel">
+    <span class="item good">● GPU 42%</span>
+    <span class="sep">·</span>
+    <span class="item">60.0 FPS</span>
+    <span class="sep">·</span>
+    <span class="item">1920 × 1080</span>
+    <span class="sep">·</span>
+    <span class="item">NDI · ethera-live · 47.3 KB/s</span>
+    <div class="statusbar-right">
+      <span class="item">3 layers · 2 active</span>
+      <span class="sep">·</span>
+      <span class="item">v0.9.2</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

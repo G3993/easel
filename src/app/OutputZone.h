@@ -4,11 +4,14 @@
 #ifdef HAS_NDI
 #include "app/NDIOutput.h"
 #endif
+#ifdef HAS_SPOUT
+#include "app/SpoutIO.h"
+#endif
 #include <string>
 #include <set>
 #include <cstdint>
 
-enum class OutputDest { None, Fullscreen, NDI };
+enum class OutputDest { None, Fullscreen, NDI, Spout };
 
 struct OutputZone {
     std::string name = "Main";
@@ -35,6 +38,10 @@ struct OutputZone {
 
 #ifdef HAS_NDI
     NDIOutput ndiOutput;            // per-zone NDI sender
+#endif
+#ifdef HAS_SPOUT
+    EaselSpoutSender spoutOutput;   // per-zone Spout sender
+    std::string spoutStreamName;    // custom Spout sender name
 #endif
 
     bool init();

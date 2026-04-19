@@ -49,7 +49,7 @@ bool UIManager::init(GLFWwindow* window) {
     // Load system font with DPI-aware sizing
     float fontSize = 16.0f * fontScale;
     ImFontConfig fontCfg;
-    fontCfg.OversampleH = 2;
+    fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 1;
 #ifdef _WIN32
     ImFont* mainFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", fontSize, &fontCfg, glyphRanges);
@@ -81,7 +81,7 @@ bool UIManager::init(GLFWwindow* window) {
         m_smallFont = io.Fonts->AddFontDefault(&defCfg);
     }
 
-    // Bold font for headers
+    // Semibold for headers / emphasis (Linear's ~590 weight)
     ImFontConfig boldCfg;
     boldCfg.OversampleH = 2;
 #ifdef _WIN32
@@ -111,71 +111,84 @@ bool UIManager::init(GLFWwindow* window) {
 void UIManager::applyTheme(float dpiScale) {
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // Geometry - compact but readable
-    s.WindowPadding     = ImVec2(8, 8);
-    s.FramePadding      = ImVec2(8, 5);
-    s.CellPadding       = ImVec2(4, 2);
-    s.ItemSpacing       = ImVec2(8, 5);
-    s.ItemInnerSpacing  = ImVec2(4, 3);
-    s.IndentSpacing     = 14.0f;
-    s.ScrollbarSize     = 8.0f;
-    s.GrabMinSize       = 8.0f;
+    // Geometry — more breathing room so rows don't feel squeezed
+    s.WindowPadding     = ImVec2(14, 14);
+    s.FramePadding      = ImVec2(12, 8);
+    s.CellPadding       = ImVec2(8, 5);
+    s.ItemSpacing       = ImVec2(12, 8);
+    s.ItemInnerSpacing  = ImVec2(8, 5);
+    s.IndentSpacing     = 18.0f;
+    s.ScrollbarSize     = 10.0f;
+    s.GrabMinSize       = 12.0f;
 
-    // Rounding - smooth and modern
-    s.WindowRounding    = 6.0f;
-    s.ChildRounding     = 4.0f;
-    s.FrameRounding     = 4.0f;
-    s.PopupRounding     = 4.0f;
-    s.ScrollbarRounding = 6.0f;
-    s.GrabRounding      = 3.0f;
-    s.TabRounding       = 4.0f;
+    // Rounding — matches the 6/8/12 scale from the Linear mockup
+    s.WindowRounding    = 10.0f;
+    s.ChildRounding     = 8.0f;
+    s.FrameRounding     = 6.0f;
+    s.PopupRounding     = 10.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.GrabRounding      = 4.0f;
+    s.TabRounding       = 6.0f;
 
-    // Borders
+    // Borders — hairline semi-transparent whites, no solid dark borders
     s.WindowBorderSize  = 1.0f;
-    s.ChildBorderSize   = 0.0f;
+    s.ChildBorderSize   = 1.0f;
     s.FrameBorderSize   = 0.0f;
     s.PopupBorderSize   = 1.0f;
     s.TabBorderSize     = 0.0f;
 
     // Alignment
-    s.WindowTitleAlign  = ImVec2(0.5f, 0.5f);
+    s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);    // left-align titles (Linear pattern)
     s.SeparatorTextAlign = ImVec2(0.0f, 0.5f);
+
+    // Disabled alpha for "on dark" contexts
+    s.DisabledAlpha     = 0.45f;
 
     // Anti-aliasing
     s.AntiAliasedLines  = true;
     s.AntiAliasedFill   = true;
 
-    // --- Color Palette ---
-    // Deep space background with blue undertone
-    ImVec4 bgDeep       = ImVec4(0.055f, 0.063f, 0.082f, 1.0f);  // #0E1015
-    ImVec4 bgPanel      = ImVec4(0.075f, 0.086f, 0.114f, 1.0f);  // #131623
-    ImVec4 bgWidget     = ImVec4(0.110f, 0.125f, 0.165f, 1.0f);  // #1C202A
-    ImVec4 bgWidgetHov  = ImVec4(0.145f, 0.165f, 0.220f, 1.0f);  // #252A38
-    ImVec4 bgWidgetAct  = ImVec4(0.180f, 0.200f, 0.270f, 1.0f);  // #2E3345
-    ImVec4 border       = ImVec4(0.160f, 0.180f, 0.240f, 0.50f); // subtle blue-gray
-    ImVec4 borderLight  = ImVec4(0.200f, 0.220f, 0.300f, 0.35f);
+    // --- Color Palette — Linear design system tokens ---
+    // Background: near-black canvas with micro luminance steps, no blue tint
+    ImVec4 bgVoid       = ImVec4(0.004f, 0.004f, 0.008f, 1.00f); // #010102 deepest
+    ImVec4 bgDeep       = ImVec4(0.031f, 0.035f, 0.039f, 1.00f); // #08090a marketing black
+    ImVec4 bgPanel      = ImVec4(0.059f, 0.063f, 0.067f, 0.92f); // #0f1011 — slight translucency for faux-glass
+    ImVec4 bgWidget     = ImVec4(0.098f, 0.102f, 0.106f, 1.00f); // #191a1b elevated surface
+    ImVec4 bgWidgetHov  = ImVec4(0.125f, 0.129f, 0.137f, 1.00f); // #202124 hover
+    ImVec4 bgWidgetAct  = ImVec4(0.157f, 0.157f, 0.173f, 1.00f); // #28282c active/lightest dark
 
-    // Accent: electric cyan
-    ImVec4 accent       = ImVec4(0.000f, 0.780f, 1.000f, 1.0f);  // #00C7FF
-    ImVec4 accentDim    = ImVec4(0.000f, 0.550f, 0.710f, 1.0f);  // #008CB5
-    ImVec4 accentSoft   = ImVec4(0.000f, 0.780f, 1.000f, 0.18f);
-    ImVec4 accentMed    = ImVec4(0.000f, 0.780f, 1.000f, 0.40f);
+    // Borders — semi-transparent white, Linear's signature "moonlight" edges
+    ImVec4 borderSubtle = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
+    ImVec4 border       = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
+    ImVec4 borderStrong = ImVec4(1.0f, 1.0f, 1.0f, 0.12f);
 
-    // Text hierarchy
-    ImVec4 textPrimary  = ImVec4(0.900f, 0.920f, 0.960f, 1.0f);  // #E6EBF5
-    ImVec4 textSecondary= ImVec4(0.550f, 0.600f, 0.680f, 1.0f);  // #8C99AD
-    ImVec4 textDisabled = ImVec4(0.350f, 0.380f, 0.440f, 1.0f);  // #596170
+    // Monochrome "accent" — no chromatic color anywhere. Interactions use
+    // white-alpha tiers on the dark canvas, giving a dark/gray/light-gray palette.
+    ImVec4 brand        = ImVec4(1.0f, 1.0f, 1.0f, 1.00f); // solid white for key interactive fills
+    ImVec4 accent       = ImVec4(1.0f, 1.0f, 1.0f, 0.90f); // slider grabs, checkmarks
+    ImVec4 accentHover  = ImVec4(1.0f, 1.0f, 1.0f, 1.00f);
+    ImVec4 accentSoft   = ImVec4(1.0f, 1.0f, 1.0f, 0.07f); // selection / header bg (light gray tint)
+    ImVec4 accentMed    = ImVec4(1.0f, 1.0f, 1.0f, 0.12f); // hover-header (slightly stronger)
 
-    // Semantic
-    ImVec4 success      = ImVec4(0.220f, 0.820f, 0.520f, 1.0f);  // #38D184
-    ImVec4 warning      = ImVec4(1.000f, 0.720f, 0.240f, 1.0f);  // #FFB83D
+    // Text tiers — never pure white, Linear's cool-warm near-white
+    ImVec4 textPrimary  = ImVec4(0.969f, 0.973f, 0.973f, 1.00f); // #f7f8f8
+    ImVec4 textSecondary= ImVec4(0.816f, 0.839f, 0.878f, 1.00f); // #d0d6e0
+    ImVec4 textTertiary = ImVec4(0.541f, 0.561f, 0.596f, 1.00f); // #8a8f98
+    ImVec4 textDisabled = ImVec4(0.384f, 0.400f, 0.427f, 1.00f); // #62666d
+
+    // Semantic — muted, used sparingly
+    ImVec4 success      = ImVec4(0.063f, 0.725f, 0.506f, 1.00f); // #10b981
+    ImVec4 warning      = ImVec4(1.000f, 0.720f, 0.240f, 1.00f);
+    ImVec4 error        = ImVec4(0.950f, 0.320f, 0.380f, 1.00f);
+    (void)bgVoid; (void)borderStrong; (void)textTertiary; (void)error;
+    (void)bgWidget; (void)bgWidgetHov; (void)bgWidgetAct; (void)textSecondary; (void)success;
 
     auto* c = s.Colors;
 
-    // Window
+    // Window — translucent panel background for a faux-glass feel over the dark viewport
     c[ImGuiCol_WindowBg]            = bgPanel;
-    c[ImGuiCol_ChildBg]             = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg]             = ImVec4(bgDeep.x, bgDeep.y, bgDeep.z, 0.96f);
+    c[ImGuiCol_ChildBg]             = ImVec4(1.0f, 1.0f, 1.0f, 0.02f); // ultra-subtle surface elevation
+    c[ImGuiCol_PopupBg]             = ImVec4(0.098f, 0.102f, 0.106f, 0.96f); // #191a1b surface
     c[ImGuiCol_Border]              = border;
     c[ImGuiCol_BorderShadow]        = ImVec4(0, 0, 0, 0);
 
@@ -183,76 +196,76 @@ void UIManager::applyTheme(float dpiScale) {
     c[ImGuiCol_Text]                = textPrimary;
     c[ImGuiCol_TextDisabled]        = textDisabled;
 
-    // Title bar
-    c[ImGuiCol_TitleBg]             = bgDeep;
-    c[ImGuiCol_TitleBgActive]       = ImVec4(0.065f, 0.075f, 0.100f, 1.0f);
-    c[ImGuiCol_TitleBgCollapsed]    = ImVec4(bgDeep.x, bgDeep.y, bgDeep.z, 0.75f);
+    // Title bar — nearly flush with the panel, no shouting
+    c[ImGuiCol_TitleBg]             = ImVec4(0.059f, 0.063f, 0.067f, 0.92f);
+    c[ImGuiCol_TitleBgActive]       = ImVec4(0.098f, 0.102f, 0.106f, 0.95f);
+    c[ImGuiCol_TitleBgCollapsed]    = ImVec4(0.031f, 0.035f, 0.039f, 0.75f);
 
-    // Menu bar
+    // Menu bar — flush with deep bg
     c[ImGuiCol_MenuBarBg]           = bgDeep;
 
-    // Frames (inputs, sliders, etc.)
-    c[ImGuiCol_FrameBg]             = bgWidget;
-    c[ImGuiCol_FrameBgHovered]      = bgWidgetHov;
-    c[ImGuiCol_FrameBgActive]       = bgWidgetAct;
+    // Frames (inputs, sliders) — Linear's near-zero-opacity white over dark
+    c[ImGuiCol_FrameBg]             = ImVec4(1.0f, 1.0f, 1.0f, 0.03f);
+    c[ImGuiCol_FrameBgHovered]      = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
+    c[ImGuiCol_FrameBgActive]       = ImVec4(1.0f, 1.0f, 1.0f, 0.09f);
 
     // Tabs
-    c[ImGuiCol_Tab]                 = ImVec4(bgWidget.x, bgWidget.y, bgWidget.z, 0.86f);
-    c[ImGuiCol_TabHovered]          = accentMed;
-    c[ImGuiCol_TabActive]           = ImVec4(accent.x * 0.25f, accent.y * 0.25f, accent.z * 0.25f, 1.0f);
-    c[ImGuiCol_TabUnfocused]        = ImVec4(bgDeep.x, bgDeep.y, bgDeep.z, 0.97f);
-    c[ImGuiCol_TabUnfocusedActive]  = ImVec4(bgWidget.x, bgWidget.y, bgWidget.z, 1.0f);
+    c[ImGuiCol_Tab]                 = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
+    c[ImGuiCol_TabHovered]          = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
+    c[ImGuiCol_TabActive]           = ImVec4(brand.x, brand.y, brand.z, 0.18f);
+    c[ImGuiCol_TabUnfocused]        = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_TabUnfocusedActive]  = ImVec4(1.0f, 1.0f, 1.0f, 0.04f);
 
-    // Headers (collapsing headers, selectables)
+    // Headers (CollapsingHeader, Selectable) — white at low opacity when selected
     c[ImGuiCol_Header]              = accentSoft;
-    c[ImGuiCol_HeaderHovered]       = accentMed;
-    c[ImGuiCol_HeaderActive]        = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+    c[ImGuiCol_HeaderHovered]       = ImVec4(1.0f, 1.0f, 1.0f, 0.04f);
+    c[ImGuiCol_HeaderActive]        = accentMed;
 
-    // Buttons
-    c[ImGuiCol_Button]              = bgWidget;
-    c[ImGuiCol_ButtonHovered]       = bgWidgetHov;
+    // Buttons — ghost/subtle Linear buttons: transparent with hairline border effect (via ItemBg)
+    c[ImGuiCol_Button]              = ImVec4(1.0f, 1.0f, 1.0f, 0.03f);
+    c[ImGuiCol_ButtonHovered]       = ImVec4(1.0f, 1.0f, 1.0f, 0.07f);
     c[ImGuiCol_ButtonActive]        = accentMed;
 
-    // Checkmarks, slider grabs
+    // Checkmarks / slider grabs — brand/accent at full intensity for key interactions
     c[ImGuiCol_CheckMark]           = accent;
-    c[ImGuiCol_SliderGrab]          = accentDim;
-    c[ImGuiCol_SliderGrabActive]    = accent;
+    c[ImGuiCol_SliderGrab]          = accent;
+    c[ImGuiCol_SliderGrabActive]    = accentHover;
 
-    // Scrollbar
-    c[ImGuiCol_ScrollbarBg]         = ImVec4(bgDeep.x, bgDeep.y, bgDeep.z, 0.40f);
-    c[ImGuiCol_ScrollbarGrab]       = ImVec4(0.200f, 0.220f, 0.280f, 0.80f);
-    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.280f, 0.310f, 0.400f, 0.80f);
-    c[ImGuiCol_ScrollbarGrabActive] = accent;
+    // Scrollbar — invisible track, hairline grab
+    c[ImGuiCol_ScrollbarBg]         = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab]       = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
+    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(1.0f, 1.0f, 1.0f, 0.14f);
+    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(1.0f, 1.0f, 1.0f, 0.22f);
 
-    // Separator
-    c[ImGuiCol_Separator]           = borderLight;
-    c[ImGuiCol_SeparatorHovered]    = accentDim;
-    c[ImGuiCol_SeparatorActive]     = accent;
+    // Separator — subtle by default, brand on interaction
+    c[ImGuiCol_Separator]           = borderSubtle;
+    c[ImGuiCol_SeparatorHovered]    = accent;
+    c[ImGuiCol_SeparatorActive]     = accentHover;
 
     // Resize grip
-    c[ImGuiCol_ResizeGrip]          = ImVec4(accent.x, accent.y, accent.z, 0.10f);
-    c[ImGuiCol_ResizeGripHovered]   = ImVec4(accent.x, accent.y, accent.z, 0.40f);
-    c[ImGuiCol_ResizeGripActive]    = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+    c[ImGuiCol_ResizeGrip]          = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
+    c[ImGuiCol_ResizeGripHovered]   = accentSoft;
+    c[ImGuiCol_ResizeGripActive]    = accentMed;
 
     // Docking
-    c[ImGuiCol_DockingPreview]      = ImVec4(accent.x, accent.y, accent.z, 0.50f);
+    c[ImGuiCol_DockingPreview]      = ImVec4(accent.x, accent.y, accent.z, 0.40f);
     c[ImGuiCol_DockingEmptyBg]      = bgDeep;
 
-    // Nav
+    // Nav focus — white highlight
     c[ImGuiCol_NavHighlight]        = accent;
 
     // Table
-    c[ImGuiCol_TableHeaderBg]       = bgWidget;
+    c[ImGuiCol_TableHeaderBg]       = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
     c[ImGuiCol_TableBorderStrong]   = border;
-    c[ImGuiCol_TableBorderLight]    = borderLight;
+    c[ImGuiCol_TableBorderLight]    = borderSubtle;
     c[ImGuiCol_TableRowBg]          = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_TableRowBgAlt]       = ImVec4(1, 1, 1, 0.02f);
+    c[ImGuiCol_TableRowBgAlt]       = ImVec4(1.0f, 1.0f, 1.0f, 0.015f);
 
     // Drag/drop
     c[ImGuiCol_DragDropTarget]      = warning;
 
-    // Modal dim
-    c[ImGuiCol_ModalWindowDimBg]    = ImVec4(0.0f, 0.0f, 0.0f, 0.60f);
+    // Modal dim — deep, near-opaque (Linear uses 0.85)
+    c[ImGuiCol_ModalWindowDimBg]    = ImVec4(0.0f, 0.0f, 0.0f, 0.85f);
 
     // Scale for DPI
     s.ScaleAllSizes(dpiScale);
@@ -353,34 +366,34 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // Responsive split based on window width
         float splitRatio = (dockSize.x > 1600) ? 0.65f : (dockSize.x > 1200) ? 0.60f : 0.55f;
 
-        // Split: left = preview + mapping, right = panels
+        // Split: left = main viewport tabs, right = side panels (controls)
         ImGuiID leftId, rightId;
         ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, splitRatio, &leftId, &rightId);
 
-        // Split left: top = preview canvas, bottom = Mapping (auto-size to content)
-        ImGuiID leftTopId, leftBottomId;
-        ImGui::DockBuilderSplitNode(leftId, ImGuiDir_Up, 0.65f, &leftTopId, &leftBottomId);
-
-        // Split right side: top = Layers tabs, bottom = Properties
-        // Use proportional split — give layers ~25% for tab bar + add layer + a few rows
+        // Split right side: top = Sources, bottom = Properties/inspectors
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
 
         // Dock windows into regions
-        ImGui::DockBuilderDockWindow("Canvas", leftTopId);
-        ImGui::DockBuilderDockWindow("Stage", leftTopId);
-        ImGui::DockBuilderDockWindow("Stream", leftTopId);
-        ImGui::DockBuilderDockWindow("Projector", leftTopId);
-        ImGui::DockBuilderDockWindow("Mapping", leftBottomId);
+        //   leftId         = Main viewport tab group: Canvas, Projector, Mapping, Masks, Stage
+        //   rightTopId     = Sources / outputs (Layers, feeds, NDI/Stream/Spout)
+        //   rightBottomId  = Inspectors (Properties, MIDI, Audio)
+        // Tab order mirrors the workflow sequence.
+        ImGui::DockBuilderDockWindow("Canvas", leftId);
+        ImGui::DockBuilderDockWindow("Mapping", leftId);
+        ImGui::DockBuilderDockWindow("Masks", leftId);
+        ImGui::DockBuilderDockWindow("Stage", leftId);
         ImGui::DockBuilderDockWindow("Layers", rightTopId);
-        ImGui::DockBuilderDockWindow("Masks", rightTopId);
         ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
         ImGui::DockBuilderDockWindow("Etherea", rightTopId);
         ImGui::DockBuilderDockWindow("NDI", rightTopId);
+        ImGui::DockBuilderDockWindow("Stream", rightTopId);
+        ImGui::DockBuilderDockWindow("Spout", rightTopId);
         ImGui::DockBuilderDockWindow("Capture", rightTopId);
         ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
         ImGui::DockBuilderDockWindow("Properties", rightBottomId);
         ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
+        ImGui::DockBuilderDockWindow("Audio", rightBottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);
     } else {

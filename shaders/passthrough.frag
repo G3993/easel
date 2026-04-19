@@ -6,6 +6,8 @@ uniform sampler2D uTexture;
 uniform float uOpacity = 1.0;
 uniform sampler2D uMask;
 uniform bool uHasMask = false;
+uniform float uMaskFeather = 0.0;
+uniform bool uMaskInvert = false;
 uniform float uTileX = 1.0;
 uniform float uTileY = 1.0;
 uniform vec4 uCrop = vec4(0);          // left, right, top, bottom
@@ -155,7 +157,26 @@ void main() {
 
     color.a *= uOpacity;
     if (uHasMask) {
-        float maskVal = texture(uMask, maskUV).r;
+        float maskVal;
+        if (uMaskFeather > 0.001) {
+            float f = uMaskFeather * 0.5;
+            const vec2 offs[9] = vec2[](
+                vec2(-1,-1), vec2( 0,-1), vec2( 1,-1),
+                vec2(-1, 0), vec2( 0, 0), vec2( 1, 0),
+                vec2(-1, 1), vec2( 0, 1), vec2( 1, 1)
+            );
+            const float wts[9] = float[](
+                1.0, 2.0, 1.0, 2.0, 4.0, 2.0, 1.0, 2.0, 1.0
+            );
+            float sum = 0.0;
+            for (int i = 0; i < 9; i++) {
+                sum += texture(uMask, maskUV + offs[i] * f).r * wts[i];
+            }
+            maskVal = sum * (1.0 / 16.0);
+        } else {
+            maskVal = texture(uMask, maskUV).r;
+        }
+        if (uMaskInvert) maskVal = 1.0 - maskVal;
         color *= maskVal;
     }
     FragColor = color;

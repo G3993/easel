@@ -12,11 +12,37 @@
 #include <cmath>
 #include <cstring>
 
-// Theme colors
-static const ImU32 kAccent        = IM_COL32(0, 200, 255, 255);
+// Zone color palette (shared with LayerPanel)
+struct ZoneRGB { int r, g, b; };
+static const ZoneRGB kZoneColors[] = {
+    {0, 200, 255},    // cyan
+    {255, 140, 50},   // orange
+    {80, 220, 120},   // green
+    {220, 80, 200},   // magenta
+    {255, 220, 60},   // yellow
+    {100, 140, 255},  // blue
+    {255, 100, 100},  // red
+    {180, 180, 180},  // grey
+};
+static ZoneRGB zoneRGB(int idx) { return kZoneColors[idx % 8]; }
+
+// Zone-colored accent helpers
+static ImU32 zAccent(int zi)      { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 255); }
+static ImU32 zAccentDim(int zi)   { auto c = zoneRGB(zi); return IM_COL32(c.r*7/10, c.g*7/10, c.b*7/10, 255); }
+static ImU32 zAccentSoft(int zi)  { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 80); }
+static ImU32 zAccentGlow(int zi)  { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 30); }
+static ImU32 zMaskFill(int zi)    { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 30); }
+static ImU32 zMaskCurve(int zi)   { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 200); }
+static ImU32 zMaskGlow(int zi)    { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 50); }
+static ImU32 zHandleRing(int zi)  { auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 200); }
+static ImU32 zSelectedFill(int zi){ auto c = zoneRGB(zi); return IM_COL32(c.r, c.g, c.b, 255); }
+static ImU32 zPointFill(int zi)   { auto c = zoneRGB(zi); return IM_COL32(c.r*9/10, c.g*9/10, c.b*9/10, 255); }
+
+// Fallback static colors (zone-independent)
+static const ImU32 kAccent        = IM_COL32(255, 255, 255, 255);
 static const ImU32 kAccentDim     = IM_COL32(0, 140, 180, 255);
-static const ImU32 kAccentSoft    = IM_COL32(0, 200, 255, 80);
-static const ImU32 kAccentGlow    = IM_COL32(0, 200, 255, 30);
+static const ImU32 kAccentSoft    = IM_COL32(255, 255, 255, 80);
+static const ImU32 kAccentGlow    = IM_COL32(255, 255, 255, 30);
 static const ImU32 kWhiteSoft     = IM_COL32(255, 255, 255, 140);
 static const ImU32 kHandleOuter   = IM_COL32(255, 255, 255, 220);
 static const ImU32 kMaskFill      = IM_COL32(255, 255, 255, 30);
@@ -24,7 +50,7 @@ static const ImU32 kMaskCurve     = IM_COL32(255, 255, 255, 200);
 static const ImU32 kMaskCurveGlow = IM_COL32(255, 255, 255, 50);
 static const ImU32 kHandleLine    = IM_COL32(255, 255, 255, 70);
 static const ImU32 kHandleDot     = IM_COL32(255, 255, 255, 200);
-static const ImU32 kHandleRing    = IM_COL32(0, 200, 255, 200);
+static const ImU32 kHandleRing    = IM_COL32(255, 255, 255, 200);
 static const ImU32 kSelectedFill  = IM_COL32(0, 220, 255, 255);
 static const ImU32 kSelectedRing  = IM_COL32(255, 255, 255, 255);
 static const ImU32 kPointFill     = IM_COL32(0, 180, 230, 255);
@@ -35,7 +61,7 @@ static const ImU32 kBBoxLine      = IM_COL32(50, 130, 255, 200);
 static const ImU32 kBBoxGlow      = IM_COL32(50, 130, 255, 40);
 static const ImU32 kBBoxDim       = IM_COL32(255, 255, 255, 30);
 static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 240);
-static const ImU32 kLHandleStroke = IM_COL32(0, 200, 255, 255);
+static const ImU32 kLHandleStroke = IM_COL32(255, 255, 255, 255);
 static const ImU32 kLHandleActive = IM_COL32(0, 220, 255, 255);
 
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
@@ -64,6 +90,8 @@ glm::vec2 ViewportPanel::ndcToScreen(glm::vec2 ndc) const {
 
 static ImVec2 toImVec2(glm::vec2 v) { return ImVec2(v.x, v.y); }
 
+#include <functional>
+
 void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                            float projectorAspect,
                            std::vector<std::unique_ptr<OutputZone>>* zones,
@@ -71,7 +99,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                            const std::vector<MonitorInfo>* monitors,
                            bool ndiAvailable,
                            int editorMonitor,
-                           const std::vector<std::unique_ptr<MappingProfile>>* allMappings) {
+                           const std::vector<std::unique_ptr<MappingProfile>>* allMappings,
+                           std::function<void()> inlineSetupSection) {
     // Unpack mapping for warp overlay
     WarpMode warpMode = mapping ? mapping->warpMode : WarpMode::CornerPin;
     CornerPinWarp* cornerPinPtr = mapping ? &mapping->cornerPin : nullptr;
@@ -109,14 +138,21 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             bool isActive = (i == *activeZone);
             auto& z = *(*zones)[i];
 
+            // Per-zone color from shared palette (matches layer panel dots)
+            static const float zoneColors[][3] = {
+                // Monochrome zone tabs — lightness ramp only
+                {0.96f, 0.96f, 0.96f}, {0.86f, 0.86f, 0.86f}, {0.76f, 0.76f, 0.76f}, {0.66f, 0.66f, 0.66f},
+                {0.56f, 0.56f, 0.56f}, {0.80f, 0.80f, 0.80f}, {0.70f, 0.70f, 0.70f}, {0.60f, 0.60f, 0.60f},
+            };
+            const float* zc = zoneColors[i % 8];
             if (isActive) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.35f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.90f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
             } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.09f, 0.13f, 0.9f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.14f, 0.20f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0] * 0.15f, zc[1] * 0.15f, zc[2] * 0.15f, 0.9f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0] * 0.25f, zc[1] * 0.25f, zc[2] * 0.25f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0] * 0.6f, zc[1] * 0.6f, zc[2] * 0.6f, 1.0f));
             }
             if (ImGui::SmallButton(z.name.c_str())) {
                 *activeZone = i;
@@ -150,12 +186,11 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 ImGui::EndPopup();
             }
 
-            // Output type dot on tab (top-left corner)
+            // Output type dot on tab (top-left corner) — uses zone color
             ImVec2 btnMin = ImGui::GetItemRectMin();
-            if (z.outputDest == OutputDest::Fullscreen) {
-                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, IM_COL32(0, 200, 255, 255));
-            } else if (z.outputDest == OutputDest::NDI) {
-                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, IM_COL32(34, 210, 130, 255));
+            if (z.outputDest == OutputDest::Fullscreen || z.outputDest == OutputDest::NDI) {
+                ImU32 dotCol = IM_COL32((int)(zc[0]*255), (int)(zc[1]*255), (int)(zc[2]*255), 255);
+                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, dotCol);
             }
             ImGui::SameLine();
             ImGui::PopID();
@@ -185,9 +220,9 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         }
 
         // "+" button to add zone
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.78f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.78f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.85f, 1.0f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
         if (ImGui::SmallButton("+")) {
             *activeZone = -(100 + (int)zones->size()); // signal: want add
         }
@@ -197,13 +232,15 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
 
-        // --- Output routing row ---
+        // --- Output + Mapping routing (same row as zone tabs) ---
         int ai = *activeZone;
         if (ai >= 0 && ai < (int)zones->size()) {
             auto& az = *(*zones)[ai];
 
+            ImGui::SameLine(0, 16); // gap between zone tabs and output section
+
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 2));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 2));
 
             // Build display label
             static char destBuf[128] = {};
@@ -252,8 +289,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
             }
 
-            float comboW = std::min(300.0f, ImGui::GetContentRegionAvail().x - 4);
-            ImGui::SetNextItemWidth(comboW);
+            ImGui::SetNextItemWidth(220.0f);
             if (ImGui::BeginCombo("##ZoneOutput", destLabel, ImGuiComboFlags_HeightLarge)) {
                 if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
                     az.outputDest = OutputDest::None;
@@ -345,8 +381,9 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             }
             ImGui::PopStyleColor(); // combo text color
 
-            // --- Mapping profile selector ---
+            // --- Mapping profile selector (inline, same row) ---
             if (allMappings && !allMappings->empty()) {
+                ImGui::SameLine(0, 12);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
                 ImGui::Text("Mapping");
                 ImGui::PopStyleColor();
@@ -354,7 +391,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
 
                 const char* mapLabel = (az.mappingIndex >= 0 && az.mappingIndex < (int)allMappings->size())
                     ? (*allMappings)[az.mappingIndex]->name.c_str() : "None";
-                ImGui::SetNextItemWidth(std::min(300.0f, ImGui::GetContentRegionAvail().x - 4));
+                ImGui::SetNextItemWidth(160.0f);
                 if (ImGui::BeginCombo("##ZoneMapping", mapLabel)) {
                     for (int mi = 0; mi < (int)allMappings->size(); mi++) {
                         bool sel = (az.mappingIndex == mi);
@@ -376,9 +413,17 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         {
             ImVec2 p = ImGui::GetCursorScreenPos();
             float w = ImGui::GetContentRegionAvail().x;
-            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(0, 200, 255, 25));
+            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y), IM_COL32(255, 255, 255, 25));
         }
         ImGui::Dummy(ImVec2(0, 2));
+
+        // Caller-supplied inline section (unused in the current wiring but kept
+        // in place for future Canvas-specific setup).
+        if (inlineSetupSection) {
+            ImGui::Indent(6);
+            inlineSetupSection();
+            ImGui::Unindent(6);
+        }
     }
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -418,6 +463,20 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     }
 
     m_hovered = ImGui::IsWindowHovered();
+
+    // Safety net: if NO mouse buttons are down and we still think we're mid-drag,
+    // clear the flags. This prevents the canvas from getting stuck unresponsive
+    // after the user releases the mouse over a different window (e.g. clicking a
+    // zone tab mid-drag, or dragging off the viewport onto another panel).
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Middle) &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (m_panDragging)   m_panDragging = false;
+        if (m_layerDragging) { m_layerDragging = false; m_handleDrag = HandleType::None; }
+        if (m_warpDragging)  { m_warpDragging = false;  m_warpDragIndex = -1; }
+        if (m_orbitDragging) m_orbitDragging = false;
+        if (m_maskDragType > 0) { m_maskDragType = 0; m_maskDragIndex = -1; }
+    }
 
     // --- Canvas zoom (scroll wheel) and pan (middle-mouse drag) ---
     if (m_hovered && warpMode != WarpMode::ObjMesh) {
@@ -530,22 +589,23 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 m_warpDragIndex = -1;
             }
 
-            // Draw warp handles
+            // Draw warp handles (zone-colored)
             ImDrawList* draw = ImGui::GetWindowDrawList();
             auto ndc2scr = [&](glm::vec2 ndc) -> ImVec2 { return toImVec2(ndcToScreen(ndc)); };
+            int zi = activeZone ? *activeZone : 0;
 
             if (warpMode == WarpMode::CornerPin && cornerPinPtr) {
                 const auto& corners = cornerPinPtr->corners();
 
                 for (int i = 0; i < 4; i++) {
-                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccentGlow, 6.0f);
-                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), kAccent, 1.5f);
+                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), zAccentGlow(zi), 6.0f);
+                    draw->AddLine(ndc2scr(corners[i]), ndc2scr(corners[(i + 1) % 4]), zAccent(zi), 1.5f);
                 }
                 for (int i = 0; i < 4; i++) {
                     ImVec2 p = ndc2scr(corners[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
-                    draw->AddCircleFilled(p, active ? 14.0f : 10.0f, kAccentGlow);
-                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? kAccent : kAccentDim);
+                    draw->AddCircleFilled(p, active ? 14.0f : 10.0f, zAccentGlow(zi));
+                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? zAccent(zi) : zAccentDim(zi));
                     draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
                 }
             } else if (meshWarpPtr) {
@@ -553,14 +613,14 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 int cols = meshWarpPtr->cols(), rows = meshWarpPtr->rows();
                 for (int r = 0; r < rows; r++)
                     for (int c = 0; c < cols - 1; c++)
-                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), kAccentSoft, 1.0f);
+                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), zAccentSoft(zi), 1.0f);
                 for (int c = 0; c < cols; c++)
                     for (int r = 0; r < rows - 1; r++)
-                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[(r+1)*cols+c]), kAccentSoft, 1.0f);
+                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[(r+1)*cols+c]), zAccentSoft(zi), 1.0f);
                 for (int i = 0; i < (int)points.size(); i++) {
                     ImVec2 p = ndc2scr(points[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
-                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? kAccent : kPointFill);
+                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? zAccent(zi) : zPointFill(zi));
                     draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 0, 1.2f);
                 }
             }
@@ -682,6 +742,7 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                     m_dragStartMouse = mouseNDC;
                     m_dragStartPos = stack[selectedLayer]->position;
                     m_dragStartScale = stack[selectedLayer]->scale;
+                    m_dragStartRotation = stack[selectedLayer]->rotation;
                     m_dragStartRatio = stack[selectedLayer]->scale.x / std::max(0.001f, stack[selectedLayer]->scale.y);
                     hitSomething = true;
                     break;
@@ -695,6 +756,7 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                 m_dragStartMouse = mouseNDC;
                 m_dragStartPos = stack[selectedLayer]->position;
                 m_dragStartScale = stack[selectedLayer]->scale;
+                m_dragStartRotation = stack[selectedLayer]->rotation;
                 hitSomething = true;
             }
         }
@@ -712,6 +774,7 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                     m_dragStartMouse = mouseNDC;
                     m_dragStartPos = stack[idx]->position;
                     m_dragStartScale = stack[idx]->scale;
+                    m_dragStartRotation = stack[idx]->rotation;
                     found = true;
                     break;
                 }
@@ -765,7 +828,14 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
         if (m_handleDrag == HandleType::Move) {
             dl->position = m_dragStartPos + delta;
         } else {
-            float dx = delta.x, dy = delta.y;
+            // Rotate mouse delta into the layer's local coordinate space
+            // so handle dragging works correctly at any rotation angle.
+            // Use drag-start rotation so projection is stable if rotation
+            // changes during the drag (e.g. audio bindings).
+            float rad = glm::radians(m_dragStartRotation);
+            float c = cosf(rad), s = sinf(rad);
+            float dx = delta.x * c + delta.y * s;   // local X (along layer's right)
+            float dy = -delta.x * s + delta.y * c;   // local Y (along layer's up)
             glm::vec2 ns = m_dragStartScale;
 
             switch (m_handleDrag) {
@@ -894,7 +964,7 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
 
 // ======== MASK OVERLAY ========
 
-void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform) {
+void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTransform, int zoneIndex) {
     if (m_imageSize.x <= 0 || m_imageSize.y <= 0) return;
     if (!m_panelVisible) return;
     if (m_editMode != EditMode::Mask) return;
@@ -927,22 +997,86 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     ImVec2 mousePos = ImGui::GetMousePos();
     glm::vec2 mouseUV = screenToLayerUV({mousePos.x, mousePos.y});
 
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered) {
+    // --- Compute banner rect early so clicks on the banner/Save button
+    // don't leak through to the mask-point-add handler below. The banner
+    // sits at the top-right of the viewport away from common drawing areas.
+    ImVec2 bannerMin, bannerMax, saveBtnMin, saveBtnMax;
+    {
+        const char* banner = mask.closed()
+            ? "MASK EDIT  |  Shift+Click: multi-select  •  Drag: move  •  R-click: del"
+            : "MASK EDIT  |  Click: add points  •  Click first point to close  •  R-click: del";
+        ImVec2 ts = ImGui::CalcTextSize(banner);
+        const char* saveLbl = "Save";
+        ImVec2 sts = ImGui::CalcTextSize(saveLbl);
+        float pad = 8.0f;
+        float saveBtnW = sts.x + 18.0f;
+        float totalW = ts.x + pad * 2 + saveBtnW + 6.0f;
+        float totalH = ts.y + pad;
+        bannerMin = ImVec2(m_panelMax.x - totalW - 12, m_panelMin.y + 8);
+        bannerMax = ImVec2(bannerMin.x + totalW, bannerMin.y + totalH);
+        saveBtnMin = ImVec2(bannerMin.x + pad + ts.x + pad, bannerMin.y);
+        saveBtnMax = ImVec2(saveBtnMin.x + saveBtnW, bannerMin.y + totalH);
+    }
+    auto ptInRect = [](ImVec2 p, ImVec2 a, ImVec2 b) {
+        return p.x >= a.x && p.x <= b.x && p.y >= a.y && p.y <= b.y;
+    };
+    bool mouseOverBanner = ptInRect(mousePos, bannerMin, bannerMax);
+
+    bool shiftHeld = ImGui::GetIO().KeyShift;
+    auto isSelected = [&](int idx) -> bool {
+        for (int s : m_maskSelectedPoints) if (s == idx) return true;
+        return false;
+    };
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !mouseOverBanner) {
         int hi = mask.hitTestHandleIn(mouseUV, 0.025f);
         int ho = mask.hitTestHandleOut(mouseUV, 0.025f);
         int pt = mask.hitTestPoint(mouseUV, 0.03f);
 
-        if (hi >= 0) { m_maskDragIndex = hi; m_maskDragType = 2; m_maskSelectedPoint = hi; }
-        else if (ho >= 0) { m_maskDragIndex = ho; m_maskDragType = 3; m_maskSelectedPoint = ho; }
-        else if (pt >= 0) { m_maskDragIndex = pt; m_maskDragType = 1; m_maskSelectedPoint = pt; }
-        else {
-            float t; int edge = mask.hitTestEdge(mouseUV, 0.02f, t);
-            if (edge >= 0 && mask.count() >= 2) {
-                mask.insertPoint(edge, t);
-                m_maskSelectedPoint = edge+1; m_maskDragIndex = m_maskSelectedPoint; m_maskDragType = 1;
+        if (hi >= 0) {
+            m_maskDragIndex = hi; m_maskDragType = 2; m_maskSelectedPoint = hi;
+        } else if (ho >= 0) {
+            m_maskDragIndex = ho; m_maskDragType = 3; m_maskSelectedPoint = ho;
+        } else if (pt >= 0) {
+            // Click on point 0 with 3+ points and open path → close the mask
+            if (pt == 0 && !mask.closed() && mask.count() >= 3) {
+                mask.setClosed(true);
+                mask.markDirty();
+                m_maskSelectedPoint = 0;
             } else {
+                // Shift-click: toggle selection
+                if (shiftHeld) {
+                    if (isSelected(pt)) {
+                        m_maskSelectedPoints.erase(
+                            std::remove(m_maskSelectedPoints.begin(), m_maskSelectedPoints.end(), pt),
+                            m_maskSelectedPoints.end());
+                    } else {
+                        m_maskSelectedPoints.push_back(pt);
+                    }
+                } else {
+                    if (!isSelected(pt)) {
+                        m_maskSelectedPoints.clear();
+                        m_maskSelectedPoints.push_back(pt);
+                    }
+                }
+                m_maskSelectedPoint = pt;
+                m_maskDragIndex = pt; m_maskDragType = 1;
+            }
+        } else {
+            float t; int edge = mask.hitTestEdge(mouseUV, 0.02f, t);
+            if (edge >= 0 && mask.count() >= 2 && mask.closed()) {
+                mask.insertPoint(edge, t);
+                m_maskSelectedPoints.clear();
+                m_maskSelectedPoints.push_back(edge + 1);
+                m_maskSelectedPoint = edge + 1;
+                m_maskDragIndex = m_maskSelectedPoint; m_maskDragType = 1;
+            } else {
+                // Add new point at end (open path building)
                 mask.addPoint(mouseUV);
-                m_maskSelectedPoint = mask.count()-1; m_maskDragIndex = m_maskSelectedPoint; m_maskDragType = 1;
+                m_maskSelectedPoints.clear();
+                m_maskSelectedPoints.push_back(mask.count() - 1);
+                m_maskSelectedPoint = mask.count() - 1;
+                m_maskDragIndex = m_maskSelectedPoint; m_maskDragType = 1;
             }
         }
     }
@@ -950,13 +1084,25 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     if (m_maskDragType > 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         auto& pts = mask.points();
         if (m_maskDragIndex >= 0 && m_maskDragIndex < (int)pts.size()) {
-            auto& pt = pts[m_maskDragIndex];
             glm::vec2 clamped = glm::clamp(mouseUV, glm::vec2(0.0f), glm::vec2(1.0f));
-            if (m_maskDragType == 1) { pt.position = clamped; }
-            else if (m_maskDragType == 2) {
+            if (m_maskDragType == 1) {
+                // Move all selected points together
+                glm::vec2 delta = clamped - pts[m_maskDragIndex].position;
+                if (m_maskSelectedPoints.size() > 1) {
+                    for (int si : m_maskSelectedPoints) {
+                        if (si >= 0 && si < (int)pts.size()) {
+                            pts[si].position = glm::clamp(pts[si].position + delta, glm::vec2(0.0f), glm::vec2(1.0f));
+                        }
+                    }
+                } else {
+                    pts[m_maskDragIndex].position = clamped;
+                }
+            } else if (m_maskDragType == 2) {
+                auto& pt = pts[m_maskDragIndex];
                 pt.handleIn = clamped - pt.position;
                 if (pt.smooth) { float l = glm::length(pt.handleOut); if (l<0.001f) l=glm::length(pt.handleIn); pt.handleOut = glm::normalize(-pt.handleIn)*l; }
             } else if (m_maskDragType == 3) {
+                auto& pt = pts[m_maskDragIndex];
                 pt.handleOut = clamped - pt.position;
                 if (pt.smooth) { float l = glm::length(pt.handleIn); if (l<0.001f) l=glm::length(pt.handleOut); pt.handleIn = glm::normalize(-pt.handleOut)*l; }
             }
@@ -988,20 +1134,98 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
             }
         }
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) m_maskSelectedPoint = -1;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsAnyItemActive()) {
+        if (m_maskSelectedPoint >= 0) {
+            // First Esc: clear mask-point selection
+            m_maskSelectedPoint = -1;
+        } else {
+            // Second Esc (or no point selected): request exit from mask mode
+            m_wantsExitMaskMode = true;
+        }
+    }
 
     const auto& pts = mask.points();
+
+    // Mask edit mode visual vocabulary: amber/yellow distinct from cyan transform handles
+    // Mask overlay colors: zone-colored for canvas masks, gold for layer masks
+    ImU32 kMFill, kMCurveGlow, kMCurve, kMHandleLine, kMHandleDot, kMHandleRing;
+    ImU32 kMPointFill, kMPointRing, kMSelFill, kMSelRing, kMSelGlow;
+    if (zoneIndex >= 0) {
+        auto c = kZoneColors[zoneIndex % 8];
+        kMFill       = IM_COL32(c.r, c.g, c.b, 25);
+        kMCurveGlow  = IM_COL32(c.r, c.g, c.b, 55);
+        kMCurve      = IM_COL32(c.r, c.g, c.b, 230);
+        kMHandleLine = IM_COL32(c.r, c.g, c.b, 110);
+        kMHandleDot  = IM_COL32(std::min(c.r+40,255), std::min(c.g+40,255), std::min(c.b+40,255), 220);
+        kMHandleRing = IM_COL32(std::min(c.r+60,255), std::min(c.g+60,255), std::min(c.b+60,255), 255);
+        kMPointFill  = IM_COL32(c.r, c.g, c.b, 255);
+        kMPointRing  = IM_COL32(std::min(c.r+80,255), std::min(c.g+80,255), std::min(c.b+80,255), 220);
+        kMSelFill    = IM_COL32(std::min(c.r+40,255), std::min(c.g+40,255), std::min(c.b+40,255), 255);
+        kMSelRing    = IM_COL32(255, 255, 255, 255);
+        kMSelGlow    = IM_COL32(c.r, c.g, c.b, 60);
+    } else {
+        kMFill       = IM_COL32(255, 200, 60, 25);
+        kMCurveGlow  = IM_COL32(255, 200, 60, 55);
+        kMCurve      = IM_COL32(255, 210, 90, 230);
+        kMHandleLine = IM_COL32(255, 200, 60, 110);
+        kMHandleDot  = IM_COL32(255, 220, 120, 220);
+        kMHandleRing = IM_COL32(255, 230, 160, 255);
+        kMPointFill  = IM_COL32(255, 200, 60, 255);
+        kMPointRing  = IM_COL32(255, 240, 200, 220);
+        kMSelFill    = IM_COL32(255, 240, 120, 255);
+        kMSelRing    = IM_COL32(255, 255, 255, 255);
+        kMSelGlow    = IM_COL32(255, 200, 60, 60);
+    }
+
+    // Edit mode banner (top-right of viewport) + Save button.
+    {
+        const char* banner = mask.closed()
+            ? "MASK EDIT  |  Shift+Click: multi-select  •  Drag: move  •  R-click: del"
+            : "MASK EDIT  |  Click: add points  •  Click first point to close  •  R-click: del";
+        const char* saveLbl = "Save";
+        ImVec2 ts = ImGui::CalcTextSize(banner);
+        ImVec2 sts = ImGui::CalcTextSize(saveLbl);
+        float pad = 8.0f;
+        draw->AddRectFilled(bannerMin, bannerMax, IM_COL32(40, 30, 10, 200), 3.0f);
+        draw->AddRect(bannerMin, bannerMax, IM_COL32(255, 200, 60, 180), 3.0f, 0, 1.5f);
+        draw->AddText(ImVec2(bannerMin.x + pad, bannerMin.y + pad * 0.5f),
+                      IM_COL32(255, 220, 120, 255), banner);
+
+        bool saveHov = ptInRect(mousePos, saveBtnMin, saveBtnMax);
+        ImU32 btnBg = saveHov ? IM_COL32(255, 210, 110, 230) : IM_COL32(255, 200, 60, 180);
+        ImU32 btnTx = saveHov ? IM_COL32(40, 25, 0, 255)      : IM_COL32(60, 40, 10, 255);
+        draw->AddRectFilled(saveBtnMin, saveBtnMax, btnBg, 3.0f);
+        float saveBtnW = saveBtnMax.x - saveBtnMin.x;
+        float saveBtnH = saveBtnMax.y - saveBtnMin.y;
+        draw->AddText(ImVec2(saveBtnMin.x + (saveBtnW - sts.x) * 0.5f,
+                             saveBtnMin.y + (saveBtnH - sts.y) * 0.5f), btnTx, saveLbl);
+        if (saveHov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_wantsExitMaskMode = true;
+        }
+    }
+
     if (pts.empty()) { draw->PopClipRect(); return; }
 
-    if (pts.size() >= 3) {
+    // Closed mask: subtle fill inside to show masked region
+    if (pts.size() >= 3 && mask.closed()) {
         auto tv = mask.tessellate(24);
         if (tv.size() >= 3) {
             ImVec2 cs = toImVec2(layerUVToScreen(mask.centroid()));
             for (int i = 0; i < (int)tv.size(); i++) {
                 int j = (i+1) % (int)tv.size();
-                draw->AddTriangleFilled(cs, toImVec2(layerUVToScreen(tv[i])), toImVec2(layerUVToScreen(tv[j])), kMaskFill);
+                draw->AddTriangleFilled(cs, toImVec2(layerUVToScreen(tv[i])),
+                                        toImVec2(layerUVToScreen(tv[j])), kMFill);
             }
         }
+    }
+
+    // Open path with 1+ points: show "close" hint on first point
+    if (!mask.closed() && pts.size() >= 3) {
+        ImVec2 firstPt = toImVec2(layerUVToScreen(pts[0].position));
+        draw->AddCircle(firstPt, 12.0f, IM_COL32(255, 200, 60, 180), 0, 2.0f);
+        draw->AddCircleFilled(firstPt, 12.0f, IM_COL32(255, 200, 60, 40));
+        // "Close" label
+        draw->AddText(ImVec2(firstPt.x + 14, firstPt.y - 8), IM_COL32(255, 220, 120, 255), "Close");
     }
     if (pts.size() >= 2) {
         int n = (int)pts.size(), edges = mask.closed() ? n : (n-1);
@@ -1009,28 +1233,47 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
             int j = (i+1)%n;
             ImVec2 p0=toImVec2(layerUVToScreen(pts[i].position)), c0=toImVec2(layerUVToScreen(pts[i].position+pts[i].handleOut));
             ImVec2 c1=toImVec2(layerUVToScreen(pts[j].position+pts[j].handleIn)), p1=toImVec2(layerUVToScreen(pts[j].position));
-            draw->AddBezierCubic(p0,c0,c1,p1,kMaskCurveGlow,5.0f,32);
-            draw->AddBezierCubic(p0,c0,c1,p1,kMaskCurve,1.8f,32);
+            draw->AddBezierCubic(p0,c0,c1,p1,kMCurveGlow,5.0f,32);
+            draw->AddBezierCubic(p0,c0,c1,p1,kMCurve,1.8f,32);
+        }
+
+        // Hover ghost "+" on edge midpoints for discoverable point insertion
+        float tParam; int hoverEdge = mask.hitTestEdge(mouseUV, 0.04f, tParam);
+        if (hoverEdge >= 0 && m_maskDragType == 0) {
+            // Find the midpoint on the edge at t=0.5 for visual hint
+            int i = hoverEdge, j = (hoverEdge + 1) % n;
+            glm::vec2 mid = MaskPath::evalBezier(
+                pts[i].position,
+                pts[i].position + pts[i].handleOut,
+                pts[j].position + pts[j].handleIn,
+                pts[j].position,
+                0.5f);
+            ImVec2 mp = toImVec2(layerUVToScreen(mid));
+            draw->AddCircleFilled(mp, 8.0f, IM_COL32(255, 220, 120, 80));
+            draw->AddCircle(mp, 8.0f, IM_COL32(255, 230, 160, 200), 0, 1.5f);
+            // Plus icon
+            draw->AddLine(ImVec2(mp.x - 4, mp.y), ImVec2(mp.x + 4, mp.y), IM_COL32(255, 250, 200, 255), 1.8f);
+            draw->AddLine(ImVec2(mp.x, mp.y - 4), ImVec2(mp.x, mp.y + 4), IM_COL32(255, 250, 200, 255), 1.8f);
         }
     }
     for (int i = 0; i < (int)pts.size(); i++) {
-        ImVec2 anchor = toImVec2(layerUVToScreen(pts[i].position));
-        bool isSel = (i == m_maskSelectedPoint);
+        ImVec2 anch = toImVec2(layerUVToScreen(pts[i].position));
+        bool isSel = (i == m_maskSelectedPoint) || isSelected(i);
         if (glm::length(pts[i].handleIn) > 0.001f) {
             ImVec2 h = toImVec2(layerUVToScreen(pts[i].position+pts[i].handleIn));
-            draw->AddLine(anchor,h,kHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kHandleDot); draw->AddCircle(h,3.5f,kHandleRing,0,1.2f);
+            draw->AddLine(anch,h,kMHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kMHandleDot); draw->AddCircle(h,3.5f,kMHandleRing,0,1.2f);
         }
         if (glm::length(pts[i].handleOut) > 0.001f) {
             ImVec2 h = toImVec2(layerUVToScreen(pts[i].position+pts[i].handleOut));
-            draw->AddLine(anchor,h,kHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kHandleDot); draw->AddCircle(h,3.5f,kHandleRing,0,1.2f);
+            draw->AddLine(anch,h,kMHandleLine,1.0f); draw->AddCircleFilled(h,3.5f,kMHandleDot); draw->AddCircle(h,3.5f,kMHandleRing,0,1.2f);
         }
         if (isSel) {
             float s=5.5f;
-            draw->AddQuadFilled(ImVec2(anchor.x,anchor.y-s-3),ImVec2(anchor.x+s+3,anchor.y),ImVec2(anchor.x,anchor.y+s+3),ImVec2(anchor.x-s-3,anchor.y),kAccentGlow);
-            draw->AddQuadFilled(ImVec2(anchor.x,anchor.y-s),ImVec2(anchor.x+s,anchor.y),ImVec2(anchor.x,anchor.y+s),ImVec2(anchor.x-s,anchor.y),kSelectedFill);
-            draw->AddQuad(ImVec2(anchor.x,anchor.y-s),ImVec2(anchor.x+s,anchor.y),ImVec2(anchor.x,anchor.y+s),ImVec2(anchor.x-s,anchor.y),kSelectedRing,1.5f);
+            draw->AddQuadFilled(ImVec2(anch.x,anch.y-s-3),ImVec2(anch.x+s+3,anch.y),ImVec2(anch.x,anch.y+s+3),ImVec2(anch.x-s-3,anch.y),kMSelGlow);
+            draw->AddQuadFilled(ImVec2(anch.x,anch.y-s),ImVec2(anch.x+s,anch.y),ImVec2(anch.x,anch.y+s),ImVec2(anch.x-s,anch.y),kMSelFill);
+            draw->AddQuad(ImVec2(anch.x,anch.y-s),ImVec2(anch.x+s,anch.y),ImVec2(anch.x,anch.y+s),ImVec2(anch.x-s,anch.y),kMSelRing,1.5f);
         } else {
-            draw->AddCircleFilled(anchor,4.5f,kPointFill); draw->AddCircle(anchor,4.5f,kPointRing,0,1.2f);
+            draw->AddCircleFilled(anch,4.5f,kMPointFill); draw->AddCircle(anch,4.5f,kMPointRing,0,1.2f);
         }
     }
 

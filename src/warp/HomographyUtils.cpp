@@ -20,7 +20,7 @@ static bool solveLinearSystem(double A[8][9], double x[8]) {
             }
         }
 
-        if (maxVal < 1e-12) return false; // singular
+        if (maxVal < 1e-8) return false; // singular or near-singular
 
         // Swap rows
         if (maxRow != col) {

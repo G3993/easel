@@ -1,94 +1,81 @@
 #include "app/SpoutIO.h"
 #include <iostream>
 
-// --- SpoutSender ---
+// --- EaselSpoutSender ---
 
-bool SpoutSender::create(const std::string& name, int width, int height) {
+bool EaselSpoutSender::create(const std::string& name, int width, int height) {
 #ifdef HAS_SPOUT
-    m_spout = GetSpout();
-    if (!m_spout) return false;
-    m_spout->CreateSender(name.c_str(), width, height);
+    m_sender.SetSenderName(name.c_str());
+    // SendTexture auto-creates on first call, but we track state here
     m_name = name;
     m_active = true;
     std::cout << "[Spout] Sender created: " << name << std::endl;
     return true;
 #else
     (void)name; (void)width; (void)height;
-    std::cout << "[Spout] Not available (Spout2 SDK not installed)" << std::endl;
+    std::cout << "[Spout] Not available (Spout2 SDK not linked)" << std::endl;
     return false;
 #endif
 }
 
-void SpoutSender::send(GLuint texture, int width, int height) {
+void EaselSpoutSender::send(GLuint texture, int width, int height) {
 #ifdef HAS_SPOUT
-    if (m_spout && m_active) {
-        m_spout->SendTexture(texture, GL_TEXTURE_2D, width, height);
+    if (m_active && texture != 0) {
+        m_sender.SendTexture(texture, GL_TEXTURE_2D, (unsigned int)width, (unsigned int)height, false);
     }
 #else
     (void)texture; (void)width; (void)height;
 #endif
 }
 
-void SpoutSender::destroy() {
+void EaselSpoutSender::destroy() {
 #ifdef HAS_SPOUT
-    if (m_spout) {
-        m_spout->ReleaseSender();
-        m_spout->Release();
-        m_spout = nullptr;
+    if (m_active) {
+        m_sender.ReleaseSender();
     }
 #endif
     m_active = false;
 }
 
-// --- SpoutReceiver ---
+// --- EaselSpoutReceiver ---
 
-bool SpoutReceiver::connect(const std::string& name) {
+bool EaselSpoutReceiver::connect(const std::string& name) {
 #ifdef HAS_SPOUT
-    m_spout = GetSpout();
-    if (!m_spout) return false;
-    char senderName[256] = {};
     if (!name.empty()) {
-        strncpy(senderName, name.c_str(), sizeof(senderName) - 1);
+        m_receiver.SetReceiverName(name.c_str());
     }
-    unsigned int w = 0, h = 0;
-    m_spout->CreateReceiver(senderName, w, h);
-    m_senderName = senderName;
+    m_senderName = name;
     m_active = true;
-    if (w > 0 && h > 0) {
-        m_texture.createEmpty(w, h);
-    }
-    std::cout << "[Spout] Receiver connected: " << m_senderName << std::endl;
+    std::cout << "[Spout] Receiver listening" << (name.empty() ? " (any sender)" : ": " + name) << std::endl;
     return true;
 #else
     (void)name;
-    std::cout << "[Spout] Not available (Spout2 SDK not installed)" << std::endl;
+    std::cout << "[Spout] Not available (Spout2 SDK not linked)" << std::endl;
     return false;
 #endif
 }
 
-GLuint SpoutReceiver::receive(int& width, int& height) {
+GLuint EaselSpoutReceiver::receive(int& width, int& height) {
 #ifdef HAS_SPOUT
-    if (!m_spout || !m_active) return 0;
-    unsigned int w = m_texture.width(), h = m_texture.height();
-    bool newFrame = m_spout->ReceiveTexture(m_texture.id(), GL_TEXTURE_2D, false, w, h);
-    if (w != (unsigned int)m_texture.width() || h != (unsigned int)m_texture.height()) {
-        m_texture.createEmpty(w, h);
+    if (!m_active) return 0;
+    if (m_receiver.ReceiveTexture(m_texture, GL_TEXTURE_2D)) {
+        m_width = (int)m_receiver.GetSenderWidth();
+        m_height = (int)m_receiver.GetSenderHeight();
+        width = m_width;
+        height = m_height;
+        return m_texture;
     }
-    width = w;
-    height = h;
-    return newFrame ? m_texture.id() : 0;
+    return 0;
 #else
     (void)width; (void)height;
     return 0;
 #endif
 }
 
-void SpoutReceiver::disconnect() {
+void EaselSpoutReceiver::disconnect() {
 #ifdef HAS_SPOUT
-    if (m_spout) {
-        m_spout->ReleaseReceiver();
-        m_spout->Release();
-        m_spout = nullptr;
+    if (m_active) {
+        m_receiver.ReleaseReceiver();
     }
 #endif
     m_active = false;

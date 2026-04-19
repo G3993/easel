@@ -26,6 +26,11 @@ bool CompositeEngine::init(int width, int height) {
         return false;
     }
 
+    if (!m_shadowShader.loadFromFiles("shaders/passthrough.vert", "shaders/shadow.frag")) {
+        std::cerr << "Failed to load shadow shader" << std::endl;
+        return false;
+    }
+
     m_quad.createQuad();
     return true;
 }
@@ -44,6 +49,7 @@ void CompositeEngine::clear() {
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
     }
+    Framebuffer::unbind();
     m_current = 0;
 }
 
@@ -189,6 +195,63 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, currentTex);
             m_quad.draw();
+        } else if (fx.type == EffectType::Glow && fx.glowIntensity > 0.01f) {
+            // Glow: threshold → blur → additive combine
+            GLuint originalTex = currentTex;
+
+            // Step 1: Extract bright areas (threshold)
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 5); // threshold pass
+            m_effectShader.setFloat("uGlowThreshold", fx.glowThreshold);
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+            GLuint threshTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
+
+            // Step 2: Blur the thresholded texture (multiple passes for soft glow)
+            float passR = 2.0f;
+            int iterations = std::max(1, (int)std::ceil(fx.glowRadius / passR));
+            iterations = std::min(iterations, 12);
+            GLuint blurSrc = threshTex;
+            for (int it = 0; it < iterations; it++) {
+                for (int dir = 0; dir < 2; dir++) {
+                    m_effectFBO[pingpong].bind();
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    m_effectShader.setInt("uEffectType", 0); // blur
+                    m_effectShader.setInt("uBlurPass", dir);
+                    m_effectShader.setFloat("uBlurRadius", passR);
+                    m_effectShader.setVec2("uResolution", glm::vec2(m_width, m_height));
+                    m_effectShader.setInt("uTexture", 0);
+                    m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, blurSrc);
+                    m_quad.draw();
+                    blurSrc = m_effectFBO[pingpong].textureId();
+                    pingpong = 1 - pingpong;
+                }
+            }
+
+            // Step 3: Additive combine original + blurred glow
+            m_effectFBO[pingpong].bind();
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.setInt("uEffectType", 6); // glow combine
+            m_effectShader.setFloat("uGlowIntensity", fx.glowIntensity);
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setInt("uFeedback", 1); // reuse sampler for glow texture
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, originalTex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, blurSrc);
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
         }
     }
 
@@ -261,6 +324,64 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         // Apply per-layer effects chain
         GLuint layerTex = applyEffects(layer, layer->textureId());
 
+        // Combine per-layer masks into a single mask texture (additive union)
+        GLuint layerMaskTex = 0;
+        float layerMaskFeather = 0.0f;
+        bool layerMaskInvert = false;
+        {
+            int validMasks = 0;
+            GLuint singleMaskTex = 0;
+            for (auto& mask : layer->masks) {
+                if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
+                    validMasks++;
+                    singleMaskTex = mask.texture->id();
+                    // Use the first valid mask's feather/invert as the layer mask params
+                    if (validMasks == 1) {
+                        layerMaskFeather = mask.feather;
+                        layerMaskInvert = mask.invert;
+                    }
+                }
+            }
+            if (validMasks == 1) {
+                layerMaskTex = singleMaskTex;
+            } else if (validMasks > 1) {
+                // Ensure mask FBOs match canvas size
+                for (int fi = 0; fi < 2; fi++) {
+                    if (m_maskFBO[fi].width() != m_width || m_maskFBO[fi].height() != m_height)
+                        m_maskFBO[fi].create(m_width, m_height);
+                }
+                int mpp = 0;
+                bool first = true;
+                for (auto& mask : layer->masks) {
+                    if (!mask.texture || !mask.texture->id() || mask.path.count() < 3) continue;
+                    m_maskFBO[mpp].bind();
+                    if (first) {
+                        glClearColor(0, 0, 0, 0);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                    }
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_ONE, GL_ONE); // additive
+                    m_passthroughShader.use();
+                    m_passthroughShader.setInt("uTexture", 0);
+                    m_passthroughShader.setFloat("uOpacity", 1.0f);
+                    m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                    m_passthroughShader.setBool("uHasMask", false);
+                    m_passthroughShader.setBool("uFlipV", false);
+                    m_passthroughShader.setFloat("uTileX", 1.0f);
+                    m_passthroughShader.setFloat("uTileY", 1.0f);
+                    m_passthroughShader.setInt("uMosaicMode", 0);
+                    m_passthroughShader.setFloat("uFeather", 0.0f);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, mask.texture->id());
+                    m_quad.draw();
+                    glDisable(GL_BLEND);
+                    if (first) { first = false; }
+                }
+                layerMaskTex = m_maskFBO[mpp].textureId();
+                Framebuffer::unbind();
+            }
+        }
+
         int next = 1 - m_current;
         m_fbo[next].bind();
         glViewport(0, 0, m_width, m_height);
@@ -288,6 +409,171 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         }
         glm::mat3 layerXform = layer->getTransformMatrix() * nativeScale;
 
+        // --- Drop shadow pre-pass ---
+        // Render layer silhouette → blur → composite with offset BEFORE the main layer draw
+        if (layer->dropShadowEnabled && layer->dropShadowOpacity > 0.001f) {
+            // Ensure shadow FBOs match canvas size
+            for (int fi = 0; fi < 2; fi++) {
+                if (m_shadowFBO[fi].width() != m_width || m_shadowFBO[fi].height() != m_height)
+                    m_shadowFBO[fi].create(m_width, m_height);
+            }
+
+            // Step 1: Render the layer silhouette into m_shadowFBO[0] at the layer's transform
+            m_shadowFBO[0].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_shadowShader.use();
+            m_shadowShader.setMat3("uTransform", layerXform);
+            m_shadowShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
+            m_shadowShader.setInt("uTexture", 0);
+            m_shadowShader.setVec3("uShadowColor", glm::vec3(layer->dropShadowColorR,
+                                                              layer->dropShadowColorG,
+                                                              layer->dropShadowColorB));
+            m_shadowShader.setFloat("uShadowOpacity", 1.0f); // opacity applied later
+            m_shadowShader.setFloat("uShadowSpread", layer->dropShadowSpread);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, layerTex);
+            m_quad.draw();
+            glDisable(GL_BLEND);
+
+            // Step 2: Smooth separable Gaussian blur.
+            //   - For small blurs (<= 12px): iterate small-radius passes at full res.
+            //   - For large blurs (> 12px): downsample to 1/4 res (bilinear = cheap smoothing),
+            //     blur at low res with scaled radius, then let bilinear filtering upsample.
+            float targetBlur = layer->dropShadowBlur;
+            GLuint blurredShadow = m_shadowFBO[0].textureId();
+
+            if (targetBlur <= 0.1f) {
+                // No blur
+            } else if (targetBlur <= 12.0f) {
+                // Full-res iterative small-radius blur for crisp small shadows
+                float passRadius = 1.5f;
+                int iterations = std::max(1, (int)std::ceil(targetBlur / passRadius));
+                iterations = std::min(iterations, 8);
+                int src = 0;
+                for (int it = 0; it < iterations; it++) {
+                    for (int dir = 0; dir < 2; dir++) {
+                        int dst = 1 - src;
+                        m_shadowFBO[dst].bind();
+                        glClearColor(0, 0, 0, 0);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                        m_effectShader.use();
+                        m_effectShader.setInt("uEffectType", 0);
+                        m_effectShader.setInt("uBlurPass", dir);
+                        m_effectShader.setFloat("uBlurRadius", passRadius);
+                        m_effectShader.setVec2("uResolution", glm::vec2(m_width, m_height));
+                        m_effectShader.setInt("uTexture", 0);
+                        m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, m_shadowFBO[src].textureId());
+                        m_quad.draw();
+                        src = dst;
+                    }
+                }
+                blurredShadow = m_shadowFBO[src].textureId();
+            } else {
+                // Downsample + low-res blur for smooth, soft large shadows
+                int lw = std::max(16, m_width / 4);
+                int lh = std::max(16, m_height / 4);
+                for (int fi = 0; fi < 2; fi++) {
+                    if (m_shadowLoRes[fi].width() != lw || m_shadowLoRes[fi].height() != lh)
+                        m_shadowLoRes[fi].create(lw, lh);
+                }
+
+                // Downsample full-res silhouette into m_shadowLoRes[0]
+                m_shadowLoRes[0].bind();
+                glViewport(0, 0, lw, lh);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                m_passthroughShader.use();
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m_shadowFBO[0].textureId());
+                m_quad.draw();
+
+                // Iterate blur at low res with small per-pass radius for smoothness
+                float passRadius = 2.0f;
+                float loResBlur = targetBlur * 0.25f; // blur at 1/4 res
+                int iterations = std::max(2, (int)std::ceil(loResBlur / passRadius));
+                iterations = std::min(iterations, 20);
+                int src = 0;
+                for (int it = 0; it < iterations; it++) {
+                    for (int dir = 0; dir < 2; dir++) {
+                        int dst = 1 - src;
+                        m_shadowLoRes[dst].bind();
+                        glViewport(0, 0, lw, lh);
+                        glClearColor(0, 0, 0, 0);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                        m_effectShader.use();
+                        m_effectShader.setInt("uEffectType", 0);
+                        m_effectShader.setInt("uBlurPass", dir);
+                        m_effectShader.setFloat("uBlurRadius", passRadius);
+                        m_effectShader.setVec2("uResolution", glm::vec2(lw, lh));
+                        m_effectShader.setInt("uTexture", 0);
+                        m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, m_shadowLoRes[src].textureId());
+                        m_quad.draw();
+                        src = dst;
+                    }
+                }
+                blurredShadow = m_shadowLoRes[src].textureId();
+                // Restore full-res viewport for subsequent draws
+                glViewport(0, 0, m_width, m_height);
+            }
+
+            // Step 3: Composite the blurred shadow into m_fbo[next] with offset
+            int shadowNext = 1 - m_current;
+            m_fbo[shadowNext].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            // Draw the base (accumulated) first
+            m_passthroughShader.use();
+            m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+            m_passthroughShader.setBool("uFlipV", false);
+            m_passthroughShader.setFloat("uOpacity", 1.0f);
+            m_passthroughShader.setInt("uTexture", 0);
+            m_passthroughShader.setBool("uHasMask", false);
+            m_passthroughShader.setFloat("uTileX", 1.0f);
+            m_passthroughShader.setFloat("uTileY", 1.0f);
+            m_passthroughShader.setInt("uMosaicMode", 0);
+            m_passthroughShader.setFloat("uFeather", 0.0f);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_fbo[m_current].textureId());
+            m_quad.draw();
+
+            // Now overlay the shadow with offset
+            glm::mat3 shadowOffset(1.0f);
+            shadowOffset[2][0] = layer->dropShadowOffsetX; // translate X in NDC
+            shadowOffset[2][1] = -layer->dropShadowOffsetY; // translate Y (NDC Y up, user offset Y down)
+            m_passthroughShader.setMat3("uTransform", shadowOffset);
+            m_passthroughShader.setFloat("uOpacity", layer->dropShadowOpacity * effectiveOpacity);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, blurredShadow);
+            m_quad.draw();
+            glDisable(GL_BLEND);
+
+            // Swap: the shadow composite becomes the new "current" base
+            m_current = shadowNext;
+            // Force composite path so the layer draws on top of the shadow base
+            firstLayer = false;
+        }
+
         if (firstLayer && layer->blendMode == BlendMode::Normal) {
             // First layer: just draw it directly
             m_passthroughShader.use();
@@ -313,7 +599,18 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, layerTex);
 
-            m_passthroughShader.setBool("uHasMask", false);
+            if (layerMaskTex) {
+                m_passthroughShader.setBool("uHasMask", true);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, layerMaskTex);
+                m_passthroughShader.setInt("uMask", 2);
+                m_passthroughShader.setFloat("uMaskFeather", layerMaskFeather);
+                m_passthroughShader.setBool("uMaskInvert", layerMaskInvert);
+            } else {
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setFloat("uMaskFeather", 0.0f);
+                m_passthroughShader.setBool("uMaskInvert", false);
+            }
         } else {
             m_compositeShader.use();
             // Draw a full-screen quad (identity transform) — the fragment
@@ -350,7 +647,18 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, layerTex);
 
-            m_compositeShader.setBool("uHasMask", false);
+            if (layerMaskTex) {
+                m_compositeShader.setBool("uHasMask", true);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, layerMaskTex);
+                m_compositeShader.setInt("uMask", 2);
+                m_compositeShader.setFloat("uMaskFeather", layerMaskFeather);
+                m_compositeShader.setBool("uMaskInvert", layerMaskInvert);
+            } else {
+                m_compositeShader.setBool("uHasMask", false);
+                m_compositeShader.setFloat("uMaskFeather", 0.0f);
+                m_compositeShader.setBool("uMaskInvert", false);
+            }
         }
 
         glEnable(GL_BLEND);

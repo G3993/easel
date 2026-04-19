@@ -66,7 +66,7 @@ struct ImageBinding {
     bool flippedV = false;      // source is top-down (NDI etc.)
 };
 
-// Audio signal sources for parameter binding
+// Signal sources for parameter binding
 enum class AudioSignal {
     None = 0,
     Level,   // RMS
@@ -74,15 +74,19 @@ enum class AudioSignal {
     Mid,
     High,
     Beat,    // beat decay (0-1 pulse)
+    MidiCC,  // MIDI control change (uses midiCC/midiChannel fields)
 };
 
-// Per-parameter audio binding
+// Per-parameter audio/MIDI binding
 struct AudioBinding {
     AudioSignal signal = AudioSignal::None;
     float rangeMin = 0.0f;  // output min (maps to param min by default)
     float rangeMax = 1.0f;  // output max (maps to param max by default)
     float smoothing = 0.3f; // 0 = instant, 1 = very slow
     float smoothedValue = 0.0f; // internal state
+    // MIDI fields (used when signal == MidiCC)
+    int midiCC = -1;        // CC number 0-127, -1 = unassigned
+    int midiChannel = -1;   // MIDI channel 0-15, -1 = any
 };
 
 class ShaderSource : public ContentSource {
@@ -99,7 +103,7 @@ public:
     bool reload(const std::string& isfSource);
 
     void update() override;
-    GLuint textureId() const override { return m_fbo.textureId(); }
+    GLuint textureId() const override { return m_initialized ? m_fbo.textureId() : 0; }
     int width() const override { return m_width; }
     int height() const override { return m_height; }
     std::string typeName() const override { return "Shader"; }
@@ -131,7 +135,8 @@ public:
     // Audio-reactive parameter bindings
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
-    void applyAudioBindings(float level, float bass, float mid, float high, float beat);
+    void applyAudioBindings(float level, float bass, float mid, float high, float beat,
+                            class MIDIManager* midi = nullptr);
 
     // Resolution (defaults to 1920x1080, can be changed)
     void setResolution(int w, int h);
