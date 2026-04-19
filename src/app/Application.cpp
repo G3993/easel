@@ -442,12 +442,18 @@ void Application::run() {
             } else {
                 // Legacy single-device mode
                 m_audioAnalyzer.setDevice(m_selectedAudioDevice);
+#ifdef HAS_FFMPEG
+                // m_audioDevices is only populated when FFmpeg is available
+                // (see Application.h — lives in the HAS_FFMPEG block).
                 if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
                     m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
                                                 m_audioDevices[m_selectedAudioDevice].isCapture);
                 } else {
                     m_audioAnalyzer.setDeviceId("", false);
                 }
+#else
+                m_audioAnalyzer.setDeviceId("", false);
+#endif
             }
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
@@ -1524,8 +1530,9 @@ void Application::renderUI() {
 #else
     float transportBarH = 0.0f;
 #endif
-    m_ui.setupDockspace(transportBarH);
     renderMenuBar();
+    m_ui.renderWorkspaceBar();
+    m_ui.setupDockspace(transportBarH);
 
     // Reset editing state when switching zones
     if (m_activeZone != m_prevActiveZone) {
@@ -3759,35 +3766,6 @@ void Application::renderMenuBar() {
                                      m_savedWindowW, m_savedWindowH, 0);
                 m_editorFullscreen = false;
             }
-        }
-
-        // Workspace switcher — right-aligned Stage / Canvas / Show buttons.
-        // Each remaps the dock layout for the corresponding phase of a show.
-        {
-            Workspace current = m_ui.workspace();
-            auto drawBtn = [&](const char* label, Workspace ws) {
-                bool active = (current == ws);
-                if (active) {
-                    ImVec4 a = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
-                    ImGui::PushStyleColor(ImGuiCol_Button, a);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, a);
-                }
-                if (ImGui::Button(label)) m_ui.setWorkspace(ws);
-                if (active) ImGui::PopStyleColor(2);
-            };
-            // Approx width of 3 buttons + spacing — right-align inside menu bar.
-            float btnEstW = ImGui::CalcTextSize("Canvas").x
-                            + ImGui::GetStyle().FramePadding.x * 2;
-            float total = btnEstW * 3
-                          + ImGui::GetStyle().ItemSpacing.x * 2
-                          + 20.0f;
-            float cursorX = ImGui::GetContentRegionMax().x - total;
-            if (cursorX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(cursorX);
-            drawBtn("Stage",  Workspace::Stage);
-            ImGui::SameLine();
-            drawBtn("Canvas", Workspace::Canvas);
-            ImGui::SameLine();
-            drawBtn("Show",   Workspace::Show);
         }
 
         ImGui::EndMainMenuBar();

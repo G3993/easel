@@ -18,6 +18,10 @@ public:
     void endFrame();
 
     void setupDockspace(float bottomBarHeight = 0);
+    // Renders the primary nav (Stage / Canvas / Show) as a prominent bar
+    // directly under the menu bar. Call BEFORE setupDockspace each frame.
+    void renderWorkspaceBar();
+    float workspaceBarHeight() const { return m_workspaceBarHeight; }
 
     ImFont* smallFont() const { return m_smallFont; }
     ImFont* boldFont() const { return m_boldFont; }
@@ -42,4 +46,5 @@ private:
     float m_uiZoom = 1.0f;
     float m_baseFontGlobalScale = 1.0f;
     Workspace m_workspace = Workspace::Canvas;
+    float m_workspaceBarHeight = 0.0f;
 };

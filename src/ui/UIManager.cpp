@@ -345,9 +345,11 @@ void UIManager::endFrame() {
 
 void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImVec2 dockPos = viewport->WorkPos;
+    dockPos.y += m_workspaceBarHeight;           // shift below the primary nav bar
+    ImGui::SetNextWindowPos(dockPos);
     ImVec2 dockSize = viewport->WorkSize;
-    dockSize.y -= bottomBarHeight;
+    dockSize.y -= (bottomBarHeight + m_workspaceBarHeight);
     ImGui::SetNextWindowSize(dockSize);
     ImGui::SetNextWindowViewport(viewport->ID);
 
@@ -504,4 +506,71 @@ void UIManager::setWorkspace(Workspace w) {
     m_workspace = w;
     // Force dock layout rebuild on next setupDockspace call
     m_firstFrame = true;
+}
+
+void UIManager::renderWorkspaceBar() {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    // Height: 52px at 1x, scales with UI zoom. Tall enough that the primary
+    // nav reads as a "section" not a menu item.
+    const float barH = 52.0f * m_uiZoom;
+    m_workspaceBarHeight = barH;
+
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, barH));
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 10.0f));
+    // Subtle top-bar tint so the bar reads as a surface, not floating on nothing.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
+
+    ImGui::Begin("##WorkspaceBar", nullptr, flags);
+
+    const float btnW = 132.0f * m_uiZoom;
+    const float btnH = 32.0f  * m_uiZoom;
+
+    auto drawBtn = [&](const char* label, Workspace ws) {
+        bool active = (m_workspace == ws);
+        if (active) {
+            // Active tab — solid accent fill.
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.95f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.52f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.38f, 0.88f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+        } else {
+            // Inactive — ghost button on dark surface.
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.04f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.16f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 0.70f));
+        }
+        if (m_boldFont) ImGui::PushFont(m_boldFont);
+        if (ImGui::Button(label, ImVec2(btnW, btnH))) {
+            setWorkspace(ws);
+        }
+        if (m_boldFont) ImGui::PopFont();
+        ImGui::PopStyleColor(4);
+    };
+
+    drawBtn("Stage",  Workspace::Stage);
+    ImGui::SameLine();
+    drawBtn("Canvas", Workspace::Canvas);
+    ImGui::SameLine();
+    drawBtn("Show",   Workspace::Show);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
 }
