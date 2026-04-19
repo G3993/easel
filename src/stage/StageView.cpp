@@ -810,9 +810,10 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         ImGui::PopStyleColor();
 
         if (sel) {
-            // Material selector
-            if (ImGui::BeginCombo("Material", s.materialIndex < (int)m_materials.size() ?
-                                  m_materials[s.materialIndex].name.c_str() : "None")) {
+            // Material selector — guard both bounds: -1 (unassigned) would index out.
+            const char* matLabel = (s.materialIndex >= 0 && s.materialIndex < (int)m_materials.size())
+                ? m_materials[s.materialIndex].name.c_str() : "None";
+            if (ImGui::BeginCombo("Material", matLabel)) {
                 for (int m = 0; m < (int)m_materials.size(); m++) {
                     if (ImGui::Selectable(m_materials[m].name.c_str(), s.materialIndex == m)) {
                         s.materialIndex = m;
@@ -820,9 +821,11 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
                 }
                 ImGui::EndCombo();
             }
-            // Projector selector
-            if (ImGui::BeginCombo("Projector", s.projectorIndex < (int)m_projectors.size() ?
-                                  m_projectors[s.projectorIndex].name.c_str() : "None")) {
+            // Projector selector — guard both bounds: addSurface sets projectorIndex = -1
+            // when no projectors exist; the old `< size` check allowed -1 through.
+            const char* projLabel = (s.projectorIndex >= 0 && s.projectorIndex < (int)m_projectors.size())
+                ? m_projectors[s.projectorIndex].name.c_str() : "None";
+            if (ImGui::BeginCombo("Projector", projLabel)) {
                 for (int p = 0; p < (int)m_projectors.size(); p++) {
                     if (ImGui::Selectable(m_projectors[p].name.c_str(), s.projectorIndex == p)) {
                         s.projectorIndex = p;

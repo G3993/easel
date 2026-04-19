@@ -426,10 +426,10 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
         switch (m_workspace) {
         case Workspace::Stage:
-            // Tools: spatial setup (Stage focused)
-            ImGui::DockBuilderDockWindow("Stage",         toolsId);
+            // Tools: spatial setup (Mapping focused — surface mapping is step 1)
             ImGui::DockBuilderDockWindow("Mapping",       toolsId);
             ImGui::DockBuilderDockWindow("Masks",         toolsId);
+            ImGui::DockBuilderDockWindow("Stage",         toolsId);
             ImGui::DockBuilderDockWindow("Scene Scanner", toolsId);
             // Right top: sources (Layers focused)
             ImGui::DockBuilderDockWindow("Layers",        rightTopId);
