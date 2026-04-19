@@ -7,27 +7,27 @@
       "feather": 0.0,
       "flipH": false,
       "flipV": false,
-      "id": 16,
+      "id": 14,
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
       "name": "text_typewriter.fs",
       "ndiEnabled": false,
-      "opacity": 4.745894329971634e-05,
+      "opacity": 1.6387301684517297e-06,
       "position": [
-        0.007352948188781738,
-        -0.4705882668495178
+        0.0,
+        0.0
       ],
-      "rotation": 1.0,
+      "rotation": 0.0,
       "scale": [
-        0.6800000071525574,
-        0.6800000071525574
+        0.8600000143051147,
+        0.8600000143051147
       ],
       "shaderParams": [
         {
           "name": "msg",
           "type": "text",
-          "value": "IT'S JITTERY. SO I'M TRYING TO FIGURE OUT"
+          "value": "DISCO BALL RECURSIVE DISCO BALLS."
         },
         {
           "name": "fontFamily",
@@ -118,12 +118,12 @@
       "feather": 0.0,
       "flipH": false,
       "flipV": true,
-      "id": 17,
+      "id": 15,
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
-      "name": "Win: Picture in Picture",
-      "ndiEnabled": true,
+      "name": "Win: Google Chrome — Picture in Picture",
+      "ndiEnabled": false,
       "opacity": 1.0,
       "position": [
         0.0,
@@ -267,14 +267,14 @@
         ],
         "rows": 5
       },
-      "name": "Main",
+      "name": "Default",
       "warpMode": 0
     }
   ],
   "version": 2,
   "zones": [
     {
-      "height": 1080,
+      "height": 1200,
       "mappingIndex": 0,
       "name": "Main",
       "ndiStreamName": "",
