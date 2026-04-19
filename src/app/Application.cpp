@@ -4834,7 +4834,11 @@ void Application::pollScreenshotTrigger() {
 
 // Stage tab: Composition resolution + Output destination (collapsible sections).
 void Application::renderStageInlineSetup(OutputZone& zone) {
-    if (ImGui::CollapsingHeader("Composition")) {
+    // Stage section — sections always expanded, no collapse toggle. Users are
+    // here to wire up their stage, so surface the controls instead of hiding
+    // them behind an extra click.
+    {
+        ImGui::SeparatorText("Composition");
         static const char* presetLabels[] = {
             "1920x1080 (1080p)", "3840x2160 (4K)", "1280x720 (720p)",
             "2560x1440 (1440p)", "8000x2000 (Ultra-wide)", "1024x768", "Custom"
@@ -4874,7 +4878,10 @@ void Application::renderStageInlineSetup(OutputZone& zone) {
         }
     }
 
-    if (ImGui::CollapsingHeader("Output")) {
+    ImGui::Dummy(ImVec2(0, 6));
+
+    {
+        ImGui::SeparatorText("Output");
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
         ImGui::Text("Destination");
         ImGui::PopStyleColor();

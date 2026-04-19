@@ -34,6 +34,15 @@ bool StageView::init() {
     }
     m_quad.createQuad();
     m_fbo.create(m_fboWidth, m_fboHeight, true); // with depth
+
+    // Friendly empty state — drop a default 1920x1080 display into the scene
+    // so there's always something showing the test pattern. Users can delete
+    // it, import a model over it, or just use it as their screen if the show
+    // is that simple. Defaults in StageDisplay are already 1.92m x 1.08m and
+    // zoneIndex = 0, which means it will pick up zone 0's live content.
+    if (m_displays.empty()) {
+        addDisplay("Default Screen", StageDisplay::Type::Monitor);
+    }
     return true;
 }
 

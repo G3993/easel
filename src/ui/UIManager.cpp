@@ -428,10 +428,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
         switch (m_workspace) {
         case Workspace::Stage:
-            // Tools: spatial setup (Mapping focused — surface mapping is step 1)
+            // Tools: Stage tab comes first so the 3D layout view is the default.
+            // Composition / Output / default display all live in the Stage tab.
+            ImGui::DockBuilderDockWindow("Stage",         toolsId);
             ImGui::DockBuilderDockWindow("Mapping",       toolsId);
             ImGui::DockBuilderDockWindow("Masks",         toolsId);
-            ImGui::DockBuilderDockWindow("Stage",         toolsId);
             ImGui::DockBuilderDockWindow("Scene Scanner", toolsId);
             // Right top: sources (Layers focused)
             ImGui::DockBuilderDockWindow("Layers",        rightTopId);
@@ -492,6 +493,17 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         }
 
         ImGui::DockBuilderFinish(dockspaceId);
+
+        // Focus the signature tab for this workspace on rebuild. DockBuilder
+        // dock order doesn't reliably pick the initial active tab across all
+        // ImGui versions, so we explicitly set focus after the layout lands.
+        // Runs deferred to next frame via m_pendingFocus.
+        switch (m_workspace) {
+        case Workspace::Stage:  m_pendingFocus = "Stage";   break;
+        case Workspace::Canvas: m_pendingFocus = "Mapping"; break;
+        case Workspace::Show:   m_pendingFocus = "Audio";   break;
+        }
+        m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
         m_lastDockW = dockSize.x;
@@ -499,6 +511,15 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     }
 
     ImGui::End();
+
+    // Apply deferred focus. SetWindowFocus only works if the named window
+    // has been Begin()-ed at least once in a previous frame, so we may need
+    // to retry across a couple frames after a dock rebuild.
+    if (m_pendingFocus) {
+        ImGui::SetWindowFocus(m_pendingFocus);
+        m_pendingFocusFramesLeft--;
+        if (m_pendingFocusFramesLeft <= 0) m_pendingFocus = nullptr;
+    }
 }
 
 void UIManager::setWorkspace(Workspace w) {
@@ -540,6 +561,15 @@ void UIManager::renderWorkspaceBar() {
 
     const float btnW = 132.0f * m_uiZoom;
     const float btnH = 32.0f  * m_uiZoom;
+
+    // Horizontally center the 3 buttons inside the bar.
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float groupW = btnW * 3.0f + spacing * 2.0f;
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const float offsetX = (availW - groupW) * 0.5f;
+    if (offsetX > 0.0f) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offsetX);
+    }
 
     auto drawBtn = [&](const char* label, Workspace ws) {
         bool active = (m_workspace == ws);

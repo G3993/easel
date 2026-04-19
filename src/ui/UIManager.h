@@ -47,4 +47,6 @@ private:
     float m_baseFontGlobalScale = 1.0f;
     Workspace m_workspace = Workspace::Canvas;
     float m_workspaceBarHeight = 0.0f;
+    const char* m_pendingFocus = nullptr;  // window name to focus next frame
+    int m_pendingFocusFramesLeft = 0;
 };
