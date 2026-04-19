@@ -433,8 +433,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Masks",         toolsId);
         dockIfVisible("Sources",       toolsId);
 
-        // Middle-right: Scene (3D stage lists) + Scanner + Mixer.
+        // Middle-right: Scene (3D stage lists) + Scanner + Mixer + Scenes (presets).
         dockIfVisible("Scene",         rightTopId);
+        dockIfVisible("Scenes",        rightTopId);
         dockIfVisible("Scene Scanner", rightTopId);
         dockIfVisible("Audio Mixer",   rightTopId);
 

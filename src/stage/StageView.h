@@ -198,9 +198,13 @@ private:
     void renderUI(const std::vector<GLuint>& zoneTextures);
 
     // Stage environment — light floor + back wall so the 3D space has ground.
+public:
+    bool& environmentVisible() { return m_envVisible; }
+private:
     Mesh3D m_floorMesh;
     Mesh3D m_wallMesh;
     bool m_envReady = false;
+    bool m_envVisible = true;
 
     // Display quad mesh (unit quad, scaled per display)
     Mesh m_displayQuad;

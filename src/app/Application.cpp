@@ -2084,78 +2084,136 @@ void Application::renderUI() {
                                      | ImGuiTabBarFlags_FittingPolicyScroll;
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
 
-    // Capture tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
-    {
-        if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
-            auto capMonitors = CaptureSource::enumerateMonitors();
-            for (int i = 0; i < (int)capMonitors.size(); i++) {
-                ImGui::PushID(i);
+    // NDI tab (moved from position 4 to 1)
+#ifdef HAS_NDI
+    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
+        {
+            // --- Broadcasting section ---
+            if (ImGui::CollapsingHeader("Broadcasting", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // Composition output toggle
+                {
+                    bool compositionOn = m_ndiOutputEnabled && m_ndiOutput.isActive();
+                    if (compositionOn) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    }
+                    if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
+                        if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
+                            m_ndiOutput.create("Easel");
+                        } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
+                            m_ndiOutput.destroy();
+                        }
+                    }
+                    ImGui::PopStyleColor();
+                }
 
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
-                ImGui::Text("%s  %dx%d", capMonitors[i].name.c_str(),
-                            capMonitors[i].width, capMonitors[i].height);
+                // Per-layer toggles
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    ImGui::PushID(5000 + i);
+                    auto& layer = m_layerStack[i];
+                    bool active = layer->ndiSender.isActive();
+
+                    if (active) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    }
+
+                    std::string label = "Easel - " + layer->name;
+                    if (label.length() > 50) label = label.substr(0, 47) + "...";
+                    if (ImGui::Checkbox(label.c_str(), &layer->ndiEnabled)) {
+                        // Toggle handled in updateSources
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+
+                if (m_layerStack.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::Text("  No layers");
+                    ImGui::PopStyleColor();
+                }
+            }
+
+            // --- Receive section ---
+            if (ImGui::CollapsingHeader("Receive", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
+                    m_ndiSources = m_ndiFinder.sources();
+                }
+                ImGui::PopStyleColor(4);
+
+                // Auto-refresh source list every ~2 seconds
+                {
+                    static double lastRefresh = 0;
+                    double now = glfwGetTime();
+                    if (now - lastRefresh > 2.0) {
+                        m_ndiSources = m_ndiFinder.sources();
+                        lastRefresh = now;
+                    }
+                }
+
+                ImGui::Dummy(ImVec2(0, 2));
+                if (m_ndiSources.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::TextWrapped("No NDI sources found on the network.");
+                    ImGui::PopStyleColor();
+                }
+
+                for (int i = 0; i < (int)m_ndiSources.size(); i++) {
+                    ImGui::PushID(3000 + i);
+
+                    std::string name = m_ndiSources[i].name;
+                    if (name.length() > 40) name = name.substr(0, 37) + "...";
+
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                    ImGui::Text("%s", name.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine();
+
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    if (ImGui::SmallButton("Add")) {
+                        addNDISource(m_ndiSources[i].name);
+                    }
+                    ImGui::PopStyleColor(4);
+
+                    ImGui::PopID();
+                }
+
+#ifdef HAS_WHEP
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0, 2));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                ImGui::Text("Scope (WHEP)");
                 ImGui::PopStyleColor();
-                ImGui::SameLine();
-
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("Add")) {
-                    addScreenCapture(i);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
+                if (ImGui::Button("Connect Scope", ImVec2(-1, 0))) {
+                    addWHEPSource(WHEPSource::discoverUrl());
                 }
                 ImGui::PopStyleColor(4);
-
-                ImGui::PopID();
-            }
-        }
-
-        if (ImGui::CollapsingHeader("Window Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button("Refresh Windows", ImVec2(-1, 0))) {
-                m_windowList = WindowCaptureSource::enumerateWindows();
-            }
-            ImGui::PopStyleColor(4);
-
-            if (m_windowList.empty()) {
-                m_windowList = WindowCaptureSource::enumerateWindows();
-            }
-
-            ImGui::Dummy(ImVec2(0, 2));
-            for (int i = 0; i < (int)m_windowList.size(); i++) {
-                ImGui::PushID(1000 + i);
-
-                // Truncate long window titles
-                std::string title = m_windowList[i].title;
-                if (title.length() > 40) title = title.substr(0, 37) + "...";
-
-                ImGui::Text("%s", title.c_str());
-                ImGui::SameLine();
-
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("Add")) {
-#ifdef _WIN32
-                    addWindowCapture(m_windowList[i].hwnd, m_windowList[i].title);
-#elif defined(__APPLE__)
-                    addWindowCapture(m_windowList[i].windowID, m_windowList[i].title);
 #endif
-                }
-                ImGui::PopStyleColor(4);
-
-                ImGui::PopID();
             }
         }
-
+        ImGui::EndTabItem();
     }
-    ImGui::EndTabItem();
-    }  // end Capture tab
+#else
+    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
+        ImGui::TextDisabled("NDI SDK not installed");
+        ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
+        ImGui::EndTabItem();
+    }
+#endif
 
     // ShaderClaw tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("ShaderClaw")) {
@@ -2650,135 +2708,78 @@ void Application::renderUI() {
     ImGui::EndTabItem();
     }  // end Etherea tab
 
-#ifdef HAS_NDI
-    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
-        {
-            // --- Broadcasting section ---
-            if (ImGui::CollapsingHeader("Broadcasting", ImGuiTreeNodeFlags_DefaultOpen)) {
-                // Composition output toggle
-                {
-                    bool compositionOn = m_ndiOutputEnabled && m_ndiOutput.isActive();
-                    if (compositionOn) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    }
-                    if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
-                        if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Easel");
-                        } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
-                            m_ndiOutput.destroy();
-                        }
-                    }
-                    ImGui::PopStyleColor();
-                }
+    // Capture tab (moved from position 1 to 4)
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
+    {
+        if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto capMonitors = CaptureSource::enumerateMonitors();
+            for (int i = 0; i < (int)capMonitors.size(); i++) {
+                ImGui::PushID(i);
 
-                // Per-layer toggles
-                for (int i = 0; i < m_layerStack.count(); i++) {
-                    ImGui::PushID(5000 + i);
-                    auto& layer = m_layerStack[i];
-                    bool active = layer->ndiSender.isActive();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::Text("%s  %dx%d", capMonitors[i].name.c_str(),
+                            capMonitors[i].width, capMonitors[i].height);
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
 
-                    if (active) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    }
-
-                    std::string label = "Easel - " + layer->name;
-                    if (label.length() > 50) label = label.substr(0, 47) + "...";
-                    if (ImGui::Checkbox(label.c_str(), &layer->ndiEnabled)) {
-                        // Toggle handled in updateSources
-                    }
-                    ImGui::PopStyleColor();
-                    ImGui::PopID();
-                }
-
-                if (m_layerStack.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    ImGui::Text("  No layers");
-                    ImGui::PopStyleColor();
-                }
-            }
-
-            // --- Receive section ---
-            if (ImGui::CollapsingHeader("Receive", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
-                    m_ndiSources = m_ndiFinder.sources();
+                if (ImGui::Button("Add")) {
+                    addScreenCapture(i);
                 }
                 ImGui::PopStyleColor(4);
 
-                // Auto-refresh source list every ~2 seconds
-                {
-                    static double lastRefresh = 0;
-                    double now = glfwGetTime();
-                    if (now - lastRefresh > 2.0) {
-                        m_ndiSources = m_ndiFinder.sources();
-                        lastRefresh = now;
-                    }
-                }
-
-                ImGui::Dummy(ImVec2(0, 2));
-                if (m_ndiSources.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    ImGui::TextWrapped("No NDI sources found on the network.");
-                    ImGui::PopStyleColor();
-                }
-
-                for (int i = 0; i < (int)m_ndiSources.size(); i++) {
-                    ImGui::PushID(3000 + i);
-
-                    std::string name = m_ndiSources[i].name;
-                    if (name.length() > 40) name = name.substr(0, 37) + "...";
-
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
-                    ImGui::Text("%s", name.c_str());
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine();
-
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                    if (ImGui::SmallButton("Add")) {
-                        addNDISource(m_ndiSources[i].name);
-                    }
-                    ImGui::PopStyleColor(4);
-
-                    ImGui::PopID();
-                }
-
-#ifdef HAS_WHEP
-                ImGui::Dummy(ImVec2(0, 4));
-                ImGui::Separator();
-                ImGui::Dummy(ImVec2(0, 2));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
-                ImGui::Text("Scope (WHEP)");
-                ImGui::PopStyleColor();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
-                if (ImGui::Button("Connect Scope", ImVec2(-1, 0))) {
-                    addWHEPSource(WHEPSource::discoverUrl());
-                }
-                ImGui::PopStyleColor(4);
-#endif
+                ImGui::PopID();
             }
         }
-        ImGui::EndTabItem();
-    }
-#else
-    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
-        ImGui::TextDisabled("NDI SDK not installed");
-        ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
-        ImGui::EndTabItem();
-    }
+
+        if (ImGui::CollapsingHeader("Window Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            if (ImGui::Button("Refresh Windows", ImVec2(-1, 0))) {
+                m_windowList = WindowCaptureSource::enumerateWindows();
+            }
+            ImGui::PopStyleColor(4);
+
+            if (m_windowList.empty()) {
+                m_windowList = WindowCaptureSource::enumerateWindows();
+            }
+
+            ImGui::Dummy(ImVec2(0, 2));
+            for (int i = 0; i < (int)m_windowList.size(); i++) {
+                ImGui::PushID(1000 + i);
+
+                // Truncate long window titles
+                std::string title = m_windowList[i].title;
+                if (title.length() > 40) title = title.substr(0, 37) + "...";
+
+                ImGui::Text("%s", title.c_str());
+                ImGui::SameLine();
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                if (ImGui::Button("Add")) {
+#ifdef _WIN32
+                    addWindowCapture(m_windowList[i].hwnd, m_windowList[i].title);
+#elif defined(__APPLE__)
+                    addWindowCapture(m_windowList[i].windowID, m_windowList[i].title);
 #endif
+                }
+                ImGui::PopStyleColor(4);
+
+                ImGui::PopID();
+            }
+        }
+
+    }
+    ImGui::EndTabItem();
+    }  // end Capture tab
 
 #ifdef HAS_SPOUT
     if (sourcesTabsOpen && ImGui::BeginTabItem("Spout")) {
@@ -2856,10 +2857,68 @@ void Application::renderUI() {
     }  // end Stream visibility guard
 #endif
 
-    // Audio panel — device, levels, gain controls
+    // Audio panel — BPM, device, levels, gain controls
     if (m_ui.isPanelVisible("Audio")) {
     ImGui::Begin("Audio");
     {
+        // --- BPM (moved from Properties panel) ---
+        {
+            float currentBPM = m_bpmSync.bpm();
+            float w = ImGui::GetContentRegionAvail().x;
+
+            // Beat indicator dots + BPM text
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float dotY = p.y + 8;
+                for (int b = 0; b < 4; b++) {
+                    float dotCX = p.x + b * 16.0f;
+                    int beatInBar = m_bpmSync.beatCount() % 4;
+                    bool isCurrent = (b == beatInBar) && currentBPM > 0;
+                    float pulse = isCurrent ? m_bpmSync.beatPulse() : 0.0f;
+                    float r = 4.0f + pulse * 2.0f;
+                    dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
+                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
+                                                  : IM_COL32(50, 60, 80, 120));
+                }
+                char bpmBuf[16];
+                if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
+                else snprintf(bpmBuf, sizeof(bpmBuf), "--- BPM");
+                dl->AddText(ImVec2(p.x + 74, p.y + 2),
+                            currentBPM > 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(100, 115, 140, 180),
+                            bpmBuf);
+                ImGui::Dummy(ImVec2(w, 18));
+            }
+
+            // TAP + BPM input + Reset
+            {
+                float btnW = (w - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                if (ImGui::Button("TAP", ImVec2(btnW, 0))) m_bpmSync.tap();
+                ImGui::PopStyleColor(4);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(btnW);
+                float bpmVal = currentBPM;
+                if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM"))
+                    m_bpmSync.setBPM(bpmVal);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.35f, 0.35f, 0.8f));
+                if (ImGui::Button("Reset", ImVec2(btnW, 0))) {
+                    m_bpmSync.setBPM(0);
+                    m_bpmSync.resetPhase();
+                }
+                ImGui::PopStyleColor(3);
+            }
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::Separator();
+            ImGui::Dummy(ImVec2(0, 4));
+        }
+
         // --- Device selection ---
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
         ImGui::Text("Input");
@@ -3295,6 +3354,45 @@ void Application::renderUI() {
 
     renderTransportBar();
 #endif
+
+    // Scenes panel — save / recall presets. Moved out of Properties so
+    // Properties only shows selected-layer content.
+    if (m_ui.isPanelVisible("Scenes")) {
+        ImGui::Begin("Scenes");
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.40f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+            if (ImGui::Button("Save Scene", ImVec2(-1, 0))) {
+                char nm[32];
+                snprintf(nm, sizeof(nm), "Scene %d", m_sceneManager.count() + 1);
+                m_sceneManager.saveScene(nm, m_layerStack);
+            }
+            ImGui::PopStyleColor(4);
+
+            int removeIdx = -1;
+            for (int s = 0; s < m_sceneManager.count(); s++) {
+                ImGui::PushID(30000 + s);
+                auto& scene = m_sceneManager[s];
+                float w = ImGui::GetContentRegionAvail().x - 24;
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.06f, 0.07f, 0.10f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.35f));
+                if (ImGui::Button(scene.name.c_str(), ImVec2(w, 0))) {
+                    m_sceneManager.recallScene(s, m_layerStack);
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+                if (ImGui::SmallButton("x")) removeIdx = s;
+                ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
+            if (removeIdx >= 0) m_sceneManager.removeScene(removeIdx);
+        }
+        ImGui::End();
+    }
 }
 
 #ifdef HAS_FFMPEG

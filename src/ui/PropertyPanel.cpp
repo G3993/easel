@@ -69,6 +69,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Properties");
 
+    // BPM/Audio controls now live in the Audio panel.
+    // Scene management now lives in the Scenes panel.
+    // Properties is empty unless a layer is selected.
+#if 0
     // --- Audio (BPM + bindings, always visible) ---
     if (bpmSync) {
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
@@ -221,9 +225,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
         thinSep();
     }
+#endif
+    // Silence unused-parameter warnings for sections now routed elsewhere.
+    (void)bpmSync; (void)sceneManager;
 
     if (!layer) {
-        ImGui::TextDisabled("No layer selected");
+        // Empty Properties — content appears only when a layer/shader/etc. is selected.
         ImGui::End();
         return;
     }

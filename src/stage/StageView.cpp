@@ -250,9 +250,9 @@ void StageView::renderDisplays(const std::vector<GLuint>& zoneTextures, const gl
 // like a void so users can read depth and orientation at a glance.
 void StageView::renderEnvironment(const glm::mat4& viewProj) {
     if (!m_envReady) {
-        // Floor: 40m × 40m horizontal quad, centered at origin, y = -0.55 so
+        // Floor: 10m × 10m horizontal quad, centered at origin, y = -0.55 so
         // the default 1.08m-tall display (centered at origin) sits just above it.
-        const float fHalf = 20.0f;
+        const float fHalf = 5.0f;
         const float fY    = -0.55f;
         std::vector<Vertex3D> fv = {
             {-fHalf, fY, -fHalf, 0.0f, 0.0f},
@@ -263,11 +263,11 @@ void StageView::renderEnvironment(const glm::mat4& viewProj) {
         std::vector<unsigned int> fi = { 0, 1, 2, 0, 2, 3 };
         m_floorMesh.upload(fv, fi);
 
-        // Back wall: 40m wide × 8m tall, at z = -3 behind the origin.
-        const float wHalfX = 20.0f;
+        // Back wall: 10m wide × 3.5m tall, at z = -2 behind the origin.
+        const float wHalfX = 5.0f;
         const float wYBot  = -0.55f;
-        const float wYTop  =  7.45f;
-        const float wZ     = -3.0f;
+        const float wYTop  =  2.95f;
+        const float wZ     = -2.0f;
         std::vector<Vertex3D> wv = {
             {-wHalfX, wYBot, wZ, 0.0f, 0.0f},
             { wHalfX, wYBot, wZ, 1.0f, 0.0f},
@@ -279,6 +279,8 @@ void StageView::renderEnvironment(const glm::mat4& viewProj) {
 
         m_envReady = true;
     }
+
+    if (!m_envVisible) return;
 
     m_shader.use();
     m_shader.setMat4("uMVP", viewProj);  // identity model — vertices are in world space
@@ -481,6 +483,8 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
 
+        ImGui::Checkbox("Floor/Wall", &m_envVisible);
+        ImGui::SameLine();
         if (ImGui::SmallButton("+ Display")) {
             char name[32];
             snprintf(name, sizeof(name), "Display %d", (int)m_displays.size() + 1);
