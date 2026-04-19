@@ -3,11 +3,11 @@
 struct GLFWwindow;
 struct ImFont;
 
-// Three top-level modes that map to the phases of a live show:
-//   Stage  — physical/spatial setup (projector layout, warp, masks, scanner)
-//   Canvas — content authoring (layers, properties, sources)
-//   Show   — live ops (preview + I/O monitoring)
-enum class Workspace { Stage, Canvas, Show };
+// Two top-level modes:
+//   Canvas — setup + authoring (mapping, masks, stage 3D, layers, sources,
+//            output config). The bulk of the work happens here.
+//   Show   — live ops (preview + triggers + monitoring). Minimal chrome.
+enum class Workspace { Canvas, Show };
 
 class UIManager {
 public:

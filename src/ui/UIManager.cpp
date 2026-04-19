@@ -427,44 +427,22 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Canvas", canvasId);
 
         switch (m_workspace) {
-        case Workspace::Stage:
-            // Tools: Stage tab comes first so the 3D layout view is the default.
-            // Composition / Output / default display all live in the Stage tab.
-            dockIfVisible("Stage",         toolsId);
-            dockIfVisible("Mapping",       toolsId);
-            dockIfVisible("Masks",         toolsId);
-            dockIfVisible("Scene Scanner", toolsId);
-            // Right top: sources (Layers focused)
-            dockIfVisible("Layers",        rightTopId);
-            dockIfVisible("Capture",       rightTopId);
-            dockIfVisible("ShaderClaw",    rightTopId);
-            dockIfVisible("Etherea",       rightTopId);
-            dockIfVisible("Audio Mixer",   rightTopId);
-            // Right bottom: inspectors + I/O (Properties focused)
-            dockIfVisible("Properties",    rightBottomId);
-            dockIfVisible("Audio",         rightBottomId);
-            dockIfVisible("MIDI",          rightBottomId);
-            dockIfVisible("NDI",           rightBottomId);
-            dockIfVisible("Spout",         rightBottomId);
-            dockIfVisible("Stream",        rightBottomId);
-            break;
-
         case Workspace::Canvas:
-            // Tools: authoring tools (Mapping focused — most commonly touched while designing)
+            // Tools: Mapping is the default focused tab — it's the first thing
+            // users want while designing against a warped surface.
             dockIfVisible("Mapping",       toolsId);
             dockIfVisible("Masks",         toolsId);
             dockIfVisible("Stage",         toolsId);
             dockIfVisible("Scene Scanner", toolsId);
-            // Right top: sources (Layers focused)
+            // Sources middle (Layers focused)
             dockIfVisible("Layers",        rightTopId);
             dockIfVisible("ShaderClaw",    rightTopId);
             dockIfVisible("Etherea",       rightTopId);
             dockIfVisible("Capture",       rightTopId);
             dockIfVisible("Audio Mixer",   rightTopId);
-            // Right bottom: inspectors + I/O (Properties focused)
+            // Inspectors + I/O bottom (Properties focused)
             dockIfVisible("Properties",    rightBottomId);
             dockIfVisible("Audio",         rightBottomId);
-            dockIfVisible("MIDI",          rightBottomId);
             dockIfVisible("NDI",           rightBottomId);
             dockIfVisible("Spout",         rightBottomId);
             dockIfVisible("Stream",        rightBottomId);
@@ -499,7 +477,6 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // ImGui versions, so we explicitly set focus after the layout lands.
         // Runs deferred to next frame via m_pendingFocus.
         switch (m_workspace) {
-        case Workspace::Stage:  m_pendingFocus = "Stage";   break;
         case Workspace::Canvas: m_pendingFocus = "Mapping"; break;
         case Workspace::Show:   m_pendingFocus = "Audio";   break;
         }
@@ -531,9 +508,8 @@ void UIManager::setWorkspace(Workspace w) {
 
 bool UIManager::isPanelVisible(const char* title) const {
     // Per-workspace whitelist. Names must match ImGui::Begin() titles exactly.
-    // Stage   — spatial + output setup (one-time wiring before a show).
-    // Canvas  — content authoring (layers, sources, inspectors while composing).
-    // Show    — live ops (minimal chrome, trigger + monitor).
+    // Canvas — setup + authoring (everything you touch before/while composing).
+    // Show   — live ops (minimal chrome, trigger + monitor).
     auto contains = [title](std::initializer_list<const char*> list) {
         for (const char* s : list) {
             if (std::strcmp(title, s) == 0) return true;
@@ -542,16 +518,13 @@ bool UIManager::isPanelVisible(const char* title) const {
     };
 
     switch (m_workspace) {
-    case Workspace::Stage:
-        return contains({
-            "Canvas", "Stage", "Mapping", "Masks", "Scene Scanner",
-            "Properties", "NDI", "Spout", "Stream",
-        });
     case Workspace::Canvas:
         return contains({
-            "Canvas", "Layers", "Properties",
-            "ShaderClaw", "Etherea", "Capture",
-            "Audio", "Audio Mixer",
+            "Canvas",
+            "Mapping", "Masks", "Stage", "Scene Scanner",
+            "Layers", "ShaderClaw", "Etherea", "Capture", "Audio Mixer",
+            "Properties", "Audio",
+            "NDI", "Spout", "Stream",
         });
     case Workspace::Show:
         return contains({

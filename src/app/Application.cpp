@@ -3793,15 +3793,13 @@ void Application::renderMenuBar() {
             }
         }
 
-        // Stage / Canvas / Show — primary workspace switcher, center-aligned
-        // inside the main menu bar. Each remaps the dock layout + panel
-        // whitelist for the corresponding phase of a show.
+        // Canvas / Show — primary workspace switcher, center-aligned inside
+        // the main menu bar. Each remaps the dock layout + panel whitelist
+        // for setup-and-authoring vs live-ops modes.
         {
-            const float btnW = 100.0f * m_ui.uiScale();
+            const float btnW = 110.0f * m_ui.uiScale();
             const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            const float groupW = btnW * 3.0f + spacing * 2.0f;
-            // Use the menu bar's full width to center, regardless of where
-            // the last menu item left the cursor.
+            const float groupW = btnW * 2.0f + spacing;
             const float barW = ImGui::GetWindowSize().x;
             const float startX = (barW - groupW) * 0.5f;
             if (startX > ImGui::GetCursorPosX()) {
@@ -3825,8 +3823,6 @@ void Application::renderMenuBar() {
                 if (ImGui::Button(label, ImVec2(btnW, 0))) m_ui.setWorkspace(ws);
                 ImGui::PopStyleColor(4);
             };
-            drawBtn("Stage",  Workspace::Stage);
-            ImGui::SameLine();
             drawBtn("Canvas", Workspace::Canvas);
             ImGui::SameLine();
             drawBtn("Show",   Workspace::Show);
