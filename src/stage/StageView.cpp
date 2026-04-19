@@ -513,10 +513,10 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
     ImVec2 viewStart = ImGui::GetCursorScreenPos();
     ImVec2 viewSize(panelW, viewH);
 
-    // SSAA: render FBO at 2× viewport size so the GL_LINEAR filter on the
+    // SSAA: render FBO at 3× viewport size so the GL_LINEAR filter on the
     // display texture downsamples — cheap anti-aliasing on the 3D edges,
-    // no MSAA FBO plumbing needed. 2× → 4 samples per final pixel.
-    const int ssaa = 2;
+    // no MSAA FBO plumbing needed. 3× → 9 samples per final pixel.
+    const int ssaa = 3;
     int needW = (int)viewSize.x * ssaa, needH = (int)viewSize.y * ssaa;
     if (needW < 1) needW = 1;
     if (needH < 1) needH = 1;
