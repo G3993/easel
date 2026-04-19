@@ -432,21 +432,18 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockIfVisible("Masks",         toolsId);
         dockIfVisible("Scene Scanner", toolsId);
 
-        // Sources + Scene (middle-right): Layers focused. Scene holds the
-        // 3D stage's display/projector/surface lists, off the 3D viewport.
+        // Middle-right: Layers + Sources (consolidated input panel) + Scene
+        // (3D stage's display/projector/surface lists) + Mixer.
         dockIfVisible("Layers",        rightTopId);
+        dockIfVisible("Sources",       rightTopId);
         dockIfVisible("Scene",         rightTopId);
-        dockIfVisible("ShaderClaw",    rightTopId);
-        dockIfVisible("Etherea",       rightTopId);
-        dockIfVisible("Capture",       rightTopId);
         dockIfVisible("Audio Mixer",   rightTopId);
 
-        // Properties + I/O (bottom-right): Properties focused.
+        // Properties + I/O bottom-right. NDI/Spout/Capture/ShaderClaw/Etherea
+        // are no longer separate docks — they live as tabs inside Sources.
         dockIfVisible("Properties",    rightBottomId);
         dockIfVisible("Audio",         rightBottomId);
         dockIfVisible("MIDI",          rightBottomId);
-        dockIfVisible("NDI",           rightBottomId);
-        dockIfVisible("Spout",         rightBottomId);
         dockIfVisible("Stream",        rightBottomId);
 
         ImGui::DockBuilderFinish(dockspaceId);

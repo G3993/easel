@@ -2075,9 +2075,17 @@ void Application::renderUI() {
     // Projector settings are now rendered inline inside the Canvas tab
     // via renderCompositionInlinePanel(). The standalone "Projector" window is gone.
 
-    // Capture panel
-    if (m_ui.isPanelVisible("Capture")) {
-    ImGui::Begin("Capture");
+    // Sources panel — single window with tabs for each input source type.
+    // Groups what used to be 5 separate panels (NDI / Spout / Capture /
+    // ShaderClaw / Etherea) into one place so the right column isn't
+    // overwhelmed with tabs.
+    bool sourcesOpen = ImGui::Begin("Sources");
+    ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
+                                     | ImGuiTabBarFlags_FittingPolicyScroll;
+    bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
+
+    // Capture tab
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
     {
         if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto capMonitors = CaptureSource::enumerateMonitors();
@@ -2146,12 +2154,11 @@ void Application::renderUI() {
         }
 
     }
-    ImGui::End();
-    }  // end Capture visibility guard
+    ImGui::EndTabItem();
+    }  // end Capture tab
 
-    // ShaderClaw panel — shader browser + connection
-    if (m_ui.isPanelVisible("ShaderClaw")) {
-    ImGui::Begin("ShaderClaw");
+    // ShaderClaw tab
+    if (sourcesTabsOpen && ImGui::BeginTabItem("ShaderClaw")) {
     {
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -2381,12 +2388,11 @@ void Application::renderUI() {
             }
         }
     }
-    ImGui::End();
-    }  // end ShaderClaw visibility guard
+    ImGui::EndTabItem();
+    }  // end ShaderClaw tab
 
-    // Etherea panel — SSE connection for transcript + data
-    if (m_ui.isPanelVisible("Etherea")) {
-    ImGui::Begin("Etherea");
+    // Etherea tab
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Etherea")) {
     {
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
@@ -2641,12 +2647,11 @@ void Application::renderUI() {
         }
 #endif
     }
-    ImGui::End();
-    }  // end Etherea visibility guard
+    ImGui::EndTabItem();
+    }  // end Etherea tab
 
 #ifdef HAS_NDI
-    if (NDIRuntime::instance().isAvailable() && m_ui.isPanelVisible("NDI")) {
-        ImGui::Begin("NDI");
+    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
         {
             // --- Broadcasting section ---
             if (ImGui::CollapsingHeader("Broadcasting", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2765,20 +2770,18 @@ void Application::renderUI() {
 #endif
             }
         }
-        ImGui::End();
+        ImGui::EndTabItem();
     }
 #else
-    if (m_ui.isPanelVisible("NDI")) {
-        ImGui::Begin("NDI");
+    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
         ImGui::TextDisabled("NDI SDK not installed");
         ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
-        ImGui::End();
+        ImGui::EndTabItem();
     }
 #endif
 
 #ifdef HAS_SPOUT
-    if (m_ui.isPanelVisible("Spout")) {
-    ImGui::Begin("Spout");
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Spout")) {
     {
         bool spoutOn = m_spoutOutputEnabled && m_spoutOutput.isActive();
         if (spoutOn) {
@@ -2802,9 +2805,13 @@ void Application::renderUI() {
             ImGui::PopStyleColor();
         }
     }
-    ImGui::End();
-    }  // end Spout visibility guard
+    ImGui::EndTabItem();
+    }  // end Spout tab
 #endif
+
+    // Close the Sources tab bar + window (opened before the Capture tab).
+    if (sourcesTabsOpen) ImGui::EndTabBar();
+    ImGui::End();
 
 #ifdef HAS_FFMPEG
     if (m_ui.isPanelVisible("Stream")) {

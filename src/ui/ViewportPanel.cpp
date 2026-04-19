@@ -289,7 +289,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
             }
 
-            ImGui::SetNextItemWidth(220.0f);
+            ImGui::SetNextItemWidth(150.0f);
             if (ImGui::BeginCombo("##ZoneOutput", destLabel, ImGuiComboFlags_HeightLarge)) {
                 if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
                     az.outputDest = OutputDest::None;
@@ -391,7 +391,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
 
                 const char* mapLabel = (az.mappingIndex >= 0 && az.mappingIndex < (int)allMappings->size())
                     ? (*allMappings)[az.mappingIndex]->name.c_str() : "None";
-                ImGui::SetNextItemWidth(160.0f);
+                ImGui::SetNextItemWidth(110.0f);
                 if (ImGui::BeginCombo("##ZoneMapping", mapLabel)) {
                     for (int mi = 0; mi < (int)allMappings->size(); mi++) {
                         bool sel = (az.mappingIndex == mi);
@@ -422,7 +422,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 char compLabel[48];
                 snprintf(compLabel, sizeof(compLabel), "%dx%d", az.width, az.height);
 
-                ImGui::SetNextItemWidth(150.0f);
+                ImGui::SetNextItemWidth(130.0f);
                 if (ImGui::BeginCombo("##ZoneComp", compLabel)) {
                     for (int p = 0; p < presetCount - 1; p++) {
                         bool sel = (az.width == presetW[p] && az.height == presetH[p]);
