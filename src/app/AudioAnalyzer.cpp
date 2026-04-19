@@ -44,11 +44,17 @@ void AudioAnalyzer::update(float dt) {
     if (!m_externalFeed) {
         // Reinit capture if device changed or previous init failed
         bool deviceChanged = (m_deviceIdx != m_requestedDevice) || (m_deviceId != m_requestedDeviceId);
-        if (deviceChanged || (!m_initialized && m_deviceIdx != -2)) {
+        if (deviceChanged) {
+            m_captureFailed = false; // reset on device change
+        }
+        if (!m_captureFailed && (deviceChanged || (!m_initialized && m_deviceIdx != -2))) {
             cleanupCapture();
             m_deviceIdx = m_requestedDevice;
             m_deviceId = m_requestedDeviceId;
             initCapture();
+            if (!m_initialized) {
+                m_captureFailed = true;
+            }
         }
 
         // Drain WASAPI packets (non-blocking)

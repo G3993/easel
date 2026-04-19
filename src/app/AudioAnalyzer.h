@@ -93,6 +93,7 @@ private:
     int m_channels = 2;
     bool m_initialized = false;
     bool m_externalFeed = false;
+    bool m_captureFailed = false;  // true after permission denied — don't retry
 
     void initCapture();
     void cleanupCapture();

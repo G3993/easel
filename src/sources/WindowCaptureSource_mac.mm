@@ -32,29 +32,37 @@ std::vector<WindowInfo> WindowCaptureSource::enumerateWindows() {
         CFNumberRef windowIDRef = (CFNumberRef)CFDictionaryGetValue(windowInfo, kCGWindowNumber);
         if (windowIDRef) CFNumberGetValue(windowIDRef, kCFNumberIntType, &windowID);
 
-        // Get window name
+        // Get owner (app) name
+        std::string ownerName;
+        CFStringRef ownerRef = (CFStringRef)CFDictionaryGetValue(windowInfo, kCGWindowOwnerName);
+        if (ownerRef) {
+            char buf[512];
+            if (CFStringGetCString(ownerRef, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                ownerName = buf;
+            }
+        }
+
+        // Get window title
+        std::string windowTitle;
         CFStringRef nameRef = (CFStringRef)CFDictionaryGetValue(windowInfo, kCGWindowName);
-        std::string name;
         if (nameRef) {
             char buf[512];
             if (CFStringGetCString(nameRef, buf, sizeof(buf), kCFStringEncodingUTF8)) {
-                name = buf;
+                windowTitle = buf;
             }
         }
 
-        // Get owner name as fallback
-        if (name.empty()) {
-            CFStringRef ownerRef = (CFStringRef)CFDictionaryGetValue(windowInfo, kCGWindowOwnerName);
-            if (ownerRef) {
-                char buf[512];
-                if (CFStringGetCString(ownerRef, buf, sizeof(buf), kCFStringEncodingUTF8)) {
-                    name = buf;
-                }
-            }
+        // Build display name: prefer "App — Title", fall back to app name, then window ID
+        std::string name;
+        if (!ownerName.empty() && !windowTitle.empty()) {
+            name = ownerName + " — " + windowTitle;
+        } else if (!ownerName.empty()) {
+            name = ownerName;
+        } else if (!windowTitle.empty()) {
+            name = windowTitle;
+        } else {
+            name = "Window " + std::to_string(windowID);
         }
-
-        // Skip windows with no name
-        if (name.empty()) continue;
 
         // Get bounds
         CFDictionaryRef boundsRef = (CFDictionaryRef)CFDictionaryGetValue(windowInfo, kCGWindowBounds);

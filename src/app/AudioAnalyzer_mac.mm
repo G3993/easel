@@ -279,6 +279,7 @@ void AudioAnalyzer::initCapture() {
         m_channels = 2;
     } else {
         std::cerr << "[AudioAnalyzer] macOS audio capture failed — FFT will not update" << std::endl;
+        std::cerr << "[AudioAnalyzer] Grant Screen Recording permission in System Settings > Privacy & Security" << std::endl;
         cleanupCapture();
     }
 }

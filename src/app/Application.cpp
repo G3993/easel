@@ -2536,8 +2536,12 @@ void Application::renderUI() {
                     for (auto& inst : health["instances"]) {
                         if (inst.value("responding", false)) {
                             std::string id = inst.value("instance_id", "");
-                            std::string prompt = inst.value("last_confirmed_prompt", "");
-                            if (prompt.size() > 40) prompt = prompt.substr(0, 37) + "...";
+                            std::string prompt;
+                            auto& p = inst["last_confirmed_prompt"];
+                            if (p.is_string()) {
+                                prompt = p.get<std::string>();
+                                if (prompt.size() > 40) prompt = prompt.substr(0, 37) + "...";
+                            }
                             if (!id.empty()) scopePods.push_back({id, prompt});
                         }
                     }
