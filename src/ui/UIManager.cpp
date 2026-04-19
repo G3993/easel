@@ -46,17 +46,31 @@ bool UIManager::init(GLFWwindow* window) {
         0,
     };
 
-    // Load system font with DPI-aware sizing
-    float fontSize = 16.0f * fontScale;
+    // Font loading — prefer Segoe UI Variable (Windows 11, Inter-like) on
+    // Windows with Segoe UI static fallback; Apple system fonts on macOS.
+    // Variable font gives the "510 weight" feel Linear's design system leans on.
+    const char* primaryFontPath = "C:/Windows/Fonts/SegUIVar.ttf";
+    const char* primaryFallback = "C:/Windows/Fonts/segoeui.ttf";
+    const char* boldFontPath    = "C:/Windows/Fonts/seguisb.ttf";       // SemiBold
+    const char* boldFallback    = "C:/Windows/Fonts/segoeuib.ttf";      // Bold
+    const char* monoFontPath    = "C:/Windows/Fonts/CascadiaMono.ttf";
+    const char* macPrimaryPath  = "/System/Library/Fonts/Helvetica.ttc";
+    const char* macPrimaryFB    = "/System/Library/Fonts/Supplemental/Arial.ttf";
+    const char* macBoldPath     = "/System/Library/Fonts/Supplemental/Arial Bold.ttf";
+    const char* macMonoPath     = "/System/Library/Fonts/Menlo.ttc";
+
+    float fontSize = 15.0f * fontScale;  // denser feel; scaled for DPI
     ImFontConfig fontCfg;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 1;
-#ifdef _WIN32
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", fontSize, &fontCfg, glyphRanges);
-#elif defined(__APPLE__)
-    ImFont* mainFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", fontSize, &fontCfg, glyphRanges);
-#else
+    fontCfg.PixelSnapH = false;
     ImFont* mainFont = nullptr;
+#ifdef _WIN32
+    mainFont = io.Fonts->AddFontFromFileTTF(primaryFontPath, fontSize, &fontCfg, glyphRanges);
+    if (!mainFont) mainFont = io.Fonts->AddFontFromFileTTF(primaryFallback, fontSize, &fontCfg, glyphRanges);
+#elif defined(__APPLE__)
+    mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, fontSize, &fontCfg, glyphRanges);
+    if (!mainFont) mainFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, fontSize, &fontCfg, glyphRanges);
 #endif
     if (!mainFont) {
         ImFontConfig defCfg;
@@ -64,16 +78,18 @@ bool UIManager::init(GLFWwindow* window) {
         io.Fonts->AddFontDefault(&defCfg);
     }
 
-    // Slightly smaller font for secondary text
-    float smallSize = 14.0f * fontScale;
+    // Small font — for captions, metadata, tertiary labels
+    float smallSize = 13.0f * fontScale;
     ImFontConfig smallCfg;
-    smallCfg.OversampleH = 2;
-#ifdef _WIN32
-    m_smallFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", smallSize, &smallCfg, glyphRanges);
-#elif defined(__APPLE__)
-    m_smallFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial.ttf", smallSize, &smallCfg, glyphRanges);
-#else
+    smallCfg.OversampleH = 3;
+    smallCfg.PixelSnapH = false;
     m_smallFont = nullptr;
+#ifdef _WIN32
+    m_smallFont = io.Fonts->AddFontFromFileTTF(primaryFontPath, smallSize, &smallCfg, glyphRanges);
+    if (!m_smallFont) m_smallFont = io.Fonts->AddFontFromFileTTF(primaryFallback, smallSize, &smallCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryPath, smallSize, &smallCfg, glyphRanges);
+    if (!m_smallFont) m_smallFont = io.Fonts->AddFontFromFileTTF(macPrimaryFB, smallSize, &smallCfg, glyphRanges);
 #endif
     if (!m_smallFont) {
         ImFontConfig defCfg;
@@ -83,15 +99,29 @@ bool UIManager::init(GLFWwindow* window) {
 
     // Semibold for headers / emphasis (Linear's ~590 weight)
     ImFontConfig boldCfg;
-    boldCfg.OversampleH = 2;
-#ifdef _WIN32
-    m_boldFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", fontSize, &boldCfg, glyphRanges);
-#elif defined(__APPLE__)
-    m_boldFont = io.Fonts->AddFontFromFileTTF("/System/Library/Fonts/Supplemental/Arial Bold.ttf", fontSize, &boldCfg, glyphRanges);
-#else
+    boldCfg.OversampleH = 3;
+    boldCfg.PixelSnapH = false;
     m_boldFont = nullptr;
+#ifdef _WIN32
+    m_boldFont = io.Fonts->AddFontFromFileTTF(boldFontPath, fontSize, &boldCfg, glyphRanges);
+    if (!m_boldFont) m_boldFont = io.Fonts->AddFontFromFileTTF(boldFallback, fontSize, &boldCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_boldFont = io.Fonts->AddFontFromFileTTF(macBoldPath, fontSize, &boldCfg, glyphRanges);
 #endif
     if (!m_boldFont) m_boldFont = mainFont ? mainFont : io.Fonts->Fonts[0];
+
+    // Mono font for uppercase section labels / technical metadata
+    float monoSize = 11.0f * fontScale;
+    ImFontConfig monoCfg;
+    monoCfg.OversampleH = 3;
+    monoCfg.PixelSnapH = false;
+    m_monoFont = nullptr;
+#ifdef _WIN32
+    m_monoFont = io.Fonts->AddFontFromFileTTF(monoFontPath, monoSize, &monoCfg, glyphRanges);
+#elif defined(__APPLE__)
+    m_monoFont = io.Fonts->AddFontFromFileTTF(macMonoPath, monoSize, &monoCfg, glyphRanges);
+#endif
+    if (!m_monoFont) m_monoFont = m_smallFont;
 
     applyTheme(uiScale);
 
@@ -374,26 +404,60 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         ImGuiID rightTopId, rightBottomId;
         ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
 
-        // Dock windows into regions
-        //   leftId         = Main viewport tab group: Canvas, Projector, Mapping, Masks, Stage
-        //   rightTopId     = Sources / outputs (Layers, feeds, NDI/Stream/Spout)
-        //   rightBottomId  = Inspectors (Properties, MIDI, Audio)
-        // Tab order mirrors the workflow sequence.
-        ImGui::DockBuilderDockWindow("Canvas", leftId);
-        ImGui::DockBuilderDockWindow("Mapping", leftId);
-        ImGui::DockBuilderDockWindow("Masks", leftId);
-        ImGui::DockBuilderDockWindow("Stage", leftId);
-        ImGui::DockBuilderDockWindow("Layers", rightTopId);
-        ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
-        ImGui::DockBuilderDockWindow("Etherea", rightTopId);
-        ImGui::DockBuilderDockWindow("NDI", rightTopId);
-        ImGui::DockBuilderDockWindow("Stream", rightTopId);
-        ImGui::DockBuilderDockWindow("Spout", rightTopId);
-        ImGui::DockBuilderDockWindow("Capture", rightTopId);
-        ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
-        ImGui::DockBuilderDockWindow("Properties", rightBottomId);
-        ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
-        ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+        // Dock windows into regions per workspace.
+        //   Stage  — 3D layout/warp/masks take center; Canvas preview + Layers on side.
+        //   Canvas — Canvas center; sources + properties on sides. (Default authoring view.)
+        //   Show   — Canvas center; live-ops panels (Audio, MIDI, NDI/Stream/Spout) on sides.
+        // First DockBuilderDockWindow call for a region wins focus, so the focused
+        // tab per workspace is deliberate.
+        switch (m_workspace) {
+        case Workspace::Stage:
+            // Center: spatial setup tools (Stage focused)
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            ImGui::DockBuilderDockWindow("Mapping", leftId);
+            ImGui::DockBuilderDockWindow("Masks", leftId);
+            ImGui::DockBuilderDockWindow("Scene Scanner", leftId);
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            // Side: minimal — layer picking + properties
+            ImGui::DockBuilderDockWindow("Layers", rightTopId);
+            ImGui::DockBuilderDockWindow("Capture", rightTopId);
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+            break;
+
+        case Workspace::Canvas:
+            // Center: authoring preview (Canvas focused)
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            ImGui::DockBuilderDockWindow("Mapping", leftId);
+            ImGui::DockBuilderDockWindow("Masks", leftId);
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            // Right top: sources (Layers focused)
+            ImGui::DockBuilderDockWindow("Layers", rightTopId);
+            ImGui::DockBuilderDockWindow("ShaderClaw", rightTopId);
+            ImGui::DockBuilderDockWindow("Etherea", rightTopId);
+            ImGui::DockBuilderDockWindow("Capture", rightTopId);
+            ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
+            // Right bottom: inspectors (Properties focused)
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            ImGui::DockBuilderDockWindow("Audio", rightBottomId);
+            ImGui::DockBuilderDockWindow("MIDI", rightBottomId);
+            break;
+
+        case Workspace::Show:
+            // Center: live preview (Canvas focused)
+            ImGui::DockBuilderDockWindow("Canvas", leftId);
+            ImGui::DockBuilderDockWindow("Stage", leftId);
+            // Right top: live I/O monitoring (Audio focused)
+            ImGui::DockBuilderDockWindow("Audio", rightTopId);
+            ImGui::DockBuilderDockWindow("Audio Mixer", rightTopId);
+            ImGui::DockBuilderDockWindow("MIDI", rightTopId);
+            // Right bottom: broadcast / feeds (NDI focused)
+            ImGui::DockBuilderDockWindow("NDI", rightBottomId);
+            ImGui::DockBuilderDockWindow("Spout", rightBottomId);
+            ImGui::DockBuilderDockWindow("Stream", rightBottomId);
+            ImGui::DockBuilderDockWindow("Properties", rightBottomId);
+            break;
+        }
 
         ImGui::DockBuilderFinish(dockspaceId);
     } else {
@@ -403,4 +467,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     }
 
     ImGui::End();
+}
+
+void UIManager::setWorkspace(Workspace w) {
+    if (w == m_workspace) return;
+    m_workspace = w;
+    // Force dock layout rebuild on next setupDockspace call
+    m_firstFrame = true;
 }
