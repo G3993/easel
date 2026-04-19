@@ -400,22 +400,20 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // Responsive split based on window width
         float splitRatio = (dockSize.x > 1600) ? 0.65f : (dockSize.x > 1200) ? 0.60f : 0.55f;
 
-        // Split: left = main viewport tabs, right = side panels (controls)
-        // Four-region split so Canvas always has a dedicated slot:
-        //   toolsId     = narrow strip on far left — viewport tools (Stage, Mapping, Masks, Scanner)
-        //   canvasId    = dedicated center slot — Canvas, always visible
-        //   rightTopId  = sources (Layers, ShaderClaw, Etherea, Capture, Audio Mixer)
-        //   rightBottomId = inspectors + I/O (Properties, Audio, MIDI, NDI, Spout, Stream)
-        ImGuiID leftId, rightId;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, splitRatio, &leftId, &rightId);
+        // Layout — Canvas fills the left, everything else stacks on the right:
+        //   canvasId      = dedicated left slot — Canvas, always visible
+        //   toolsId       = top of right — viewport tools (Stage, Mapping, Masks, Scanner)
+        //   rightTopId    = middle of right — sources (Layers, ShaderClaw, Etherea, Capture, Mixer)
+        //   rightBottomId = bottom of right — inspectors + I/O (Properties, Audio, MIDI, NDI, ...)
+        // Canvas takes ~60% width; right column = 40%, split 30/35/35 vertically.
+        ImGuiID canvasId, rightId;
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, splitRatio, &canvasId, &rightId);
 
-        // Split the left region horizontally: tools on far left, Canvas takes the rest.
-        ImGuiID toolsId, canvasId;
-        ImGui::DockBuilderSplitNode(leftId, ImGuiDir_Left, 0.30f, &toolsId, &canvasId);
-
-        // Split right side: top = Sources, bottom = Inspectors/IO
+        // Split right column top-to-bottom: tools → sources → inspectors.
+        ImGuiID toolsId, rightRemainder;
+        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.30f, &toolsId, &rightRemainder);
         ImGuiID rightTopId, rightBottomId;
-        ImGui::DockBuilderSplitNode(rightId, ImGuiDir_Up, 0.25f, &rightTopId, &rightBottomId);
+        ImGui::DockBuilderSplitNode(rightRemainder, ImGuiDir_Up, 0.45f, &rightTopId, &rightBottomId);
 
         // Each workspace docks ONLY its whitelisted panels (see isPanelVisible).
         // Hidden panels aren't rendered AND aren't docked — no stray tabs.
@@ -566,77 +564,8 @@ bool UIManager::isPanelVisible(const char* title) const {
 }
 
 void UIManager::renderWorkspaceBar() {
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    // Height: 52px at 1x, scales with UI zoom. Tall enough that the primary
-    // nav reads as a "section" not a menu item.
-    const float barH = 52.0f * m_uiZoom;
-    m_workspaceBarHeight = barH;
-
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x, barH));
-    ImGui::SetNextWindowViewport(viewport->ID);
-
-    ImGuiWindowFlags flags =
-        ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoNavFocus |
-        ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoSavedSettings;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 10.0f));
-    // Subtle top-bar tint so the bar reads as a surface, not floating on nothing.
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
-
-    ImGui::Begin("##WorkspaceBar", nullptr, flags);
-
-    const float btnW = 132.0f * m_uiZoom;
-    const float btnH = 32.0f  * m_uiZoom;
-
-    // Horizontally center the 3 buttons inside the bar.
-    const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float groupW = btnW * 3.0f + spacing * 2.0f;
-    const float availW = ImGui::GetContentRegionAvail().x;
-    const float offsetX = (availW - groupW) * 0.5f;
-    if (offsetX > 0.0f) {
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offsetX);
-    }
-
-    auto drawBtn = [&](const char* label, Workspace ws) {
-        bool active = (m_workspace == ws);
-        if (active) {
-            // Active tab — solid accent fill.
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.95f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.52f, 1.00f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.38f, 0.88f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-        } else {
-            // Inactive — ghost button on dark surface.
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.04f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.16f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 0.70f));
-        }
-        if (m_boldFont) ImGui::PushFont(m_boldFont);
-        if (ImGui::Button(label, ImVec2(btnW, btnH))) {
-            setWorkspace(ws);
-        }
-        if (m_boldFont) ImGui::PopFont();
-        ImGui::PopStyleColor(4);
-    };
-
-    drawBtn("Stage",  Workspace::Stage);
-    ImGui::SameLine();
-    drawBtn("Canvas", Workspace::Canvas);
-    ImGui::SameLine();
-    drawBtn("Show",   Workspace::Show);
-
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(3);
+    // No-op. Workspace switcher now lives inside the main menu bar
+    // (see Application::renderMenuBar). Kept as a method so the API
+    // doesn't break callers and future redesigns can slot back in.
+    m_workspaceBarHeight = 0.0f;
 }

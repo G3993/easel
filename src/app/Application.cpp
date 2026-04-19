@@ -1531,7 +1531,6 @@ void Application::renderUI() {
     float transportBarH = 0.0f;
 #endif
     renderMenuBar();
-    m_ui.renderWorkspaceBar();
     m_ui.setupDockspace(transportBarH);
 
     // Reset editing state when switching zones
@@ -3792,6 +3791,45 @@ void Application::renderMenuBar() {
                                      m_savedWindowW, m_savedWindowH, 0);
                 m_editorFullscreen = false;
             }
+        }
+
+        // Stage / Canvas / Show — primary workspace switcher, center-aligned
+        // inside the main menu bar. Each remaps the dock layout + panel
+        // whitelist for the corresponding phase of a show.
+        {
+            const float btnW = 100.0f * m_ui.uiScale();
+            const float spacing = ImGui::GetStyle().ItemSpacing.x;
+            const float groupW = btnW * 3.0f + spacing * 2.0f;
+            // Use the menu bar's full width to center, regardless of where
+            // the last menu item left the cursor.
+            const float barW = ImGui::GetWindowSize().x;
+            const float startX = (barW - groupW) * 0.5f;
+            if (startX > ImGui::GetCursorPosX()) {
+                ImGui::SetCursorPosX(startX);
+            }
+
+            Workspace current = m_ui.workspace();
+            auto drawBtn = [&](const char* label, Workspace ws) {
+                bool active = (current == ws);
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.45f, 0.95f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.52f, 1.00f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.16f, 0.38f, 0.88f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.04f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.16f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 1.00f, 1.00f, 0.70f));
+                }
+                if (ImGui::Button(label, ImVec2(btnW, 0))) m_ui.setWorkspace(ws);
+                ImGui::PopStyleColor(4);
+            };
+            drawBtn("Stage",  Workspace::Stage);
+            ImGui::SameLine();
+            drawBtn("Canvas", Workspace::Canvas);
+            ImGui::SameLine();
+            drawBtn("Show",   Workspace::Show);
         }
 
         ImGui::EndMainMenuBar();
