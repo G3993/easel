@@ -78,9 +78,37 @@ async function connect() {
     };
     pc.oniceconnectionstatechange = () => S('ice:' + pc.iceConnectionState);
 
-    // Step 6: Create offer
+    // Step 6: Create offer.
+    // Match etherea dashboard's ScopeModule.preferH264Codec: reorder the
+    // m=video payload types so H264 comes first. Scope's LTX2 pipeline
+    // emits H264 — without this, Safari's default codec preference may
+    // negotiate VP8/VP9 in the answer, the track event still fires, but
+    // no decodable frames flow.
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    let sdp = offer.sdp;
+    const lines = sdp.split('\r\n');
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.startsWith('m=video')) {
+            const h264 = [];
+            for (let j = i + 1; j < lines.length; j++) {
+                if (lines[j].startsWith('m=')) break;
+                const m = lines[j].match(/^a=rtpmap:(\d+) H264\//i);
+                if (m) h264.push(m[1]);
+            }
+            if (h264.length) {
+                const parts = line.split(' ');
+                const others = parts.slice(3).filter(pt => !h264.includes(pt));
+                out.push(parts.slice(0, 3).concat(h264, others).join(' '));
+                S('codec-prefer-h264: ' + h264.join(','));
+                continue;
+            }
+        }
+        out.push(line);
+    }
+    sdp = out.join('\r\n');
+    await pc.setLocalDescription({ type: 'offer', sdp });
 
     // Step 7: Wait for ICE gathering (5s timeout, same as etherea)
     await new Promise(r => {

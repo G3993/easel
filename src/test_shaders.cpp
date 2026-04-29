@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -19,7 +20,7 @@ struct TestResult {
 };
 
 int main(int argc, char* argv[]) {
-    std::string shadersDir = "C:/Users/james/Shader-Claw/shaders";
+    std::string shadersDir = "shaders";
     if (argc > 1) shadersDir = argv[1];
 
     if (!fs::exists(shadersDir)) {

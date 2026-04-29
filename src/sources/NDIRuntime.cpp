@@ -40,11 +40,11 @@ bool NDIRuntime::init() {
         if (!loadFn) loadFn = (NDIlib_v6_3_load_fn)GetProcAddress(hLib, "NDIlib_v5_load");
     }
 #else
-    // macOS/Linux: try standard library paths and common NDI install locations
+    // macOS/Linux: try standard library paths and common NDI install locations.
+#ifdef __APPLE__
     void* hLib = dlopen("libndi.dylib", RTLD_LAZY);
     if (!hLib) hLib = dlopen("/usr/local/lib/libndi.dylib", RTLD_LAZY);
     if (!hLib) hLib = dlopen("/Library/NDI SDK for Apple/lib/macOS/libndi.dylib", RTLD_LAZY);
-#ifdef __APPLE__
     if (!hLib) {
         // Try next to the executable
         char exePath[1024] = {};
@@ -58,6 +58,12 @@ bool NDIRuntime::init() {
             }
         }
     }
+#else
+    void* hLib = dlopen("libndi.so", RTLD_LAZY);
+    if (!hLib) hLib = dlopen("/usr/local/lib/libndi.so", RTLD_LAZY);
+    if (!hLib) hLib = dlopen("/usr/lib/libndi.so", RTLD_LAZY);
+    if (!hLib) hLib = dlopen("/usr/lib/aarch64-linux-gnu/libndi.so", RTLD_LAZY);
+    if (!hLib) hLib = dlopen("./libndi.so", RTLD_LAZY);
 #endif
     if (hLib) {
         loadFn = (NDIlib_v6_3_load_fn)dlsym(hLib, "NDIlib_v6_3_load");

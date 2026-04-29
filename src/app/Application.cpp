@@ -43,6 +43,15 @@ static void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
 }
 
+static std::string defaultProjectPath() {
+#ifdef __linux__
+    if (std::filesystem::exists("default.jetson.easel")) {
+        return "default.jetson.easel";
+    }
+#endif
+    return "default.easel";
+}
+
 #ifdef __APPLE__
 // Implemented in FileDialog_mac.mm
 extern std::string openFileDialog_mac(const char* filter);
@@ -118,7 +127,9 @@ bool Application::init() {
         return false;
     }
 
-    // Set window icon (search multiple paths since exe may be in build/Release/)
+    // Set window icon (search multiple paths since exe may be in build/Release/).
+    // The bundled icon is too large for X11 window-manager properties on Linux.
+#ifndef __linux__
     {
         int iw, ih, ic;
         const char* iconPaths[] = {
@@ -137,6 +148,7 @@ bool Application::init() {
             stbi_image_free(iconData);
         }
     }
+#endif
 
     glfwSetWindowUserPointer(m_window, this);
     glfwSetDropCallback(m_window, Application::dropCallback);
@@ -274,7 +286,7 @@ bool Application::init() {
 
     // Auto-load default project if it exists, otherwise blank
     {
-        std::string defaultPath = "default.easel";
+        std::string defaultPath = defaultProjectPath();
         if (std::filesystem::exists(defaultPath)) {
             loadProject(defaultPath);
             std::cout << "[Easel] Auto-loaded default project" << std::endl;
@@ -468,7 +480,7 @@ void Application::run() {
             static double lastAutoSave = 0;
             double now = glfwGetTime();
             if (now - lastAutoSave > 30.0) {
-                saveProject("default.easel");
+                saveProject(defaultProjectPath());
                 lastAutoSave = now;
             }
         }
@@ -618,7 +630,7 @@ void Application::run() {
 void Application::shutdown() {
     // Auto-save current state as default project
     {
-        std::string defaultPath = "default.easel";
+        std::string defaultPath = defaultProjectPath();
         saveProject(defaultPath);
         std::cout << "[Easel] Auto-saved default project" << std::endl;
     }
@@ -2711,6 +2723,7 @@ void Application::renderUI() {
     // Capture tab (moved from position 1 to 4)
     if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
     {
+#if defined(_WIN32) || defined(__APPLE__)
         if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto capMonitors = CaptureSource::enumerateMonitors();
             for (int i = 0; i < (int)capMonitors.size(); i++) {
@@ -2776,7 +2789,10 @@ void Application::renderUI() {
                 ImGui::PopID();
             }
         }
-
+#else
+        ImGui::TextDisabled("Desktop capture is not available on Linux yet.");
+        ImGui::TextWrapped("Use video files, shader sources, NDI, WHEP, or external network sources on this build.");
+#endif
     }
     ImGui::EndTabItem();
     }  // end Capture tab
@@ -3965,6 +3981,7 @@ void Application::loadVideo(const std::string& path) {
 #endif
 }
 
+#if defined(_WIN32) || defined(__APPLE__)
 void Application::addScreenCapture(int monitorIndex) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<CaptureSource>();
@@ -3982,6 +3999,7 @@ void Application::addScreenCapture(int monitorIndex) {
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
 }
+#endif
 
 #ifdef _WIN32
 void Application::addWindowCapture(HWND hwnd, const std::string& title) {

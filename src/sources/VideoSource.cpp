@@ -302,6 +302,7 @@ bool VideoSource::load(const std::string& path) {
     }
 
     // Open audio decoder and set up resampler
+#ifdef _WIN32
     if (m_audioStreamIndex >= 0) {
         auto* audioCodecpar = m_formatCtx->streams[m_audioStreamIndex]->codecpar;
         const AVCodec* audioCodec = avcodec_find_decoder(audioCodecpar->codec_id);
@@ -338,6 +339,12 @@ bool VideoSource::load(const std::string& path) {
             }
         }
     }
+#else
+    if (m_audioStreamIndex >= 0) {
+        std::cerr << "[Video] Audio output not implemented on this platform; playing video without audio" << std::endl;
+        m_audioStreamIndex = -1;
+    }
+#endif
 
     // Allocate triple buffers
     int frameSize = m_width * m_height * 4;

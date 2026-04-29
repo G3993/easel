@@ -35,10 +35,14 @@ void FontAtlas::generate() {
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/SFNS.ttf",
-#else
+#elif defined(_WIN32)
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/calibri.ttf",
+#else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
 #endif
         nullptr
     };
@@ -54,8 +58,9 @@ void FontAtlas::generate() {
         long size = ftell(f);
         fseek(f, 0, SEEK_SET);
         fontData.resize(size);
-        fread(fontData.data(), 1, size, f);
+        size_t bytesRead = fread(fontData.data(), 1, size, f);
         fclose(f);
+        if (bytesRead != static_cast<size_t>(size)) continue;
 
         if (stbtt_InitFont(&font, fontData.data(), 0)) {
             fontLoaded = true;

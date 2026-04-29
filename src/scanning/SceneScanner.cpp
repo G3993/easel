@@ -435,11 +435,12 @@ cv::Mat SceneScanner::computeNormals(const cv::Mat& depth3D) {
             cv::Vec3f dx = right - center;
             cv::Vec3f dy = down - center;
 
-            // Cross product
+            // Cross product. Use dx x dy so a front-facing flat plane produces
+            // a positive Z normal.
             cv::Vec3f n;
-            n[0] = dy[1] * dx[2] - dy[2] * dx[1];
-            n[1] = dy[2] * dx[0] - dy[0] * dx[2];
-            n[2] = dy[0] * dx[1] - dy[1] * dx[0];
+            n[0] = dx[1] * dy[2] - dx[2] * dy[1];
+            n[1] = dx[2] * dy[0] - dx[0] * dy[2];
+            n[2] = dx[0] * dy[1] - dx[1] * dy[0];
 
             // Normalize
             float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);

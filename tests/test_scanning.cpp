@@ -424,9 +424,9 @@ TEST_CASE("Normal computation on a flat plane", "[scanner][normals]") {
             cv::Vec3f dy = down - center;
 
             cv::Vec3f n;
-            n[0] = dy[1] * dx[2] - dy[2] * dx[1];
-            n[1] = dy[2] * dx[0] - dy[0] * dx[2];
-            n[2] = dy[0] * dx[1] - dy[1] * dx[0];
+            n[0] = dx[1] * dy[2] - dx[2] * dy[1];
+            n[1] = dx[2] * dy[0] - dx[0] * dy[2];
+            n[2] = dx[0] * dy[1] - dx[1] * dy[0];
 
             float len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
             if (len > 1e-6f) {
@@ -473,9 +473,9 @@ TEST_CASE("Normal computation on a tilted plane", "[scanner][normals]") {
             cv::Vec3f dy = down - center;
 
             cv::Vec3f n;
-            n[0] = dy[1] * dx[2] - dy[2] * dx[1];
-            n[1] = dy[2] * dx[0] - dy[0] * dx[2];
-            n[2] = dy[0] * dx[1] - dy[1] * dx[0];
+            n[0] = dx[1] * dy[2] - dx[2] * dy[1];
+            n[1] = dx[2] * dy[0] - dx[0] * dy[2];
+            n[2] = dx[0] * dy[1] - dx[1] * dy[0];
 
             float len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
             if (len > 1e-6f) {
@@ -527,9 +527,9 @@ TEST_CASE("Normal computation skips zero-depth pixels", "[scanner][normals]") {
             cv::Vec3f dy = down - center;
 
             cv::Vec3f n;
-            n[0] = dy[1] * dx[2] - dy[2] * dx[1];
-            n[1] = dy[2] * dx[0] - dy[0] * dx[2];
-            n[2] = dy[0] * dx[1] - dy[1] * dx[0];
+            n[0] = dx[1] * dy[2] - dx[2] * dy[1];
+            n[1] = dx[2] * dy[0] - dx[0] * dy[2];
+            n[2] = dx[0] * dy[1] - dx[1] * dy[0];
 
             float len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
             if (len > 1e-6f) {

@@ -3,12 +3,8 @@
     "INPUTS": []
 }*/
 
-// Audio uniforms provided by Easel
-uniform float audioLevel;
-uniform float audioBass;
-uniform float audioMid;
-uniform float audioHigh;
-uniform sampler2D audioFFT;
+// audioLevel, audioBass, audioMid, audioHigh, and audioFFT are provided by
+// Easel's shader preamble.
 
 void main() {
     vec2 uv = isf_FragNormCoord;

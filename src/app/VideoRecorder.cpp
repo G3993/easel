@@ -463,6 +463,7 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
     // ── Audio stream (AAC) ──
     bool hasAudio = initAudioCapture();
 
+#ifdef _WIN32
     if (hasAudio) {
         const AVCodec* audioCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (audioCodec) {
@@ -522,6 +523,10 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
             m_audioAccum.clear();
         }
     }
+#else
+    (void)hasAudio;
+    hasAudio = false;
+#endif
 
     if (!hasAudio) {
         std::cerr << "[REC] WARNING: Recording without audio!" << std::endl;

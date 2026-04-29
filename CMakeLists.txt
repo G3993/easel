@@ -14,20 +14,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Fetch all dependencies
 include(cmake/FetchDependencies.cmake)
 
-# FFmpeg (external pre-built)
+# FFmpeg
+set(FFMPEG_FOUND FALSE)
 if(WIN32)
     set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg-master-latest-win64-gpl-shared")
+    if(EXISTS "${FFMPEG_DIR}")
+        set(FFMPEG_FOUND TRUE)
+        message(STATUS "FFmpeg found at ${FFMPEG_DIR}")
+    endif()
 elseif(APPLE)
     set(FFMPEG_DIR "/opt/homebrew/opt/ffmpeg")
     if(NOT EXISTS "${FFMPEG_DIR}")
         set(FFMPEG_DIR "/usr/local/opt/ffmpeg")
     endif()
-endif()
-if(FFMPEG_DIR AND EXISTS "${FFMPEG_DIR}")
-    set(FFMPEG_FOUND TRUE)
-    message(STATUS "FFmpeg found at ${FFMPEG_DIR}")
+    if(EXISTS "${FFMPEG_DIR}")
+        set(FFMPEG_FOUND TRUE)
+        message(STATUS "FFmpeg found at ${FFMPEG_DIR}")
+    endif()
 else()
-    set(FFMPEG_FOUND FALSE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
+            libavformat libavcodec libavutil libswscale libswresample)
+        if(FFMPEG_FOUND)
+            message(STATUS "FFmpeg found via pkg-config")
+        endif()
+    endif()
+endif()
+if(NOT FFMPEG_FOUND)
     message(WARNING "FFmpeg not found - video support disabled")
 endif()
 
@@ -48,7 +62,7 @@ if(WIN32)
         set(HAS_OPENCV FALSE)
         message(STATUS "OpenCV not found - scanning disabled")
     endif()
-elseif(APPLE)
+else()
     find_package(OpenCV QUIET COMPONENTS core imgproc calib3d videoio)
     if(OpenCV_FOUND)
         set(HAS_OPENCV TRUE)
@@ -57,8 +71,6 @@ elseif(APPLE)
         set(HAS_OPENCV FALSE)
         message(STATUS "OpenCV not found - scanning disabled")
     endif()
-else()
-    set(HAS_OPENCV FALSE)
 endif()
 
 # Whisper.cpp disabled (CUDA compilation too slow)
@@ -136,6 +148,15 @@ if(APPLE)
 elseif(WIN32)
     list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.mm$")
     list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.h$")
+else()
+    list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.mm$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*_mac\\.h$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*CaptureSource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*CaptureSource\\.h$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WindowCaptureSource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WindowCaptureSource\\.h$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WGCCapture\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WGCCapture\\.h$")
 endif()
 
 # kiss_fft (public domain FFT library for AudioAnalyzer)
@@ -242,9 +263,13 @@ endif()
 
 # FFmpeg linking
 if(FFMPEG_FOUND)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
-    target_link_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/lib")
-    target_link_libraries(${PROJECT_NAME} PRIVATE avformat avcodec avutil swscale swresample)
+    if(TARGET PkgConfig::FFMPEG)
+        target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::FFMPEG)
+    else()
+        target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
+        target_link_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/lib")
+        target_link_libraries(${PROJECT_NAME} PRIVATE avformat avcodec avutil swscale swresample)
+    endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_FFMPEG=1)
 
     if(WIN32)
@@ -282,6 +307,17 @@ endif()
 if(HAS_NDI)
     target_include_directories(${PROJECT_NAME} PRIVATE "${NDI_DIR}/include")
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_NDI=1)
+
+    # NDI is dlopen-loaded at runtime. NDIRuntime.cpp searches next to the
+    # executable; on macOS that's Easel.app/Contents/MacOS, so copy the
+    # dylib in there post-build. Source is build/libndi.dylib (downloaded
+    # via the NDI runtime install steps in CLAUDE.md).
+    if(APPLE AND EXISTS "${CMAKE_BINARY_DIR}/libndi.dylib")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_BINARY_DIR}/libndi.dylib"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/libndi.dylib")
+    endif()
 endif()
 
 if(HAS_WHEP)
@@ -371,15 +407,21 @@ if(HAS_WHEP)
     target_include_directories(test_whep_source PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${stb_SOURCE_DIR}
-        "${FFMPEG_DIR}/include"
     )
-    target_link_directories(test_whep_source PRIVATE "${FFMPEG_DIR}/lib")
+    if(FFMPEG_DIR)
+        target_include_directories(test_whep_source PRIVATE "${FFMPEG_DIR}/include")
+        target_link_directories(test_whep_source PRIVATE "${FFMPEG_DIR}/lib")
+    endif()
     target_link_libraries(test_whep_source PRIVATE
         Catch2::Catch2WithMain
         LibDataChannel::LibDataChannel
         glad glm::glm OpenGL::GL
-        avformat avcodec avutil swscale swresample
     )
+    if(TARGET PkgConfig::FFMPEG)
+        target_link_libraries(test_whep_source PRIVATE PkgConfig::FFMPEG)
+    else()
+        target_link_libraries(test_whep_source PRIVATE avformat avcodec avutil swscale swresample)
+    endif()
     if(NOT WIN32)
         target_link_libraries(test_whep_source PRIVATE CURL::libcurl)
     endif()
