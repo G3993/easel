@@ -810,6 +810,44 @@ bool WHEPSource::connect(const std::string& whepUrl) {
     }
 }
 
+#ifndef __APPLE__
+void WHEPSource::startWebView(const std::string& whepUrl, const std::string& iceServersJson) {
+    (void)whepUrl;
+    (void)iceServersJson;
+    m_failed.store(true);
+    m_statusText = "WebView WHEP is only available on macOS";
+}
+
+void WHEPSource::stopWebView() {
+    m_useWebView = false;
+}
+
+void WHEPSource::onWebViewFrame(int w, int h, const uint8_t* rgba, int dataLen) {
+    if (dataLen != w * h * 4) return;
+
+    int writeIdx = (m_writeIndex.load() + 1) % 3;
+    auto& buf = m_buffers[writeIdx];
+    buf.data.assign(rgba, rgba + dataLen);
+    buf.width = w;
+    buf.height = h;
+    buf.ready.store(true);
+    m_writeIndex.store(writeIdx);
+
+    m_width = w;
+    m_height = h;
+    m_connected.store(true);
+}
+
+void WHEPSource::onWebViewStatus(const std::string& status) {
+    m_statusText = status;
+    if (status.find("pc:connected") != std::string::npos || status.find("got-track") != std::string::npos) {
+        m_connected.store(true);
+    } else if (status.find("pc:failed") != std::string::npos || status.find("error") != std::string::npos) {
+        m_failed.store(true);
+    }
+}
+#endif
+
 // ─── Disconnect ──────────────────────────────────────────────────────────────
 
 WHEPSource::~WHEPSource() {

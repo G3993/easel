@@ -161,7 +161,9 @@ private:
     void setupMultiGPUProjection(const std::vector<std::string>& ndiSourceNames);
     void loadImage(const std::string& path);
     void loadVideo(const std::string& path);
+#if defined(_WIN32) || defined(__APPLE__)
     void addScreenCapture(int monitorIndex);
+#endif
     void addParticles();
 #ifdef HAS_OPENCV
     void addWebcam(int cameraIndex);
@@ -174,7 +176,9 @@ private:
     void loadShader(const std::string& path);
     void registerLayerWithZones(uint32_t layerId);
 
+#if defined(_WIN32) || defined(__APPLE__)
     std::vector<WindowInfo> m_windowList;
+#endif
     ShaderClawBridge m_shaderClaw;
 
     // ShaderClaw thumbnail preview (animated on hover)

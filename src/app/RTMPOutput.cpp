@@ -277,6 +277,7 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
     // ── Audio stream (AAC) ──
     bool hasAudio = initAudioCapture();
 
+#ifdef _WIN32
     if (hasAudio) {
         const AVCodec* audioCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (!audioCodec) {
@@ -348,6 +349,9 @@ bool RTMPOutput::initEncoder(const std::string& url, int width, int height,
             m_audioAccum.clear();
         }
     }
+#else
+    (void)hasAudio;
+#endif
 
     // ── Open RTMP connection and write header ──
     m_packet = av_packet_alloc();
