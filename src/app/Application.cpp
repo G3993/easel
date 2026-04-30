@@ -53,6 +53,7 @@ extern std::string openFileDialog_mac(const char* filter);
 // Implemented in WindowChrome_mac.mm — exposed as C so ObjC++ name mangling
 // doesn't interfere with the link from this C++ TU.
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
+extern "C" int  EaselMac_IsNativeFullScreen(GLFWwindow*);
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -6335,15 +6336,19 @@ void Application::renderMenuBar() {
         // Reserve space on the left for the macOS traffic-light buttons
         // (close / min / max) — the window title bar has been merged into
         // the content area so they now sit inside our ImGui row. In
-        // native fullscreen AppKit hides the traffic-lights, so skip
-        // the inset or the menu row gets an ugly empty gap on the left.
-        if (!m_editorFullscreen) {
+        // either editor (F11 borderless) OR native (green-button)
+        // fullscreen AppKit hides the traffic-lights, so skip the inset
+        // or the menu row gets an ugly empty gap on the left.
+        bool nativeFs = EaselMac_IsNativeFullScreen(m_window) != 0;
+        if (!m_editorFullscreen && !nativeFs) {
             const float kTrafficLightInset = 78.0f;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + kTrafficLightInset);
         } else {
-            // Fullscreen: AppKit hides the traffic-lights, so push the menu
-            // flush against the left edge (override the menu window padding).
-            ImGui::SetCursorPosX(0.0f);
+            // Fullscreen (editor OR native): AppKit hides the traffic-
+            // lights. Use a 12px inset to match the left-edge padding
+            // used by the floating toolbar / layer panel — visual
+            // alignment with other left-edge UI elements.
+            ImGui::SetCursorPosX(12.0f);
         }
 #endif
         if (ImGui::BeginMenu("EDIT")) {

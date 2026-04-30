@@ -13,6 +13,13 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
+extern "C" int EaselMac_IsNativeFullScreen(GLFWwindow* window) {
+    if (!window) return 0;
+    NSWindow* ns = glfwGetCocoaWindow(window);
+    if (!ns) return 0;
+    return (ns.styleMask & NSWindowStyleMaskFullScreen) ? 1 : 0;
+}
+
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     if (!window) return;
     NSWindow* ns = glfwGetCocoaWindow(window);
