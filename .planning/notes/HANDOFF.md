@@ -115,8 +115,63 @@ Critique notes so far: pass1 through pass8 in `.planning/notes/`.
 ## Open user-asked items not yet done
 
 1. **HTTPGifSource layer in Easel** for Giphy integration — would let `vaporwave_floral_shoppe.fs` chroma-key real GIFs into the chaos swarm. ~1-day scaffold in `src/sources/`.
-2. **Round 8+ multi-canon enums** for the remaining 13 shaders (Mucha, Lissitzky, Stella, Vasarely, Lichtenstein, Floral Shoppe, Datamosh, Latent, Boccioni, Höch, Mondrian, Kirchner, Dali). Notes in `shader_critique_pass8.md`.
-3. **Fauvism that satisfies user** — see above.
+2. **Surface-as-shaped-display** in StageView (user asked for "auto mask template" surfaces — currently `ProjectionSurface` is a stub at `src/stage/StageView.cpp:110`, no shape/mask). Half-day for Rect/Circle/Polygon, full day with PNG-mask import.
+3. **Remaining round-8 silhouette work** — see queue below.
+4. **Fauvism long-term stability** — last session added paintFade clamp to 0.99, init mosaic, per-frame curl jitter, and saturation pump (`prev = lum + (prev-lum)*1.014`). Verify no oversaturation drift.
+
+## 2026-04-30 autonomous improvement loop status
+
+The user authorised an overnight self-pacing loop. Each `ScheduleWakeup` cycle:
+- Picks 1–2 shaders from the priority queue below
+- Adds new SDFs, palette enums, audio walks, parallax, or new visual concepts
+- Mirrors edits to `/Users/lu/ShaderClaw3/shaders/`
+- Updates this HANDOFF priority queue
+- Schedules the next wakeup ~25–30 min later (deliberately past 5-min cache TTL — single cache miss buys a long working window per cycle)
+- Stops after ~10 cycles / 5–6 hours, OR if a cycle hits an error / produces low-quality work
+
+### Round 8 multi-canon enum scoreboard (11/18 shaders done)
+
+DONE before this session: Pollock, Picasso, Rothko, Magritte, Kandinsky, Stella.
+DONE this session: Mondrian, Vasarely, Boccioni, Datamosh, Latent, **Lichtenstein**, **Dali**.
+
+REMAINING (in priority order — these need new SDF silhouettes, real geometry work):
+
+1. **dada_hoch.fs** — `dadaWork` enum {Höch Cut Kitchen Knife default, Schwitters Merzbau beige scraps, Duchamp Fountain urinal silhouette, Hausmann Mechanical Head, Ernst Elephant Celebes}. Need urinal SDF (capsule + flange), mechanical-head SDF (rounded box + dial), elephant silhouette.
+4. **expressionism_kirchner.fs** — `expressionistWork` enum {Kirchner Street Berlin default, Munch Scream orange-sky + scream head, Nolde Last Supper red+halos, Marc Blue Horses 3 silhouettes, Schiele Self-Portrait gaunt single figure}. Need scream-head SDF (Munch's open-mouth oval), horse silhouettes, gaunt figure.
+5. **constructivism_lissitzky.fs** — `constructivistWork` enum {Beat the Whites default, Proun 99 axonometric blocks, Rodchenko Books typography, Stenberg Man-Camera lens overlays, Klutsis 5 Year Plan fist + diagonal stripes}. Need axonometric block SDF, fist silhouette, lens-circle overlay.
+6. **vaporwave_floral_shoppe.fs** — `vaporworkAlbum` enum {Floral Shoppe default, Eccojams ECCO dolphin, Replica corporate office plant + blinds, New Dreams Ltd palm silhouettes, Hiraeth ocean horizon}. Need dolphin curve SDF, palm-tree silhouette, ocean horizon mode.
+7. **art_nouveau_mucha.fs** — `muchaWork` enum {Gismonda halo default, Job no-halo+smoke, Zodiac thick ring + 12 ticks, Four Seasons Spring flower wreath, Reverie violet}. Has `artistStyle` already (3 artists); add second enum keyed off Mucha-mode.
+
+- DONE 2026-04-30: dali_melt.fs — daliWork enum (Persistence / Disintegration / Christ St John / Swans / Hypercubus) with SDF silhouettes
+
+### Other improvement opportunities (after round 8)
+
+- **Solar Flare** — add audio walk through SDO/STEREO/SOHO/AIA wavelength palettes (171Å gold/304Å red/193Å green-yellow/211Å magenta/335Å blue). Each is a recognisable solar imaging mode.
+- **Fog Machine** — add fog-machine "scene" enum {Concert Stage, Dream Sequence, Horror Film, Datacenter, Bioluminescent Cave}. Each retunes fog colour + back colour + glow profile.
+- **Liquid Metal / Liquid Ripples** — add audio-walk palette presets.
+- **Oil Paint** — add brand/artist palette enum.
+- **Bioluminescent Fluid** — add ocean/jungle/cave/aurora environment toggle.
+
+### Per-cycle task brief (re-issued at every wakeup)
+
+```
+Read /Users/lu/easel/.planning/notes/HANDOFF.md and continue the autonomous
+shader improvement loop. Pick ONE shader from the priority queue. Add the
+multi-canon enum and the SDF silhouettes per shader_critique_pass8.md.
+Mirror to /Users/lu/ShaderClaw3/shaders/. Update the priority queue here
+(mark done, push remaining up). Then ScheduleWakeup ~25 min later with the
+same prompt. Stop after 10 cycles or by 8am EDT 2026-04-30, whichever first.
+
+Constraints:
+- No Voronoi / cellular tile patterns — user dislikes them
+- No frozen-at-TIME=0 visuals — must move with TIME alone, audio is bonus
+- Specific canonical works, not "generic of genre"
+- Keep edits surgical: read existing shader, add enum INPUT, add per-work
+  override block, route through one or two call sites. Don't rewrite.
+- Always mirror to standalone repo after edit.
+- After 3 cycles without hitting an error: do a critique-and-polish pass
+  on a previously-improved shader (e.g. boost depth, parallax, motion).
+```
 
 ## File paths quick reference
 
@@ -133,4 +188,10 @@ Critique notes so far: pass1 through pass8 in `.planning/notes/`.
 /Users/lu/ShaderClaw3/                                 — standalone mirror
 ```
 
+- DONE 2026-04-30: dada_hoch.fs — dadaWork enum (Höch / Schwitters / Duchamp / Hausmann / Ernst) wired with SDF silhouettes
+
 End of handoff.
+
+- DONE 2026-04-30: constructivism_lissitzky.fs — constructivistWork enum (Beat Whites / Proun 99 / Rodchenko Books / Stenberg / Klutsis) with SDFs
+- DONE 2026-04-30: expressionism_kirchner.fs — expressionistWork enum (Kirchner / Munch / Nolde / Marc / Schiele) with SDF silhouettes
+- DONE 2026-04-30: vaporwave_floral_shoppe.fs — vaporworkAlbum enum (Floral Shoppe / Eccojams / Replica / New Dreams Ltd / Hiraeth) with SDFs

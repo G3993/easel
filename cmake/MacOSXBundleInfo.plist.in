@@ -31,7 +31,9 @@
     <key>NSCameraUsageDescription</key>
     <string>Easel uses the camera for webcam-based projector calibration scanning.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Easel captures audio to drive audio-reactive shaders and effects.</string>
+    <string>Easel captures audio to drive audio-reactive shaders and effects, and to listen for voice commands when you hold the mic.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Easel transcribes voice commands you speak while holding the mic so you can control the timeline by voice.</string>
     <key>NSScreenCaptureDescription</key>
     <string>Easel captures the desktop and other windows for use as projection sources.</string>
 </dict>

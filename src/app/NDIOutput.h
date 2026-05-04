@@ -14,6 +14,7 @@ public:
     void destroy();
     bool isActive() const { return m_send != nullptr; }
     bool hasReceivers() const;
+    const std::string& publishedName() const { return m_publishedName; }
 
     // Read back the warp FBO texture and send it over NDI.
     // Call this after compositeAndWarp() each frame.
@@ -23,6 +24,7 @@ private:
     NDIlib_send_instance_t m_send = nullptr;
     std::vector<uint8_t> m_pixelBuffer[1];
     int m_lastW = 0, m_lastH = 0;
+    std::string m_publishedName;
 };
 
 #endif // HAS_NDI

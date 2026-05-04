@@ -13,19 +13,31 @@ bool NDIOutput::create(const std::string& name) {
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return false;
 
-    NDIlib_send_create_t sendCreate = {};
-    sendCreate.p_ndi_name = name.c_str();
-    sendCreate.clock_video = false;  // Don't block render loop; we pace frames ourselves
-    sendCreate.clock_audio = false;
+    // The NDI runtime sometimes holds a sender name briefly after a previous
+    // process crashed or was killed mid-shutdown; create() then returns null
+    // for the duplicate name. Retry with "Name-2", "Name-3", … on failure so
+    // a relaunch always finds an open slot.
+    for (int suffix = 0; suffix < 8; ++suffix) {
+        std::string tryName = (suffix == 0)
+            ? name
+            : (name + "-" + std::to_string(suffix + 1));
 
-    m_send = rt.api()->send_create(&sendCreate);
-    if (!m_send) {
-        std::cerr << "[NDI] Failed to create sender" << std::endl;
-        return false;
+        NDIlib_send_create_t sendCreate = {};
+        sendCreate.p_ndi_name = tryName.c_str();
+        sendCreate.clock_video = false; // we pace frames ourselves
+        sendCreate.clock_audio = false;
+
+        m_send = rt.api()->send_create(&sendCreate);
+        if (m_send) {
+            m_publishedName = tryName;
+            std::cout << "[NDI] Sender created: " << tryName << std::endl;
+            return true;
+        }
     }
-
-    std::cout << "[NDI] Sender created: " << name << std::endl;
-    return true;
+    std::cerr << "[NDI] Failed to create sender (all 8 name slots taken — "
+                 "is another Easel still running, or did NDI runtime fail to load?)"
+              << std::endl;
+    return false;
 }
 
 void NDIOutput::destroy() {

@@ -94,7 +94,10 @@ bool CompositeEngine::init(int width, int height) {
     m_width = width;
     m_height = height;
 
-    if (!m_fbo[0].create(width, height) || !m_fbo[1].create(width, height)) {
+    // Phase Q: main composite ping-pong is RGBA16F so layer→layer→transition
+    // chain keeps headroom and doesn't band in dark gradients. Final readback
+    // is still 8-bit (recorder + NDI expect that on output).
+    if (!m_fbo[0].createHalfFloat(width, height) || !m_fbo[1].createHalfFloat(width, height)) {
         std::cerr << "Failed to create composite FBOs" << std::endl;
         return false;
     }
@@ -169,7 +172,9 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
     // Ensure effect FBOs match size
     for (int i = 0; i < 2; i++) {
         if (m_effectFBO[i].width() != m_width || m_effectFBO[i].height() != m_height) {
-            m_effectFBO[i].create(m_width, m_height);
+            // Phase Q: effect ping-pong (blur, glow, etc.) is 16F to match
+            // composite chain — multi-tap blurs especially benefit.
+            m_effectFBO[i].createHalfFloat(m_width, m_height);
         }
     }
 

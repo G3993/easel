@@ -124,4 +124,8 @@ FetchContent_Declare(
 )
 
 # whisper.cpp disabled — CUDA compilation too slow for iterative builds
+# llama.cpp + Qwen 2.5 NLU integration: planned for Phase 2 voice. See
+# .planning/timeline-overhaul/PLAN-voice-llm.md before wiring — pulls the full
+# llama.cpp source via FetchContent (5+ min first build), needs a Metal build
+# config, and ships a runtime model fetch into ~/.easel/models/.
 

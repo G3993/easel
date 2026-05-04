@@ -1,5 +1,6 @@
 #include "ui/ViewportPanel.h"
 #include "ui/UIManager.h"
+#include "ui/ParamRow.h"
 #include "app/OutputZone.h"
 #include "app/MappingProfile.h"
 #include "app/ProjectorOutput.h"
@@ -66,7 +67,7 @@ static const ImU32 kBBoxGlow      = IM_COL32(255, 255, 255, 40);
 static const ImU32 kBBoxDim       = IM_COL32(255, 255, 255, 30);
 static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 240);
 static const ImU32 kLHandleStroke = IM_COL32(255, 255, 255, 255);
-static const ImU32 kLHandleActive = IM_COL32(0, 220, 255, 255);
+static const ImU32 kLHandleActive = IM_COL32(255, 255, 255, 255);  // monochrome
 
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
     return glm::vec2(
@@ -114,9 +115,23 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // Stage or Show. Only one of the three windows submits per frame,
     // so the dock never shows a tab bar.
     if (UIManager::sMode != UIManager::WorkspaceMode::Canvas) { return; }
+    // (Mode-transition Alpha fade removed — it made the panel translucent
+    // during the cross-fade which exposed the GL backbuffer underneath as a
+    // white flash. Re-introduce only with a non-translucent technique
+    // such as snapshotting the outgoing panel into a texture overlay.)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("Canvas");
+    // Canvas background — almost black so layer content reads as the only
+    // luminous thing on screen. Slightly above #000 so it's distinguishable
+    // from a fully unlit projector test pattern.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
+    // NoScrollbar/NoScrollWithMouse so canvas zoom never lets the
+    // workspace nav row scroll up out of view — the nav must stay
+    // pinned to the top of the work area.
+    ImGui::Begin("Canvas", nullptr,
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
 
     // Track panel visibility and bounds for overlay clipping
     // Check if this window is actually the visible/selected tab in its dock node
@@ -338,7 +353,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             *activeZone = -(100 + (int)zones->size()); // signal: want add
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Add output zone");
+            ParamRow::Tooltip("Add output zone");
         }
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
@@ -603,6 +618,14 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         float offsetX = (avail.x - imgW) * 0.5f + m_pan.x;
         float offsetY = (avail.y - imgH) * 0.5f + m_pan.y;
 
+        // Clip the canvas image to the panel's content rect — without
+        // this, zoom > 1 spills the image over the workspace nav above
+        // and the timeline below. Hit-testing keeps the unclipped image
+        // bounds so panning past the edge still works.
+        ImVec2 clipMin = ImGui::GetCursorScreenPos();
+        ImVec2 clipMax = ImVec2(clipMin.x + avail.x, clipMin.y + avail.y);
+        ImGui::PushClipRect(clipMin, clipMax, true);
+
         ImVec2 cursor = ImGui::GetCursorPos();
         ImGui::SetCursorPos(ImVec2(cursor.x + offsetX, cursor.y + offsetY));
         ImGui::Image((ImTextureID)(intptr_t)texture, ImVec2(imgW, imgH),
@@ -613,11 +636,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         m_imageOrigin = {imgMin.x, imgMin.y};
         m_imageSize = {imgMax.x - imgMin.x, imgMax.y - imgMin.y};
 
+        ImGui::PopClipRect();
+
+        // Canvas image previously had a 2-stroke glow + hairline ring
+        // around it; removed because it read as an unwanted "work area"
+        // border on top of the already-clear darker letterbox.
         ImDrawList* draw = ImGui::GetWindowDrawList();
-        draw->AddRect(ImVec2(imgMin.x - 2, imgMin.y - 2),
-                      ImVec2(imgMax.x + 2, imgMax.y + 2), kBorderGlow, 2.0f, 0, 4.0f);
-        draw->AddRect(ImVec2(imgMin.x - 1, imgMin.y - 1),
-                      ImVec2(imgMax.x + 1, imgMax.y + 1), kBorderColor, 1.0f, 0, 1.0f);
+        (void)draw;
     }
 
     m_hovered = ImGui::IsWindowHovered();
@@ -762,9 +787,9 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 for (int i = 0; i < 4; i++) {
                     ImVec2 p = ndc2scr(corners[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
-                    draw->AddCircleFilled(p, active ? 14.0f : 10.0f, zAccentGlow(zi));
-                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? zAccent(zi) : zAccentDim(zi));
-                    draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 0, 1.5f);
+                    draw->AddCircleFilled(p, active ? 14.0f : 10.0f, zAccentGlow(zi), 32);
+                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? zAccent(zi) : zAccentDim(zi), 32);
+                    draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 32, 1.5f);
                 }
             } else if (meshWarpPtr) {
                 const auto& points = meshWarpPtr->points();
@@ -778,8 +803,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 for (int i = 0; i < (int)points.size(); i++) {
                     ImVec2 p = ndc2scr(points[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
-                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? zAccent(zi) : zPointFill(zi));
-                    draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 0, 1.2f);
+                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? zAccent(zi) : zPointFill(zi), 32);
+                    draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 32, 1.2f);
                 }
             }
         }
@@ -1054,7 +1079,7 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                 for (int j = 0; j < 4; j++) {
                     float d = pointToSegmentDist(mouse, corners[j], corners[(j+1)%4]);
                     if (d < edgeHitDist) {
-                        draw->AddLine(corners[j], corners[(j+1)%4], IM_COL32(0, 220, 255, 160), 3.0f);
+                        draw->AddLine(corners[j], corners[(j+1)%4], IM_COL32(255, 255, 255, 200), 3.0f);
                     }
                 }
             }
@@ -1069,8 +1094,8 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                 bool active = (m_layerDragging && m_handleDrag == handleTypes[h]);
                 bool hovered = (!m_layerDragging && distPt(mouse, handles[h]) < hitR && m_hovered);
 
-                ImU32 fillCol = (active || hovered) ? IM_COL32(0, 230, 255, 255) : kLHandleFill;
-                ImU32 strokeCol = active ? kLHandleActive : (hovered ? IM_COL32(0, 230, 255, 255) : kLHandleStroke);
+                ImU32 fillCol = (active || hovered) ? IM_COL32(255, 255, 255, 255) : kLHandleFill;
+                ImU32 strokeCol = active ? kLHandleActive : (hovered ? IM_COL32(255, 255, 255, 255) : kLHandleStroke);
                 float drawR = (active || hovered) ? r + 1.5f : r;
 
                 if (isCorner) {
@@ -1079,8 +1104,9 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
                     draw->AddRectFilled(hMin, hMax, fillCol, 1.5f);
                     draw->AddRect(hMin, hMax, strokeCol, 1.5f, 0, 1.5f);
                 } else {
-                    draw->AddCircleFilled(handles[h], drawR, fillCol);
-                    draw->AddCircle(handles[h], drawR, strokeCol, 0, 1.5f);
+                    // num_segments=32 → smooth, non-pixelated edges
+                    draw->AddCircleFilled(handles[h], drawR, fillCol, 32);
+                    draw->AddCircle(handles[h], drawR, strokeCol, 32, 1.5f);
                 }
             }
 
@@ -1518,7 +1544,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
             bool clicked = ImGui::InvisibleButton("##seg", ImVec2(segW[i], kPillH));
             ImGui::PopID();
             if (clicked) {
-                UIManager::sMode = modes[i];
+                UIManager::setMode(modes[i]);
                 if (modes[i] == Mode::Show && stageActive) {
                     // Show mode currently shares Canvas chrome — nothing
                     // special to do until pass 2 wires up the live focus.
@@ -1649,7 +1675,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
     if (ImGui::Button("+")) *activeZone = -(100 + (int)zones->size());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add output zone");
+    if (ImGui::IsItemHovered()) ParamRow::Tooltip("Add output zone");
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(2);
 
@@ -1836,7 +1862,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
                     d->AddLine(ImVec2(cx + r,       cy + r), ImVec2(cx + r,         cy + r - a - 1), fg, th);
                 }
                 if (clicked) m_wantsFullscreenToggle = true;
-                if (hov) ImGui::SetTooltip(m_editorFullscreenHint
+                if (hov) ParamRow::Tooltip(m_editorFullscreenHint
                     ? "Exit fullscreen" : "Enter fullscreen");
             }
 

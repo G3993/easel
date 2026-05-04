@@ -22,13 +22,28 @@ static const ImU32 kInsertGlow   = IM_COL32(255, 255, 255, 50);
 static const ImU32 kThumbBorder  = IM_COL32(50, 58, 80, 200);
 static const ImU32 kThumbBg      = IM_COL32(15, 18, 25, 255);
 static const ImU32 kOpacityBg    = IM_COL32(30, 35, 50, 200);
-static const ImU32 kOpacityFill  = IM_COL32(0, 160, 210, 120);
-static const ImU32 kBadgeImage   = IM_COL32(80, 180, 100, 200);
-static const ImU32 kBadgeVideo   = IM_COL32(200, 120, 60, 200);
-static const ImU32 kBadgeShader  = IM_COL32(160, 80, 220, 200);
-static const ImU32 kBadgeCapture = IM_COL32(220, 180, 50, 200);
+static const ImU32 kOpacityFill  = IM_COL32(255, 255, 255, 110);  // monochrome (was blue)
+static const ImU32 kBadgeImage   = IM_COL32(180, 180, 180, 200);  // mono gray
+static const ImU32 kBadgeVideo   = IM_COL32(160, 160, 160, 200);  // mono gray
+static const ImU32 kBadgeShader  = IM_COL32(140, 140, 140, 200);  // mono gray
+static const ImU32 kBadgeCapture = IM_COL32(200, 200, 200, 200);  // mono gray
 static const ImU32 kBadgeText    = IM_COL32(255, 255, 255, 220);
 static const ImU32 kDragShadow   = IM_COL32(0, 0, 0, 120);
+
+// Mirror of Application.cpp's shaderDisplayName: strip trailing ".fs" and
+// uppercase. Used to present shader layer names in the panel's editorial
+// all-caps style without mutating the underlying layer->name (which keeps
+// its original filename/mixed-case form for project files and elsewhere).
+static std::string lpShaderDisplayName(const std::string& s) {
+    std::string out = s;
+    if (out.size() >= 3) {
+        std::string tail = out.substr(out.size() - 3);
+        for (auto& ch : tail) ch = (char)tolower((unsigned char)ch);
+        if (tail == ".fs") out.erase(out.size() - 3);
+    }
+    for (auto& ch : out) ch = (char)toupper((unsigned char)ch);
+    return out;
+}
 
 static ImU32 getBadgeColor(const std::string& type) {
     if (type == "Image") return kBadgeImage;
@@ -264,9 +279,15 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     // Compute % text metrics at the SMALLER SHADER-caption size so both
     // read as a matched pair rhythmically.
     ImVec2 opSz = ImGui::GetFont()->CalcTextSizeA(typeSize, FLT_MAX, 0.0f, opBuf);
+    // Eye icon sits to the LEFT of the % — toggles layer visibility on
+    // click. Reserve fixed pixels so the % stays at the same absolute
+    // right edge regardless of icon state.
+    const float kEyeW   = 14.0f;
+    const float kEyeGap = 6.0f;
     float rightInnerEdge = cx1 - LP::kCardPadX;
-    float rightClusterW  = std::max(opSz.x, zoneClusterW);
+    float rightClusterW  = std::max(opSz.x + kEyeGap + kEyeW, zoneClusterW);
     float pctX           = rightInnerEdge - opSz.x;
+    float eyeX           = pctX - kEyeGap - kEyeW;
     float nameWMax       = std::max(40.0f,
                                      rightInnerEdge - rightClusterW
                                      - LP::kTextToPct - nameX);
@@ -276,8 +297,15 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
 
     draw->PushClipRect(ImVec2(nameX, rowMin.y),
                         ImVec2(nameX + nameWMax, rowMax.y), true);
+    // For shader layers we display the name in the editorial ALL-CAPS form
+    // (with any trailing ".fs" stripped), while leaving layer->name
+    // untouched in memory so saves / sceneness stay stable.
+    std::string displayName = layer->name;
+    if (layer->source && layer->source->typeName() == "Shader") {
+        displayName = lpShaderDisplayName(displayName);
+    }
     draw->AddText(ImGui::GetFont(), nameSize,
-                   ImVec2(nameX, nameY), nameCol, layer->name.c_str());
+                   ImVec2(nameX, nameY), nameCol, displayName.c_str());
     if (layer->source) {
         std::string type = layer->source->typeName();
         for (auto& ch : type) ch = (char)toupper((unsigned char)ch);
@@ -294,6 +322,49 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     //    in render().
     draw->AddText(ImGui::GetFont(), typeSize,
                    ImVec2(pctX, typeY), kTextDim, opBuf);
+
+    // ── Eye icon — left of the %, toggles layer visibility on click.
+    //    Drawn with ImDrawList primitives (no icon font dependency):
+    //    visible  → almond outline + pupil dot
+    //    hidden   → almond outline + diagonal slash through it
+    {
+        float eyeCx = eyeX + kEyeW * 0.5f;
+        float eyeCy = typeY + typeSize * 0.5f;
+        ImU32 eyeCol = effectivelyVisible
+                       ? IM_COL32(220, 226, 240, 235)
+                       : IM_COL32(150, 158, 175, 180);
+        // Almond outline — two arcs meeting at the corners.
+        float aw = kEyeW * 0.42f;     // half-width
+        float ah = kEyeW * 0.22f;     // half-height of bulge
+        // Approximate the almond with two cubic-style polylines (fan
+        // segments). ImDrawList lacks a direct ellipse; we draw an
+        // outline circle vertically squashed via path commands.
+        draw->PathClear();
+        const int seg = 14;
+        for (int s = 0; s <= seg; s++) {
+            float t = (float)s / (float)seg * 3.14159265f;
+            float ex = eyeCx - aw + (1.0f - cos(t)) * aw;   // x: -aw → +aw
+            float ey = eyeCy - sin(t) * ah;                  // upper arc
+            draw->PathLineTo(ImVec2(ex, ey));
+        }
+        for (int s = 0; s <= seg; s++) {
+            float t = (float)s / (float)seg * 3.14159265f;
+            float ex = eyeCx + aw - (1.0f - cos(t)) * aw;
+            float ey = eyeCy + sin(t) * ah;                  // lower arc
+            draw->PathLineTo(ImVec2(ex, ey));
+        }
+        draw->PathStroke(eyeCol, ImDrawFlags_Closed, 1.2f);
+        if (effectivelyVisible) {
+            // Pupil
+            draw->AddCircleFilled(ImVec2(eyeCx, eyeCy), kEyeW * 0.13f,
+                                  eyeCol, 10);
+        } else {
+            // Slash — diagonal across the closed eye
+            draw->AddLine(ImVec2(eyeCx - aw - 1.0f, eyeCy + ah + 1.5f),
+                          ImVec2(eyeCx + aw + 1.0f, eyeCy - ah - 1.5f),
+                          eyeCol, 1.4f);
+        }
+    }
 }
 
 // Zone / layer-row accent colors — vibrant so layers assigned to different
@@ -312,6 +383,17 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                         int activeZone) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 150), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Layers");
+    // 1px outline only when floating — when docked, dock-node edges already
+    // separate the panel from its neighbours and a window border just adds
+    // a visual seam.
+    if (!ImGui::IsWindowDocked()) {
+        ImVec2 mn = ImGui::GetWindowPos();
+        ImVec2 mx(mn.x + ImGui::GetWindowSize().x,
+                  mn.y + ImGui::GetWindowSize().y);
+        ImGui::GetWindowDrawList()->AddRect(
+            mn, mx, IM_COL32(255, 255, 255, 50),
+            ImGui::GetStyle().WindowRounding, 0, 1.0f);
+    }
 
     wantsAddImage = wantsAddVideo = wantsAddShader = false;
     removedLayerIds.clear();
@@ -322,7 +404,12 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     if (panelWidth < 10.0f) { ImGui::End(); return; }
 
     // "+" add layer button (full width)
+    // Equal vertical breathing room above/below — the panel begins with the
+    // ImGui-default top padding, so we add a small Dummy above to match the
+    // gap below the button. This keeps the button visually centred between
+    // the panel's top edge and the first row.
     {
+        ImGui::Dummy(ImVec2(0, 6));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.40f));
@@ -338,13 +425,14 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             if (ImGui::MenuItem("Shader...")) wantsAddShader = true;
             ImGui::EndPopup();
         }
-        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::Dummy(ImVec2(0, 6));
     }
 
-    // Row rhythm — 72px cards (64 content + 8 outer margin) so each card
-    // reads as an iOS-sized list cell with room to breathe.
+    // Row rhythm — 70px cards (slightly tighter than the previous 72) so the
+    // list reads less airy without becoming cramped. ~2px reduction across
+    // the inter-row spacing.
     float thumbSize = LP::kThumbW;
-    float rowHeight = 72.0f;
+    float rowHeight = 70.0f;
     int layerCount = stack.count();
 
     // Empty state
@@ -525,6 +613,43 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         drawLayerRow(draw, layer, listStart.x, rowY, panelWidth, rowHeight,
                      selected, rowHovered, false, thumbSize, zoneClusterW);
 
+        // Eye toggle — per-row InvisibleButton over the eye icon, sitting
+        // immediately LEFT of the opacity scrub region. Single click flips
+        // visibility. Use the same pattern as the thumbnail toggle so the
+        // composited frame updates the next render.
+        {
+            const float kInsetX  = 0.0f;
+            float pctRight       = listStart.x + panelWidth - kInsetX - LP::kCardPadX;
+            char obuf[8];
+            snprintf(obuf, sizeof(obuf), "%d%%",
+                     (int)(layer->opacity * 100.0f + 0.5f));
+            ImVec2 psz = ImGui::GetFont()->CalcTextSizeA(10.0f, FLT_MAX, 0.0f, obuf);
+            const float kEyeW   = 14.0f;
+            const float kEyeGap = 6.0f;
+            float pctLeft = pctRight - psz.x;
+            float eyeRight = pctLeft - kEyeGap;
+            float eyeLeft  = eyeRight - kEyeW;
+            // Make the click region span the full row height + extra
+            // horizontal padding so the user can hit the eye anywhere in
+            // its column. Prior 18px-tall band missed the icon (icon
+            // sits at typeY which is below row center). IsItemActivated
+            // fires on press, more reliable than IsItemClicked which
+            // requires hover at both press AND release.
+            float hitH = rowHeight - 4.0f;
+            float hitY = rowY + 2.0f;
+            ImGui::SetCursorScreenPos(ImVec2(eyeLeft - 4.0f, hitY));
+            ImGui::PushID((int)(layer->id + 0xB0000000));
+            ImGui::InvisibleButton("##eyeBtn", ImVec2(kEyeW + 8.0f, hitH));
+            if (ImGui::IsItemActivated()) {
+                layer->userHidden = !layer->userHidden;
+                layer->visible    = !layer->userHidden;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            }
+            ImGui::PopID();
+        }
+
         // Opacity scrub — per-row InvisibleButton over the % text. Because
         // ImGui's item system owns the press, ImGui NEVER treats this
         // click as a "window drag" gesture on the Layers panel. We drive
@@ -699,7 +824,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImU32 grpCol = IM_COL32(255, 255, 255, 100);
             draw->AddRectFilled(ImVec2(listStart.x, barY - 14),
                                 ImVec2(listStart.x + panelWidth, barY),
-                                IM_COL32(0, 180, 235, 20), 2.0f);
+                                IM_COL32(255, 255, 255, 20), 2.0f);
             draw->AddLine(ImVec2(listStart.x + 4, barY), ImVec2(listStart.x + panelWidth - 4, barY), grpCol, 1.0f);
 
             // Group name

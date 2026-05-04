@@ -17,7 +17,13 @@
 #include "ui/LayerPanel.h"
 #include "ui/PropertyPanel.h"
 #include "ui/WarpEditor.h"
+#include "ui/TransitionCatalog.h"
+#include "voice/VoiceCommand.h"
+#ifdef __APPLE__
+#include "voice/MacSpeechRecognizer.h"
+#endif
 #include <unordered_map>
+#include <deque>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -26,6 +32,7 @@
 #endif
 #include "sources/ShaderSource.h"
 #include "sources/ShaderClawBridge.h"
+#include "sources/ShaderRatings.h"
 #include "sources/ParticleSource.h"
 
 #ifdef HAS_OPENCV
@@ -82,6 +89,27 @@ private:
     int m_windowWidth = 1280, m_windowHeight = 720;
 
     UIManager m_ui;
+    TransitionCatalog m_transitionCatalog;
+    std::unordered_map<std::string, float> m_animatedParams; // Phase C lane runtime cache
+
+    // V1 voice-driven timeline. Push-to-talk via UI for now; SFSpeech wrapper
+    // arrives in V1.1. handleVoiceIntent() dispatches recognized phrases to
+    // the existing timeline / layer / shader APIs so anyone can drive the
+    // tool with their voice instead of clicks.
+    void handleVoiceIntent(const easel::voice::VoiceIntent& intent);
+    void renderVoiceCommandBar();
+    void startVoiceRecording();
+    void stopVoiceRecording();
+    char m_voiceTextInput[256] = "";
+    std::deque<std::string> m_voiceLog;        // last N transcripts (recent first)
+    std::string m_voiceLastEcho;               // formatted intent for the pill
+    double m_voiceLastEchoTime = 0.0;
+    bool m_voiceBarOpen = true;                // command bar visibility
+    std::string m_voicePartial;                // streaming partial transcript while listening
+    bool m_voiceListening = false;             // mic gate (push-to-talk)
+#ifdef __APPLE__
+    MacSpeechRecognizer m_voiceRecognizer;
+#endif
     ViewportPanel m_viewportPanel;
     LayerPanel m_layerPanel;
     PropertyPanel m_propertyPanel;
@@ -134,6 +162,12 @@ private:
     int m_lastMonitorCount = 0;
     bool m_maskEditMode = false;
 
+    // Show-workspace preview zoom. Multiplier applied to the centered
+    // live-output preview's height (then width follows aspect). 1.0 = fit
+    // (default). Driven by `+`/`-`/Fit toolbar buttons and Cmd+=, Cmd+-,
+    // Cmd+0 keyboard shortcuts (handled in renderUI before the Show panel).
+    float m_showZoom = 1.0f;
+
     // Editor fullscreen toggle (F11)
     bool m_editorFullscreen = false;
     int m_savedWindowX = 0, m_savedWindowY = 0;
@@ -180,6 +214,7 @@ private:
     std::vector<WindowInfo> m_windowList;
 #endif
     ShaderClawBridge m_shaderClaw;
+    ShaderRatings    m_shaderRatings;
 
     // ShaderClaw thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;

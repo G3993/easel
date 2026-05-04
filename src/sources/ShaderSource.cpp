@@ -205,6 +205,30 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     // texture2D -> texture
     body = std::regex_replace(body, std::regex(R"(\btexture2D\b)"), "texture");
 
+    // Route every sampling of a top-down image input (NDI, Video, etc.) through
+    // a per-input wrapper that flips v when _flip_<name> is true. Without this
+    // the _flip_<name> uniform is set but never consumed and the source ends up
+    // upside down inside the shader.
+    for (const auto& input : m_inputs) {
+        if (input.type != "image") continue;
+        const std::string& n = input.name;
+        body = std::regex_replace(body,
+            std::regex("\\btexture\\s*\\(\\s*" + n + "\\s*,"),
+            "_flippedTex_" + n + "(");
+        body = std::regex_replace(body,
+            std::regex("\\bIMG_NORM_PIXEL\\s*\\(\\s*" + n + "\\s*,"),
+            "_flippedTex_" + n + "(");
+        body = std::regex_replace(body,
+            std::regex("\\bIMG_PIXEL\\s*\\(\\s*" + n + "\\s*,"),
+            "_flippedTexPixel_" + n + "(");
+        body = std::regex_replace(body,
+            std::regex("\\bIMG_THIS_PIXEL\\s*\\(\\s*" + n + "\\s*\\)"),
+            "_flippedTexThis_" + n + "()");
+        body = std::regex_replace(body,
+            std::regex("\\bIMG_THIS_NORM_PIXEL\\s*\\(\\s*" + n + "\\s*\\)"),
+            "_flippedTexThisNorm_" + n + "()");
+    }
+
     std::stringstream out;
     out << "#version 330 core\n";
     out << "out vec4 FragColor;\n";
@@ -224,6 +248,18 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
 
     // Mouse interaction (for painting shaders)
     out << "uniform float mouseDown;\n";
+    out << "\n";
+
+    // Phase V scaffolding — MediaPipe-compatible landmark samplers so
+    // shaders authored against ShaderClaw3 web (which feeds these via
+    // browser MediaPipe) compile in Easel. VisionSource will populate
+    // these in V1.1; until then they sample whatever texture is bound
+    // to unit 0 (typically zero — shaders check the alpha channel as
+    // confidence before drawing pose-driven elements).
+    out << "uniform sampler2D mpPoseLandmarks;\n";
+    out << "uniform sampler2D mpFaceLandmarks;\n";
+    out << "uniform sampler2D mpHandLandmarks;\n";
+    out << "uniform sampler2D mpSegmentation;\n";
     out << "\n";
 
     // ISF image input stubs — provide samplers + IMG_SIZE + flip uniforms
@@ -280,6 +316,18 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
             out << "vec2 _isf_img_size_" << input.name << "() { return IMG_SIZE_" << input.name << "; }\n";
             // IMG_PIXEL(inputName, coord) -> sample using image's own dimensions
             out << "vec4 _isf_img_pixel_" << input.name << "(vec2 coord) { return texture(" << input.name << ", coord / IMG_SIZE_" << input.name << "); }\n";
+            // Flip-aware wrappers — the regex pass on the user body redirects
+            // texture/IMG_*_PIXEL calls on this input to these helpers so
+            // top-down NDI/Video sources read right-side-up inside the shader.
+            const std::string& n = input.name;
+            out << "vec4 _flippedTex_" << n << "(vec2 uv) { if (_flip_" << n
+                << ") uv.y = 1.0 - uv.y; return texture(" << n << ", uv); }\n";
+            out << "vec4 _flippedTexPixel_" << n << "(vec2 px) { return _flippedTex_"
+                << n << "(px / IMG_SIZE_" << n << "); }\n";
+            out << "vec4 _flippedTexThis_" << n << "() { return _flippedTex_"
+                << n << "(gl_FragCoord.xy / RENDERSIZE); }\n";
+            out << "vec4 _flippedTexThisNorm_" << n << "() { return _flippedTex_"
+                << n << "(isf_FragNormCoord); }\n";
         }
     }
     // Default fallbacks for pass buffers and unknown textures

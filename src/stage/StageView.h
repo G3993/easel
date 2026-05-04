@@ -87,6 +87,9 @@ struct StageDisplay {
 
     bool visible = true;
     bool selected = false;
+    // Pinned displays don't render the gizmo and refuse manipulation.
+    // Lets a user lock a screen in place before staging surrounding ones.
+    bool pinned = false;
 
     glm::mat4 getTransform() const;
 };
@@ -181,6 +184,15 @@ private:
     glm::vec2 m_panDragStart = {0, 0};
     glm::vec3 m_panStartTarget = {0, 0, 0};
 
+    // Spline-style left-button click-vs-drag disambiguation. A press in
+    // empty viewport space starts in "potential" state; if the cursor
+    // moves past kClickDragPx it promotes to an orbit drag, otherwise
+    // a release fires the select/deselect raycast. The selected object
+    // is only ever moved when the user grabs an actual gizmo handle.
+    bool m_leftPressActive = false;
+    bool m_leftPressOrbiting = false;
+    glm::vec2 m_leftPressStart = {0, 0};
+
     // Smooth camera animation (for F-to-frame)
     bool m_cameraAnimating = false;
     float m_cameraAnimTime = 0.0f;
@@ -189,6 +201,14 @@ private:
     glm::vec3 m_cameraAnimEndTarget = {0, 0, 0};
     float m_cameraAnimStartDist = 5.0f;
     float m_cameraAnimEndDist = 5.0f;
+
+    // Screen rect of the 3D viewport image. Updated each frame by
+    // renderUI before renderScene so renderFrustum can project NDC
+    // into the right place — without this the foreground frustum
+    // overlay was anchored to the whole panel rect, which drifts
+    // whenever a toolbar / scroll / dock chrome eats height above.
+    glm::vec2 m_viewportScreenPos = {0, 0};
+    glm::vec2 m_viewportScreenSize = {0, 0};
 
     // Drawing helpers
     void renderScene(const std::vector<GLuint>& zoneTextures, float aspect);

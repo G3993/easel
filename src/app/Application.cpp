@@ -1,4 +1,5 @@
 #include "app/Application.h"
+#include "ui/ParamRow.h"
 #include "sources/ImageSource.h"
 #ifdef HAS_FFMPEG
 #include "sources/VideoSource.h"
@@ -44,6 +45,42 @@ using json = nlohmann::json;
 
 static void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
+}
+
+// Strip a trailing ".fs" extension (case-insensitive) and uppercase the
+// remaining string. Used by the ShaderClaw browser card titles, the
+// LayerPanel name display for shader layers, and shader parameter labels —
+// keeps the underlying manifest entry / layer->name intact while presenting
+// an editorial, all-caps display string.
+static std::string shaderDisplayName(const std::string& s) {
+    std::string out = s;
+    if (out.size() >= 3) {
+        std::string tail = out.substr(out.size() - 3);
+        for (auto& ch : tail) ch = (char)tolower((unsigned char)ch);
+        if (tail == ".fs") out.erase(out.size() - 3);
+    }
+    for (auto& ch : out) ch = (char)toupper((unsigned char)ch);
+    return out;
+}
+
+// Flat headline replacing ImGui::CollapsingHeader. No chevron, no
+// dropdown — just a bigger bright headline + thin separator. Always
+// returns true so the calling `if (...) { content }` pattern keeps
+// rendering content. Matches the Properties-panel sectionHeader style.
+static bool flatSection(const char* label) {
+    ImGui::Dummy(ImVec2(0, 14));
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    float headlineSize = ImGui::GetFontSize() * 1.4f;
+    float w = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(ImGui::GetFont(), headlineSize, pos,
+                IM_COL32(245, 248, 254, 255), label);
+    ImGui::Dummy(ImVec2(w, headlineSize + 4.0f));
+    float lineY = ImGui::GetCursorScreenPos().y + 2.0f;
+    dl->AddLine(ImVec2(pos.x, lineY), ImVec2(pos.x + w, lineY),
+                IM_COL32(255, 255, 255, 22), 1.0f);
+    ImGui::Dummy(ImVec2(0, 6));
+    return true;
 }
 
 static std::string defaultProjectPath() {
@@ -309,6 +346,9 @@ bool Application::init() {
                     break;
                 }
             }
+    m_shaderRatings.load();
+    std::cout << "[ShaderRatings] " << m_shaderRatings.needsImprovementCount()
+              << " shaders rated < 5 (improvement candidates)" << std::endl;
         }
     }
 
@@ -329,6 +369,7 @@ bool Application::init() {
     // displays/projectors/surfaces inspector under "Setup" only when
     // sMode == Stage.
     m_propertyPanel.setStageView(&m_stageView);
+    m_propertyPanel.setTimeline(&m_timeline);  // Phase C: enables keyframe diamonds
 
     // Auto-start OSC receiver on port 9000
     m_oscManager.startReceiver(9000);
@@ -542,6 +583,22 @@ void Application::run() {
             if (tlDt > 0.1f) tlDt = 1.0f / 60.0f;
             m_timeline.advance(tlDt);
             m_timeline.applyToLayers(m_layerStack);
+
+            // Phase C: sample animation lanes once per frame, apply resolved
+            // values back to the layer fields the lanes target. For v1 we
+            // route only "opacity" — extending the dispatch table covers
+            // position/scale/rotation/shader uniforms in v2.
+            m_animatedParams.clear();
+            m_timeline.sampleAnimatedParams(m_animatedParams);
+            for (int li = 0; li < m_layerStack.count(); li++) {
+                auto& lp = m_layerStack[li];
+                if (!lp) continue;
+                auto it = m_animatedParams.find(
+                    Timeline::animKey(lp->id, "opacity"));
+                if (it != m_animatedParams.end()) {
+                    lp->opacity = std::max(0.0f, std::min(1.0f, it->second));
+                }
+            }
 
             // Export flow: auto-stop recorder + pause when playhead crosses the Work Area end.
             if (m_timelineExporting && m_timeline.playhead() >= m_timelineExportEnd - 1e-3) {
@@ -1545,6 +1602,197 @@ void Application::duplicateZone(int index) {
     m_zones.push_back(std::move(z));
 }
 
+// V1 voice-driven timeline — dispatch a parsed intent to the existing
+// timeline / layer / shader APIs. Soft matching on layer name (case-insensitive
+// substring) so "the magritte layer" finds "surrealism_magritte". Adds two
+// keyframes for fade-in/out using the Phase C lane runtime; one for SetOpacity.
+void Application::handleVoiceIntent(const easel::voice::VoiceIntent& intent) {
+    using easel::voice::IntentKind;
+
+    auto findLayerByName = [&](const std::string& name) -> std::shared_ptr<Layer> {
+        if (name.empty()) return nullptr;
+        std::string needle = name;
+        std::transform(needle.begin(), needle.end(), needle.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            const auto& lp = m_layerStack[i];
+            if (!lp) continue;
+            std::string hay = lp->name;
+            std::transform(hay.begin(), hay.end(), hay.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+            if (hay.find(needle) != std::string::npos) return lp;
+        }
+        return nullptr;
+    };
+
+    auto echo = [&](const std::string& msg) {
+        m_voiceLastEcho = msg;
+        m_voiceLastEchoTime = glfwGetTime();
+        m_voiceLog.push_front(msg);
+        while (m_voiceLog.size() > 8) m_voiceLog.pop_back();
+    };
+
+    switch (intent.kind) {
+        case IntentKind::Play:        m_timeline.play();   echo("▶ Play"); break;
+        case IntentKind::Pause:       m_timeline.pause();  echo("⏸ Pause"); break;
+        case IntentKind::Stop:        m_timeline.stop();   echo("⏹ Stop"); break;
+        case IntentKind::ToggleLoop:  /* loop flag is internal — toggle via stop+play+m_loop later */
+                                      echo("Loop · (wire toggle next)"); break;
+        case IntentKind::Seek:
+            m_timeline.seek(intent.value);
+            echo("Seek → " + std::to_string((int)intent.value) + "s");
+            break;
+        case IntentKind::Skip:
+            m_timeline.seek(m_timeline.playhead() + intent.value);
+            echo(std::string(intent.value >= 0 ? "Skip +" : "Skip ") +
+                 std::to_string((int)intent.value) + "s");
+            break;
+        case IntentKind::FadeIn:
+        case IntentKind::FadeOut: {
+            auto lp = findLayerByName(intent.target);
+            if (!lp) { echo("? layer '" + intent.target + "' not found"); break; }
+            // Two keyframes: now (start) and now+duration (end). Fade in goes
+            // 0→1; fade out goes 1→0. Captures the current opacity as a baseline
+            // so successive fades chain naturally (a fade-out from 0.7 ends at 0).
+            double t0 = m_timeline.playhead();
+            double t1 = t0 + (double)intent.value;
+            float startV = (intent.kind == IntentKind::FadeIn) ? 0.0f : lp->opacity;
+            float endV   = (intent.kind == IntentKind::FadeIn) ? 1.0f : 0.0f;
+            // Toggle creates lane + first key from `currentValue`. Force start.
+            m_timeline.toggleKeyframeAt(lp->id, "opacity", t0, startV);
+            // Now place the end key — toggleKeyframeAt adds a new key with the
+            // value we pass when no key exists at that time.
+            m_timeline.toggleKeyframeAt(lp->id, "opacity", t1, endV);
+            // Auto-play so the fade is immediately visible — match user intent.
+            m_timeline.play();
+            echo((intent.kind == IntentKind::FadeIn ? "Fade in " : "Fade out ") +
+                 lp->name + " · " + std::to_string((int)intent.value) + "s");
+            break;
+        }
+        case IntentKind::SetOpacity: {
+            auto lp = findLayerByName(intent.target);
+            if (!lp) { echo("? layer '" + intent.target + "' not found"); break; }
+            float v = std::max(0.0f, std::min(1.0f, intent.value));
+            m_timeline.toggleKeyframeAt(lp->id, "opacity", m_timeline.playhead(), v);
+            // Also snap the live value so the change is visible even when the
+            // playhead doesn't move (sampleAnimatedParams writes opacity on the
+            // next tick anyway, but this keeps the slider in sync immediately).
+            lp->opacity = v;
+            echo("Set " + lp->name + " opacity → " +
+                 std::to_string((int)(v * 100.0f)) + "%");
+            break;
+        }
+        case IntentKind::Show:
+        case IntentKind::Hide: {
+            auto lp = findLayerByName(intent.target);
+            if (!lp) { echo("? layer '" + intent.target + "' not found"); break; }
+            lp->visible = (intent.kind == IntentKind::Show);
+            echo((intent.kind == IntentKind::Show ? "Show " : "Hide ") + lp->name);
+            break;
+        }
+        case IntentKind::AddShader:
+        case IntentKind::PickTransition:
+            echo("? '" + intent.raw + "' (V1.1 — not wired yet)");
+            break;
+        case IntentKind::Unknown:
+        default:
+            echo("? not understood: \"" + intent.raw + "\"");
+            break;
+    }
+}
+
+void Application::startVoiceRecording() {
+#ifdef __APPLE__
+    if (m_voiceListening) return;
+    if (!m_voiceRecognizer.available()) {
+        std::cerr << "[Voice] start: not available (auth pending or denied) — "
+                     "open System Settings > Privacy > Speech Recognition / Microphone\n";
+        m_voiceLastEcho = "Mic / speech permission needed (System Settings > Privacy)";
+        m_voiceLastEchoTime = glfwGetTime();
+        return;
+    }
+    m_voicePartial.clear();
+    m_voiceRecognizer.onPartial = [this](const std::string& s) {
+        m_voicePartial = s;
+    };
+    m_voiceRecognizer.onFinal = [this](const std::string& s) {
+        m_voicePartial.clear();
+        std::cerr << "[Voice] final: \"" << s << "\"\n";
+        if (s.empty()) return;
+        m_voiceLastEcho = std::string("\"") + s + "\"";
+        m_voiceLastEchoTime = glfwGetTime();
+        auto intent = easel::voice::parse(s);
+        std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
+        if (!intent.target.empty()) std::cerr << " target=" << intent.target;
+        std::cerr << "\n";
+        handleVoiceIntent(intent);
+    };
+    m_voiceRecognizer.start();
+    m_voiceListening = m_voiceRecognizer.isRecording();
+    std::cerr << "[Voice] start: listening=" << (m_voiceListening ? "yes" : "no") << "\n";
+#endif
+}
+
+void Application::stopVoiceRecording() {
+#ifdef __APPLE__
+    if (!m_voiceListening) return;
+    m_voiceRecognizer.stop();
+    m_voiceListening = false;
+    std::cerr << "[Voice] stop\n";
+#endif
+}
+
+void Application::renderVoiceCommandBar() {
+    if (!m_voiceBarOpen) return;
+    ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Voice##VoiceBar", &m_voiceBarOpen,
+                      ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("Type or speak — V1 dispatch (Etherea / SFSpeech feed in next).");
+
+    ImGui::SetNextItemWidth(-90);
+    bool submit = ImGui::InputText("##VoiceCmd", m_voiceTextInput,
+                                   sizeof(m_voiceTextInput),
+                                   ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (ImGui::Button("Run") || submit) {
+        if (m_voiceTextInput[0] != '\0') {
+            auto intent = easel::voice::parse(m_voiceTextInput);
+            handleVoiceIntent(intent);
+            m_voiceTextInput[0] = '\0';
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+    }
+
+    if (!m_voiceLastEcho.empty()) {
+        double age = glfwGetTime() - m_voiceLastEchoTime;
+        float alpha = (float)std::max(0.0, 1.0 - (age - 4.0) / 2.0);
+        if (alpha > 0.05f) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  ImVec4(0.84f, 0.88f, 0.94f, alpha));
+            ImGui::TextWrapped("%s", m_voiceLastEcho.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    if (!m_voiceLog.empty()) {
+        ImGui::Separator();
+        ImGui::TextDisabled("Recent");
+        for (size_t i = 0; i < std::min((size_t)6, m_voiceLog.size()); i++) {
+            ImGui::TextDisabled("· %s", m_voiceLog[i].c_str());
+        }
+    }
+
+    if (ImGui::SmallButton("Clear log")) m_voiceLog.clear();
+    ImGui::SameLine();
+    ImGui::TextDisabled("Try: \"play\", \"fade in fauvism over 3 seconds\", \"set magritte opacity to 50 percent\"");
+
+    ImGui::End();
+}
+
 void Application::renderUI() {
     // Escape key deselects current layer — but NOT while we're in mask edit mode,
     // where Esc belongs to the mask editor (see ViewportPanel::renderMaskOverlay).
@@ -1679,6 +1927,8 @@ void Application::renderUI() {
     float transportBarH = 0.0f;
     renderMenuBar();
     m_ui.setupDockspace(transportBarH);
+    // (renderVoiceCommandBar() removed — voice UI now lives in a popup
+    // anchored to the mic icon next to System Audio in the transport bar.)
 
     // Reset editing state when switching zones
     if (m_activeZone != m_prevActiveZone) {
@@ -1815,7 +2065,7 @@ void Application::renderUI() {
     // tweak canvas/layer masks.
     if (m_ui.isPanelVisible("Mapping")) {
     ImGui::Begin("        ###Mapping");
-    if (ImGui::CollapsingHeader("Masks"))
+    if (flatSection("Masks"))
     {
         // (Edge Blend moved to the bottom of this panel — you only want to
         //  reach for it AFTER you've shaped a mask, not before.)
@@ -2224,8 +2474,11 @@ void Application::renderUI() {
         // tab). Viewport gets the bulk of the panel; Setup and Scenes sit
         // below, each collapsible so the viewport breathes when closed.
         if (m_ui.isPanelVisible("Stage") && UIManager::sMode == UIManager::WorkspaceMode::Stage) {
+            // (Mode-transition Alpha fade removed — translucency exposed
+            // the GL backbuffer as a white flash during the cross-fade.)
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::Begin("Stage");
+            ImGui::Begin("Stage", nullptr,
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::PopStyleVar();
 
             // Shared secondary-nav row (pills + zones + OUTPUT + composition
@@ -2269,8 +2522,20 @@ void Application::renderUI() {
             float reservedH = 80.0f;
             float viewportH = std::max(200.0f, panelH - reservedH);
 
+            // Reserve right-side width for the anchored Properties+Mapping
+            // dock so the 3D viewport reads as the left ~75% of the work
+            // area instead of running underneath the right rail. The
+            // floating right host width comes from UIManager so the two
+            // stay in sync (any margin/host-padding adjustments are made
+            // there). We add a small gap so the viewport's border doesn't
+            // butt right up against the rail's left edge.
+            float panelW    = ImGui::GetContentRegionAvail().x;
+            float rightRail = m_ui.rightRailWidth();
+            float gap       = 18.0f;
+            float viewportW = std::max(240.0f, panelW - rightRail - gap);
+
             // --- 3D viewport (first) ---
-            ImGui::BeginChild("##StageViewport", ImVec2(0, viewportH), false);
+            ImGui::BeginChild("##StageViewport", ImVec2(viewportW, viewportH), false);
             m_stageView.renderUI(zoneTextures);
             if (m_stageView.wantsImport()) {
                 m_stageView.clearImportSignal();
@@ -2303,8 +2568,32 @@ void Application::renderUI() {
         // currently going to the projector while they drive Timeline +
         // MIDI + Audio from the right rail.
         if (m_ui.isPanelVisible("Show") && UIManager::sMode == UIManager::WorkspaceMode::Show) {
+            // Cmd/Ctrl + = / - / 0 zoom shortcuts for the Show preview.
+            // Mirrors the canvas mouse-wheel zoom logic (1.1x per step,
+            // clamped to [0.05, 20]). Use io.KeySuper on macOS, Ctrl
+            // elsewhere — matches how UIManager::handleZoom dispatches
+            // the global UI scale shortcut.
+            {
+                ImGuiIO& io = ImGui::GetIO();
+            #ifdef __APPLE__
+                bool zmod = io.KeySuper;
+            #else
+                bool zmod = io.KeyCtrl;
+            #endif
+                if (zmod && ImGui::IsKeyPressed(ImGuiKey_Equal)) {
+                    m_showZoom = std::min(20.0f, m_showZoom * 1.1f);
+                }
+                if (zmod && ImGui::IsKeyPressed(ImGuiKey_Minus)) {
+                    m_showZoom = std::max(0.05f, m_showZoom / 1.1f);
+                }
+                if (zmod && ImGui::IsKeyPressed(ImGuiKey_0)) {
+                    m_showZoom = 1.0f;
+                }
+            }
+
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::Begin("Show");
+            ImGui::Begin("Show", nullptr,
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::PopStyleVar();
 
             // Same shared nav so geometry doesn't shift between modes.
@@ -2335,9 +2624,36 @@ void Application::renderUI() {
                 }
             }
 
+            // Zoom toolbar — `−` / `+` / `Fit`. Mirrors the simple wheel
+            // zoom Canvas uses (ViewportPanel::m_zoom) but lives here as
+            // explicit clickable affordances since the Show preview is a
+            // single Image() and there's no scroll-wheel hookup yet. The
+            // labels stay text-only (no icon font dependency) so they
+            // render the same on every platform.
+            {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::Indent(10.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
+                if (ImGui::SmallButton("-##showzoomout")) {
+                    m_showZoom = std::max(0.05f, m_showZoom / 1.1f);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##showzoomin")) {
+                    m_showZoom = std::min(20.0f, m_showZoom * 1.1f);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Fit##showzoomfit")) {
+                    m_showZoom = 1.0f;
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.0f%%", m_showZoom * 100.0f);
+                ImGui::PopStyleVar();
+                ImGui::Unindent(10.0f);
+            }
+
             // Live output preview — shows the active zone's composited
             // output so the performer can see what the audience sees.
-            ImGui::Dummy(ImVec2(0, 8));
+            ImGui::Dummy(ImVec2(0, 4));
             ImVec2 avail = ImGui::GetContentRegionAvail();
             float aspect = 16.0f / 9.0f;
             if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) {
@@ -2345,9 +2661,15 @@ void Application::renderUI() {
                 if (z->width > 0 && z->height > 0)
                     aspect = (float)z->width / (float)z->height;
             }
-            float previewH = std::min(avail.y - 16.0f, avail.x / aspect);
+            // Fit-size baseline (zoom == 1.0) — the preview that exactly
+            // fits the available area while preserving aspect. Apply
+            // m_showZoom as a uniform multiplier; clamp so the preview
+            // doesn't try to render at zero size when shrunk all the way.
+            float fitH = std::min(avail.y - 16.0f, avail.x / aspect);
+            float previewH = std::max(20.0f, fitH * m_showZoom);
             float previewW = previewH * aspect;
             float padX = (avail.x - previewW) * 0.5f;
+            if (padX < 0) padX = 0;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padX);
             GLuint previewTex = 0;
             if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size())
@@ -2377,137 +2699,6 @@ void Application::renderUI() {
     ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
                                      | ImGuiTabBarFlags_FittingPolicyScroll;
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
-
-    // NDI tab (moved from position 4 to 1)
-#ifdef HAS_NDI
-    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
-        {
-            // --- Broadcasting section ---
-            if (ImGui::CollapsingHeader("Broadcasting", ImGuiTreeNodeFlags_DefaultOpen)) {
-                // Composition output toggle
-                {
-                    bool compositionOn = m_ndiOutputEnabled && m_ndiOutput.isActive();
-                    if (compositionOn) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    }
-                    if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
-                        if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Easel");
-                        } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
-                            m_ndiOutput.destroy();
-                        }
-                    }
-                    ImGui::PopStyleColor();
-                }
-
-                // Per-layer toggles
-                for (int i = 0; i < m_layerStack.count(); i++) {
-                    ImGui::PushID(5000 + i);
-                    auto& layer = m_layerStack[i];
-                    bool active = layer->ndiSender.isActive();
-
-                    if (active) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    }
-
-                    std::string label = "Easel - " + layer->name;
-                    if (label.length() > 50) label = label.substr(0, 47) + "...";
-                    if (ImGui::Checkbox(label.c_str(), &layer->ndiEnabled)) {
-                        // Toggle handled in updateSources
-                    }
-                    ImGui::PopStyleColor();
-                    ImGui::PopID();
-                }
-
-                if (m_layerStack.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    ImGui::Text("  No layers");
-                    ImGui::PopStyleColor();
-                }
-            }
-
-            // --- Receive section ---
-            if (ImGui::CollapsingHeader("Receive", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
-                    m_ndiSources = m_ndiFinder.sources();
-                }
-                ImGui::PopStyleColor(4);
-
-                // Auto-refresh source list every ~2 seconds
-                {
-                    static double lastRefresh = 0;
-                    double now = glfwGetTime();
-                    if (now - lastRefresh > 2.0) {
-                        m_ndiSources = m_ndiFinder.sources();
-                        lastRefresh = now;
-                    }
-                }
-
-                ImGui::Dummy(ImVec2(0, 2));
-                if (m_ndiSources.empty()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-                    ImGui::TextWrapped("No NDI sources found on the network.");
-                    ImGui::PopStyleColor();
-                }
-
-                for (int i = 0; i < (int)m_ndiSources.size(); i++) {
-                    ImGui::PushID(3000 + i);
-
-                    std::string name = m_ndiSources[i].name;
-                    if (name.length() > 40) name = name.substr(0, 37) + "...";
-
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
-                    ImGui::Text("%s", name.c_str());
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine();
-
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                    if (ImGui::SmallButton("Add")) {
-                        addNDISource(m_ndiSources[i].name);
-                    }
-                    ImGui::PopStyleColor(4);
-
-                    ImGui::PopID();
-                }
-
-#ifdef HAS_WHEP
-                ImGui::Dummy(ImVec2(0, 4));
-                ImGui::Separator();
-                ImGui::Dummy(ImVec2(0, 2));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
-                ImGui::Text("Scope (WHEP)");
-                ImGui::PopStyleColor();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
-                if (ImGui::Button("Connect Scope", ImVec2(-1, 0))) {
-                    addWHEPSource(WHEPSource::discoverUrl());
-                }
-                ImGui::PopStyleColor(4);
-#endif
-            }
-        }
-        ImGui::EndTabItem();
-    }
-#else
-    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
-        ImGui::TextDisabled("NDI SDK not installed");
-        ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
-        ImGui::EndTabItem();
-    }
-#endif
 
     // ShaderClaw tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("ShaderClaw")) {
@@ -2561,77 +2752,16 @@ void Application::renderUI() {
             }
             ImGui::PopStyleColor(4);
         } else {
-            // Connected — show shader browser. Color language: green means
-            // "connected" (a healthy state, not an alert). Disconnect is a
-            // calm muted pill — no red, since disconnecting is a normal user
-            // action, not an error. Refresh lives as a small icon right next
-            // to Disconnect to keep the row compact.
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.78f, 0.52f, 1.0f));
-            ImGui::Text("Connected");
-            ImGui::PopStyleColor();
-            // (Shader count removed — the tile gallery below makes the number
-            //  obvious from scanning; a bare integer added noise.)
-
-            // Right-aligned cluster: [⟳] Disconnect. Refresh icon sizes to
-            // the actual text-line height so it matches SmallButton's vertical
-            // footprint — previously `GetFrameHeight()` made it ~2x too tall.
-            const float kDiscW = ImGui::CalcTextSize("Disconnect").x
-                               + ImGui::GetStyle().FramePadding.x * 2.0f + 6.0f;
-            const float kIconH = ImGui::GetTextLineHeight();
-            float rightClusterW = kIconH + 6.0f + kDiscW;
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightClusterW);
-
-            // Refresh — small circular-arrow glyph, sized to match text row.
-            {
-                ImVec2 p0 = ImGui::GetCursorScreenPos();
-                bool clicked = ImGui::InvisibleButton("##SCRefresh", ImVec2(kIconH, kIconH));
-                bool hov = ImGui::IsItemHovered();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                ImU32 bg = hov ? IM_COL32(255, 255, 255, 28)
-                               : IM_COL32(255, 255, 255, 10);
-                d->AddRectFilled(p0, ImVec2(p0.x + kIconH, p0.y + kIconH), bg, 4.0f);
-
-                float cx = p0.x + kIconH * 0.5f;
-                float cy = p0.y + kIconH * 0.5f;
-                float r  = kIconH * 0.30f;
-                ImU32 fg = IM_COL32(235, 240, 250, 230);
-                const int seg = 20;
-                for (int s = 0; s < seg; s++) {
-                    float a0 = -0.35f * 3.14159f + (s    / (float)seg) * 5.2f;
-                    float a1 = -0.35f * 3.14159f + ((s+1)/ (float)seg) * 5.2f;
-                    d->AddLine(ImVec2(cx + cosf(a0)*r, cy + sinf(a0)*r),
-                               ImVec2(cx + cosf(a1)*r, cy + sinf(a1)*r),
-                               fg, 1.2f);
-                }
-                float ae = -0.35f * 3.14159f + 5.2f;
-                float ax = cx + cosf(ae) * r;
-                float ay = cy + sinf(ae) * r;
-                d->AddTriangleFilled(ImVec2(ax - 2.5f, ay - 2.5f),
-                                     ImVec2(ax + 2.5f, ay - 2.5f),
-                                     ImVec2(ax,        ay + 2.5f), fg);
-                if (hov) ImGui::SetTooltip("Refresh shader list");
-                if (clicked) m_shaderClaw.refreshManifest();
-            }
-
-            ImGui::SameLine(0, 6);
-
-            // Disconnect — neutral ghost pill (no alarming red).
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.72f, 0.76f, 0.82f, 1.0f));
-            if (ImGui::SmallButton("Disconnect")) {
-                m_shaderClaw.disconnect();
-                m_scThumbnails.clear();
-                m_scThumbRenderer.reset();
-                m_scPreview.reset();
-                m_scPreviewPath.clear();
-            }
-            ImGui::PopStyleColor(4);
-
-            // (Old wide Refresh button + hairline divider removed — they added
-            // clutter without structural value.)
+            // Connected — show shader browser straight away. The
+            // "Connected" status text + Disconnect pill + Refresh icon
+            // were removed from the panel header per UX request; those
+            // controls live under FILE → Sources in the menu bar instead.
             ImGui::Dummy(ImVec2(0, 6));
+
+            // The Particles entry used to be a full-width button here;
+            // it now lives as the first tile in the VFX gallery grid
+            // below so it reads as "another shader" instead of a
+            // separate command.
 
             // Update animated preview shader (for hovered item)
             bool previewValid = false;
@@ -2696,7 +2826,7 @@ void Application::renderUI() {
             // under "Text" (anything tagged Text in the manifest), the
             // rest under "VFX". Keeps the grid scannable when there are
             // 70+ shaders by separating the two main creative modes.
-            static int s_scSubTab = 0; // 0 = VFX, 1 = Text
+            static int s_scSubTab = 0; // 0 = VFX, 1 = Text, 2 = 3D
             {
                 auto subTabBtn = [&](const char* label, int idx) {
                     bool active = (s_scSubTab == idx);
@@ -2717,6 +2847,8 @@ void Application::renderUI() {
                 subTabBtn("VFX",  0);
                 ImGui::SameLine(0, 6);
                 subTabBtn("Text", 1);
+                ImGui::SameLine(0, 6);
+                subTabBtn("3D",   2);
                 ImGui::Dummy(ImVec2(0, 6));
             }
 
@@ -2727,7 +2859,8 @@ void Application::renderUI() {
             // animated. Works like a shader-picker gallery.
             std::string hoveredPath;
             const float cellPad     = 8.0f;
-            const float labelH      = 22.0f;
+            const float starsH      = 16.0f;   // stars row beneath title
+            const float labelH      = 22.0f + starsH;
             const float minCellW    = 132.0f;
             const float maxCellW    = 200.0f;
             float availW = ImGui::GetContentRegionAvail().x;
@@ -2749,22 +2882,104 @@ void Application::renderUI() {
             for (int i = 0; i < (int)shaders.size(); i++) {
                 const auto& sh = shaders[i];
                 bool isText = false;
+                bool is3D   = false;
                 for (const auto& c : sh.categories) {
-                    if (c == "Text") { isText = true; break; }
+                    if (c == "Text") isText = true;
+                    if (c == "3D")   is3D   = true;
                 }
                 if (!isText && sh.file.rfind("text_", 0) == 0) isText = true;
-                bool keep = (s_scSubTab == 1) ? isText : !isText;
+                bool keep;
+                if      (s_scSubTab == 1) keep = isText;
+                else if (s_scSubTab == 2) keep = is3D;
+                else                       keep = !isText && !is3D; // VFX = neither
                 if (keep) visibleIdx.push_back(i);
             }
+            // Running grid position so the Particles tile (VFX only) and
+            // shader tiles share the same wrap rules.
+            int gridPos = 0;
+
+            // Particles tile — only on the VFX sub-tab. Drawn with the
+            // same rect / hover treatment as a shader tile so it reads
+            // as one of the cards instead of a separate command.
+            if (s_scSubTab == 0) {
+                ImGui::PushID("particles-card");
+                ImVec2 cellPos = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##ptile", ImVec2(thumbSize, cellH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+
+                ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+                d->AddRectFilled(cellPos,
+                                 ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                                 tileBg, 6.0f);
+                d->AddRect(cellPos,
+                           ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                           tileEdge, 6.0f, 0, 1.0f);
+
+                ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
+                ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
+                d->AddRectFilled(thumbMin, thumbMax, IM_COL32(14, 18, 30, 255), 4.0f);
+
+                // Drifting dot field — animated so the tile reads as
+                // a live shader preview instead of a static icon.
+                float t = (float)ImGui::GetTime();
+                float thumbW = thumbMax.x - thumbMin.x;
+                float thumbH = thumbMax.y - thumbMin.y;
+                for (int s = 0; s < 36; s++) {
+                    uint32_t h = (uint32_t)s * 2654435761u;
+                    float fx = ((h >>  8) & 0xFFFF) / 65535.0f;
+                    float fy = ((h >> 16) & 0xFFFF) / 65535.0f;
+                    fy = fmodf(fy + t * (0.04f + ((s & 7) / 200.0f)), 1.0f);
+                    ImVec2 p(thumbMin.x + fx * thumbW,
+                             thumbMin.y + fy * thumbH);
+                    float r = 1.2f + ((s % 5) * 0.45f);
+                    float a = 0.5f + 0.5f * sinf(t * 1.3f + s * 0.71f);
+                    ImU32 col = IM_COL32(220, 230, 255, (int)(120 + 110 * a));
+                    d->AddCircleFilled(p, r, col, 8);
+                }
+
+                // "+" sigil so the card reads as "create".
+                {
+                    ImVec2 c((thumbMin.x + thumbMax.x) * 0.5f,
+                             (thumbMin.y + thumbMax.y) * 0.5f);
+                    float arm = thumbW * 0.18f;
+                    float th  = std::max(2.0f, arm * 0.22f);
+                    ImU32 plus = hov ? IM_COL32(255, 255, 255, 240)
+                                     : IM_COL32(235, 240, 255, 200);
+                    d->AddRectFilled(ImVec2(c.x - arm,        c.y - th * 0.5f),
+                                     ImVec2(c.x + arm,        c.y + th * 0.5f),
+                                     plus, th * 0.5f);
+                    d->AddRectFilled(ImVec2(c.x - th * 0.5f,  c.y - arm),
+                                     ImVec2(c.x + th * 0.5f,  c.y + arm),
+                                     plus, th * 0.5f);
+                }
+
+                const char* title = "Particles";
+                ImVec2 ts = ImGui::CalcTextSize(title);
+                d->AddText(ImVec2(cellPos.x + (thumbSize - ts.x) * 0.5f,
+                                  cellPos.y + thumbSize - 2),
+                           hov ? IM_COL32(255, 255, 255, 255)
+                               : IM_COL32(220, 226, 235, 220),
+                           title);
+
+                if (hov) ParamRow::Tooltip("Particles\n\nGPU particle system layer");
+                if (clicked) addParticles();
+
+                ImGui::PopID();
+                gridPos++;
+            }
+
             for (int vi = 0; vi < (int)visibleIdx.size(); vi++) {
                 int i = visibleIdx[vi];
                 const auto& shader = shaders[i];
                 ImGui::PushID(2000 + i);
 
-                // Layout: new row every `cols` items (using the
-                // VISIBLE index so wrapping is unaffected by hidden
-                // entries from the other sub-tab).
-                if (vi % cols != 0) ImGui::SameLine(0, cellPad);
+                // Layout: new row every `cols` items (sharing the
+                // counter with the prepended Particles tile so the
+                // grid wraps cleanly).
+                if (gridPos % cols != 0) ImGui::SameLine(0, cellPad);
+                gridPos++;
                 ImVec2 cellPos = ImGui::GetCursorScreenPos();
 
                 bool isHoveredShader = (shader.fullPath == m_scPreviewPath);
@@ -2811,8 +3026,11 @@ void Application::renderUI() {
                                IM_COL32(120, 130, 150, 200), wait);
                 }
 
-                // Title — truncated to fit the cell width.
-                std::string title = shader.title.empty() ? "(untitled)" : shader.title;
+                // Title — uppercased, ".fs" stripped, then truncated to fit
+                // the cell width. The manifest entry (`shader.title`) stays
+                // intact; only the displayed string is transformed.
+                std::string title = shader.title.empty() ? "(untitled)"
+                                                          : shaderDisplayName(shader.title);
                 float titleMaxW = thumbSize - 16.0f;
                 ImVec2 ts = ImGui::CalcTextSize(title.c_str());
                 if (ts.x > titleMaxW) {
@@ -2829,12 +3047,67 @@ void Application::renderUI() {
                                            : IM_COL32(220, 226, 235, 220),
                            title.c_str());
 
+                // ── Star rating row (1–5). Hit-test is done via IsMouseClicked
+                // + manual rect math (NOT a second InvisibleButton inside the
+                // cell — that advanced ImGui's cursor and broke column-wrap).
+                // Persists to ~/.easel/shader_ratings.json on click.
+                {
+                    const float starSize = 11.0f;
+                    const float starGap  = 3.0f;
+                    const float rowW     = 5 * starSize + 4 * starGap;
+                    float       rowX     = cellPos.x + (thumbSize - rowW) * 0.5f;
+                    float       rowY     = cellPos.y + thumbSize + 22.0f - 4.0f;
+                    int         current  = m_shaderRatings.get(shader.file);
+
+                    int hoverStar = 0;
+                    ImVec2 mp = ImGui::GetMousePos();
+                    bool   inRow = (mp.y >= rowY - 2 && mp.y <= rowY + starSize + 2 &&
+                                    mp.x >= rowX     && mp.x <= rowX + rowW);
+                    if (inRow) {
+                        for (int s = 1; s <= 5; s++) {
+                            float sx = rowX + (s - 1) * (starSize + starGap);
+                            if (mp.x >= sx && mp.x < sx + starSize) {
+                                hoverStar = s;
+                                break;
+                            }
+                        }
+                    }
+
+                    int displayLevel = hoverStar > 0 ? hoverStar : current;
+                    for (int s = 1; s <= 5; s++) {
+                        float sx = rowX + (s - 1) * (starSize + starGap);
+                        ImVec2 c(sx + starSize * 0.5f, rowY + starSize * 0.5f);
+                        bool   on = s <= displayLevel;
+                        ImU32  col = on
+                            ? IM_COL32(255, 210, 80, 230)
+                            : IM_COL32(255, 255, 255, hoverStar > 0 ? 70 : 35);
+                        ImVec2 pts[10];
+                        for (int k = 0; k < 10; k++) {
+                            float r = (k % 2 == 0) ? starSize * 0.50f : starSize * 0.21f;
+                            float a = -1.5707963f + k * 0.6283185f;
+                            pts[k] = ImVec2(c.x + cosf(a) * r, c.y + sinf(a) * r);
+                        }
+                        if (on) d->AddConvexPolyFilled(pts, 10, col);
+                        else    d->AddPolyline(pts, 10, col, ImDrawFlags_Closed, 1.0f);
+                    }
+
+                    // Click-to-rate. Mouse click while hovering a specific star
+                    // sets that rating (or clears it if the same star is re-clicked).
+                    if (inRow && hoverStar > 0 && ImGui::IsMouseClicked(0)) {
+                        int newRating = (hoverStar == current) ? 0 : hoverStar;
+                        m_shaderRatings.set(shader.file, newRating);
+                    }
+                }
+
                 if (hov) {
                     hoveredPath = shader.fullPath;
                     if (!shader.description.empty()) {
-                        ImGui::SetTooltip("%s\n\n%s", shader.title.c_str(), shader.description.c_str());
+                        char tipBuf[512];
+                        snprintf(tipBuf, sizeof(tipBuf), "%s\n\n%s",
+                                 shader.title.c_str(), shader.description.c_str());
+                        ParamRow::Tooltip(tipBuf);
                     } else {
-                        ImGui::SetTooltip("%s", shader.title.c_str());
+                        ParamRow::Tooltip(shader.title.c_str());
                     }
                 }
                 if (clicked) loadShader(shader.fullPath);
@@ -2860,6 +3133,226 @@ void Application::renderUI() {
     }
     ImGui::EndTabItem();
     }  // end ShaderClaw tab
+    // NDI tab (moved from position 4 to 1)
+#ifdef HAS_NDI
+    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
+        {
+            // --- Broadcasting section ---
+            if (flatSection("Broadcasting")) {
+                // Composition output toggle
+                {
+                    bool compositionOn = m_ndiOutputEnabled && m_ndiOutput.isActive();
+                    if (compositionOn) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    }
+                    if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
+                        if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
+                            m_ndiOutput.create("Easel");
+                        } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
+                            m_ndiOutput.destroy();
+                        }
+                    }
+                    ImGui::PopStyleColor();
+                }
+
+                // Per-layer toggles
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    ImGui::PushID(5000 + i);
+                    auto& layer = m_layerStack[i];
+                    bool active = layer->ndiSender.isActive();
+
+                    if (active) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    }
+
+                    std::string label = "Easel - " + layer->name;
+                    if (label.length() > 50) label = label.substr(0, 47) + "...";
+                    if (ImGui::Checkbox(label.c_str(), &layer->ndiEnabled)) {
+                        // Toggle handled in updateSources
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+
+                if (m_layerStack.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::Text("  No layers");
+                    ImGui::PopStyleColor();
+                }
+            }
+
+            // --- Receive section — flat headline + small circular-arrow
+            //     refresh icon on the far right of the headline row.
+            {
+                ImGui::Dummy(ImVec2(0, 14));
+                ImVec2 hdrPos = ImGui::GetCursorScreenPos();
+                float hSize = ImGui::GetFontSize() * 1.4f;
+                float aw    = ImGui::GetContentRegionAvail().x;
+                ImDrawList* hdrDl = ImGui::GetWindowDrawList();
+                hdrDl->AddText(ImGui::GetFont(), hSize, hdrPos,
+                               IM_COL32(245, 248, 254, 255), "Receive");
+
+                // Refresh icon — top-right of the headline row, sized
+                // to roughly 70% of the headline cap height: big
+                // enough to land cleanly as a target without dwarfing
+                // the section title.
+                float iconSz = hSize * 0.70f;
+                ImVec2 iconPos(hdrPos.x + aw - iconSz - 2.0f,
+                               hdrPos.y + (hSize - iconSz) * 0.5f);
+                ImGui::SetCursorScreenPos(iconPos);
+                ImGui::PushID("ndiRefreshIcon");
+                bool refreshClicked = ImGui::InvisibleButton("##ndiRefresh",
+                                                              ImVec2(iconSz, iconSz));
+                bool refreshHov     = ImGui::IsItemHovered();
+                ImGui::PopID();
+                ImU32 bg = refreshHov ? IM_COL32(255, 255, 255, 32)
+                                       : IM_COL32(255, 255, 255, 0);
+                hdrDl->AddRectFilled(iconPos,
+                                     ImVec2(iconPos.x + iconSz, iconPos.y + iconSz),
+                                     bg, 6.0f);
+                // Refresh icon — loads assets/icons/refresh.png (rasterised
+                // from the user-provided refreshicon.svg) once and renders
+                // it as an ImGui::Image overlay inside the headline row.
+                static GLuint sRefreshTex = 0;
+                static bool   sRefreshTried = false;
+                if (!sRefreshTried) {
+                    sRefreshTried = true;
+                    int rw = 0, rh = 0, rc = 0;
+                    unsigned char* d = stbi_load("assets/icons/refresh.png",
+                                                 &rw, &rh, &rc, 4);
+                    if (d) {
+                        glGenTextures(1, &sRefreshTex);
+                        glBindTexture(GL_TEXTURE_2D, sRefreshTex);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rw, rh, 0,
+                                     GL_RGBA, GL_UNSIGNED_BYTE, d);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                        stbi_image_free(d);
+                    }
+                }
+                if (sRefreshTex) {
+                    ImU32 tint = refreshHov ? IM_COL32(255, 255, 255, 255)
+                                             : IM_COL32(255, 255, 255, 220);
+                    hdrDl->AddImage((ImTextureID)(intptr_t)sRefreshTex,
+                                    iconPos,
+                                    ImVec2(iconPos.x + iconSz, iconPos.y + iconSz),
+                                    ImVec2(0, 0), ImVec2(1, 1), tint);
+                }
+                if (refreshHov) ParamRow::Tooltip("Refresh source list");
+                if (refreshClicked) m_ndiSources = m_ndiFinder.sources();
+
+                // Reserve headline row vertical space + draw separator
+                ImGui::SetCursorScreenPos(hdrPos);
+                ImGui::Dummy(ImVec2(aw, hSize + 4.0f));
+                float lineY = ImGui::GetCursorScreenPos().y + 2.0f;
+                hdrDl->AddLine(ImVec2(hdrPos.x, lineY),
+                               ImVec2(hdrPos.x + aw, lineY),
+                               IM_COL32(255, 255, 255, 22), 1.0f);
+                ImGui::Dummy(ImVec2(0, 6));
+            }
+            {
+                // Auto-refresh source list every ~2 seconds
+                {
+                    static double lastRefresh = 0;
+                    double now = glfwGetTime();
+                    if (now - lastRefresh > 2.0) {
+                        m_ndiSources = m_ndiFinder.sources();
+                        lastRefresh = now;
+                    }
+                }
+
+                ImGui::Dummy(ImVec2(0, 2));
+                if (m_ndiSources.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::TextWrapped("No NDI sources found on the network.");
+                    ImGui::PopStyleColor();
+                }
+
+                for (int i = 0; i < (int)m_ndiSources.size(); i++) {
+                    ImGui::PushID(3000 + i);
+
+                    std::string name = m_ndiSources[i].name;
+                    if (name.length() > 40) name = name.substr(0, 37) + "...";
+
+                    // Add button is left-aligned and first; source name reads
+                    // to its right. SmallButton was visually squished (frame
+                    // padding y=0); use a regular Button with explicit size so
+                    // the pill has comfortable height matching the row.
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    const float addH = ImGui::GetFrameHeight() + 4.0f; // taller than default
+                    const float addW = 52.0f;
+                    if (ImGui::Button("Add", ImVec2(addW, addH))) {
+                        addNDISource(m_ndiSources[i].name);
+                    }
+                    ImGui::PopStyleColor(4);
+                    ImGui::SameLine(0, 10);
+
+                    // Single-line, truncated with ellipsis so the row stays
+                    // one line and the Add button visually centers with the
+                    // title instead of being pinned to the top of a wrap.
+                    float remW = ImGui::GetContentRegionAvail().x;
+                    std::string display = name;
+                    if (ImGui::CalcTextSize(display.c_str()).x > remW) {
+                        while (display.size() > 1 &&
+                               ImGui::CalcTextSize((display + "…").c_str()).x > remW) {
+                            display.pop_back();
+                        }
+                        display += "…";
+                    }
+                    // Center the title's optical midline against the
+                    // Add pill's midline. Use FontSize (cap-height) +
+                    // a 1px optical bias since most type sets render
+                    // slightly upper-heavy from the baseline.
+                    float fontH = ImGui::GetFontSize();
+                    float yOff  = (addH - fontH) * 0.5f + 1.0f;
+                    if (yOff > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + yOff);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                    ImGui::TextUnformatted(display.c_str());
+                    if (display != name && ImGui::IsItemHovered())
+                        ParamRow::Tooltip(name.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::Dummy(ImVec2(0, 2)); // breathing room between rows
+
+                    ImGui::PopID();
+                }
+
+#ifdef HAS_WHEP
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0, 2));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                ImGui::Text("Scope (WHEP)");
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
+                if (ImGui::Button("Connect Scope", ImVec2(-1, 0))) {
+                    addWHEPSource(WHEPSource::discoverUrl());
+                }
+                ImGui::PopStyleColor(4);
+#endif
+            }
+        }
+        ImGui::EndTabItem();
+    }
+#else
+    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
+        ImGui::TextDisabled("NDI SDK not installed");
+        ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
+        ImGui::EndTabItem();
+    }
+#endif
+
 
     // Etherea tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("Etherea")) {
@@ -3009,7 +3502,7 @@ void Application::renderUI() {
                 ImGui::Text("Hints");
                 ImGui::PopStyleColor();
                 for (int i = 0; i < (int)hints.size() && i < 3; i++) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.82f, 1.0f, 0.85f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.87f, 0.92f, 0.85f));
                     ImGui::TextWrapped("%d. %s", i + 1, hints[i].c_str());
                     ImGui::PopStyleColor();
                 }
@@ -3035,7 +3528,7 @@ void Application::renderUI() {
         // header below is enough visual separation.)
         ImGui::Dummy(ImVec2(0, 12));
 
-        if (ImGui::CollapsingHeader("Scope Stream", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (flatSection("Scope Stream")) {
             // Auto-refresh scope pods every 5 seconds
             static float lastScopeFetch = -10.0f;
             static std::vector<std::pair<std::string, std::string>> scopePods; // {id, prompt snippet}
@@ -3108,10 +3601,10 @@ void Application::renderUI() {
                 }
 
                 ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.0f, 1.0f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 1.0f, 0.30f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.0f, 1.0f, 0.50f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
                 if (ImGui::SmallButton("Add")) {
                     // Use the mediamtx WHEP URL for this pod — the WKWebView path
                     // will automatically route through Scope's native WebRTC
@@ -3128,14 +3621,9 @@ void Application::renderUI() {
     ImGui::EndTabItem();
     }  // end Etherea tab
 
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Particles")) {
-        ImGui::TextWrapped("GPU particle system — drop onto a layer.");
-        ImGui::Dummy(ImVec2(0, 8));
-        if (ImGui::Button("+ Add Particle System", ImVec2(-1, 0))) {
-            addParticles();
-        }
-        ImGui::EndTabItem();
-    }
+    // Particles tab REMOVED — particle creation is exposed inside the
+    // ShaderClaw tab as a "+ Particle System" entry above the shader
+    // browser, since particles are conceptually another generator source.
 
 #ifdef HAS_OPENCV
     if (sourcesTabsOpen && ImGui::BeginTabItem("Camera")) {
@@ -3170,7 +3658,7 @@ void Application::renderUI() {
     if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
     {
 #if defined(_WIN32) || defined(__APPLE__)
-        if (ImGui::CollapsingHeader("Screen Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (flatSection("Screen Capture")) {
             auto capMonitors = CaptureSource::enumerateMonitors();
             for (int i = 0; i < (int)capMonitors.size(); i++) {
                 ImGui::PushID(i);
@@ -3194,7 +3682,7 @@ void Application::renderUI() {
             }
         }
 
-        if (ImGui::CollapsingHeader("Window Capture", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (flatSection("Window Capture")) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
@@ -3295,19 +3783,18 @@ void Application::renderUI() {
             currentName = m_audioDevices[m_selectedAudioDevice].name.c_str();
         }
 
-        ImGui::AlignTextToFramePadding();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Input");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-
-        // Reserve room for the Refresh button at the right, combo fills the rest.
+        // Label-left + combo (taking remaining width minus refresh button) + Refresh.
         float refreshW = ImGui::CalcTextSize("Refresh").x
                        + ImGui::GetStyle().FramePadding.x * 2.0f;
-        float availRow = ImGui::GetContentRegionAvail().x;
-        float comboW   = availRow - refreshW - ImGui::GetStyle().ItemSpacing.x;
-        if (comboW < 80.0f) comboW = 80.0f;
-        ImGui::SetNextItemWidth(comboW);
+        ParamRow::Begin("INPUT");
+        {
+            // ParamRow primed the next item to the row remainder; shrink it
+            // to leave room for the inline Refresh button.
+            float curW = ImGui::CalcItemWidth();
+            float comboW = curW - refreshW - ImGui::GetStyle().ItemSpacing.x;
+            if (comboW < 80.0f) comboW = 80.0f;
+            ImGui::SetNextItemWidth(comboW);
+        }
         if (ImGui::BeginCombo("##AudioInput", currentName)) {
             if (ImGui::Selectable("System Audio (loopback)", m_selectedAudioDevice == -1)) {
                 m_selectedAudioDevice = -1;
@@ -3328,11 +3815,7 @@ void Application::renderUI() {
             m_audioDevices = VideoRecorder::enumerateAudioDevices();
         }
 #else
-        ImGui::AlignTextToFramePadding();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Input");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
+        ParamRow::Begin("INPUT");
         ImGui::TextDisabled("Audio device selection requires FFmpeg build");
 #endif
 
@@ -3399,7 +3882,7 @@ void Application::renderUI() {
             float rms = m_audioAnalyzer.smoothedRMS();
             draw->AddRectFilled(ImVec2(origin.x + 1, origin.y + 1),
                                 ImVec2(origin.x + 1 + (rmsW - 2) * rms, origin.y + h - 1),
-                                IM_COL32(100, 160, 255, 220), 2.0f);
+                                IM_COL32(220, 224, 230, 220), 2.0f);
             // Beat dot (right side)
             float beat = m_audioAnalyzer.beatDecay();
             ImU32 beatCol = IM_COL32((int)(50 + 205 * beat), (int)(50 + 100 * beat),
@@ -3467,7 +3950,7 @@ void Application::renderUI() {
             {
                 std::string outName = m_audioMixer.outputDeviceName();
                 if (outName.empty()) outName = "Default Output";
-                ImGui::SetNextItemWidth(-1);
+                ParamRow::Begin("OUTPUT");
                 if (ImGui::BeginCombo("##MixerOut", outName.c_str())) {
                     if (ImGui::Selectable("Default Output", m_mixerOutputDevice == -1)) {
                         m_mixerOutputDevice = -1;
@@ -3569,8 +4052,8 @@ void Application::renderUI() {
                     float pulse = isCurrent ? m_bpmSync.beatPulse() : 0.0f;
                     float r = 4.0f + pulse * 2.0f;
                     dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
-                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
-                                                  : IM_COL32(50, 60, 80, 120));
+                                        isCurrent ? IM_COL32(255, 255, 255, (int)(140 + pulse * 115))
+                                                  : IM_COL32(255, 255, 255, 30));
                 }
                 char bpmBuf[16];
                 if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
@@ -3614,13 +4097,11 @@ void Application::renderUI() {
     if (m_ui.isPanelVisible("MIDI")) {
     ImGui::Begin("        ###MIDI");
     {
-        // Device selection
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Device");
-        ImGui::PopStyleColor();
-
         auto devices = m_midiManager.listDevices();
         if (devices.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::Text("Device");
+            ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
             ImGui::TextWrapped("No MIDI devices found. Plug in a controller and reopen this panel.");
             ImGui::PopStyleColor();
@@ -3629,7 +4110,7 @@ void Application::renderUI() {
             const char* currentLabel = m_midiManager.isOpen()
                 ? devices[m_midiManager.deviceIndex()].c_str() : "None";
 
-            ImGui::SetNextItemWidth(-1);
+            ParamRow::Begin("DEVICE");
             if (ImGui::BeginCombo("##MIDIDevice", currentLabel)) {
                 // "None" option to disconnect
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
@@ -3688,12 +4169,12 @@ void Application::renderUI() {
                         "Layer Opacity", "Layer Visible", "Layer Pos X", "Layer Pos Y",
                         "Layer Scale", "Layer Rotation", "Scene Recall", "BPM Set", "BPM Tap"
                     };
-                    ImGui::SetNextItemWidth(-1);
+                    ParamRow::Begin("TARGET");
                     ImGui::Combo("##LearnTarget", &learnTarget, targetNames, IM_ARRAYSIZE(targetNames));
 
                     static int learnLayerIdx = 0;
                     if (learnTarget <= 5) { // Layer targets
-                        ImGui::SetNextItemWidth(-1);
+                        ParamRow::Begin("LAYER");
                         if (ImGui::BeginCombo("##LearnLayer",
                             (learnLayerIdx < m_layerStack.count()) ? m_layerStack[learnLayerIdx]->name.c_str() : "Layer 0")) {
                             for (int li = 0; li < m_layerStack.count(); li++) {
@@ -3847,6 +4328,18 @@ void Application::renderTimelinePanel() {
     // own minimize button at the far right of the transport row instead.
     ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoCollapse);
     ImGui::PopStyleVar();
+
+    // 1px hairline along the timeline window's top edge — explicit because
+    // WindowBorderSize is 0 globally. This is the only outline the bottom
+    // nav should have (matches the main-nav underline at the top).
+    {
+        ImVec2 wpos  = ImGui::GetWindowPos();
+        float  wwid  = ImGui::GetWindowSize().x;
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        fg->AddLine(ImVec2(wpos.x, wpos.y),
+                    ImVec2(wpos.x + wwid, wpos.y),
+                    IM_COL32(255, 255, 255, 25), 1.0f);
+    }
 
     // Auto-resize the dock node when the minimize flag toggles. Docked windows
     // don't obey SetNextWindowSize, so we reach into the dock builder and
@@ -4118,7 +4611,7 @@ void Application::renderTimelinePanel() {
             ImGui::IsItemHovered() ? IM_COL32(255, 255, 255, 255)
                                    : IM_COL32(220, 226, 235, 235),
             tcBuf);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        if (ImGui::IsItemHovered()) ParamRow::Tooltip(
             "Double-click to edit timeline duration.");
         if (tcDouble) ImGui::OpenPopup("##DurEdit");
         (void)tcClicked;
@@ -4176,9 +4669,12 @@ void Application::renderTimelinePanel() {
                 if (s_tlZoom > 64.0f) s_tlZoom = 64.0f;
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Zoom: %.1fx — shows %.1fs at a time\n"
-                                  "(double-click ruler to reset)",
-                                  s_tlZoom, m_timeline.duration() / s_tlZoom);
+                char tipBuf[256];
+                snprintf(tipBuf, sizeof(tipBuf),
+                         "Zoom: %.1fx — shows %.1fs at a time\n"
+                         "(double-click ruler to reset)",
+                         s_tlZoom, m_timeline.duration() / s_tlZoom);
+                ParamRow::Tooltip(tipBuf);
             }
         }
 
@@ -4256,7 +4752,8 @@ void Application::renderTimelinePanel() {
         // Centered group: [Audio combo][Meter] — treated as one block so both
         // sit in the middle of the transport row, with the meter reading next
         // to the source that drives it.
-        float centerGroupW = kAudioComboW + kGap + kMeterW;
+        const float kVoiceIconW = 24.0f;
+        float centerGroupW = kAudioComboW + kGap + kVoiceIconW + kGap + kMeterW;
         std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
         if (!m_mixerEnabled && m_selectedAudioDevice >= 0 &&
             m_selectedAudioDevice < (int)m_audioDevices.size()) {
@@ -4268,6 +4765,117 @@ void Application::renderTimelinePanel() {
         float contentMinX = ImGui::GetWindowContentRegionMin().x;
         float centerX = (contentMinX + contentMaxX) * 0.5f - centerGroupW * 0.5f;
         if (centerX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(centerX);
+        // VOICE icon — sits immediately left of the System Audio combo.
+        // Tap = open the voice popup (listen toggle, partial transcript, type
+        // input, recent log). Pulse-red while listening so the state is
+        // visible even when the popup is closed.
+        {
+            ImVec2 mp = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##VoiceIcon", ImVec2(kVoiceIconW, frameH));
+            bool hov = ImGui::IsItemHovered();
+            bool clk = ImGui::IsItemClicked();
+            if (clk) ImGui::OpenPopup("##VoicePopup");
+
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImVec2 c(mp.x + kVoiceIconW * 0.5f, mp.y + frameH * 0.5f);
+            float r = 5.0f;
+            ImU32 col;
+            if (m_voiceListening) {
+                float pulse = 0.55f + 0.45f * sinf((float)glfwGetTime() * 4.0f);
+                col = IM_COL32(255, 80, 80, (int)(pulse * 230 + 25));
+            } else {
+                col = IM_COL32(255, 255, 255, hov ? 220 : 130);
+            }
+            // Mic capsule
+            d->AddRectFilled(ImVec2(c.x - r * 0.55f, c.y - r),
+                             ImVec2(c.x + r * 0.55f, c.y + r * 0.45f),
+                             col, r * 0.55f);
+            // Stem
+            d->AddLine(ImVec2(c.x, c.y + r * 0.45f),
+                       ImVec2(c.x, c.y + r * 1.15f), col, 1.4f);
+            // Base
+            d->AddLine(ImVec2(c.x - r * 0.7f, c.y + r * 1.15f),
+                       ImVec2(c.x + r * 0.7f, c.y + r * 1.15f), col, 1.4f);
+
+            if (hov && !m_voiceListening) ImGui::SetTooltip("Voice — tap for options");
+
+            ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Always);
+            if (ImGui::BeginPopup("##VoicePopup")) {
+                // Big single toggle: listen on/off. Active = red.
+                if (m_voiceListening) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.95f, 0.30f, 0.30f, 0.85f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 0.40f, 0.40f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.85f, 0.20f, 0.20f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
+                    if (ImGui::Button("● Listening — tap to stop", ImVec2(-1, 32))) {
+                        stopVoiceRecording();
+                    }
+                    ImGui::PopStyleColor(4);
+                } else {
+                    if (ImGui::Button("Tap to listen", ImVec2(-1, 32))) {
+                        startVoiceRecording();
+                    }
+                }
+
+                // Streaming partial transcript (only meaningful while listening).
+                if (m_voiceListening) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          ImVec4(0.84f, 0.88f, 0.94f, 0.95f));
+                    if (m_voicePartial.empty())
+                        ImGui::TextWrapped("…");
+                    else
+                        ImGui::TextWrapped("%s", m_voicePartial.c_str());
+                    ImGui::PopStyleColor();
+                }
+
+                // Inline type-to-command — exists in case voice fails or for
+                // muted environments. Same parser, same dispatch.
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::SetNextItemWidth(-60);
+                bool submit = ImGui::InputTextWithHint(
+                    "##VoiceTypedCmd", "or type a command…",
+                    m_voiceTextInput, sizeof(m_voiceTextInput),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
+                ImGui::SameLine(0, 4);
+                if (ImGui::Button("Run", ImVec2(-FLT_MIN, 0)) || submit) {
+                    if (m_voiceTextInput[0] != '\0') {
+                        auto intent = easel::voice::parse(m_voiceTextInput);
+                        handleVoiceIntent(intent);
+                        m_voiceTextInput[0] = '\0';
+                    }
+                }
+
+                // Last echo (what was just dispatched).
+                if (!m_voiceLastEcho.empty()) {
+                    double age = glfwGetTime() - m_voiceLastEchoTime;
+                    if (age < 8.0) {
+                        float a = (float)std::max(0.0, 1.0 - (age - 5.0) / 3.0);
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                                              ImVec4(0.84f, 0.88f, 0.94f, a));
+                        ImGui::TextWrapped("%s", m_voiceLastEcho.c_str());
+                        ImGui::PopStyleColor();
+                    }
+                }
+
+                // Recent log (compact).
+                if (!m_voiceLog.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Recent");
+                    int n = (int)std::min((size_t)4, m_voiceLog.size());
+                    for (int i = 0; i < n; i++) {
+                        ImGui::TextDisabled("· %s", m_voiceLog[i].c_str());
+                    }
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Try: \"play\", \"fade in fauvism over 3 seconds\"");
+
+                ImGui::EndPopup();
+            }
+        }
+
+        // System Audio combo — sits to the right of the mic icon.
+        ImGui::SameLine(0, kGap);
         ImGui::SetNextItemWidth(kAudioComboW);
         if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
             if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1 && m_audioAnalyzer.wantsSystemAudio())) {
@@ -4343,7 +4951,7 @@ void Application::renderTimelinePanel() {
                 waHov ? IM_COL32(255, 255, 255, 255)
                       : IM_COL32(200, 210, 225, 200),
                 waLbl);
-            if (waHov) ImGui::SetTooltip(
+            if (waHov) ParamRow::Tooltip(
                 "Work Area — the range REC will capture.\n"
                 "Click to edit start/end (or use I / O at playhead).");
             if (waClicked) ImGui::OpenPopup("##WAEditPopup");
@@ -4394,6 +5002,9 @@ void Application::renderTimelinePanel() {
             }
         }
 
+        // (Voice pill removed — voice mic icon now sits next to System Audio
+        // and opens a popup on tap. See the VoiceIcon block in this function.)
+
         // REC — red pill, anchored at the far right next to Work Area time.
         ImGui::SameLine(0, kGap);
         const char* recLabel = (recording || exporting) ? "STOP" : "REC";
@@ -4410,7 +5021,7 @@ void Application::renderTimelinePanel() {
         // actions, so they cluster together at the tail of the transport row.
         ImGui::SameLine(0, kGap);
         renderGoLiveButton();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        if (ImGui::IsItemHovered()) ParamRow::Tooltip(
             (recording || exporting)
               ? "Click to stop recording."
               : "Click to record the Work Area to MP4.");
@@ -4575,8 +5186,11 @@ void Application::renderTimelinePanel() {
                 else                          m_timeline.seek(mk.time);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s  (click to jump, shift-click to delete)",
-                                  mk.name.c_str());
+                char tipBuf[256];
+                snprintf(tipBuf, sizeof(tipBuf),
+                         "%s  (click to jump, shift-click to delete)",
+                         mk.name.c_str());
+                ParamRow::Tooltip(tipBuf);
             }
             ImGui::PopID();
         }
@@ -5180,7 +5794,7 @@ void Application::renderTimelinePanel() {
             if (ImGui::InvisibleButton("##vis", ImVec2(16, 16))) {
                 if (layerForRow) layerForRow->visible = !layerForRow->visible;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            if (ImGui::IsItemHovered()) ParamRow::Tooltip(
                 visible ? "Layer visible — click to hide"
                         : "Layer hidden — click to show");
 
@@ -5216,7 +5830,7 @@ void Application::renderTimelinePanel() {
                     if (l && l->id == track.layerId) { m_selectedLayer = i; break; }
                 }
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            if (ImGui::IsItemHovered()) ParamRow::Tooltip(
                 "Click to edit layer properties");
         }
 
@@ -5524,15 +6138,79 @@ void Application::renderTimelinePanel() {
                               ? std::string("No transition")
                               : std::string("> ") + selClip->transitionInName;
         ImGui::SetNextItemWidth(180);
-        if (ImGui::BeginCombo("##clipXition", preview.c_str())) {
-            if (ImGui::Selectable("No transition", selClip->transitionInName.empty())) {
-                selClip->transitionInName.clear();
+        // Bounded, searchable transition picker. The catalog grew past what a
+        // bare BeginCombo can display — items beyond the screen fold were
+        // unreachable. Phase B replaces this with a live-preview grid; this is
+        // the Phase A floor: search field on top + max-height scrollable child.
+        if (ImGui::BeginCombo("##clipXition", preview.c_str(), ImGuiComboFlags_HeightLargest)) {
+            static char clipXitionFilter[64] = "";
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##clipXitionFilter", "Search transitions...",
+                                     clipXitionFilter, sizeof(clipXitionFilter));
+            ImGui::Separator();
+
+            ImGui::BeginChild("##clipXitionList", ImVec2(260, 240), false,
+                              ImGuiWindowFlags_HorizontalScrollbar);
+            auto matches = [&](const std::string& s) -> bool {
+                if (clipXitionFilter[0] == '\0') return true;
+                std::string a = s, b = clipXitionFilter;
+                std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+                std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+                return a.find(b) != std::string::npos;
+            };
+            if (matches("No transition")) {
+                if (ImGui::Selectable("No transition", selClip->transitionInName.empty())) {
+                    selClip->transitionInName.clear();
+                }
             }
+            ImGui::Separator();
             for (const auto& n : names) {
+                if (!matches(n)) continue;
                 bool sel = (selClip->transitionInName == n);
                 if (ImGui::Selectable(n.c_str(), sel)) selClip->transitionInName = n;
             }
+            ImGui::EndChild();
             ImGui::EndCombo();
+        }
+
+        // Live-preview catalog grid — opens a popup with each transition
+        // running on the user's actual on-stage textures. Phase B: replaces
+        // the BeginCombo as the recommended way to pick a transition; the
+        // combo above stays as a fast keyboard-driven path.
+        ImGui::SameLine(0, 6);
+        if (ImGui::SmallButton("Browse...##clipXitionGrid")) {
+            ImGui::OpenPopup("##clipXitionGridPopup");
+        }
+        ImGui::SetNextWindowSize(ImVec2(640, 460), ImGuiCond_Once);
+        if (ImGui::BeginPopup("##clipXitionGridPopup")) {
+            ImGui::TextDisabled("Live transition catalog");
+            ImGui::SameLine();
+            ImGui::TextDisabled(" · click any tile to apply");
+            ImGui::Separator();
+
+            // Pull two on-stage textures as A/B references — first two layers
+            // with non-zero textureId. Single-layer setups double up.
+            GLuint texA = 0, texB = 0;
+            int srcW = 1280, srcH = 720;
+            for (int li = 0; li < m_layerStack.count(); li++) {
+                const auto& lp = m_layerStack[li];
+                if (!lp) continue;
+                GLuint t = lp->textureId();
+                if (!t) continue;
+                if (texA == 0) texA = t;
+                else if (texB == 0) { texB = t; break; }
+            }
+            if (texB == 0) texB = texA;
+
+            std::string current = selClip->transitionInName;
+            std::string picked  = m_transitionCatalog.drawAndPick(
+                texA, texB, srcW, srcH, current);
+            if (!picked.empty()) {
+                selClip->transitionInName = picked;
+                selClip->transitionInShaderPath.clear(); // grid picks built-ins
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
 
         // Transition duration — only meaningful when a transition is set.
@@ -5564,7 +6242,7 @@ void Application::renderTimelinePanel() {
             }
             ImGui::EndCombo();
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+        if (ImGui::IsItemHovered()) ParamRow::Tooltip(
             "Forward / Loop / Hold are wired. Reverse & Ping-Pong are UI-only.");
 
         // Custom ISF shader path for the per-clip enter transition. Overrides
@@ -5660,15 +6338,28 @@ void Application::renderTimelinePanel() {
                 ImGui::TextDisabled("Effect (built-in)");
                 ImGui::Separator();
                 auto names = GLTransitionLibrary::instance().names();
-                ImGui::PushItemWidth(180);
+                // Searchable, bounded list — see clipXition above for rationale.
+                static char trPickerFilter[64] = "";
+                ImGui::SetNextItemWidth(220);
+                ImGui::InputTextWithHint("##trPickerFilter", "Search...",
+                                         trPickerFilter, sizeof(trPickerFilter));
+                auto trMatches = [&](const std::string& s) -> bool {
+                    if (trPickerFilter[0] == '\0') return true;
+                    std::string a = s, b = trPickerFilter;
+                    std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+                    std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+                    return a.find(b) != std::string::npos;
+                };
+                ImGui::BeginChild("##trPickerList", ImVec2(220, 220), false);
                 for (const auto& n : names) {
+                    if (!trMatches(n)) continue;
                     bool sel = (tr->name == n && tr->shaderPath.empty());
                     if (ImGui::Selectable(n.c_str(), sel)) {
                         tr->name = n;
                         tr->shaderPath.clear(); // switching back to built-in
                     }
                 }
-                ImGui::PopItemWidth();
+                ImGui::EndChild();
 
                 // Custom ISF shader picker — any .fs file that exposes
                 // `from`/`to`/`progress` uniforms becomes a transition. Lets
@@ -5680,7 +6371,7 @@ void Application::renderTimelinePanel() {
                     std::string base = tr->shaderPath;
                     auto slash = base.find_last_of("/\\");
                     if (slash != std::string::npos) base = base.substr(slash + 1);
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.70f, 1.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.87f, 0.92f, 1.0f));
                     ImGui::TextWrapped("%s", base.c_str());
                     ImGui::PopStyleColor();
                 }
@@ -6256,7 +6947,8 @@ void Application::renderTransportBar() {
         ImGui::SetCursorScreenPos(ImVec2(curX, cy + 2));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.05f, 0.06f, 0.08f, 0.9f));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 6));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+        // Use the global 8.0f frame rounding for consistency (was a stray 4.0f).
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
         std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
         if (!m_mixerEnabled && m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
             audioPreview = m_audioDevices[m_selectedAudioDevice].name;
@@ -6319,7 +7011,7 @@ void Application::renderTransportBar() {
                                aspectNums[m_streamAspect], aspectDens[m_streamAspect], 30);
         }
         if (!hasKey && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Set stream key in the Stream tab");
+            ParamRow::Tooltip("Set stream key in the Stream tab");
     } else {
         float pulse = 0.5f + 0.5f * sinf(time * 3.0f);
         draw->AddCircleFilled(ImVec2(curX + 8, cy + btnH * 0.5f), 5.0f, IM_COL32(255, 255, 255, (int)(pulse * 255)));
@@ -6459,6 +7151,30 @@ void Application::renderMenuBar() {
                 if (!path.empty()) captureScreenshot(path);
             }
             ImGui::Separator();
+            // Sources submenu — moved out of the Sources panel header
+            // so the panel itself stays clean. Each source's connection
+            // controls (Connect / Disconnect / Refresh) live here.
+            if (ImGui::BeginMenu("Sources")) {
+                bool scConn = m_shaderClaw.isConnected();
+                if (ImGui::MenuItem(scConn ? "ShaderClaw: Refresh" : "ShaderClaw: (not connected)",
+                                    nullptr, false, scConn)) {
+                    m_shaderClaw.refreshManifest();
+                }
+                if (ImGui::MenuItem("ShaderClaw: Disconnect", nullptr, false, scConn)) {
+                    m_shaderClaw.disconnect();
+                    m_scThumbnails.clear();
+                    m_scThumbRenderer.reset();
+                    m_scPreview.reset();
+                    m_scPreviewPath.clear();
+                }
+                ImGui::Separator();
+                bool ethConn = m_ethereaClient.wsConnected() || m_ethereaClient.sseConnected();
+                if (ImGui::MenuItem("Etherea: Disconnect", nullptr, false, ethConn)) {
+                    m_ethereaClient.disconnect();
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Exit")) {
                 glfwSetWindowShouldClose(m_window, GLFW_TRUE);
             }
@@ -6521,6 +7237,10 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
+        // (Voice mic moved to the timeline transport row — see renderTimelinePanel.
+        // Lives next to REC there since it's a transport-adjacent action, not a
+        // chrome affordance, and menu-bar input handling was eating the hold gesture.)
+
         // Fullscreen lives next to the composition chip in the viewport;
         // GO LIVE lives next to REC in the timeline transport. The menu bar
         // now carries only the Edit/File/Layer/Zone dropdowns so it fits
@@ -6534,18 +7254,22 @@ void Application::renderMenuBar() {
 void Application::renderGoLiveButton() {
     const char* lbl = m_rtmpOutput.isActive() ? "END LIVE" : "GO LIVE";
     if (m_rtmpOutput.isActive()) {
+        // Streaming → red, mirroring REC's domain convention.
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.35f, 0.06f, 0.06f, 0.80f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.10f, 0.10f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.70f, 0.14f, 0.14f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 0.55f, 0.55f, 1.00f));
     } else {
+        // Idle → neutral ghost button matching the rest of the chrome. Bright
+        // white text once a stream key is set (signals "ready"), tertiary text
+        // otherwise (signals "needs config"). No second accent hue.
         bool hasKey = m_streamKeyBuf[0] != '\0';
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.07f, 0.22f, 0.36f, 0.55f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.10f, 0.32f, 0.52f, 0.90f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.14f, 0.40f, 0.62f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 0.04f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 0.16f));
         ImGui::PushStyleColor(ImGuiCol_Text,
-            hasKey ? ImVec4(0.38f, 0.76f, 1.00f, 1.00f)
-                   : ImVec4(0.60f, 0.62f, 0.68f, 1.00f));
+            hasKey ? ImVec4(0.969f, 0.973f, 0.973f, 1.00f)   // textPrimary
+                   : ImVec4(0.541f, 0.561f, 0.596f, 1.00f)); // textTertiary
     }
     if (ImGui::Button(lbl)) {
         if (m_rtmpOutput.isActive()) {
@@ -6691,44 +7415,6 @@ void Application::addScreenCapture(int monitorIndex) {
     layer->id = m_nextLayerId++;
     layer->source = source;
     layer->name = "Screen Capture " + std::to_string(monitorIndex);
-
-    m_layerStack.addLayer(layer);
-    m_selectedLayer = m_layerStack.count() - 1;
-    registerLayerWithZones(layer->id);
-}
-#endif
-
-void Application::addParticles() {
-    m_undoStack.pushState(m_layerStack, m_selectedLayer);
-    auto src = std::make_shared<ParticleSource>();
-    if (!src->init()) {
-        std::cerr << "Failed to init ParticleSource" << std::endl;
-        return;
-    }
-
-    auto layer = std::make_shared<Layer>();
-    layer->id = m_nextLayerId++;
-    layer->source = src;
-    layer->name = "Particle System";
-
-    m_layerStack.addLayer(layer);
-    m_selectedLayer = m_layerStack.count() - 1;
-    registerLayerWithZones(layer->id);
-}
-
-#ifdef HAS_OPENCV
-void Application::addWebcam(int cameraIndex) {
-    m_undoStack.pushState(m_layerStack, m_selectedLayer);
-    auto src = std::make_shared<WebcamSource>();
-    if (!src->open(cameraIndex)) {
-        std::cerr << "Failed to open webcam index " << cameraIndex << std::endl;
-        return;
-    }
-
-    auto layer = std::make_shared<Layer>();
-    layer->id = m_nextLayerId++;
-    layer->source = src;
-    layer->name = "Camera " + std::to_string(cameraIndex);
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
@@ -7797,24 +8483,23 @@ void Application::renderStageInlineSetup(OutputZone& zone) {
 
 // Masks tab: Edge Blend (collapsible).
 void Application::renderEdgeBlendInline(OutputZone& zone) {
-    if (ImGui::CollapsingHeader("Edge Blend")) {
+    if (flatSection("Edge Blend")) {
         auto* ebm = mappingForZone(zone);
         if (ebm) {
-            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "L %.0fpx");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "R %.0fpx");
+            ParamRow::BeginPair("LEFT / RIGHT");
+            ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "%.0fpx");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(ParamRow::PairSecondWidth());
+            ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "%.0fpx");
 
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "T %.0fpx");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(half);
-            ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "B %.0fpx");
+            ParamRow::BeginPair("TOP / BTM");
+            ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "%.0fpx");
+            ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(ParamRow::PairSecondWidth());
+            ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "%.0fpx");
 
-            ImGui::SetNextItemWidth(-1);
-            ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "Gamma %.2f");
+            ParamRow::Begin("GAMMA");
+            ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "%.2f");
         }
     }
 }

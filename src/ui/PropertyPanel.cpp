@@ -1,5 +1,7 @@
 #include "ui/PropertyPanel.h"
 #include "ui/UIManager.h"
+#include "ui/ParamRow.h"
+#include "timeline/Timeline.h"
 #include "stage/StageView.h"
 #include "app/BPMSync.h"
 #include "app/SceneManager.h"
@@ -18,6 +20,15 @@
 #include <imgui_internal.h>
 #include <cstdio>
 #include <unordered_set>
+
+// Uppercase a string in place — used for the editorial ALL-CAPS shader
+// parameter labels. ImGui IDs use a separate `##paramname` token so the
+// uppercased visible label doesn't disturb widget identity.
+static std::string upperLabel(const std::string& s) {
+    std::string out = s;
+    for (auto& ch : out) ch = (char)toupper((unsigned char)ch);
+    return out;
+}
 
 // --- Theme ---
 static const ImVec4 kDimText   = ImVec4(0.45f, 0.50f, 0.58f, 1.0f);
@@ -62,34 +73,34 @@ static bool accentBtn(const char* label, float w = 0) {
 //  - Aesthetic-usability: chevron + label stay calm; hover brightens label.
 //  - Fitts: full-row hit target (InvisibleButton spans the panel width).
 static bool sectionHeader(const char* label, bool* open) {
-    ImGui::Dummy(ImVec2(0, 2));
+    // Flat headline. No chevron, no collapse — sections are always
+    // expanded so parameters are immediately visible. Heading reads
+    // like a bold H2: larger font scale, bright label, generous top
+    // padding, thin separator hairline below to delineate the group.
+    (void)open;  // kept in signature for compatibility with call sites
+    ImGui::Dummy(ImVec2(0, 18));               // generous top breathing room
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float rowW  = ImGui::GetContentRegionAvail().x;
-    float rowH  = ImGui::GetFontSize() + 6.0f;
-    ImGui::PushID(label);
-    bool clicked = ImGui::InvisibleButton("##sec", ImVec2(rowW, rowH));
-    bool hovered = ImGui::IsItemHovered();
-    ImGui::PopID();
-    if (clicked && open) *open = !*open;
+    float fontSize = ImGui::GetFontSize();
+    float headlineSize = fontSize * 1.45f;     // bigger, headline scale
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImU32 textCol = hovered ? IM_COL32(255, 255, 255, 255)
-                            : IM_COL32(235, 240, 250, 240);
-    dl->AddText(ImVec2(rowStart.x, rowStart.y + 3), textCol, label);
-    float chevCx = rowStart.x + rowW - 10.0f;
-    float chevCy = rowStart.y + rowH * 0.5f;
-    ImU32 chevCol = IM_COL32(160, 170, 190, 220);
-    if (open && *open) {
-        dl->AddTriangleFilled(ImVec2(chevCx - 4, chevCy - 2),
-                              ImVec2(chevCx + 4, chevCy - 2),
-                              ImVec2(chevCx,     chevCy + 3), chevCol);
-    } else {
-        dl->AddTriangleFilled(ImVec2(chevCx - 2, chevCy - 4),
-                              ImVec2(chevCx - 2, chevCy + 4),
-                              ImVec2(chevCx + 3, chevCy),     chevCol);
-    }
-    ImGui::Dummy(ImVec2(0, 4));
-    return open ? *open : true;
+    // Bright headline. Eye-catching but not distracting. The label is
+    // drawn at a larger font size by passing it explicitly to AddText.
+    dl->AddText(ImGui::GetFont(), headlineSize,
+                ImVec2(rowStart.x, rowStart.y),
+                IM_COL32(245, 248, 254, 255), label);
+
+    // Reserve vertical space so subsequent widgets render below.
+    ImGui::Dummy(ImVec2(rowW, headlineSize + 6.0f));
+
+    // Hairline separator below the headline for clear group rhythm.
+    float lineY = ImGui::GetCursorScreenPos().y + 2.0f;
+    dl->AddLine(ImVec2(rowStart.x, lineY),
+                ImVec2(rowStart.x + rowW, lineY),
+                IM_COL32(255, 255, 255, 22), 1.0f);
+    ImGui::Dummy(ImVec2(0, 8));               // bottom breathing room
+    return true;                              // always expanded
 }
 
 // Horizontal pill-group selector: active pill is filled, others are outlined.
@@ -200,20 +211,25 @@ static bool pillSlider(const char* label, float* v, float lo, float hi,
     return changed;
 }
 
-// Draw a small lightning-bolt glyph inside a square at (x,y) with size s.
-// Two overlapping triangles produce a classic ⚡ silhouette.
+// Draw a solid filled lightning-bolt glyph inside a square at (cx, cy) with
+// size s. Uses a single 7-vertex convex-ish polygon that reads as one clean
+// shape rather than two overlapping triangles. AddConvexPolyFilled gives us
+// anti-aliased edges so the bolt no longer looks pixelated.
 static void drawBolt(ImDrawList* dl, float cx, float cy, float s, ImU32 col) {
     float h = s * 0.5f;
-    // Top arm (slants up-right)
-    dl->AddTriangleFilled(ImVec2(cx + h * 0.55f, cy - h),
-                          ImVec2(cx - h * 0.55f, cy + h * 0.15f),
-                          ImVec2(cx + h * 0.15f, cy + h * 0.15f),
-                          col);
-    // Bottom arm (slants down-left), overlapping at the middle
-    dl->AddTriangleFilled(ImVec2(cx - h * 0.55f, cy + h),
-                          ImVec2(cx + h * 0.55f, cy - h * 0.15f),
-                          ImVec2(cx - h * 0.15f, cy - h * 0.15f),
-                          col);
+    // 7-vertex bolt outline, traced clockwise starting from the top spike.
+    // Coordinates chosen so the silhouette reads as the classic ⚡ glyph
+    // with slightly thicker arms than the previous two-triangle version.
+    ImVec2 pts[7] = {
+        ImVec2(cx + h * 0.10f, cy - h * 1.00f),  // top spike
+        ImVec2(cx - h * 0.55f, cy + h * 0.10f),  // upper-left notch (inside)
+        ImVec2(cx - h * 0.05f, cy + h * 0.10f),  // mid-left waist
+        ImVec2(cx - h * 0.40f, cy + h * 1.00f),  // bottom spike
+        ImVec2(cx + h * 0.55f, cy - h * 0.10f),  // mid-right waist (top edge of lower arm)
+        ImVec2(cx + h * 0.05f, cy - h * 0.10f),  // upper-right notch
+        ImVec2(cx + h * 0.45f, cy - h * 1.00f),  // top-right shoulder back to spike line
+    };
+    dl->AddConvexPolyFilled(pts, 7, col);
 }
 
 // Parameter row styled after the reference UI: muted label (top-left) + right-aligned
@@ -231,30 +247,46 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                                      const char* fmt = "%.2f") {
     ParamSliderResult r;
     ImGui::PushID(id);
-    ImGui::Dummy(ImVec2(0, 8)); // top breathing room
+    ImGui::Dummy(ImVec2(0, 14)); // top breathing room — generous, matches
+                                  // the reference style's clear group rhythm
 
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH  = ImGui::GetFontSize();
-    float trackH  = 6.0f;
-    float handleR = 8.0f;
-    float rowH    = labelH + 20.0f;
+    // Thicker pill track + larger circular thumb to match the reference
+    // style: track reads as a rounded pill (not a hairline) and the
+    // thumb is a confident solid dot the eye latches onto.
+    float trackH  = 10.0f;
+    float handleR = 11.0f;
+    float rowH    = labelH + 28.0f;
     float boltBox = 18.0f; // hit-target square around the bolt glyph
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     // ⚡ Bolt button — leftmost affordance. Clicking opens the bind menu.
+    // Wrapped in a subtle dark-rounded square (~18px, 4px radius) so it
+    // reads as a tactile button rather than a floating glyph.
     ImGui::SetCursorScreenPos(ImVec2(rowStart.x - 2.0f,
                                      rowStart.y + (labelH - boltBox) * 0.5f));
     bool boltClicked = ImGui::InvisibleButton("##bolt", ImVec2(boltBox, boltBox));
     bool boltHovered = ImGui::IsItemHovered();
     if (boltClicked) r.openBindMenu = true;
 
+    // Rounded background — brightens on hover so the user sees the tap target.
+    ImVec2 bMin(rowStart.x - 2.0f, rowStart.y + (labelH - boltBox) * 0.5f);
+    ImVec2 bMax(bMin.x + boltBox, bMin.y + boltBox);
+    ImU32 bgCol = boltHovered ? IM_COL32(255, 255, 255, 36)
+                              : IM_COL32(255, 255, 255, 16);
+    dl->AddRectFilled(bMin, bMax, bgCol, 4.0f);
+
+    // Bolt fill: bound → amber, active (white when bound treated as "on") —
+    // when off, fill is a muted gray; when on (bound), fill is the bright
+    // amber accent. This keeps active/inactive state differentiated.
     ImU32 boltCol = bound       ? IM_COL32(232, 150,  70, 255)
                   : boltHovered ? IM_COL32(215, 225, 240, 230)
-                                : IM_COL32(120, 128, 142, 180);
-    drawBolt(dl, rowStart.x + boltBox * 0.5f - 2.0f,
-                 rowStart.y + labelH * 0.55f,
+                                : IM_COL32(120, 128, 142, 200);
+    drawBolt(dl, rowStart.x - 2.0f + boltBox * 0.5f,
+                 rowStart.y + (labelH - boltBox) * 0.5f + boltBox * 0.5f,
                  12.0f, boltCol);
 
     float labelX = rowStart.x + boltBox + 4.0f;
@@ -268,14 +300,17 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                 IM_COL32(235, 240, 250, 245), valbuf);
 
     // Right-click anywhere on the row also opens the bind menu.
-    float trackY = rowStart.y + labelH + 10.0f;
+    // More space between the label/value row and the slider track so each
+    // control reads as its own block — matches the airy reference layout.
+    float trackY = rowStart.y + labelH + 14.0f;
     ImGui::SetCursorScreenPos(ImVec2(labelX, rowStart.y));
     ImGui::InvisibleButton("##row", ImVec2(w - (labelX - rowStart.x), labelH + 4));
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) r.openBindMenu = true;
 
-    // Track drag hit-target.
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 6.0f));
-    ImGui::InvisibleButton("##track", ImVec2(w, trackH + 12.0f));
+    // Track drag hit-target — slightly oversized vertically so the user
+    // can grab the slider with their thumb-circle, not just the hairline.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 8.0f));
+    ImGui::InvisibleButton("##track", ImVec2(w, trackH + 16.0f));
     bool tActive  = ImGui::IsItemActive();
     bool hovered  = ImGui::IsItemHovered();
     if (ImGui::IsItemActivated()) r.activated = true;
@@ -291,25 +326,40 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
     if (norm < 0) norm = 0; if (norm > 1) norm = 1;
 
-    // Track background + fill (fill tint shifts to amber when bound).
-    ImU32 fillCol = bound ? IM_COL32(232, 150, 70, 190)
-                          : IM_COL32(255, 255, 255, 52);
+    // Track background + fill — pill track. Background opacity bumped
+    // (14 → 28) so the rounded pill reads as a clear container rather
+    // than a faint hairline. Fill tint shifts to amber when bound.
+    ImU32 fillCol = bound ? IM_COL32(232, 150, 70, 200)
+                          : IM_COL32(255, 255, 255, 60);
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
-                      IM_COL32(255, 255, 255, 14), trackH * 0.5f);
+                      IM_COL32(255, 255, 255, 28), trackH * 0.5f);
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w * norm + 0.5f, trackY + trackH),
                       fillCol, trackH * 0.5f);
-    // Handle
+    // Solid circular thumb — bigger and brighter than the previous
+    // version so the eye latches onto it as the primary affordance.
+    // Subtle inner highlight at the top of the dot adds a polished feel.
     float hx = rowStart.x + w * norm;
     float hy = trackY + trackH * 0.5f;
     ImU32 handleCol = tActive  ? IM_COL32(255, 255, 255, 255)
-                    : hovered  ? IM_COL32(240, 244, 252, 255)
-                               : IM_COL32(220, 225, 235, 255);
-    dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
-    dl->AddCircle(ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
+                    : hovered  ? IM_COL32(245, 248, 254, 255)
+                               : IM_COL32(232, 236, 244, 255);
+    // Soft drop shadow under the thumb for elevation
+    dl->AddCircleFilled(ImVec2(hx, hy + 1.5f), handleR + 1.5f,
+                        IM_COL32(0, 0, 0, 60), 24);
+    dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol, 24);
+    // Inner dark accent dot for the "solid black thumb" reference look
+    // when not interacting (handle reads as a confident filled circle
+    // with weight, not a flat disc).
+    if (!tActive && !hovered) {
+        dl->AddCircleFilled(ImVec2(hx, hy), handleR * 0.55f,
+                            IM_COL32(40, 44, 56, 220), 20);
+    }
 
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 10.0f));
+    // Generous bottom space so each row has airy breathing room — the
+    // reference style explicitly separates each control as its own block.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 14.0f));
     ImGui::PopID();
     return r;
 }
@@ -461,43 +511,27 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // an icon. The "###ID" half keeps the internal window name stable
     // for dock/focus lookups.
     ImGui::Begin("        ###Properties");
+    // 1px outline only when floating — when docked, dock-node edges already
+    // separate the panel from its neighbours and a window border just adds
+    // a visual seam.
+    if (!ImGui::IsWindowDocked()) {
+        ImVec2 mn = ImGui::GetWindowPos();
+        ImVec2 mx(mn.x + ImGui::GetWindowSize().x,
+                  mn.y + ImGui::GetWindowSize().y);
+        ImGui::GetWindowDrawList()->AddRect(
+            mn, mx, IM_COL32(255, 255, 255, 50),
+            ImGui::GetStyle().WindowRounding, 0, 1.0f);
+    }
 
     // Stage Setup section — only when the workspace is Stage mode and
-    // we have a StageView reference. Hosts the gizmo Tool selector
-    // (Move/Rotate/Scale) and the displays/projectors/surfaces
-    // inspector that previously lived inside the Stage panel body.
+    // we have a StageView reference. Tool selection (Move/Rotate/Scale)
+    // lives on the floating left toolbar; this panel is the displays
+    // inspector ONLY so the user has a single source of truth.
     if (m_stageView && UIManager::sMode == UIManager::WorkspaceMode::Stage) {
-        // Tool — segmented Move/Rotate/Scale toggle for the gizmo.
-        // Drives StageView::gizmoOp() which the 3D viewport reads each
-        // frame to pick the matching ImGuizmo operation.
-        int& tool = m_stageView->gizmoOp();
-        const char* toolLabels[] = {"Move", "Rotate", "Scale"};
-        ImGui::TextDisabled("TOOL");
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(4, 4));
-        for (int i = 0; i < 3; i++) {
-            if (i > 0) ImGui::SameLine();
-            bool active = (tool == i);
-            if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
-            }
-            float w = (ImGui::GetContentRegionAvail().x - 8.0f) / (3 - i);
-            if (ImGui::Button(toolLabels[i], ImVec2(w, 0))) tool = i;
-            ImGui::PopStyleColor(3);
-        }
-        ImGui::PopStyleVar(2);
-        ImGui::Spacing();
-
         ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
-        bool setupOpen = ImGui::CollapsingHeader("Setup", ImGuiTreeNodeFlags_DefaultOpen);
+        bool setupOpen = sectionHeader("Setup", nullptr);
         ImGui::PopStyleColor(3);
         if (setupOpen) {
             static const std::vector<unsigned int> kEmpty;
@@ -515,7 +549,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
-        bool audioSectionOpen = ImGui::CollapsingHeader("Audio", ImGuiTreeNodeFlags_DefaultOpen);
+        bool audioSectionOpen = sectionHeader("Audio", nullptr);
         ImGui::PopStyleColor(3);
 
         if (audioSectionOpen) {
@@ -534,8 +568,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     float pulse = isCurrent ? bpmSync->beatPulse() : 0.0f;
                     float r = 4.0f + pulse * 2.0f;
                     dl->AddCircleFilled(ImVec2(dotCX + 6, dotY), r,
-                                        isCurrent ? IM_COL32(0, 220, 255, (int)(140 + pulse * 115))
-                                                  : IM_COL32(50, 60, 80, 120));
+                                        isCurrent ? IM_COL32(255, 255, 255, (int)(140 + pulse * 115))
+                                                  : IM_COL32(255, 255, 255, 30));
                 }
                 char bpmBuf[16];
                 if (currentBPM > 0) snprintf(bpmBuf, sizeof(bpmBuf), "%.1f BPM", currentBPM);
@@ -561,9 +595,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (ImGui::DragFloat("##BPMVal", &bpmVal, 0.5f, 0.0f, 300.0f, "%.0f BPM"))
                     bpmSync->setBPM(bpmVal);
                 ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.05f, 0.05f, 0.15f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.1f, 0.1f, 0.3f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.35f, 0.35f, 0.8f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.30f, 0.32f, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.30f, 0.32f, 0.30f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.30f, 0.32f, 0.85f));
                 if (ImGui::Button("Reset", ImVec2(btnW, 0))) {
                     bpmSync->setBPM(0);
                     bpmSync->resetPhase();
@@ -623,7 +657,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.15f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
-        bool scenesOpen = ImGui::CollapsingHeader("Scenes", ImGuiTreeNodeFlags_DefaultOpen);
+        bool scenesOpen = sectionHeader("Scenes", nullptr);
         ImGui::PopStyleColor(3);
 
         if (scenesOpen) {
@@ -695,6 +729,56 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (selected) ImGui::SetItemDefaultFocus();
             }
             ImGui::EndCombo();
+        }
+        // Phase C: keyframe-state diamond. Touch-friendly affordance — always
+        // visible, three states tell you whether this parameter is animated and
+        // whether the playhead is on a keyframe right now.
+        //  - hollow + dim         → not animated. Tap = create lane, first key.
+        //  - filled + accent       → on a key at playhead. Tap = remove that key.
+        //  - hollow + accent ring  → animated, playhead between keys. Tap = add key.
+        // The diamond + slider sit on the same row so the affordance is co-located
+        // with the value it controls.
+        if (m_timeline) {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            const float box = 16.0f;          // tap target
+            const float diam = 6.0f;          // visual radius
+            ImVec2 center(cur.x + box * 0.5f, cur.y + ImGui::GetFrameHeight() * 0.5f);
+            ImGui::InvisibleButton("##animOpacity", ImVec2(box, ImGui::GetFrameHeight()));
+            bool clicked = ImGui::IsItemClicked();
+            bool hov     = ImGui::IsItemHovered();
+
+            const TimelineLane* lane = m_timeline->findLaneByParam(layer->id, "opacity");
+            bool animated = (lane != nullptr);
+            bool atKey    = animated && m_timeline->hasKeyframeAt(
+                                layer->id, "opacity", m_timeline->playhead());
+
+            ImU32 col;
+            if (atKey)             col = IM_COL32(255, 255, 255, 255);
+            else if (animated)     col = IM_COL32(255, 255, 255, hov ? 200 : 130);
+            else                   col = IM_COL32(255, 255, 255, hov ?  90 :  40);
+
+            // Diamond — rotated square. Filled when on a key, outline otherwise.
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImVec2 p0(center.x,        center.y - diam);
+            ImVec2 p1(center.x + diam, center.y);
+            ImVec2 p2(center.x,        center.y + diam);
+            ImVec2 p3(center.x - diam, center.y);
+            if (atKey) d->AddQuadFilled(p0, p1, p2, p3, col);
+            else       d->AddQuad      (p0, p1, p2, p3, col, 1.4f);
+
+            if (hov) ParamRow::Tooltip(
+                animated
+                    ? (atKey ? "Remove keyframe at playhead"
+                             : "Add keyframe at playhead")
+                    : "Animate this parameter");
+
+            if (clicked) {
+                undoNeeded = true;
+                m_timeline->toggleKeyframeAt(layer->id, "opacity",
+                                             m_timeline->playhead(),
+                                             layer->opacity);
+            }
+            ImGui::SameLine(0, 4);
         }
         pillSlider("Opacity", &layer->opacity, 0.0f, 1.0f, "%.2f");
     }
@@ -846,8 +930,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 float w = ImGui::GetContentRegionAvail().x;
                 switch (fx.type) {
                 case EffectType::Blur:
-                    ImGui::SetNextItemWidth(w);
-                    ImGui::SliderFloat("##blur", &fx.blurRadius, 0.0f, 20.0f, "Blur %.1f");
+                    ParamRow::Begin("BLUR");
+                    ImGui::SliderFloat("##blur", &fx.blurRadius, 0.0f, 20.0f, "%.1f");
                     break;
                 case EffectType::ColorAdjust: {
                     float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -867,8 +951,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // No params
                     break;
                 case EffectType::Pixelate:
-                    ImGui::SetNextItemWidth(w);
-                    ImGui::SliderFloat("##pix", &fx.pixelSize, 1.0f, 64.0f, "Size %.0f");
+                    ParamRow::Begin("SIZE");
+                    ImGui::SliderFloat("##pix", &fx.pixelSize, 1.0f, 64.0f, "%.0f");
                     break;
                 case EffectType::Feedback: {
                     float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -880,8 +964,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     break;
                 }
                 case EffectType::Glow: {
-                    ImGui::SetNextItemWidth(w);
-                    ImGui::SliderFloat("##glowT", &fx.glowThreshold, 0.0f, 1.0f, "Thresh %.2f");
+                    ParamRow::Begin("THRESHOLD");
+                    ImGui::SliderFloat("##glowT", &fx.glowThreshold, 0.0f, 1.0f, "%.2f");
                     float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
                     ImGui::SetNextItemWidth(half);
                     ImGui::SliderFloat("##glowR", &fx.glowRadius, 1.0f, 40.0f, "Rad %.1f");
@@ -999,7 +1083,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (sel >= 0 && sel < (int)mosaicAudio->devices.size()) {
                     srcLabel = mosaicAudio->devices[sel].name.c_str();
                 }
-                ImGui::SetNextItemWidth(-1);
+                ParamRow::Begin("AUDIO SRC");
                 if (ImGui::BeginCombo("##AudioSrc", srcLabel)) {
                     if (ImGui::Selectable("System Audio", sel == -1)) {
                         *mosaicAudio->selectedDevice = -1;
@@ -1055,10 +1139,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             hovered = true;
                         }
                         if (active) {
-                            draw->AddRectFilled(cMin, cMax, IM_COL32(0, 180, 235, 90), 2.0f);
+                            draw->AddRectFilled(cMin, cMax, IM_COL32(255, 255, 255, 90), 2.0f);
                             draw->AddRect(cMin, cMax, IM_COL32(255, 255, 255, 60), 2.0f);
                         } else if (hovered) {
-                            draw->AddRectFilled(cMin, cMax, IM_COL32(0, 180, 235, 35), 2.0f);
+                            draw->AddRectFilled(cMin, cMax, IM_COL32(255, 255, 255, 35), 2.0f);
                             draw->AddRect(cMin, cMax, IM_COL32(255, 255, 255, 15), 2.0f);
                         } else {
                             draw->AddRectFilled(cMin, cMax, IM_COL32(255, 255, 255, 6), 2.0f);
@@ -1173,9 +1257,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             bool muted = (vol == 0.0f);
 
             // Mute toggle button
-            ImGui::PushStyleColor(ImGuiCol_Button, muted ? ImVec4(0.6f, 0.1f, 0.1f, 0.25f) : ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, muted ? ImVec4(0.8f, 0.15f, 0.15f, 0.40f) : ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
-            ImGui::PushStyleColor(ImGuiCol_Text, muted ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, muted ? ImVec4(0.85f, 0.30f, 0.32f, 0.25f) : ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, muted ? ImVec4(0.85f, 0.30f, 0.32f, 0.45f) : ImVec4(1.0f, 1.0f, 1.0f, 0.22f));
+            ImGui::PushStyleColor(ImGuiCol_Text, muted ? ImVec4(0.85f, 0.30f, 0.32f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
             if (ImGui::Button(muted ? "Unmute" : "Mute", ImVec2(54, 0))) {
                 static float s_preMuteVol = 1.0f;
                 if (muted) {
@@ -1211,8 +1295,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             // compute a negative cursor offset on narrow panels.
             ImGui::Dummy(ImVec2(0, 4));
 
-            dimLabel("Spawn Shape", kRowLabel, false);
-            ImGui::SetNextItemWidth(-FLT_MIN);
+            ParamRow::Begin("SPAWN SHAPE");
             if (ImGui::BeginCombo("##PSShape", particleSpawnShapeName(em.spawnShape))) {
                 for (int i = 0; i < (int)ParticleSpawnShape::COUNT; i++) {
                     bool sel = ((int)em.spawnShape == i);
@@ -1237,10 +1320,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
             if (ImGui::Checkbox("Additive Blend", &em.additive)) {}
 
-            dimLabel("Render Mode", kRowLabel, false);
+            ParamRow::Begin("RENDER MODE");
             const char* modes[] = {"Soft Sprite", "Textured", "Ring"};
             int rm = em.renderMode; if (rm < 0 || rm > 2) rm = 0;
-            ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::BeginCombo("##PSRender", modes[rm])) {
                 for (int i = 0; i < 3; i++) {
                     bool sel = (rm == i);
@@ -1293,7 +1375,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::SameLine();
                 if (ImGui::SmallButton("dn")) { toMoveIdx = i; toMoveDir = +1; }
                 ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.35f, 0.35f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.30f, 0.32f, 1.0f));
                 if (ImGui::SmallButton("remove")) toRemove = i;
                 ImGui::PopStyleColor();
 
@@ -1398,7 +1480,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 currentLabel = customLabel;
             }
 
-            ImGui::SetNextItemWidth(-FLT_MIN);
+            ParamRow::Begin("RESOLUTION");
             if (ImGui::BeginCombo("##ShaderRes", currentLabel)) {
                 for (auto& p : presets) {
                     bool sel = !customMode
@@ -1491,7 +1573,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     else if (range < 1.0f)   fmt = "%.3f";
 
                     float v = std::get<float>(input.value);
-                    ParamSliderResult ps = paramSlider("##val", input.name.c_str(),
+                    std::string lblUp = upperLabel(input.name);
+                    ParamSliderResult ps = paramSlider("##val", lblUp.c_str(),
                                                       &v, input.minVal, input.maxVal,
                                                       isBound, fmt);
                     if (ps.changed) input.value = v;
@@ -1528,7 +1611,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             if (midi) {
                                 bool learning = midi->isLearning();
                                 if (learning) {
-                                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.3f, 0.1f, 0.6f));
+                                    // Active/destructive: monochrome-friendly red.
+                                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.30f, 0.32f, 0.45f));
                                     if (ImGui::Button("Learning... (move a knob)", ImVec2(-1, 0))) {
                                         midi->stopLearn();
                                     }
@@ -1569,13 +1653,15 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // when a binding is active.)
                 } else if (input.type == "color") {
                     glm::vec4 c = std::get<glm::vec4>(input.value);
-                    if (paramColorRow("##col", input.name.c_str(), &c)) {
+                    std::string lblUp = upperLabel(input.name);
+                    if (paramColorRow("##col", lblUp.c_str(), &c)) {
                         input.value = c;
                         undoNeeded = true;
                     }
                 } else if (input.type == "bool") {
                     bool b = std::get<bool>(input.value);
-                    if (paramToggleRow("##bool", input.name.c_str(), &b)) {
+                    std::string lblUp = upperLabel(input.name);
+                    if (paramToggleRow("##bool", lblUp.c_str(), &b)) {
                         input.value = b;
                         undoNeeded = true;
                     }
@@ -1583,8 +1669,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // Two stacked paramSliders (X / Y) keeps the clean
                     // label-top, pill-track-below rhythm.
                     glm::vec2 p = std::get<glm::vec2>(input.value);
-                    std::string labelX = input.name + "  X";
-                    std::string labelY = input.name + "  Y";
+                    std::string lblUp = upperLabel(input.name);
+                    std::string labelX = lblUp + "  X";
+                    std::string labelY = lblUp + "  Y";
                     auto rx = paramSlider("##px", labelX.c_str(), &p.x,
                                           input.minVec.x, input.maxVec.x, false);
                     auto ry = paramSlider("##py", labelY.c_str(), &p.y,
@@ -1600,15 +1687,15 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     int iv = (int)v;
                     if (!input.longLabels.empty()) {
                         ImGui::Dummy(ImVec2(0, 6));
-                        dimLabel(input.name.c_str());
+                        std::string lblUp = upperLabel(input.name);
 
                         int cur = iv;
                         if (cur < 0) cur = 0;
                         if (cur > (int)input.longLabels.size() - 1)
                             cur = (int)input.longLabels.size() - 1;
                         const char* preview = input.longLabels[cur].c_str();
-                        ImGui::SetNextItemWidth(-FLT_MIN);
                         ImGui::PushID(input.name.c_str());
+                        ParamRow::Begin(lblUp.c_str());
                         if (ImGui::BeginCombo("##longCombo", preview)) {
                             for (int i = 0; i < (int)input.longLabels.size(); i++) {
                                 bool sel = (i == cur);
@@ -1624,7 +1711,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         ImGui::Dummy(ImVec2(0, 2));
                     } else {
                         float fv = (float)iv;
-                        auto r = paramSlider("##val", input.name.c_str(),
+                        std::string lblUp = upperLabel(input.name);
+                        auto r = paramSlider("##val", lblUp.c_str(),
                                              &fv, input.minVal, input.maxVal,
                                              false, "%.0f");
                         if (r.changed) input.value = (float)(int)(fv + 0.5f);
@@ -1635,8 +1723,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     int maxLen = (int)input.maxVal;
                     if (maxLen <= 0) maxLen = 12;
 
+                    std::string lblUp = upperLabel(input.name);
                     ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-                    ImGui::Text("%s", input.name.c_str());
+                    ImGui::Text("%s", lblUp.c_str());
                     ImGui::PopStyleColor();
 
                     // Data bus binding dropdown
@@ -1670,7 +1759,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         std::string val = bus ? bus->get(currentBinding) : "";
                         if (val.size() > (size_t)maxLen) val = val.substr(val.size() - maxLen);
                         ImGui::SetNextItemWidth(-1);
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.82f, 1.0f, 0.85f));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.87f, 0.92f, 0.85f));
                         ImGui::TextWrapped("%s", val.empty() ? "..." : val.c_str());
                         ImGui::PopStyleColor();
                     } else {
@@ -1692,10 +1781,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                             speech->targetSource == shaderSrc &&
                                             speech->targetParam == input.name;
                             if (isTarget) {
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 0.35f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.15f, 0.15f, 0.50f));
-                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.2f, 0.2f, 0.65f));
-                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.30f, 0.32f, 0.30f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.30f, 0.32f, 0.55f));
+                                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.85f, 0.30f, 0.32f, 0.75f));
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.30f, 0.32f, 1.0f));
                                 if (ImGui::Button("STOP", ImVec2(micW, 0))) {
                                     speech->listening = false;
                                     speech->targetSource = nullptr;
@@ -1735,12 +1824,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         for (const char* g : generics) if (n == g) return true;
                         return false;
                     };
-                    const char* displayLabel = isGenericImageName(input.name)
-                                               ? "Texture"
-                                               : input.name.c_str();
-                    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-                    ImGui::Text("%s", displayLabel);
-                    ImGui::PopStyleColor();
+                    std::string imgLabelStorage = isGenericImageName(input.name)
+                                                  ? std::string("TEXTURE")
+                                                  : upperLabel(input.name);
+                    const char* displayLabel = imgLabelStorage.c_str();
 
                     auto& bindings = shaderSrc->imageBindings();
                     auto it = bindings.find(input.name);
@@ -1756,7 +1843,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         }
                     }
 
-                    ImGui::SetNextItemWidth(-1);
+                    ParamRow::Begin(displayLabel);
                     if (ImGui::BeginCombo("##imgsrc", preview.c_str())) {
                         // "None" option
                         if (ImGui::Selectable("None", currentSrcId == 0)) {
@@ -1796,8 +1883,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     transLabels[i] = transitionTypeName((TransitionType)i);
                 int curT = (int)layer->transitionType;
                 ImGui::Dummy(ImVec2(0, 10));
-                dimLabel("Transition");
-                ImGui::SetNextItemWidth(-FLT_MIN);
+                ParamRow::Begin("TRANSITION");
                 if (ImGui::BeginCombo("##TransType", transLabels[curT])) {
                     for (int i = 0; i < (int)TransitionType::COUNT; i++) {
                         bool sel = (i == curT);
@@ -1872,13 +1958,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         if (speech && speech->available && speech->whisper) {
             auto& devices = speech->whisper->captureDevices();
             if (!devices.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-                ImGui::Text("Mic");
-                ImGui::PopStyleColor();
                 int sel = speech->whisper->selectedDevice();
                 std::string preview = (sel < 0) ? "Default" :
                     (sel < (int)devices.size() ? devices[sel].name : "Unknown");
-                ImGui::SetNextItemWidth(-1);
+                ParamRow::Begin("MIC");
                 if (ImGui::BeginCombo("##mic_device", preview.c_str())) {
                     if (ImGui::Selectable("Default", sel < 0)) {
                         if (!speech->listening) speech->whisper->selectDevice(-1);

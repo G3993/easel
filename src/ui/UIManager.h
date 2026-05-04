@@ -35,6 +35,13 @@ public:
     void handleZoom();  // call each frame to handle Cmd+/- zoom
     float uiScale() const { return m_uiZoom; }
 
+    // Width of the right floating dock host (Mapping/Properties column),
+    // measured in the same coordinate space as ImGui::GetContentRegionAvail.
+    // Other panels (e.g. the Stage 3D viewport) read this to reserve space
+    // so the right column reads as a fixed anchored rail rather than an
+    // overlay covering the central content.
+    float rightRailWidth() const { return m_rightFloatW; }
+
     Workspace workspace() const { return m_workspace; }
     void setWorkspace(Workspace w);
 
@@ -45,6 +52,16 @@ public:
     //   Show   → live-performance focus: timeline + MIDI + audio
     enum class WorkspaceMode { Canvas, Stage, Show };
     static WorkspaceMode sMode;
+    static WorkspaceMode sPrevMode;
+    // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
+    // with an ease-out cubic. Set via setMode() — never write sMode directly
+    // from new code or you'll skip the animation.
+    static double sModeTransitionStart;
+    static constexpr double kModeTransitionSec = 0.28;
+    static void  setMode(WorkspaceMode m);
+    // 0..1 alpha to render `m` at this frame. 1.0 when no transition; ramps
+    // 0→1 for the incoming mode during transition; 0 for any other mode.
+    static float modeAlpha(WorkspaceMode m);
 
     // True if a panel with this title should render in the current workspace.
     // Call sites that render panels (inline or via class.render()) should

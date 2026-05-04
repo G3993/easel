@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 #include <nlohmann/json.hpp>
 
 class LayerStack;
@@ -245,6 +246,25 @@ public:
     TimelineLane* findLane(uint32_t id);
     std::vector<TimelineLane>& lanes()             { return m_lanes; }
     const std::vector<TimelineLane>& lanes() const { return m_lanes; }
+
+    // Phase C: keyframe runtime. Lanes evaluated once per frame in
+    // sampleAnimatedParams(); LayerStack writes are done by callers via
+    // applyAnimatedParams(). Param keys are "L<layerId>.<paramName>" so a
+    // single flat map can address every animatable value.
+    TimelineLane* findLaneByParam(uint32_t layerId, const std::string& paramName);
+    const TimelineLane* findLaneByParam(uint32_t layerId, const std::string& paramName) const;
+    bool  hasKeyframeAt(uint32_t layerId, const std::string& paramName,
+                        double t, double epsilonSec = 0.04) const;
+    // Adds a key at t (using currentValue) if none, removes it if present.
+    // Creates the lane on first key. Returns the new "is animated" state.
+    bool  toggleKeyframeAt(uint32_t layerId, const std::string& paramName,
+                           double t, float currentValue, double epsilonSec = 0.04);
+    // Linear interpolation between adjacent keyframes; clamps before/after.
+    float evalLaneAt(const TimelineLane& lane, double t) const;
+    // Walk all Automation lanes, write resolved values into out (keyed by
+    // "L<layerId>.<paramName>"). Caller decides what to do with them.
+    void  sampleAnimatedParams(std::unordered_map<std::string, float>& out) const;
+    static std::string animKey(uint32_t layerId, const std::string& paramName);
 
     // JSON serialization (keys used by .easel project file).
     nlohmann::json toJson() const;

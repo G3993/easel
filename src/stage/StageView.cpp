@@ -1,6 +1,7 @@
 #include "stage/StageView.h"
 #include <imgui.h>
 #include "ui/ImGuizmo.h"
+#include "ui/ParamRow.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
@@ -67,13 +68,12 @@ bool StageView::loadModel(const std::string& path) {
     m_modelScale = loader.modelScale();
     m_bboxCenter = {0, 0, 0};
 
-    // Compute bounding box
-    float maxExtent = 0;
-    for (const auto& mg : m_materials) {
-        // We don't have direct vertex access, so use the scale from loader
-        maxExtent = std::max(maxExtent, 1.0f);
-    }
-    m_bboxExtent = loader.modelScale() > 0 ? 3.0f / loader.modelScale() : 3.0f;
+    // ObjMeshWarp normalises with `modelScale = 1 / maxAxisExtent`, so
+    // `1/modelScale` is the model's largest world dimension after import.
+    // Without a clamp this can go to hundreds of metres for tiny scales,
+    // which sends the camera 750m+ away and makes F-to-frame useless.
+    float worldExtent = (loader.modelScale() > 1e-4f) ? (1.0f / loader.modelScale()) : 3.0f;
+    m_bboxExtent = std::max(0.5f, std::min(30.0f, worldExtent));
 
     // Reset camera to fit model
     m_camera.distance = m_bboxExtent * 2.5f;
@@ -102,8 +102,16 @@ int StageView::addProjector(const std::string& name) {
 void StageView::removeProjector(int index) {
     if (index >= 0 && index < (int)m_projectors.size()) {
         m_projectors.erase(m_projectors.begin() + index);
+        // Keep selection pointing at the SAME projector across the erase.
+        if (m_selectedProjector == index)       m_selectedProjector = -1;
+        else if (m_selectedProjector > index)   m_selectedProjector--;
         if (m_selectedProjector >= (int)m_projectors.size())
-            m_selectedProjector = (int)m_projectors.size() - 1;
+            m_selectedProjector = -1;
+        // Surfaces lose / shift their projector reference too.
+        for (auto& s : m_surfaces) {
+            if (s.projectorIndex == index)      s.projectorIndex = -1;
+            else if (s.projectorIndex > index)  s.projectorIndex--;
+        }
     }
 }
 
@@ -113,12 +121,16 @@ int StageView::addSurface(const std::string& name, int materialIdx, int projIdx)
     surf.materialIndex = materialIdx;
     surf.projectorIndex = projIdx;
     m_surfaces.push_back(surf);
-    return (int)m_surfaces.size() - 1;
+    m_selectedSurface = (int)m_surfaces.size() - 1;
+    return m_selectedSurface;
 }
 
 void StageView::removeSurface(int index) {
     if (index >= 0 && index < (int)m_surfaces.size()) {
         m_surfaces.erase(m_surfaces.begin() + index);
+        if (m_selectedSurface == index)       m_selectedSurface = -1;
+        else if (m_selectedSurface > index)   m_selectedSurface--;
+        if (m_selectedSurface >= (int)m_surfaces.size()) m_selectedSurface = -1;
     }
 }
 
@@ -148,6 +160,8 @@ void StageView::removeCluster(int index) {
             else if (surf.clusterIndex > index) surf.clusterIndex--;
         }
         m_clusters.erase(m_clusters.begin() + index);
+        if (m_selectedCluster == index)       m_selectedCluster = -1;
+        else if (m_selectedCluster > index)   m_selectedCluster--;
         if (m_selectedCluster >= (int)m_clusters.size()) m_selectedCluster = -1;
     }
 }
@@ -204,6 +218,8 @@ int StageView::addDisplay(const std::string& name, StageDisplay::Type type) {
 void StageView::removeDisplay(int index) {
     if (index >= 0 && index < (int)m_displays.size()) {
         m_displays.erase(m_displays.begin() + index);
+        if (m_selectedDisplay == index)       m_selectedDisplay = -1;
+        else if (m_selectedDisplay > index)   m_selectedDisplay--;
         if (m_selectedDisplay >= (int)m_displays.size()) m_selectedDisplay = -1;
     }
 }
@@ -261,9 +277,11 @@ void StageView::renderDisplays(const std::vector<GLuint>& zoneTextures, const gl
 // like a void so users can read depth and orientation at a glance.
 void StageView::renderEnvironment(const glm::mat4& viewProj) {
     if (!m_envReady) {
-        // Floor: 10m × 10m horizontal quad, centered at origin, y = -0.55 so
-        // the default 1.08m-tall display (centered at origin) sits just above it.
-        const float fHalf = 5.0f;
+        // Floor: 60m × 60m so the camera never sees the edge. Smaller
+        // floors left a visible square outline floating in space when
+        // the user orbited around — the user reported this as a stray
+        // viewport outline.
+        const float fHalf = 30.0f;
         const float fY    = -0.55f;
         std::vector<Vertex3D> fv = {
             {-fHalf, fY, -fHalf, 0.0f, 0.0f},
@@ -274,10 +292,10 @@ void StageView::renderEnvironment(const glm::mat4& viewProj) {
         std::vector<unsigned int> fi = { 0, 1, 2, 0, 2, 3 };
         m_floorMesh.upload(fv, fi);
 
-        // Back wall: 10m wide × 3.5m tall, at z = -2 behind the origin.
-        const float wHalfX = 5.0f;
+        // Back wall: very wide and tall, at z = -2 behind the origin.
+        const float wHalfX = 30.0f;
         const float wYBot  = -0.55f;
-        const float wYTop  =  2.95f;
+        const float wYTop  =  18.0f;
         const float wZ     = -2.0f;
         std::vector<Vertex3D> wv = {
             {-wHalfX, wYBot, wZ, 0.0f, 0.0f},
@@ -390,17 +408,13 @@ void StageView::renderFrustum(const VirtualProjector& proj, const glm::mat4& sta
         }
     }
 
-    // Draw lines using immediate-mode style via the shader
-    // Project corners to screen and draw with ImGui foreground
-    // (simpler than setting up a line VAO)
+    // Draw lines via ImGui's foreground draw list. Anchor the screen
+    // mapping to the viewport image rect (set by renderUI), not the
+    // whole window — otherwise toolbars / scroll regions push the
+    // overlay off-image.
     ImDrawList* draw = ImGui::GetForegroundDrawList();
-    ImVec2 imgMin, imgMax;
-    // We need the image region from the current ImGui context
-    // This is set during renderUI, so we store it
-    // For now, use the window content region
-    ImVec2 wMin = ImGui::GetWindowPos();
-    ImVec2 wSize = ImGui::GetWindowSize();
-    float aspect = wSize.x / std::max(1.0f, wSize.y);
+    ImVec2 wMin (m_viewportScreenPos.x,  m_viewportScreenPos.y);
+    ImVec2 wSize(m_viewportScreenSize.x, m_viewportScreenSize.y);
 
     auto project = [&](glm::vec3 worldPos) -> ImVec2 {
         glm::vec4 clip = stageVP * glm::vec4(worldPos, 1.0f);
@@ -516,47 +530,56 @@ void StageView::renderToolbar() {
         IM_COL32(255, 255, 255, 24),
         kPillH * 0.5f, 0, 1.0f);
 
-    // Per-button glyph drawing — minimal line art, scales with kBtnSize.
+    // Per-button glyph drawing — FILLED silhouettes, scale with kBtnSize.
     auto drawGlyph = [&](ImVec2 c, int kind, ImU32 col) {
         const float r = kBtnSize * 0.32f;
         switch (kind) {
-        case 0: { // Floor — horizontal slab in perspective
-            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.3f),
-                        ImVec2(c.x + r, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x - r * 0.6f, c.y - r * 0.2f),
-                        ImVec2(c.x + r * 0.6f, c.y - r * 0.2f), col, 1.4f);
-            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.3f),
-                        ImVec2(c.x - r * 0.6f, c.y - r * 0.2f), col, 1.4f);
-            dl->AddLine(ImVec2(c.x + r, c.y + r * 0.3f),
-                        ImVec2(c.x + r * 0.6f, c.y - r * 0.2f), col, 1.4f);
+        case 0: { // Floor — filled trapezoid (perspective slab)
+            ImVec2 pts[4] = {
+                ImVec2(c.x - r,           c.y + r * 0.35f),
+                ImVec2(c.x + r,           c.y + r * 0.35f),
+                ImVec2(c.x + r * 0.55f,   c.y - r * 0.15f),
+                ImVec2(c.x - r * 0.55f,   c.y - r * 0.15f),
+            };
+            dl->AddConvexPolyFilled(pts, 4, col);
             break; }
-        case 1: { // Wall — vertical rectangle
-            dl->AddRect(ImVec2(c.x - r * 0.7f, c.y - r),
-                        ImVec2(c.x + r * 0.7f, c.y + r), col, 0, 0, 1.5f);
+        case 1: { // Wall — filled rounded rectangle
+            dl->AddRectFilled(ImVec2(c.x - r * 0.75f, c.y - r),
+                              ImVec2(c.x + r * 0.75f, c.y + r), col, 2.0f);
             break; }
-        case 2: { // Display — screen with stand
-            dl->AddRect(ImVec2(c.x - r, c.y - r * 0.7f),
-                        ImVec2(c.x + r, c.y + r * 0.4f), col, 2, 0, 1.5f);
-            dl->AddLine(ImVec2(c.x, c.y + r * 0.4f),
-                        ImVec2(c.x, c.y + r * 0.8f), col, 1.5f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y + r * 0.8f),
-                        ImVec2(c.x + r * 0.4f, c.y + r * 0.8f), col, 1.5f);
+        case 2: { // Display/Monitor — filled rect with stand triangle below
+            dl->AddRectFilled(ImVec2(c.x - r, c.y - r * 0.75f),
+                              ImVec2(c.x + r, c.y + r * 0.30f), col, 2.0f);
+            ImVec2 stand[3] = {
+                ImVec2(c.x - r * 0.45f, c.y + r * 0.85f),
+                ImVec2(c.x + r * 0.45f, c.y + r * 0.85f),
+                ImVec2(c.x,             c.y + r * 0.30f),
+            };
+            dl->AddConvexPolyFilled(stand, 3, col);
             break; }
-        case 3: { // Surface — generic flat plane (rotated rect)
-            dl->AddQuad(ImVec2(c.x - r, c.y - r * 0.4f),
-                        ImVec2(c.x, c.y - r),
-                        ImVec2(c.x + r, c.y - r * 0.4f),
-                        ImVec2(c.x, c.y + r * 0.2f), col, 1.5f);
+        case 3: { // Surface — filled diamond
+            ImVec2 pts[4] = {
+                ImVec2(c.x,         c.y - r),
+                ImVec2(c.x + r,     c.y),
+                ImVec2(c.x,         c.y + r),
+                ImVec2(c.x - r,     c.y),
+            };
+            dl->AddConvexPolyFilled(pts, 4, col);
             break; }
-        case 4: { // Import — down arrow into tray
-            dl->AddLine(ImVec2(c.x, c.y - r * 0.8f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y - r * 0.1f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x + r * 0.4f, c.y - r * 0.1f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.7f),
-                        ImVec2(c.x + r, c.y + r * 0.7f), col, 1.6f);
+        case 4: { // Import — filled down-arrow into filled tray
+            // Decompose concave arrow into two convex pieces:
+            //   shaft (rectangle) + arrowhead (triangle)
+            dl->AddRectFilled(ImVec2(c.x - r * 0.22f, c.y - r * 0.85f),
+                              ImVec2(c.x + r * 0.22f, c.y - r * 0.05f), col, 1.0f);
+            ImVec2 head[3] = {
+                ImVec2(c.x - r * 0.55f, c.y - r * 0.10f),
+                ImVec2(c.x + r * 0.55f, c.y - r * 0.10f),
+                ImVec2(c.x,             c.y + r * 0.50f),
+            };
+            dl->AddConvexPolyFilled(head, 3, col);
+            // Tray bar
+            dl->AddRectFilled(ImVec2(c.x - r,        c.y + r * 0.65f),
+                              ImVec2(c.x + r,        c.y + r * 0.90f), col, 1.5f);
             break; }
         }
     };
@@ -582,14 +605,14 @@ void StageView::renderToolbar() {
             : (hov
                 ? IM_COL32(255, 255, 255, 28)
                 : IM_COL32(255, 255, 255, 12));
-        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill);
+        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill, 64);
 
         ImU32 fg = active
             ? IM_COL32(13, 18, 26, 255)
             : IM_COL32(220, 226, 235, 230);
         drawGlyph(center, buttons[i].kind, fg);
 
-        if (hov) ImGui::SetTooltip("%s", buttons[i].tip);
+        if (hov) ParamRow::Tooltip(buttons[i].tip);
         if (clicked) clickedIdx = i;
 
         bx += kBtnSize + kBtnGap;
@@ -642,7 +665,9 @@ void StageView::renderFloatingToolbar() {
     const float kBtnGap  = 8.0f;
     const float kPillPad = 10.0f;
     const float kPillW   = kBtnSize + kPillPad * 2.0f;
-    const int   kBtnCount = 4;
+    // 4 add/import + 3 gizmo tools (select / rotate / scale) so users can
+    // switch transform mode without leaving the canvas.
+    const int   kBtnCount = 7;
     const float kPillH   = kPillPad * 2.0f
                          + kBtnSize * kBtnCount
                          + kBtnGap  * (kBtnCount - 1);
@@ -703,58 +728,148 @@ void StageView::renderFloatingToolbar() {
     auto drawGlyph = [&](ImVec2 c, int kind, ImU32 col) {
         const float r = kBtnSize * 0.32f;
         switch (kind) {
-        case 0: { // Room — isometric box (floor + back wall + side wall)
-            // Front-left rect (floor footprint)
-            dl->AddLine(ImVec2(c.x - r,           c.y + r * 0.5f),
-                        ImVec2(c.x + r * 0.4f,    c.y + r * 0.85f), col, 1.4f);
-            dl->AddLine(ImVec2(c.x + r * 0.4f,    c.y + r * 0.85f),
-                        ImVec2(c.x + r,           c.y + r * 0.5f),  col, 1.4f);
-            dl->AddLine(ImVec2(c.x + r,           c.y + r * 0.5f),
-                        ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f), col, 1.4f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f),
-                        ImVec2(c.x - r,           c.y + r * 0.5f),  col, 1.4f);
-            // Vertical walls — back-left and back-right edges going up
-            dl->AddLine(ImVec2(c.x - r,           c.y + r * 0.5f),
-                        ImVec2(c.x - r,           c.y - r * 0.3f),  col, 1.4f);
-            dl->AddLine(ImVec2(c.x + r,           c.y + r * 0.5f),
-                        ImVec2(c.x + r,           c.y - r * 0.3f),  col, 1.4f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y + r * 0.15f),
-                        ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f), col, 1.4f);
-            // Back wall top edge
-            dl->AddLine(ImVec2(c.x - r,           c.y - r * 0.3f),
-                        ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f), col, 1.4f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f,    c.y - r * 0.65f),
-                        ImVec2(c.x + r,           c.y - r * 0.3f),  col, 1.4f);
+        case 0: { // Room — filled isometric cube (top + left + right faces)
+            // Top face (rhombus, lighter)
+            ImU32 colTop  = (col & 0x00FFFFFF) | (((col >> 24) & 0xFF) << 24);
+            // Use alpha modulation for a flat-but-readable cube: top brightest,
+            // left/right dimmer. Simulate by mixing col with two tones.
+            // Compose two extra tones from `col` alpha.
+            int  a   = (col >> 24) & 0xFF;
+            ImU32 colMid = (col & 0x00FFFFFF) | ((unsigned)((a * 70) / 100) << 24);
+            ImU32 colDim = (col & 0x00FFFFFF) | ((unsigned)((a * 45) / 100) << 24);
+            (void)colTop;
+            // Top rhombus
+            ImVec2 top[4] = {
+                ImVec2(c.x,             c.y - r),
+                ImVec2(c.x + r,         c.y - r * 0.5f),
+                ImVec2(c.x,             c.y),
+                ImVec2(c.x - r,         c.y - r * 0.5f),
+            };
+            dl->AddConvexPolyFilled(top, 4, col);
+            // Left face
+            ImVec2 left[4] = {
+                ImVec2(c.x - r,         c.y - r * 0.5f),
+                ImVec2(c.x,             c.y),
+                ImVec2(c.x,             c.y + r),
+                ImVec2(c.x - r,         c.y + r * 0.5f),
+            };
+            dl->AddConvexPolyFilled(left, 4, colMid);
+            // Right face
+            ImVec2 right[4] = {
+                ImVec2(c.x,             c.y),
+                ImVec2(c.x + r,         c.y - r * 0.5f),
+                ImVec2(c.x + r,         c.y + r * 0.5f),
+                ImVec2(c.x,             c.y + r),
+            };
+            dl->AddConvexPolyFilled(right, 4, colDim);
             break; }
-        case 1: { // Display
-            dl->AddRect(ImVec2(c.x - r, c.y - r * 0.7f),
-                        ImVec2(c.x + r, c.y + r * 0.4f), col, 2, 0, 1.5f);
-            dl->AddLine(ImVec2(c.x, c.y + r * 0.4f),
-                        ImVec2(c.x, c.y + r * 0.8f), col, 1.5f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y + r * 0.8f),
-                        ImVec2(c.x + r * 0.4f, c.y + r * 0.8f), col, 1.5f);
+        case 1: { // Display — filled rect with stand triangle below
+            dl->AddRectFilled(ImVec2(c.x - r,        c.y - r * 0.75f),
+                              ImVec2(c.x + r,        c.y + r * 0.30f), col, 2.0f);
+            ImVec2 stand[3] = {
+                ImVec2(c.x - r * 0.45f, c.y + r * 0.85f),
+                ImVec2(c.x + r * 0.45f, c.y + r * 0.85f),
+                ImVec2(c.x,             c.y + r * 0.30f),
+            };
+            dl->AddConvexPolyFilled(stand, 3, col);
             break; }
-        case 2: { // Surface (generic plane)
-            dl->AddQuad(ImVec2(c.x - r, c.y - r * 0.4f),
-                        ImVec2(c.x, c.y - r),
-                        ImVec2(c.x + r, c.y - r * 0.4f),
-                        ImVec2(c.x, c.y + r * 0.2f), col, 1.5f);
+        case 2: { // Surface — filled diamond
+            ImVec2 pts[4] = {
+                ImVec2(c.x,         c.y - r),
+                ImVec2(c.x + r,     c.y),
+                ImVec2(c.x,         c.y + r),
+                ImVec2(c.x - r,     c.y),
+            };
+            dl->AddConvexPolyFilled(pts, 4, col);
             break; }
-        case 3: { // Import (down arrow into tray)
-            dl->AddLine(ImVec2(c.x, c.y - r * 0.8f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x - r * 0.4f, c.y - r * 0.1f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x + r * 0.4f, c.y - r * 0.1f),
-                        ImVec2(c.x, c.y + r * 0.3f), col, 1.6f);
-            dl->AddLine(ImVec2(c.x - r, c.y + r * 0.7f),
-                        ImVec2(c.x + r, c.y + r * 0.7f), col, 1.6f);
+        case 3: { // Import — filled down-arrow into filled tray
+            dl->AddRectFilled(ImVec2(c.x - r * 0.22f, c.y - r * 0.85f),
+                              ImVec2(c.x + r * 0.22f, c.y - r * 0.05f), col, 1.0f);
+            ImVec2 head[3] = {
+                ImVec2(c.x - r * 0.55f, c.y - r * 0.10f),
+                ImVec2(c.x + r * 0.55f, c.y - r * 0.10f),
+                ImVec2(c.x,             c.y + r * 0.50f),
+            };
+            dl->AddConvexPolyFilled(head, 3, col);
+            dl->AddRectFilled(ImVec2(c.x - r,        c.y + r * 0.65f),
+                              ImVec2(c.x + r,        c.y + r * 0.90f), col, 1.5f);
+            break; }
+        case 4: { // Select / move — filled cursor arrow
+            ImVec2 ptr[7] = {
+                ImVec2(c.x - r * 0.55f, c.y - r * 0.75f),
+                ImVec2(c.x + r * 0.20f, c.y),
+                ImVec2(c.x - r * 0.10f, c.y + r * 0.10f),
+                ImVec2(c.x + r * 0.18f, c.y + r * 0.65f),
+                ImVec2(c.x - r * 0.05f, c.y + r * 0.78f),
+                ImVec2(c.x - r * 0.32f, c.y + r * 0.20f),
+                ImVec2(c.x - r * 0.55f, c.y + r * 0.40f),
+            };
+            dl->AddConvexPolyFilled(ptr, 7, col);
+            break; }
+        case 5: { // Rotate — filled arc with arrowhead
+            // Arc is non-convex; build it from triangle fan strips between
+            // outer/inner radii.
+            const int seg = 22;
+            const float aStart = -1.4f;
+            const float aSpan  = 5.0f;
+            const float rOut   = r * 0.95f;
+            const float rIn    = r * 0.62f;
+            for (int s = 0; s < seg; s++) {
+                float a0 = aStart + (s    / (float)seg) * aSpan;
+                float a1 = aStart + ((s+1)/ (float)seg) * aSpan;
+                ImVec2 q[4] = {
+                    ImVec2(c.x + cosf(a0) * rIn,  c.y + sinf(a0) * rIn),
+                    ImVec2(c.x + cosf(a0) * rOut, c.y + sinf(a0) * rOut),
+                    ImVec2(c.x + cosf(a1) * rOut, c.y + sinf(a1) * rOut),
+                    ImVec2(c.x + cosf(a1) * rIn,  c.y + sinf(a1) * rIn),
+                };
+                dl->AddConvexPolyFilled(q, 4, col);
+            }
+            // Arrowhead at the end
+            float ae = aStart + aSpan;
+            ImVec2 tip(c.x + cosf(ae) * (rOut + r * 0.30f),
+                       c.y + sinf(ae) * (rOut + r * 0.30f));
+            float perpx = -sinf(ae);
+            float perpy =  cosf(ae);
+            ImVec2 baseA(c.x + cosf(ae) * rOut + perpx * r * 0.20f,
+                         c.y + sinf(ae) * rOut + perpy * r * 0.20f);
+            ImVec2 baseB(c.x + cosf(ae) * rIn  - perpx * r * 0.20f,
+                         c.y + sinf(ae) * rIn  - perpy * r * 0.20f);
+            ImVec2 head[3] = { tip, baseA, baseB };
+            dl->AddConvexPolyFilled(head, 3, col);
+            break; }
+        case 6: { // Scale — filled diagonal arrow with corner triangles
+            // Diagonal shaft as rotated rectangle (BL → TR)
+            float t = r * 0.10f; // half-thickness
+            ImVec2 shaft[4] = {
+                ImVec2(c.x - r * 0.55f - t, c.y + r * 0.55f - t),
+                ImVec2(c.x - r * 0.55f + t, c.y + r * 0.55f + t),
+                ImVec2(c.x + r * 0.55f + t, c.y - r * 0.55f + t),
+                ImVec2(c.x + r * 0.55f - t, c.y - r * 0.55f - t),
+            };
+            dl->AddConvexPolyFilled(shaft, 4, col);
+            // Bottom-left corner triangle
+            ImVec2 blt[3] = {
+                ImVec2(c.x - r * 0.85f, c.y + r * 0.85f),
+                ImVec2(c.x - r * 0.10f, c.y + r * 0.85f),
+                ImVec2(c.x - r * 0.85f, c.y + r * 0.10f),
+            };
+            dl->AddConvexPolyFilled(blt, 3, col);
+            // Top-right corner triangle
+            ImVec2 trt[3] = {
+                ImVec2(c.x + r * 0.85f, c.y - r * 0.85f),
+                ImVec2(c.x + r * 0.10f, c.y - r * 0.85f),
+                ImVec2(c.x + r * 0.85f, c.y - r * 0.10f),
+            };
+            dl->AddConvexPolyFilled(trt, 3, col);
             break; }
         }
     };
 
-    const char* tips[]     = {"Environment", "Add display", "Add surface", "Import..."};
-    const bool  isToggle[] = {false,         false,         false,         false};
+    const char* tips[]     = {"Environment", "Add display", "Add surface", "Import...",
+                              "Select / Move (V)", "Rotate (R)", "Scale (S)"};
+    const bool  isToggle[] = {false,         false,         false,         false,
+                              true,                  true,         true};
 
     float bx = pillPos.x + kPillPad;
     float by = pillPos.y + kPillPad;
@@ -765,19 +880,27 @@ void StageView::renderFloatingToolbar() {
         bool clicked = ImGui::InvisibleButton("##fb", ImVec2(kBtnSize, kBtnSize));
         bool hov     = ImGui::IsItemHovered();
         ImGui::PopID();
-        bool active = isToggle[i] && m_envVisible;
+        // Active state: tools 4-6 highlight when current gizmo op matches
+        // (i-4 maps to translate=0 / rotate=1 / scale=2). Tool 0 (env)
+        // would highlight when m_envVisible — but it's not currently
+        // wired as a toggle, so the existing behaviour (no-active env
+        // button) is preserved by leaving it false.
+        bool active = false;
+        if (isToggle[i] && i >= 4 && i <= 6) {
+            active = (m_gizmoOp == (i - 4));
+        }
 
         ImVec2 center(bx + kBtnSize * 0.5f, by + kBtnSize * 0.5f);
         ImU32 fill = active
             ? IM_COL32(247, 248, 248, 255)
             : (hov ? IM_COL32(255, 255, 255, 28) : IM_COL32(255, 255, 255, 12));
-        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill);
+        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill, 64);
 
         ImU32 fg = active ? IM_COL32(13, 18, 26, 255)
                           : IM_COL32(220, 226, 235, 230);
         drawGlyph(center, i, fg);
 
-        if (hov) ImGui::SetTooltip("%s", tips[i]);
+        if (hov) ParamRow::Tooltip(tips[i]);
         if (clicked) clickedIdx = i;
 
         by += kBtnSize + kBtnGap;
@@ -799,6 +922,10 @@ void StageView::renderFloatingToolbar() {
         m_envMenuOpen     = false;
     } else if (clickedIdx == 3) {
         m_wantsImport = true;
+        m_envMenuOpen = m_surfaceMenuOpen = false;
+    } else if (clickedIdx >= 4 && clickedIdx <= 6) {
+        // Gizmo tool selection: 4=translate, 5=rotate, 6=scale.
+        m_gizmoOp = clickedIdx - 4;
         m_envMenuOpen = m_surfaceMenuOpen = false;
     }
 
@@ -922,6 +1049,12 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         m_fbo.create(m_fboWidth, m_fboHeight, true);
     }
 
+    // Snapshot the on-screen viewport rect for renderFrustum's overlay
+    // mapping — must be set BEFORE renderScene since renderFrustum is
+    // invoked from inside the FBO draw pass.
+    m_viewportScreenPos  = {viewStart.x, viewStart.y};
+    m_viewportScreenSize = {viewSize.x,  viewSize.y};
+
     // Render 3D scene to FBO
     m_fbo.bind();
     glViewport(0, 0, m_fboWidth, m_fboHeight);
@@ -963,8 +1096,10 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         if (m_gizmoOp == 1) op = ImGuizmo::ROTATE;
         else if (m_gizmoOp == 2) op = ImGuizmo::SCALE;
 
-        // Apply gizmo to selected Display
-        if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
+        // Apply gizmo to selected Display (skipped when pinned so the
+        // user can lock a screen and click around it without nudging it).
+        if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()
+            && !m_displays[m_selectedDisplay].pinned) {
             auto& d = m_displays[m_selectedDisplay];
             glm::mat4 model = d.getTransform();
             float* vPtr = glm::value_ptr(view);
@@ -1081,34 +1216,92 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         }
     }
 
-    // Left-click: Select display/projector in viewport (when not using gizmo or panning)
+    // ── Spline-style left interaction ──
+    // Press in empty viewport space starts a "potential drag". If the
+    // cursor moves past kClickDragPx the press promotes to a left-drag
+    // orbit (mirroring right-drag). If the press releases without
+    // moving, we run the select/deselect raycast — so a selected
+    // object only ever gets manipulated via its gizmo handles, never
+    // by a stray drag on empty space.
+    const float kClickDragPx = 4.0f;
+
+    // Cancel any in-flight orbit if the user starts using the gizmo.
+    if (gizmoUsing) {
+        m_leftPressActive = false;
+        m_leftPressOrbiting = false;
+    }
+
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !gizmoUsing && !spaceHeld) {
+        // Hit test displays / projectors on PRESS, not on release. If the
+        // press lands on a display, just switch selection — never start
+        // an orbit. That kills the bug where clicking the rendered plane
+        // both moved the camera AND let the gizmo distort the surface.
         glm::mat4 vp = m_camera.projMatrix(aspect) * m_camera.viewMatrix();
-        float bestDist = 40.0f; // pixel threshold
-        int bestIdx = -1;
-        // Check displays
+        float bestDist = 40.0f;
+        int  bestIdx   = -1;
         for (int i = 0; i < (int)m_displays.size(); i++) {
             if (!m_displays[i].visible) continue;
             glm::vec4 clip = vp * glm::vec4(m_displays[i].position, 1.0f);
             if (clip.w <= 0) continue;
             float sx = viewStart.x + (clip.x / clip.w * 0.5f + 0.5f) * viewSize.x;
             float sy = viewStart.y + (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * viewSize.y;
-            float d = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
+            float d  = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
             if (d < bestDist) { bestDist = d; bestIdx = i; }
         }
-        // Check projectors
         for (int i = 0; i < (int)m_projectors.size(); i++) {
             if (!m_projectors[i].visible) continue;
             glm::vec4 clip = vp * glm::vec4(m_projectors[i].position, 1.0f);
             if (clip.w <= 0) continue;
             float sx = viewStart.x + (clip.x / clip.w * 0.5f + 0.5f) * viewSize.x;
             float sy = viewStart.y + (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * viewSize.y;
-            float d = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
+            float d  = sqrtf((mouse.x-sx)*(mouse.x-sx) + (mouse.y-sy)*(mouse.y-sy));
             if (d < bestDist) { bestDist = d; bestIdx = -(i + 100); }
         }
-        if (bestIdx >= 0) { m_selectedDisplay = bestIdx; m_selectedProjector = -1; }
-        else if (bestIdx <= -100) { m_selectedProjector = -(bestIdx + 100); m_selectedDisplay = -1; }
-        else { m_selectedDisplay = -1; m_selectedProjector = -1; }
+        if (bestIdx >= 0) {
+            m_selectedDisplay = bestIdx; m_selectedProjector = -1;
+            m_leftPressActive = false;     // suppress orbit promotion
+        } else if (bestIdx <= -100) {
+            m_selectedProjector = -(bestIdx + 100); m_selectedDisplay = -1;
+            m_leftPressActive = false;
+        } else {
+            // Empty space — eligible for orbit-on-drag and deselect-on-click.
+            m_leftPressActive   = true;
+            m_leftPressOrbiting = false;
+            m_leftPressStart    = {mouse.x, mouse.y};
+        }
+    }
+
+    // While the left button is held with a press in flight: promote to
+    // orbit drag once we cross the threshold.
+    if (m_leftPressActive && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        float dx = mouse.x - m_leftPressStart.x;
+        float dy = mouse.y - m_leftPressStart.y;
+        if (!m_leftPressOrbiting && (dx * dx + dy * dy) > kClickDragPx * kClickDragPx) {
+            m_leftPressOrbiting   = true;
+            m_orbitDragging       = true;
+            m_orbitDragStart      = m_leftPressStart;
+            m_orbitStartAzimuth   = m_camera.azimuth;
+            m_orbitStartElevation = m_camera.elevation;
+            m_cameraAnimating     = false;
+        }
+        if (m_leftPressOrbiting) {
+            float ox = mouse.x - m_orbitDragStart.x;
+            float oy = mouse.y - m_orbitDragStart.y;
+            m_camera.azimuth   = m_orbitStartAzimuth   - ox * 0.005f;
+            m_camera.elevation = std::max(-1.5f, std::min(1.5f,
+                                  m_orbitStartElevation + oy * 0.005f));
+        }
+    }
+
+    // Release in empty space without a drag → deselect.
+    if (m_leftPressActive && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (!m_leftPressOrbiting) {
+            m_selectedDisplay = -1;
+            m_selectedProjector = -1;
+        }
+        m_leftPressActive   = false;
+        m_leftPressOrbiting = false;
+        m_orbitDragging     = false;
     }
 
     // F: Frame selected (smooth animated fly-to)
@@ -1135,6 +1328,16 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
         }
     }
 
+    // Esc: Deselect any active display/projector. Without a selection
+    // ImGuizmo's translate/rotate/scale gizmo doesn't render, which
+    // means left-drag in the viewport falls through to camera pan
+    // instead of accidentally translating the previously-selected
+    // display when the user just wants to navigate.
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        m_selectedDisplay   = -1;
+        m_selectedProjector = -1;
+    }
+
     // Delete/Backspace: Remove selected object
     if (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace))) {
         if (m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
@@ -1144,19 +1347,43 @@ void StageView::renderUI(const std::vector<GLuint>& zoneTextures) {
             m_selectedProjector = -1;
         }
     }
+
+    // Cmd/Ctrl+D: duplicate the selected display, offset slightly so it's
+    // visible as its own object. Selection follows the new copy.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        bool modDown = io.KeySuper || io.KeyCtrl;
+        if (!io.WantTextInput && modDown && ImGui::IsKeyPressed(ImGuiKey_D)
+            && m_selectedDisplay >= 0 && m_selectedDisplay < (int)m_displays.size()) {
+            StageDisplay copy = m_displays[m_selectedDisplay];
+            copy.position.x += 0.30f;
+            copy.name      += " copy";
+            m_displays.push_back(copy);
+            m_selectedDisplay = (int)m_displays.size() - 1;
+        }
+    }
 }
 
-// Lists of displays / projectors / surfaces / clusters — rendered in the
-// separate "Scene" panel so they don't eat vertical space from the 3D
-// viewport. Everything below still refers to the same member state, so
-// selection / add / remove flow exactly as before.
+// Stage inspector — Displays only. Projector/Surface/Cluster machinery
+// remains in the data model for future use but is hidden from the UI
+// until those features are wired into the renderer.
 void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
-    // --- Displays list ---
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-    ImGui::Text("Displays");
-    ImGui::PopStyleColor();
+    // Section header is drawn by the caller as "Setup". This panel is
+    // the per-display inspector + add/delete row.
 
     int dispRemove = -1;
+    auto labelLeft = [](const char* lbl) {
+        // Left label, vertically centered with the control on its right.
+        // Uses a fixed 26% of the row for the label so dropdowns and
+        // numeric fields land on the same gridline.
+        float rowW = ImGui::GetContentRegionAvail().x;
+        float lblW = std::max(64.0f, rowW * 0.26f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(lbl);
+        ImGui::SameLine(lblW);
+        ImGui::SetNextItemWidth(rowW - lblW);
+    };
+
     for (int i = 0; i < (int)m_displays.size(); i++) {
         ImGui::PushID(53000 + i);
         auto& d = m_displays[i];
@@ -1171,19 +1398,18 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
         ImGui::PopStyleColor();
 
         if (sel) {
-            // Type selector
             static const char* typeNames[] = { "Projector", "LED Screen", "TV", "Monitor", "Custom" };
             int typeIdx = (int)d.type;
-            ImGui::SetNextItemWidth(120);
-            if (ImGui::Combo("Type##disp", &typeIdx, typeNames, 5)) {
+            labelLeft("Type");
+            if (ImGui::Combo("##type", &typeIdx, typeNames, 5)) {
                 d.type = (StageDisplay::Type)typeIdx;
             }
 
-            // Zone assignment
-            ImGui::SetNextItemWidth(-1);
+            // Zone
+            labelLeft("Zone");
             char zoneLabel[32];
             snprintf(zoneLabel, sizeof(zoneLabel), "Zone %d", d.zoneIndex);
-            if (ImGui::BeginCombo("Zone##disp", zoneLabel)) {
+            if (ImGui::BeginCombo("##zone", zoneLabel)) {
                 for (int zi = 0; zi < std::max(1, (int)zoneTextures.size()); zi++) {
                     char zl[32]; snprintf(zl, sizeof(zl), "Zone %d", zi);
                     if (ImGui::Selectable(zl, d.zoneIndex == zi)) d.zoneIndex = zi;
@@ -1191,24 +1417,48 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
                 ImGui::EndCombo();
             }
 
-            // Transform
-            ImGui::SetNextItemWidth(-1);
-            ImGui::DragFloat3("Pos##disp", &d.position[0], 0.05f, -50.0f, 50.0f, "%.2f");
-            ImGui::SetNextItemWidth(-1);
-            ImGui::DragFloat3("Rot##disp", &d.rotation[0], 0.5f, -180.0f, 180.0f, "%.1f");
+            labelLeft("Position");
+            ImGui::DragFloat3("##pos", &d.position[0], 0.05f, -50.0f, 50.0f, "%.2f");
+            labelLeft("Rotation");
+            ImGui::DragFloat3("##rot", &d.rotation[0], 0.5f, -180.0f, 180.0f, "%.1f");
+            labelLeft("Size (m)");
+            float sz[2] = { d.width, d.height };
+            if (ImGui::DragFloat2("##size", sz, 0.01f, 0.1f, 20.0f, "%.2f")) {
+                d.width = sz[0]; d.height = sz[1];
+            }
 
-            float halfW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            ImGui::SetNextItemWidth(halfW);
-            ImGui::DragFloat("W##disp", &d.width, 0.01f, 0.1f, 20.0f, "%.2fm");
+            ImGui::Dummy(ImVec2(0, 4));
+            // Row of three equal-height pills: Visible / Pinned / Delete.
+            float btnH = ImGui::GetFrameHeight();
+            float rowW = ImGui::GetContentRegionAvail().x;
+            float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float btnW = (rowW - spacing * 2) / 3.0f;
+            auto pill = [&](const char* label, bool on, ImU32 fill, ImU32 fillHov, ImU32 textCol) -> bool {
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton(label, ImVec2(btnW, btnH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImU32 bg = on ? IM_COL32(255,255,255,240)
+                              : (hov ? fillHov : fill);
+                ImU32 tx = on ? IM_COL32(13,18,26,255) : textCol;
+                dl->AddRectFilled(pos, ImVec2(pos.x + btnW, pos.y + btnH), bg, btnH * 0.5f);
+                ImVec2 ts = ImGui::CalcTextSize(label);
+                dl->AddText(ImVec2(pos.x + (btnW - ts.x) * 0.5f,
+                                   pos.y + (btnH - ts.y) * 0.5f),
+                            tx, label);
+                return clicked;
+            };
+            if (pill("Visible", d.visible,
+                     IM_COL32(255,255,255,18), IM_COL32(255,255,255,32),
+                     IM_COL32(220,226,235,230))) d.visible = !d.visible;
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(halfW);
-            ImGui::DragFloat("H##disp", &d.height, 0.01f, 0.1f, 20.0f, "%.2fm");
-
-            ImGui::Checkbox("Visible##disp", &d.visible);
+            if (pill("Pinned", d.pinned,
+                     IM_COL32(255,255,255,18), IM_COL32(255,255,255,32),
+                     IM_COL32(220,226,235,230))) d.pinned = !d.pinned;
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
-            if (ImGui::SmallButton("Delete##disp")) dispRemove = i;
-            ImGui::PopStyleColor();
+            if (pill("Delete", false,
+                     IM_COL32(255,255,255,12), IM_COL32(255,255,255,28),
+                     IM_COL32(220,226,235,200))) dispRemove = i;
         }
         ImGui::PopID();
     }
@@ -1216,11 +1466,12 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
 
     ImGui::Dummy(ImVec2(0, 4));
 
-    // --- Projector list ---
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
-    ImGui::Text("Projectors");
-    ImGui::PopStyleColor();
+    // Inspector ends here. Projectors / Surfaces / Screen Clusters
+    // are kept as data structures but the UI is removed until they're
+    // wired into the renderer (currently they're a stub).
+    return;
 
+    // ── unreachable legacy projector inspector (kept compiled out) ──
     int projRemove = -1;
     for (int i = 0; i < (int)m_projectors.size(); i++) {
         ImGui::PushID(50000 + i);

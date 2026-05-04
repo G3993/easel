@@ -37,10 +37,10 @@ void ScanPanel::render(SceneScanner& scanner, WebcamSource& webcam) {
             ImGui::PopStyleColor();
 
             ImGui::SameLine(ImGui::GetContentRegionAvail().x - 40);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.15f, 0.15f, 0.20f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 0.40f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 0.25f, 0.25f, 0.60f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.30f, 0.32f, 0.20f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.30f, 0.32f, 0.40f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.85f, 0.30f, 0.32f, 0.60f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.30f, 0.32f, 1.0f));
             if (ImGui::SmallButton("Close")) {
                 webcam.close();
             }

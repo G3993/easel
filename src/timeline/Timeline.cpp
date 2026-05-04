@@ -14,7 +14,24 @@ void Timeline::seek(double t) {
     m_playhead = t;
     // Clear per-track runtime so applyToLayers re-evaluates every track (handles
     // backward / out-of-order seeks that would otherwise skip edge firing).
-    m_runtime.clear();
+    // Phase A: keep runtime entries whose active clip still contains the new
+    // playhead — that way an in-flight transition isn't restarted from
+    // progress=0 just because the user scrubbed inside the same clip.
+    for (auto it = m_runtime.begin(); it != m_runtime.end(); ) {
+        const TimelineTrack* track = nullptr;
+        for (const auto& tr : m_tracks) if (tr.layerId == it->layerId) { track = &tr; break; }
+        const TimelineClip* active = nullptr;
+        if (track) {
+            for (const auto& c : track->clips) {
+                if (t >= c.startTime && t < c.startTime + c.duration) { active = &c; break; }
+            }
+        }
+        if (active && active->id == it->activeClipId) {
+            ++it;                       // same clip — keep runtime, smooth scrub
+        } else {
+            it = m_runtime.erase(it);   // crossed a clip boundary — re-fire edges
+        }
+    }
 }
 
 void Timeline::advance(double dt) {
@@ -189,6 +206,98 @@ void Timeline::removeLane(uint32_t id) {
 TimelineLane* Timeline::findLane(uint32_t id) {
     for (auto& l : m_lanes) if (l.id == id) return &l;
     return nullptr;
+}
+
+// ─── Lane runtime (Phase C) ──────────────────────────────────────────
+TimelineLane* Timeline::findLaneByParam(uint32_t layerId, const std::string& paramName) {
+    for (auto& l : m_lanes) {
+        if (l.layerId == layerId && l.paramName == paramName &&
+            l.kind == TimelineLaneKind::Automation) return &l;
+    }
+    return nullptr;
+}
+const TimelineLane* Timeline::findLaneByParam(uint32_t layerId,
+                                              const std::string& paramName) const {
+    for (const auto& l : m_lanes) {
+        if (l.layerId == layerId && l.paramName == paramName &&
+            l.kind == TimelineLaneKind::Automation) return &l;
+    }
+    return nullptr;
+}
+bool Timeline::hasKeyframeAt(uint32_t layerId, const std::string& paramName,
+                             double t, double epsilonSec) const {
+    const TimelineLane* lane = findLaneByParam(layerId, paramName);
+    if (!lane) return false;
+    for (const auto& p : lane->points)
+        if (std::abs(p.time - t) <= epsilonSec) return true;
+    return false;
+}
+bool Timeline::toggleKeyframeAt(uint32_t layerId, const std::string& paramName,
+                                double t, float currentValue, double epsilonSec) {
+    TimelineLane* lane = findLaneByParam(layerId, paramName);
+    if (!lane) {
+        // First click on diamond → create lane and put a key at the playhead
+        // using the parameter's current value, so we capture intent without
+        // jumping the value.
+        addLane(layerId, TimelineLaneKind::Automation, paramName);
+        lane = findLaneByParam(layerId, paramName);
+        if (!lane) return false;
+        TimelineLanePoint p; p.time = t; p.value = currentValue;
+        lane->points.push_back(p);
+        return true;
+    }
+    // Lane exists — flip a key at the playhead.
+    for (auto it = lane->points.begin(); it != lane->points.end(); ++it) {
+        if (std::abs(it->time - t) <= epsilonSec) {
+            lane->points.erase(it);
+            // If the user just removed the last point, drop the empty lane so
+            // the diamond returns to "not animated" state.
+            if (lane->points.empty()) {
+                uint32_t id = lane->id;
+                m_lanes.erase(std::remove_if(m_lanes.begin(), m_lanes.end(),
+                              [id](const TimelineLane& l){ return l.id == id; }),
+                              m_lanes.end());
+                return false;
+            }
+            return true;
+        }
+    }
+    // No existing key here → add one at the playhead with the current value.
+    TimelineLanePoint p; p.time = t; p.value = currentValue;
+    lane->points.push_back(p);
+    std::sort(lane->points.begin(), lane->points.end(),
+              [](const TimelineLanePoint& a, const TimelineLanePoint& b){
+                  return a.time < b.time;
+              });
+    return true;
+}
+float Timeline::evalLaneAt(const TimelineLane& lane, double t) const {
+    if (lane.points.empty()) return 0.0f;
+    if (lane.points.size() == 1) return lane.points.front().value;
+    // Assumes lane.points sorted by time (toggleKeyframeAt sorts on insert).
+    if (t <= lane.points.front().time) return lane.points.front().value;
+    if (t >= lane.points.back().time)  return lane.points.back().value;
+    for (size_t i = 1; i < lane.points.size(); i++) {
+        if (lane.points[i].time >= t) {
+            const auto& a = lane.points[i - 1];
+            const auto& b = lane.points[i];
+            double span = b.time - a.time;
+            if (span <= 1e-9) return b.value;
+            float u = (float)((t - a.time) / span);
+            return a.value + (b.value - a.value) * u;
+        }
+    }
+    return lane.points.back().value;
+}
+void Timeline::sampleAnimatedParams(std::unordered_map<std::string, float>& out) const {
+    for (const auto& l : m_lanes) {
+        if (l.kind != TimelineLaneKind::Automation) continue;
+        if (l.points.empty()) continue;
+        out[animKey(l.layerId, l.paramName)] = evalLaneAt(l, m_playhead);
+    }
+}
+std::string Timeline::animKey(uint32_t layerId, const std::string& paramName) {
+    return "L" + std::to_string(layerId) + "." + paramName;
 }
 
 // ─── Sections ────────────────────────────────────────────────────────
@@ -538,7 +647,9 @@ void Timeline::applyToLayers(LayerStack& layers) {
                 if (!layer->transitionActive && layer->transitionDuration > 0.0f) {
                     layer->transitionDirection = false;
                     layer->transitionActive = true;
-                } else if (layer->transitionDuration <= 0.0f) {
+                } else if (m_playing && layer->transitionDuration <= 0.0f) {
+                    // Snap-hide on clip-end only during playback — manual
+                    // scrubs / pauses leave visibility to the user.
                     layer->visible = false;
                 }
             }
@@ -589,8 +700,13 @@ void Timeline::applyToLayers(LayerStack& layers) {
                 layer->transitionActive   = false;
                 layer->transitionProgress = 1.0f;
             }
-        } else if (!layer->transitionActive && !layer->shaderTransitionActive) {
+        } else if (m_playing &&
+                   !layer->transitionActive && !layer->shaderTransitionActive) {
             // No clip under the playhead and nothing fading — hide the layer.
+            // Only auto-hide during playback. When the timeline is paused or
+            // stopped, the user's manual visibility (eye toggle) wins so
+            // shaders don't disappear after a clip naturally ends and the
+            // playhead just sits there.
             layer->visible = false;
         }
 

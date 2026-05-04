@@ -286,6 +286,8 @@ elseif(APPLE)
         "-framework CoreMedia"
         "-framework IOSurface"
         "-framework VideoToolbox"
+        "-framework Speech"           # SFSpeechRecognizer (push-to-talk)
+        "-framework AVFoundation"     # AVAudioEngine for mic capture
     )
 endif()
 
@@ -417,6 +419,11 @@ if(APPLE)
         "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation"
     )
 endif()
+
+# DataBus header-only smoke test — verifies numeric API + thread safety.
+add_executable(test_databus tests/test_databus.cpp)
+target_include_directories(test_databus PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_databus PRIVATE Catch2::Catch2WithMain)
 
 if(HAS_WHEP)
     set(TEST_WHEP_SOURCES

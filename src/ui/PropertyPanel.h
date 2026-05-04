@@ -39,6 +39,7 @@ struct MosaicAudioState {
 };
 
 class StageView;
+class Timeline;
 
 class PropertyPanel {
 public:
@@ -53,10 +54,14 @@ public:
     // window when the workspace mode is Stage.
     void setStageView(StageView* sv) { m_stageView = sv; }
     void setZoneTextures(const std::vector<unsigned int>* z) { m_zoneTexs = z; }
+    // Phase C: timeline pointer enables the keyframe-diamond affordance next
+    // to animatable parameters. Optional — diamond is only drawn when set.
+    void setTimeline(Timeline* tl) { m_timeline = tl; }
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;
 private:
     StageView* m_stageView = nullptr;
     const std::vector<unsigned int>* m_zoneTexs = nullptr;
+    Timeline* m_timeline = nullptr;
 };

@@ -10,8 +10,35 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include "stb_image.h"
+#include "ui/ImGuizmo.h"
 
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
+UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
+double UIManager::sModeTransitionStart = -1.0;
+
+void UIManager::setMode(WorkspaceMode m) {
+    if (m == sMode) return;
+    sPrevMode = sMode;
+    sMode = m;
+    sModeTransitionStart = glfwGetTime();
+}
+
+float UIManager::modeAlpha(WorkspaceMode m) {
+    if (sModeTransitionStart < 0.0) return (m == sMode) ? 1.0f : 0.0f;
+    double t = (glfwGetTime() - sModeTransitionStart) / kModeTransitionSec;
+    if (t >= 1.0) {
+        sModeTransitionStart = -1.0;  // transition complete
+        return (m == sMode) ? 1.0f : 0.0f;
+    }
+    if (t < 0.0) t = 0.0;
+    // Ease-out cubic — fast start, settles softly
+    float u = (float)(1.0 - std::pow(1.0 - t, 3.0));
+    if (m == sMode)     return u;        // incoming
+    if (m == sPrevMode) return 1.0f - u; // outgoing (rarely actually rendered;
+                                         // dock nodes hide it, but kept for
+                                         // any standalone overlays)
+    return 0.0f;
+}
 
 static ImFont* addFirstAvailableFont(ImGuiIO& io, const char* const* paths,
                                      float size, const ImFontConfig* cfg,
@@ -307,35 +334,44 @@ void UIManager::drawInspectorTabIcons() {
 void UIManager::applyTheme(float dpiScale) {
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // Geometry — Apple/Vercel-density: tight enough to feel intentional,
-    // loose enough to breathe. 10x6 frame padding fits "Masks"/"Mapping" tabs
-    // without truncation at any reasonable dock width.
+    // Geometry — canonical design tokens. One block, one set of values
+    // applied app-wide so spacing/padding rhythm is consistent. The 10x6
+    // frame padding fits "Masks"/"Mapping" tabs without truncation at any
+    // reasonable dock width.
     s.WindowPadding     = ImVec2(18, 16);
     s.FramePadding      = ImVec2(10, 6);
     s.CellPadding       = ImVec2(8, 5);
-    s.ItemSpacing       = ImVec2(8, 8);
-    s.ItemInnerSpacing  = ImVec2(6, 4);
+    s.ItemSpacing       = ImVec2(8, 6);
+    s.ItemInnerSpacing  = ImVec2(8, 4);
     s.IndentSpacing     = 16.0f;
     s.ScrollbarSize     = 10.0f;
     s.GrabMinSize       = 16.0f;
     s.SeparatorTextBorderSize = 1.0f;
     s.SeparatorTextPadding    = ImVec2(12, 6);
 
-    // Rounding — three principled tiers instead of four ad-hoc values.
-    // 6  → tactile elements (frames, buttons, tabs) — read as "interactive"
-    // 10 → containers (windows, popups, children) — read as "surface"
-    // 100 → pills (scrollbar grab, slider grab) — read as "drag handle"
+    // Rounding — uniform 8px tactile radius across all interactive frames,
+    // 10px for containers. This eliminates the rounded/sharp inconsistency
+    // the user called out (Tiling sliders, dropdowns, etc.). No more pill
+    // (100px) shapes mixed with rounded rectangles — every interactive
+    // surface reads as the same "interactive" affordance.
     s.WindowRounding    = 10.0f;
-    s.ChildRounding     = 10.0f;
-    s.FrameRounding     = 6.0f;
+    s.ChildRounding     = 8.0f;
+    s.FrameRounding     = 8.0f;
     s.PopupRounding     = 10.0f;
-    s.ScrollbarRounding = 100.0f;
-    s.GrabRounding      = 100.0f;
-    s.TabRounding       = 6.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.GrabRounding      = 8.0f;
+    s.TabRounding       = 8.0f;
 
-    // Borders — hairline semi-transparent whites, no solid dark borders
-    s.WindowBorderSize  = 1.0f;
-    s.ChildBorderSize   = 1.0f;
+    // Border layout preserved (WindowBorderSize / ChildBorderSize stay
+    // at 1) so panel content rects don't shift; Border color alpha is
+    // zeroed below in the palette so the line is invisible. This kills
+    // the stray edge-stroke without breaking dock geometry.
+    // Borders off by default — outlines on every window were bleeding into
+    // the viewport between docked panels. Only Layers and Parameters panels
+    // opt in (via PushStyleVar). The top nav and timeline-transport edges
+    // are drawn explicitly with AddLine, not via Window/Child borders.
+    s.WindowBorderSize  = 0.0f;
+    s.ChildBorderSize   = 0.0f;
     s.FrameBorderSize   = 0.0f;
     s.PopupBorderSize   = 1.0f;
     s.TabBorderSize     = 0.0f;
@@ -351,14 +387,15 @@ void UIManager::applyTheme(float dpiScale) {
     s.AntiAliasedLines  = true;
     s.AntiAliasedFill   = true;
 
-    // --- Color Palette — Linear design system tokens ---
-    // Background: near-black canvas with micro luminance steps, no blue tint
-    ImVec4 bgVoid       = ImVec4(0.004f, 0.004f, 0.008f, 1.00f); // #010102 deepest
-    ImVec4 bgDeep       = ImVec4(0.031f, 0.035f, 0.039f, 1.00f); // #08090a marketing black
-    ImVec4 bgPanel      = ImVec4(0.059f, 0.063f, 0.067f, 1.00f); // #0f1011 — fully opaque so docked panels fully occlude the canvas behind
-    ImVec4 bgWidget     = ImVec4(0.098f, 0.102f, 0.106f, 1.00f); // #191a1b elevated surface
-    ImVec4 bgWidgetHov  = ImVec4(0.125f, 0.129f, 0.137f, 1.00f); // #202124 hover
-    ImVec4 bgWidgetAct  = ImVec4(0.157f, 0.157f, 0.173f, 1.00f); // #28282c active/lightest dark
+    // --- Color Palette — strict monochrome ramp ---
+    // Background: near-black canvas with micro luminance steps. NO blue,
+    // NO cyan, NO teal. White-with-alpha for every accent.
+    ImVec4 bgVoid       = ImVec4(0.05f, 0.06f, 0.07f, 1.00f);  // darkest
+    ImVec4 bgDeep       = ImVec4(0.07f, 0.08f, 0.09f, 1.00f);  // marketing black
+    ImVec4 bgPanel      = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);  // panel bg — opaque so docked panels fully occlude the canvas behind
+    ImVec4 bgWidget     = ImVec4(0.13f, 0.14f, 0.16f, 1.00f);  // frame bg
+    ImVec4 bgWidgetHov  = ImVec4(0.18f, 0.19f, 0.22f, 1.00f);  // frame bg hovered
+    ImVec4 bgWidgetAct  = ImVec4(0.24f, 0.26f, 0.30f, 1.00f);  // frame bg active
 
     // Borders — semi-transparent white, Linear's signature "moonlight" edges
     ImVec4 borderSubtle = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
@@ -373,11 +410,11 @@ void UIManager::applyTheme(float dpiScale) {
     ImVec4 accentSoft   = ImVec4(1.0f, 1.0f, 1.0f, 0.07f); // selection / header bg (light gray tint)
     ImVec4 accentMed    = ImVec4(1.0f, 1.0f, 1.0f, 0.12f); // hover-header (slightly stronger)
 
-    // Text tiers — never pure white, Linear's cool-warm near-white
-    ImVec4 textPrimary  = ImVec4(0.969f, 0.973f, 0.973f, 1.00f); // #f7f8f8
-    ImVec4 textSecondary= ImVec4(0.816f, 0.839f, 0.878f, 1.00f); // #d0d6e0
-    ImVec4 textTertiary = ImVec4(0.541f, 0.561f, 0.596f, 1.00f); // #8a8f98
-    ImVec4 textDisabled = ImVec4(0.384f, 0.400f, 0.427f, 1.00f); // #62666d
+    // Text tiers — neutral grays, no warm/cool bias
+    ImVec4 textPrimary  = ImVec4(0.94f, 0.95f, 0.97f, 1.00f);
+    ImVec4 textSecondary= ImVec4(0.78f, 0.80f, 0.84f, 1.00f);
+    ImVec4 textTertiary = ImVec4(0.55f, 0.58f, 0.62f, 1.00f);
+    ImVec4 textDisabled = ImVec4(0.45f, 0.48f, 0.55f, 1.00f);
 
     // Semantic — muted, used sparingly
     ImVec4 success      = ImVec4(0.063f, 0.725f, 0.506f, 1.00f); // #10b981
@@ -388,10 +425,10 @@ void UIManager::applyTheme(float dpiScale) {
 
     auto* c = s.Colors;
 
-    // Window — translucent panel background for a faux-glass feel over the dark viewport
+    // Window
     c[ImGuiCol_WindowBg]            = bgPanel;
-    c[ImGuiCol_ChildBg]             = ImVec4(1.0f, 1.0f, 1.0f, 0.02f); // ultra-subtle surface elevation
-    c[ImGuiCol_PopupBg]             = ImVec4(0.098f, 0.102f, 0.106f, 0.96f); // #191a1b surface
+    c[ImGuiCol_ChildBg]             = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
+    c[ImGuiCol_PopupBg]             = ImVec4(bgWidget.x, bgWidget.y, bgWidget.z, 0.96f);
     c[ImGuiCol_Border]              = border;
     c[ImGuiCol_BorderShadow]        = ImVec4(0, 0, 0, 0);
 
@@ -399,63 +436,72 @@ void UIManager::applyTheme(float dpiScale) {
     c[ImGuiCol_Text]                = textPrimary;
     c[ImGuiCol_TextDisabled]        = textDisabled;
 
-    // Title bar — nearly flush with the panel, no shouting
-    c[ImGuiCol_TitleBg]             = ImVec4(0.059f, 0.063f, 0.067f, 0.92f);
-    c[ImGuiCol_TitleBgActive]       = ImVec4(0.098f, 0.102f, 0.106f, 0.95f);
-    c[ImGuiCol_TitleBgCollapsed]    = ImVec4(0.031f, 0.035f, 0.039f, 0.75f);
+    // Title bar
+    c[ImGuiCol_TitleBg]             = ImVec4(bgPanel.x, bgPanel.y, bgPanel.z, 0.92f);
+    c[ImGuiCol_TitleBgActive]       = ImVec4(bgWidget.x, bgWidget.y, bgWidget.z, 0.95f);
+    c[ImGuiCol_TitleBgCollapsed]    = ImVec4(bgDeep.x, bgDeep.y, bgDeep.z, 0.75f);
 
-    // Menu bar — flush with deep bg
+    // Menu bar
     c[ImGuiCol_MenuBarBg]           = bgDeep;
 
-    // Frames (inputs, sliders) — Linear's near-zero-opacity white over dark
-    c[ImGuiCol_FrameBg]             = ImVec4(1.0f, 1.0f, 1.0f, 0.03f);
-    c[ImGuiCol_FrameBgHovered]      = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
-    c[ImGuiCol_FrameBgActive]       = ImVec4(1.0f, 1.0f, 1.0f, 0.09f);
+    // Frames (inputs, sliders) — neutral gray track
+    c[ImGuiCol_FrameBg]             = bgWidget;
+    c[ImGuiCol_FrameBgHovered]      = bgWidgetHov;
+    c[ImGuiCol_FrameBgActive]       = bgWidgetAct;
 
-    // Tabs
+    // Tabs — neutral gray, white at low alpha for active
     c[ImGuiCol_Tab]                 = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
     c[ImGuiCol_TabHovered]          = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
-    c[ImGuiCol_TabActive]           = ImVec4(brand.x, brand.y, brand.z, 0.18f);
+    c[ImGuiCol_TabActive]           = ImVec4(1.0f, 1.0f, 1.0f, 0.18f);
     c[ImGuiCol_TabUnfocused]        = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_TabUnfocusedActive]  = ImVec4(1.0f, 1.0f, 1.0f, 0.04f);
 
-    // Headers (CollapsingHeader, Selectable) — white at low opacity when selected
+    // Headers (CollapsingHeader, Selectable)
     c[ImGuiCol_Header]              = accentSoft;
     c[ImGuiCol_HeaderHovered]       = ImVec4(1.0f, 1.0f, 1.0f, 0.04f);
-    c[ImGuiCol_HeaderActive]        = accentMed;
+    c[ImGuiCol_HeaderActive]        = ImVec4(1.0f, 1.0f, 1.0f, 0.18f);
 
-    // Buttons — ghost/subtle Linear buttons: transparent with hairline border effect (via ItemBg)
+    // Buttons — ghost
     c[ImGuiCol_Button]              = ImVec4(1.0f, 1.0f, 1.0f, 0.03f);
     c[ImGuiCol_ButtonHovered]       = ImVec4(1.0f, 1.0f, 1.0f, 0.07f);
     c[ImGuiCol_ButtonActive]        = accentMed;
 
-    // Checkmarks / slider grabs — brand/accent at full intensity for key interactions
-    c[ImGuiCol_CheckMark]           = accent;
-    c[ImGuiCol_SliderGrab]          = accent;
-    c[ImGuiCol_SliderGrabActive]    = accentHover;
+    // Checkmarks / slider grabs — STRICT WHITE-ALPHA, no chromatic accent
+    c[ImGuiCol_CheckMark]           = ImVec4(1.0f, 1.0f, 1.0f, 0.95f);
+    c[ImGuiCol_SliderGrab]          = ImVec4(1.0f, 1.0f, 1.0f, 0.55f);
+    c[ImGuiCol_SliderGrabActive]    = ImVec4(1.0f, 1.0f, 1.0f, 0.85f);
 
-    // Scrollbar — invisible track, hairline grab
+    // Scrollbar
     c[ImGuiCol_ScrollbarBg]         = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_ScrollbarGrab]       = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
     c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(1.0f, 1.0f, 1.0f, 0.14f);
     c[ImGuiCol_ScrollbarGrabActive] = ImVec4(1.0f, 1.0f, 1.0f, 0.22f);
 
-    // Separator — subtle by default, brand on interaction
-    c[ImGuiCol_Separator]           = borderSubtle;
-    c[ImGuiCol_SeparatorHovered]    = accent;
-    c[ImGuiCol_SeparatorActive]     = accentHover;
+    // Separator — white-alpha tiers (no chromatic)
+    c[ImGuiCol_Separator]           = ImVec4(1.0f, 1.0f, 1.0f, 0.10f);
+    c[ImGuiCol_SeparatorHovered]    = ImVec4(1.0f, 1.0f, 1.0f, 0.20f);
+    c[ImGuiCol_SeparatorActive]     = ImVec4(1.0f, 1.0f, 1.0f, 0.35f);
 
-    // Resize grip
+    // Resize grip — white-alpha tiers
     c[ImGuiCol_ResizeGrip]          = ImVec4(1.0f, 1.0f, 1.0f, 0.05f);
-    c[ImGuiCol_ResizeGripHovered]   = accentSoft;
-    c[ImGuiCol_ResizeGripActive]    = accentMed;
+    c[ImGuiCol_ResizeGripHovered]   = ImVec4(1.0f, 1.0f, 1.0f, 0.15f);
+    c[ImGuiCol_ResizeGripActive]    = ImVec4(1.0f, 1.0f, 1.0f, 0.30f);
+
+    // Plot — was potentially blue/teal in some places; force white-alpha
+    c[ImGuiCol_PlotLines]           = ImVec4(1.0f, 1.0f, 1.0f, 0.55f);
+    c[ImGuiCol_PlotLinesHovered]    = ImVec4(1.0f, 1.0f, 1.0f, 0.85f);
+    c[ImGuiCol_PlotHistogram]       = ImVec4(1.0f, 1.0f, 1.0f, 0.40f);
+    c[ImGuiCol_PlotHistogramHovered]= ImVec4(1.0f, 1.0f, 1.0f, 0.65f);
 
     // Docking
-    c[ImGuiCol_DockingPreview]      = ImVec4(accent.x, accent.y, accent.z, 0.40f);
+    c[ImGuiCol_DockingPreview]      = ImVec4(1.0f, 1.0f, 1.0f, 0.40f);
     c[ImGuiCol_DockingEmptyBg]      = bgDeep;
 
-    // Nav focus — white highlight
-    c[ImGuiCol_NavHighlight]        = accent;
+    // Nav focus — white-alpha
+    c[ImGuiCol_NavHighlight]        = ImVec4(1.0f, 1.0f, 1.0f, 0.45f);
+
+    // Text selection
+    c[ImGuiCol_TextSelectedBg]      = ImVec4(1.0f, 1.0f, 1.0f, 0.18f);
 
     // Table
     c[ImGuiCol_TableHeaderBg]       = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
@@ -464,8 +510,8 @@ void UIManager::applyTheme(float dpiScale) {
     c[ImGuiCol_TableRowBg]          = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_TableRowBgAlt]       = ImVec4(1.0f, 1.0f, 1.0f, 0.015f);
 
-    // Drag/drop
-    c[ImGuiCol_DragDropTarget]      = warning;
+    // Drag/drop — white-alpha (was warning amber)
+    c[ImGuiCol_DragDropTarget]      = ImVec4(1.0f, 1.0f, 1.0f, 0.6f);
 
     // Modal dim — deep, near-opaque (Linear uses 0.85)
     c[ImGuiCol_ModalWindowDimBg]    = ImVec4(0.0f, 0.0f, 0.0f, 0.85f);
@@ -508,6 +554,11 @@ void UIManager::beginFrame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    // ImGuizmo wants its frame state reset right after ImGui::NewFrame().
+    // Without this the 3D Stage manipulator handles never render and
+    // IsOver()/IsUsing() return stale values, so select/move/rotate/scale
+    // silently no-op when you click them.
+    ImGuizmo::BeginFrame();
     handleZoom();
 }
 
@@ -542,6 +593,16 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
+
+    // 1px hairline along the dockspace top edge — this is the underline
+    // beneath the main nav. Drawn explicitly because WindowBorderSize is now
+    // 0 globally (so panels stop bleeding outlines into the viewport).
+    {
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        fg->AddLine(ImVec2(dockPos.x, dockPos.y),
+                    ImVec2(dockPos.x + dockSize.x, dockPos.y),
+                    IM_COL32(255, 255, 255, 25), 1.0f);
+    }
 
     ImGuiID dockspaceId = ImGui::GetID("EaselDockSpace");
     // Push a taller frame padding for the DockSpace only — ImGui derives
@@ -675,7 +736,14 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // Two deferred focus passes: Canvas in the big left slot, Layers as
         // the active tab in the top-right. SetWindowFocus is called every
         // frame while m_pendingFocusFramesLeft > 0 so both settle correctly.
-        m_pendingFocus = "Layers";
+        // In Stage mode, surface Mapping (not Properties) as the active
+        // right-rail tab — when the user goes Canvas→Stage they expect to
+        // see the mapping controls front and center for projector calibration.
+        if (sMode == WorkspaceMode::Stage) {
+            m_pendingFocus = "        ###Mapping";
+        } else {
+            m_pendingFocus = "Layers";
+        }
         m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
@@ -714,7 +782,17 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             dockSize.y - headerReserve - timelineH - kFloatTopReserve - kFloatMargin);
 
         float leftW  = std::min(360.0f, dockSize.x * 0.22f);
-        float rightW = std::min(340.0f, dockSize.x * 0.22f);
+        // In Stage mode the user wants a noticeably wider, anchored right
+        // column (Mapping & Properties) that reads as a fixed dock — bump
+        // it to ~26% of the work area, no upper clamp short of the dock
+        // width itself, so it stops feeling like a thin floating overlay.
+        float rightW = (sMode == WorkspaceMode::Stage)
+                         ? std::max(320.0f, dockSize.x * 0.26f)
+                         : std::min(340.0f, dockSize.x * 0.22f);
+        // Persist for other UI code that needs to reserve space (e.g. Stage
+        // panel reserves the right column out of its central content width).
+        m_rightFloatW = rightW;
+        m_leftFloatW  = leftW;
 
         ImGuiWindowFlags hostFlags =
             ImGuiWindowFlags_NoTitleBar |
@@ -771,12 +849,20 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     // without the second call, Mapping's early Begin (from the warp editor's
     // preamble render) steals focus in the right tab group.
     if (m_pendingFocus) {
-        ImGui::SetWindowFocus(m_pendingFocus);
-        // Also raise Properties so it leads the right floating group's tabs.
-        // Calling it AFTER the primary focus means Properties is the
-        // most-recently-focused window in ITS dock; its dock updates its
-        // selected tab independently of the left group's selection.
-        ImGui::SetWindowFocus("        ###Properties");
+        // In Stage mode the primary focus IS the right-rail Mapping tab —
+        // calling it last means Mapping wins selection in its dock group.
+        // In other modes, Layers takes the left, then Properties wins the
+        // right group (originally to beat Mapping's early Begin).
+        if (sMode == WorkspaceMode::Stage) {
+            ImGui::SetWindowFocus(m_pendingFocus);  // "        ###Mapping"
+        } else {
+            ImGui::SetWindowFocus(m_pendingFocus);  // typically "Layers"
+            // Also raise Properties so it leads the right floating group's tabs.
+            // Calling it AFTER the primary focus means Properties is the
+            // most-recently-focused window in ITS dock; its dock updates its
+            // selected tab independently of the left group's selection.
+            ImGui::SetWindowFocus("        ###Properties");
+        }
         m_pendingFocusFramesLeft--;
         if (m_pendingFocusFramesLeft <= 0) m_pendingFocus = nullptr;
     }
