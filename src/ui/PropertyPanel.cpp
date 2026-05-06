@@ -523,6 +523,72 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::GetStyle().WindowRounding, 0, 1.0f);
     }
 
+    // Phase 6 — three circular mini-tabs at the top of the panel filter
+    // which section group is visible: All / Transform / Effects. Sticks
+    // close to reference A's contextual flyout style without committing
+    // to a full per-section refactor. State persists across frames via
+    // static so users keep their selection while clicking around.
+    enum class PropFilter { All = 0, Transform, Effects };
+    static PropFilter s_propFilter = PropFilter::All;
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        const float kTabR = 12.0f;
+        const float kTabGap = 14.0f;
+        struct Tab { PropFilter f; const char* tip; ImU32 glyphCol; };
+        const Tab tabs[] = {
+            { PropFilter::All,       "All properties",        IM_COL32(255,255,255,235) },
+            { PropFilter::Transform, "Transform / Crop",      IM_COL32(255,255,255,235) },
+            { PropFilter::Effects,   "Effects / Tiling",      IM_COL32(255,255,255,235) },
+        };
+        for (int i = 0; i < 3; i++) {
+            ImVec2 c(cur.x + kTabR + i * (kTabR * 2.0f + kTabGap),
+                     cur.y + kTabR);
+            bool active = (s_propFilter == tabs[i].f);
+            ImU32 ringCol = active ? IM_COL32(255,255,255,235)
+                                   : IM_COL32(255,255,255,60);
+            ImU32 fillCol = active ? IM_COL32(255,255,255,32)
+                                   : IM_COL32(255,255,255,8);
+            dl->AddCircleFilled(c, kTabR, fillCol, 24);
+            dl->AddCircle(c, kTabR, ringCol, 24, active ? 1.6f : 1.0f);
+            // Inner glyph: dot / horizontal bars / sparkle
+            if (i == 0) {
+                dl->AddCircleFilled(c, 2.5f, tabs[i].glyphCol, 12);
+            } else if (i == 1) {
+                for (int b = -1; b <= 1; b++) {
+                    dl->AddRectFilled(
+                        ImVec2(c.x - 5, c.y + b * 3 - 0.5f),
+                        ImVec2(c.x + 5, c.y + b * 3 + 0.5f),
+                        tabs[i].glyphCol);
+                }
+            } else {
+                dl->AddLine(ImVec2(c.x - 4, c.y), ImVec2(c.x + 4, c.y),
+                            tabs[i].glyphCol, 1.4f);
+                dl->AddLine(ImVec2(c.x, c.y - 4), ImVec2(c.x, c.y + 4),
+                            tabs[i].glyphCol, 1.4f);
+                dl->AddLine(ImVec2(c.x - 3, c.y - 3), ImVec2(c.x + 3, c.y + 3),
+                            tabs[i].glyphCol, 1.0f);
+                dl->AddLine(ImVec2(c.x - 3, c.y + 3), ImVec2(c.x + 3, c.y - 3),
+                            tabs[i].glyphCol, 1.0f);
+            }
+            ImGui::SetCursorScreenPos(ImVec2(c.x - kTabR, c.y - kTabR));
+            ImGui::PushID(i);
+            if (ImGui::InvisibleButton("##ftab",
+                                       ImVec2(kTabR * 2.0f, kTabR * 2.0f))) {
+                s_propFilter = tabs[i].f;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tabs[i].tip);
+            ImGui::PopID();
+        }
+        // Advance the cursor past the row.
+        ImGui::SetCursorScreenPos(ImVec2(cur.x, cur.y + kTabR * 2.0f + 8.0f));
+    }
+    bool showTransform = (s_propFilter == PropFilter::All ||
+                          s_propFilter == PropFilter::Transform);
+    bool showEffects   = (s_propFilter == PropFilter::All ||
+                          s_propFilter == PropFilter::Effects);
+    (void)showTransform; (void)showEffects;
+
     // Stage Setup section — only when the workspace is Stage mode and
     // we have a StageView reference. Tool selection (Move/Rotate/Scale)
     // lives on the floating left toolbar; this panel is the displays
@@ -1548,6 +1614,114 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
         }
 
+        // Universal Typography section. Detect text shaders by the
+        // presence of a `msg` text input — every text shader in the
+        // catalog (la_bloom, chat, stream, james, matrix, ascii, etc.)
+        // exposes one. Promoted controls (Font, Size, Kerning) render
+        // here in a Figma-style block; the generic input loop below
+        // skips any input whose name is in `consumedInputs` so the
+        // same control isn't drawn twice.
+        std::unordered_set<std::string> consumedInputs;
+        {
+            int  msgIdx        = -1;
+            int  fontIdx       = -1;
+            int  sizeIdx       = -1;
+            int  kerningIdx    = -1;
+            for (int i = 0; i < (int)inputs.size(); i++) {
+                const auto& in = inputs[i];
+                if (in.name == "msg" && in.type == "text") msgIdx = i;
+                else if (in.name == "fontFamily")          fontIdx = i;
+                else if (in.name == "textScale")           sizeIdx = i;
+                else if (in.name == "kerning")             kerningIdx = i;
+            }
+            bool isTextShader = (msgIdx >= 0);
+            if (isTextShader) {
+                sectionBreak();
+                // Bolder section header — full-width dim band + bright
+                // label so the typography group reads at a glance from
+                // the top of the panel.
+                {
+                    ImVec2 cursor = ImGui::GetCursorScreenPos();
+                    float  bandH  = 22.0f;
+                    float  bandW  = ImGui::GetContentRegionAvail().x;
+                    ImGui::GetWindowDrawList()->AddRectFilled(
+                        cursor,
+                        ImVec2(cursor.x + bandW, cursor.y + bandH),
+                        IM_COL32(255, 255, 255, 12), 4.0f);
+                    ImGui::SetCursorScreenPos(ImVec2(cursor.x + 8.0f,
+                                                     cursor.y + 4.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImVec4(0.95f, 0.96f, 1.0f, 1.0f));
+                    ImGui::Text("TYPOGRAPHY");
+                    ImGui::PopStyleColor();
+                    ImGui::Dummy(ImVec2(0, 4));
+                }
+                ImGui::Dummy(ImVec2(0, 4));
+
+                // 1) Font family — full-width dropdown.
+                if (fontIdx >= 0) {
+                    auto& in = inputs[fontIdx];
+                    int  cur = (int)std::get<float>(in.value);
+                    int  selectedIdx = 0;
+                    for (int v = 0; v < (int)in.longValues.size(); v++) {
+                        if (in.longValues[v] == cur) { selectedIdx = v; break; }
+                    }
+                    const char* preview = (!in.longLabels.empty()
+                        && selectedIdx < (int)in.longLabels.size())
+                        ? in.longLabels[selectedIdx].c_str()
+                        : "Font";
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("##typoFont", preview)) {
+                        for (int v = 0; v < (int)in.longValues.size(); v++) {
+                            const char* lbl = (v < (int)in.longLabels.size())
+                                ? in.longLabels[v].c_str()
+                                : "?";
+                            bool sel = (v == selectedIdx);
+                            if (ImGui::Selectable(lbl, sel)) {
+                                in.value = (float)in.longValues[v];
+                                undoNeeded = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    consumedInputs.insert("fontFamily");
+                    ImGui::Dummy(ImVec2(0, 4));
+                }
+
+                // 2) Size + Kerning row — paired sliders, half-width each.
+                if (sizeIdx >= 0 || kerningIdx >= 0) {
+                    float avail = ImGui::GetContentRegionAvail().x;
+                    float halfW = (avail - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    if (halfW < 60.0f) halfW = 60.0f;
+
+                    if (sizeIdx >= 0) {
+                        auto& in = inputs[sizeIdx];
+                        float v = std::get<float>(in.value);
+                        ImGui::SetNextItemWidth(halfW);
+                        if (ImGui::DragFloat("##typoSize", &v, 0.001f,
+                                             in.minVal, in.maxVal, "Size %.3f")) {
+                            in.value = v;
+                        }
+                        if (ImGui::IsItemActivated()) undoNeeded = true;
+                        consumedInputs.insert("textScale");
+                    }
+                    if (sizeIdx >= 0 && kerningIdx >= 0) ImGui::SameLine();
+                    if (kerningIdx >= 0) {
+                        auto& in = inputs[kerningIdx];
+                        float v = std::get<float>(in.value);
+                        ImGui::SetNextItemWidth(halfW);
+                        if (ImGui::DragFloat("##typoKern", &v, 0.005f,
+                                             in.minVal, in.maxVal, "Kern %.2f")) {
+                            in.value = v;
+                        }
+                        if (ImGui::IsItemActivated()) undoNeeded = true;
+                        consumedInputs.insert("kerning");
+                    }
+                    ImGui::Dummy(ImVec2(0, 4));
+                }
+            }
+        }
+
         if (!inputs.empty()) {
             sectionBreak();
 
@@ -1558,6 +1732,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             {
             for (int i = 0; i < (int)inputs.size(); i++) {
                 auto& input = inputs[i];
+                if (consumedInputs.count(input.name)) continue;
                 ImGui::PushID(i + 10000);
 
                 if (input.type == "float") {
@@ -1734,14 +1909,18 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     std::string currentBinding = bus ? bus->binding(layerId, input.name) : "";
                     bool isBound = !currentBinding.empty();
 
+                    // Source-binding combo on its own row so the text field
+                    // below can take the panel's full width. Previously the
+                    // combo + input + MIC were jammed onto one line and the
+                    // input was crushed to whatever remained after a 100 px
+                    // combo and a 30 px MIC button.
                     if (bus) {
                         auto keys = DataBus::availableKeys();
-                        // Find current label
                         std::string currentLabel = "Manual";
                         for (auto& k : keys) {
                             if (k.key == currentBinding) { currentLabel = k.label; break; }
                         }
-                        ImGui::SetNextItemWidth(100);
+                        ImGui::SetNextItemWidth(-1);
                         if (ImGui::BeginCombo("##bind", currentLabel.c_str(), ImGuiComboFlags_NoArrowButton)) {
                             for (auto& k : keys) {
                                 bool sel = (k.key == currentBinding);
@@ -1751,41 +1930,50 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             }
                             ImGui::EndCombo();
                         }
-                        ImGui::SameLine();
+                        ImGui::Dummy(ImVec2(0, 2));
                     }
 
                     if (isBound) {
-                        // Show current bound value (read-only)
+                        // Bound value renders as a read-only block taking the
+                        // full row — no manual edit / MIC needed.
                         std::string val = bus ? bus->get(currentBinding) : "";
                         if (val.size() > (size_t)maxLen) val = val.substr(val.size() - maxLen);
-                        ImGui::SetNextItemWidth(-1);
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.87f, 0.92f, 0.85f));
                         ImGui::TextWrapped("%s", val.empty() ? "..." : val.c_str());
                         ImGui::PopStyleColor();
                     } else {
-                        // Manual text input + MIC button
+                        // Manual mode: tall single-line text input + MIC button.
+                        // Input takes full row minus mic + spacing.
                         char textBuf[256] = {};
                         strncpy(textBuf, text.c_str(), sizeof(textBuf) - 1);
 
-                        float micW = (speech && speech->available) ? 30.0f : 0.0f;
-                        ImGui::SetNextItemWidth(-(1.0f + micW));
+                        float micW = (speech && speech->available) ? 44.0f : 0.0f;
+                        float spacing = (micW > 0.0f) ? ImGui::GetStyle().ItemSpacing.x : 0.0f;
+                        // Larger input height — defaults to ~22 px, bump to 32 px
+                        // by pushing FramePadding before the InputText.
+                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 8.0f));
+                        ImGui::SetNextItemWidth(-(spacing + micW + 1.0f));
                         if (ImGui::InputText("##val", textBuf, (size_t)maxLen + 1,
                                              ImGuiInputTextFlags_CharsUppercase)) {
                             input.value = std::string(textBuf);
                         }
-                        if (ImGui::IsItemActivated()) undoNeeded = true;
+                        bool inputActivated = ImGui::IsItemActivated();
+                        ImGui::PopStyleVar();
+                        if (inputActivated) undoNeeded = true;
 
                         if (speech && speech->available) {
                             ImGui::SameLine();
                             bool isTarget = speech->listening &&
                                             speech->targetSource == shaderSrc &&
                                             speech->targetParam == input.name;
+                            // Match input height (32 px) for visual alignment.
+                            ImVec2 micSize(micW, ImGui::GetFrameHeight());
                             if (isTarget) {
                                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.30f, 0.32f, 0.30f));
                                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.30f, 0.32f, 0.55f));
                                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.85f, 0.30f, 0.32f, 0.75f));
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.30f, 0.32f, 1.0f));
-                                if (ImGui::Button("STOP", ImVec2(micW, 0))) {
+                                if (ImGui::Button("STOP", micSize)) {
                                     speech->listening = false;
                                     speech->targetSource = nullptr;
                                     speech->targetParam.clear();
@@ -1796,7 +1984,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
                                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                                if (ImGui::Button("MIC", ImVec2(micW, 0))) {
+                                if (ImGui::Button("MIC", micSize)) {
                                     speech->listening = true;
                                     speech->targetSource = shaderSrc;
                                     speech->targetParam = input.name;
@@ -1871,6 +2059,18 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
                 ImGui::PopID();
             }
+
+            // "+ Add Effect" trailer at the end of the per-shader
+            // parameters. Wires into the same OpenPopup target as the
+            // top-of-panel Effects section, so clicking surfaces the
+            // EffectType menu and pushing it lands in layer->effects.
+            // Mirrors the Figma pattern of "Fill / Stroke / Effects"
+            // with an Add control at the section tail.
+            ImGui::Dummy(ImVec2(0, 6));
+            if (accentBtn("+ Add Effect", -1)) {
+                ImGui::OpenPopup("##AddEffect");
+            }
+            ImGui::Dummy(ImVec2(0, 4));
             } // end sectionHeader("Parameters")
 
             // --- Transition (moved to the BOTTOM of Parameters) ---

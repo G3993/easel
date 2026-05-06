@@ -194,7 +194,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 7 — Timeline redesign
+### [x] Phase 7 — Timeline redesign (criteria met by existing impl — see Application.cpp:6214 for "+ Lane")
 **Goal:** Timeline matches reference A bottom panel — track list on left, timeline grid on right, per-track lane affordance.
 
 **Tasks:**
