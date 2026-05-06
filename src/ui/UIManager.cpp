@@ -12,6 +12,17 @@
 #include "stb_image.h"
 #include "ui/ImGuizmo.h"
 
+// Phase 8 — design tokens. Single named source of truth for the chrome
+// surface so rails, panels, and float hosts share one luminance value.
+// Anyone touching the rail or applyTheme() should reference these.
+namespace UITokens {
+    static constexpr ImU32 kChromeSurface = IM_COL32(11, 13, 17, 255);
+    static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 30);
+    static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 22);
+    static constexpr ImU32 kButtonHover   = IM_COL32(255, 255, 255, 22);
+    static constexpr ImU32 kButtonActive  = IM_COL32(255, 255, 255, 36);
+}
+
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
 double UIManager::sModeTransitionStart = -1.0;
@@ -583,7 +594,12 @@ void UIManager::applyTheme(float dpiScale) {
     // NO cyan, NO teal. White-with-alpha for every accent.
     ImVec4 bgVoid       = ImVec4(0.05f, 0.06f, 0.07f, 1.00f);  // darkest
     ImVec4 bgDeep       = ImVec4(0.07f, 0.08f, 0.09f, 1.00f);  // marketing black
-    ImVec4 bgPanel      = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);  // panel bg — opaque so docked panels fully occlude the canvas behind
+    // Phase 8 unification — bgPanel matches the rail background so left
+    // rail / right tool rail / docked panels read as one continuous
+    // chrome surface. Keep opaque so docked panels fully occlude the
+    // canvas behind. (15/17/22 ~= 0.059/0.067/0.086 in normalised float;
+    // exact integer values used in rail draw lists below.)
+    ImVec4 bgPanel      = ImVec4(0.043f, 0.051f, 0.067f, 1.00f);  // panel bg — matches rails (kRailBg)
     ImVec4 bgWidget     = ImVec4(0.13f, 0.14f, 0.16f, 1.00f);  // frame bg
     ImVec4 bgWidgetHov  = ImVec4(0.18f, 0.19f, 0.22f, 1.00f);  // frame bg hovered
     ImVec4 bgWidgetAct  = ImVec4(0.24f, 0.26f, 0.30f, 1.00f);  // frame bg active
@@ -1142,7 +1158,7 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 11, 14, 255));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, UITokens::kChromeSurface);
 
     if (ImGui::Begin("##LeftRail", nullptr, flags)) {
         // Hairline divider at top, just below where the workspace bar ends.
@@ -1304,7 +1320,7 @@ void UIManager::renderRightToolRail() {
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 11, 14, 255));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, UITokens::kChromeSurface);
 
     if (ImGui::Begin("##RightToolRail", nullptr, flags)) {
         // Hairline divider (left edge — visual seam against canvas).

@@ -154,7 +154,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 8 — Universal styling pass
+### [x] Phase 8 — Universal styling pass
 **Goal:** unify color/spacing/rounding across all panels.
 
 **Tasks:** in `UIManager::applyTheme`:
