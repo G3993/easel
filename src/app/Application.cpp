@@ -5067,40 +5067,27 @@ void Application::renderTimelinePanel() {
             m_timelineMinimized = !m_timelineMinimized;
         ImGui::SameLine();
 
-        bool playing = m_timeline.isPlaying();
-        if (iconBtn("##PlayPause", playing ? 1 : 0, playing)) m_timeline.togglePlay();
-        ImGui::SameLine();
-        if (iconBtn("##Stop", 2)) m_timeline.stop();
-        ImGui::SameLine();
-        bool loop = m_timeline.looping();
-        if (iconBtn("##Loop", 3, loop)) m_timeline.setLooping(!loop);
-
-        // Timecode — click-to-seek playhead, double-click to edit total length.
-        // Hit-target is FrameHeight tall so vertical center matches the icon
-        // buttons and framed widgets on the rest of the row.
-        ImGui::SameLine(0, 16);
-        double ph = m_timeline.playhead();
-        int pm = (int)ph / 60, ps = (int)ph % 60;
+        // De-duplication note: play/stop/loop + timecode now live in the
+        // floating transport pill above this dock. Phase 5 made it the
+        // primary affordance — keeping a second copy here would defeat the
+        // "single source of truth" the user explicitly flagged. Dur and
+        // the zoom slider stay because the pill doesn't own those.
         double dur = m_timeline.duration();
         int dm = (int)dur / 60, ds = (int)dur % 60;
-        char tcBuf[32];
-        snprintf(tcBuf, sizeof(tcBuf), "%02d:%02d / %02d:%02d", pm, ps, dm, ds);
-        ImVec2 tcTextSize = ImGui::CalcTextSize(tcBuf);
-        float  tcFrameH   = ImGui::GetFrameHeight();
-        ImVec2 tcPos      = ImGui::GetCursorScreenPos();
-        bool tcClicked = ImGui::InvisibleButton("##TCEdit",
-                                                ImVec2(tcTextSize.x, tcFrameH));
-        bool tcDouble  = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
-        // Draw text vertically centered inside the FrameHeight-tall hit box.
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(tcPos.x, tcPos.y + (tcFrameH - tcTextSize.y) * 0.5f),
-            ImGui::IsItemHovered() ? IM_COL32(255, 255, 255, 255)
-                                   : IM_COL32(220, 226, 235, 235),
-            tcBuf);
-        if (ImGui::IsItemHovered()) ParamRow::Tooltip(
-            "Double-click to edit timeline duration.");
-        if (tcDouble) ImGui::OpenPopup("##DurEdit");
-        (void)tcClicked;
+        // Timecode hit-area kept for double-click → duration popup so the
+        // dock-only flow still has its existing affordance, just without
+        // the visible duplicate text. Width is FrameHeight×3 (≈ original
+        // "00:00 / 00:00" footprint).
+        {
+            float tcFrameH   = ImGui::GetFrameHeight();
+            bool tcClicked = ImGui::InvisibleButton("##TCEdit",
+                                                    ImVec2(tcFrameH * 3.0f, tcFrameH));
+            bool tcDouble  = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            (void)tcClicked;
+            if (ImGui::IsItemHovered()) ParamRow::Tooltip(
+                "Double-click to edit timeline duration.");
+            if (tcDouble) ImGui::OpenPopup("##DurEdit");
+        }
 
         // Inline duration editor — opens beneath the timecode on double-click.
         if (ImGui::BeginPopup("##DurEdit")) {

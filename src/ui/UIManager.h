@@ -147,7 +147,12 @@ public:
         const std::function<void(float)>& zoomSet);
 
 private:
-    LeftPanel m_activeLeftPanel = LeftPanel::Layers;
+    // Reference B vibe: rail thumbnails are the primary layer affordance,
+    // so the larger Layers/Sources/Mapping flyout starts CLOSED. Click a
+    // rail icon to open the panel; click again to collapse. Avoids the
+    // duplication where both the rail thumb AND a wide layers card show
+    // the same layer.
+    LeftPanel m_activeLeftPanel = LeftPanel::None;
     unsigned int m_tabIconTex[4] = {0, 0, 0, 0};
     int          m_tabIconW[4]   = {0, 0, 0, 0};
     int          m_tabIconH[4]   = {0, 0, 0, 0};
