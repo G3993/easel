@@ -4535,6 +4535,7 @@ void Application::renderUI() {
             ImGui::PopID();
         }
     });
+    m_ui.renderRightToolRail();
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }

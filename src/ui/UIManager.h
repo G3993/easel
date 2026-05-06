@@ -131,9 +131,22 @@ public:
     // coupling UIManager to LayerStack.
     void renderLeftRail(const std::function<void(float innerW)>& drawExtra = {});
 
+    // Right transform-tool rail (Phase 3) — pinned to the right edge of
+    // the viewport. 5 tool buttons (Move / Rotate / Scale / Flip / Center)
+    // plus a vertical zoom slider. Properties dock host shrinks by this
+    // width so the rail and Properties don't overlap.
+    static constexpr float kRightToolRailW = 56.0f;
+    void renderRightToolRail();
+
+    // Canvas zoom 0.25..4.0 — driven by the vertical slider on the right
+    // tool rail. Read by ViewportPanel for centred zoom around viewport.
+    float canvasZoom() const   { return m_canvasZoom; }
+    void  setCanvasZoom(float z) { m_canvasZoom = z; }
+
 private:
     LeftPanel m_activeLeftPanel = LeftPanel::Layers;
     unsigned int m_tabIconTex[4] = {0, 0, 0, 0};
     int          m_tabIconW[4]   = {0, 0, 0, 0};
     int          m_tabIconH[4]   = {0, 0, 0, 0};
+    float        m_canvasZoom    = 1.0f;
 };

@@ -1026,10 +1026,14 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::PopStyleVar();
         }
 
-        // Right host
+        // Right host — shifted left by kRightToolRailW so the new transform
+        // tool rail (Phase 3) has dedicated space on the far-right edge and
+        // doesn't overlap Properties/Mapping/Audio/MIDI.
         if (rightHasContent) {
             ImGui::SetNextWindowPos (
-                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kFloatMargin, floatY),
+                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kFloatMargin
+                       - kRightToolRailW,
+                       floatY),
                 ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(rightW, floatH), ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1202,6 +1206,171 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
                 IM_COL32(255, 255, 255, 30), 1.0f);
             ImGui::Dummy(ImVec2(0, 10));
             drawExtra(kLeftRailW - 12.0f);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+// Phase 3 — procedural glyphs for the right tool rail. Drawn directly
+// to the rail's draw list so we don't need PNG assets.
+static void drawMoveGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+    float r  = (mx.x - mn.x) * 0.36f;
+    // Four-arrow cross: arms + arrowheads.
+    dl->AddLine(ImVec2(cx, cy - r), ImVec2(cx, cy + r), col, 1.5f);
+    dl->AddLine(ImVec2(cx - r, cy), ImVec2(cx + r, cy), col, 1.5f);
+    float ah = r * 0.32f;
+    dl->AddTriangleFilled(ImVec2(cx, cy - r),
+                          ImVec2(cx - ah, cy - r + ah),
+                          ImVec2(cx + ah, cy - r + ah), col);
+    dl->AddTriangleFilled(ImVec2(cx, cy + r),
+                          ImVec2(cx - ah, cy + r - ah),
+                          ImVec2(cx + ah, cy + r - ah), col);
+    dl->AddTriangleFilled(ImVec2(cx - r, cy),
+                          ImVec2(cx - r + ah, cy - ah),
+                          ImVec2(cx - r + ah, cy + ah), col);
+    dl->AddTriangleFilled(ImVec2(cx + r, cy),
+                          ImVec2(cx + r - ah, cy - ah),
+                          ImVec2(cx + r - ah, cy + ah), col);
+}
+static void drawRotateGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+    float r  = (mx.x - mn.x) * 0.34f;
+    // 270° arc with an arrowhead at the open end.
+    dl->PathArcTo(ImVec2(cx, cy), r, 0.35f, 5.4f, 24);
+    dl->PathStroke(col, 0, 1.6f);
+    float ah = r * 0.32f;
+    ImVec2 tip(cx + cosf(0.35f) * r, cy + sinf(0.35f) * r);
+    dl->AddTriangleFilled(tip,
+        ImVec2(tip.x - ah, tip.y - ah * 0.4f),
+        ImVec2(tip.x - ah * 0.4f, tip.y + ah), col);
+}
+static void drawScaleGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+    float r  = (mx.x - mn.x) * 0.36f;
+    float arm = r * 0.55f;
+    // Four corner brackets — diagonal expansion icon.
+    auto bracket = [&](ImVec2 c, ImVec2 dx, ImVec2 dy) {
+        dl->AddLine(c, ImVec2(c.x + dx.x, c.y + dx.y), col, 1.5f);
+        dl->AddLine(c, ImVec2(c.x + dy.x, c.y + dy.y), col, 1.5f);
+    };
+    bracket(ImVec2(cx - r, cy - r), ImVec2(arm, 0), ImVec2(0, arm));
+    bracket(ImVec2(cx + r, cy - r), ImVec2(-arm, 0), ImVec2(0, arm));
+    bracket(ImVec2(cx - r, cy + r), ImVec2(arm, 0), ImVec2(0, -arm));
+    bracket(ImVec2(cx + r, cy + r), ImVec2(-arm, 0), ImVec2(0, -arm));
+}
+static void drawFlipGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+    float r  = (mx.x - mn.x) * 0.34f;
+    // Two filled triangles back-to-back, vertical mirror plane.
+    dl->AddTriangleFilled(ImVec2(cx - 2.0f, cy - r),
+                          ImVec2(cx - 2.0f, cy + r),
+                          ImVec2(cx - r, cy), col);
+    ImU32 dim = (col & 0x00FFFFFF) | (((col >> 24) * 100 / 255) << 24);
+    dl->AddTriangle(ImVec2(cx + 2.0f, cy - r),
+                    ImVec2(cx + 2.0f, cy + r),
+                    ImVec2(cx + r, cy), dim, 1.4f);
+}
+static void drawCenterGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float cx = (mn.x + mx.x) * 0.5f, cy = (mn.y + mx.y) * 0.5f;
+    float r  = (mx.x - mn.x) * 0.36f;
+    // Concentric circle + crosshairs.
+    dl->AddCircle(ImVec2(cx, cy), r, col, 24, 1.5f);
+    dl->AddCircleFilled(ImVec2(cx, cy), 1.6f, col, 12);
+    float cr = r * 0.55f, ce = r * 1.1f;
+    dl->AddLine(ImVec2(cx - ce, cy), ImVec2(cx - cr, cy), col, 1.5f);
+    dl->AddLine(ImVec2(cx + cr, cy), ImVec2(cx + ce, cy), col, 1.5f);
+    dl->AddLine(ImVec2(cx, cy - ce), ImVec2(cx, cy - cr), col, 1.5f);
+    dl->AddLine(ImVec2(cx, cy + cr), ImVec2(cx, cy + ce), col, 1.5f);
+}
+
+void UIManager::renderRightToolRail() {
+    if (sMode != WorkspaceMode::Canvas) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 6.0f;
+    float h = vp->WorkSize.y - topReserve - 12.0f;
+    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + vp->WorkSize.x - kRightToolRailW,
+                                     vp->WorkPos.y + topReserve),
+                              ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kRightToolRailW, h), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize  |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 11, 14, 255));
+
+    if (ImGui::Begin("##RightToolRail", nullptr, flags)) {
+        // Hairline divider (left edge — visual seam against canvas).
+        {
+            ImDrawList* dlT = ImGui::GetWindowDrawList();
+            ImVec2 wp = ImGui::GetWindowPos();
+            float wH = ImGui::GetWindowSize().y;
+            dlT->AddLine(ImVec2(wp.x + 0.5f, wp.y),
+                         ImVec2(wp.x + 0.5f, wp.y + wH),
+                         IM_COL32(255, 255, 255, 22), 1.0f);
+        }
+        struct Tool { const char* lbl;
+                      void (*draw)(ImDrawList*, ImVec2, ImVec2, ImU32); };
+        const Tool tools[] = {
+            { "##tr_move",   drawMoveGlyph   },
+            { "##tr_rotate", drawRotateGlyph },
+            { "##tr_scale",  drawScaleGlyph  },
+            { "##tr_flip",   drawFlipGlyph   },
+            { "##tr_center", drawCenterGlyph },
+        };
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (const Tool& t : tools) {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(kRightToolRailW - 12.0f, 44.0f);
+            ImU32 bgHov = ImGui::IsMouseHoveringRect(cur,
+                ImVec2(cur.x + sz.x, cur.y + sz.y))
+                ? IM_COL32(255, 255, 255, 22)
+                : IM_COL32(255, 255, 255, 0);
+            dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                              bgHov, 8.0f);
+            ImVec2 gMin(cur.x + (sz.x - 26.0f) * 0.5f,
+                        cur.y + (sz.y - 26.0f) * 0.5f);
+            ImVec2 gMax(gMin.x + 26.0f, gMin.y + 26.0f);
+            t.draw(dl, gMin, gMax, IM_COL32(180, 188, 205, 230));
+            ImGui::InvisibleButton(t.lbl, sz);
+            ImGui::Dummy(ImVec2(0, 4));
+        }
+
+        // Hairline + vertical zoom slider — fills the rest of the rail.
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            ImVec2 dPos = ImGui::GetCursorScreenPos();
+            float divW = kRightToolRailW - 16.0f;
+            ImGui::GetWindowDrawList()->AddLine(
+                ImVec2(dPos.x + 8.0f, dPos.y),
+                ImVec2(dPos.x + 8.0f + divW, dPos.y),
+                IM_COL32(255, 255, 255, 30), 1.0f);
+        }
+        ImGui::Dummy(ImVec2(0, 8));
+        float remainH = ImGui::GetContentRegionAvail().y - 14.0f;
+        if (remainH < 80.0f) remainH = 80.0f;
+        // Center the slider horizontally inside the rail.
+        float sliderW = 18.0f;
+        float padX = (kRightToolRailW - 12.0f - sliderW) * 0.5f;
+        if (padX > 0) ImGui::Dummy(ImVec2(padX, 0));
+        ImGui::SameLine(0, 0);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(255,255,255,15));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255,255,255,28));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab,     IM_COL32(220,225,235,235));
+        ImGui::VSliderFloat("##CanvasZoom", ImVec2(sliderW, remainH),
+                            &m_canvasZoom, 0.25f, 4.0f, "");
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) {
+            char tip[64];
+            snprintf(tip, sizeof(tip), "Zoom %.2fx", m_canvasZoom);
+            ImGui::SetTooltip("%s", tip);
         }
     }
     ImGui::End();

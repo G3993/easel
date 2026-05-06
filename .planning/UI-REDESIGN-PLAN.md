@@ -135,7 +135,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 3 — Right transform tool rail
+### [x] Phase 3 — Right transform tool rail
 **Goal:** add a thin vertical rail on the right edge with 5 transform tool icons + zoom slider.
 
 **Tasks:**
