@@ -4735,6 +4735,9 @@ void Application::renderFloatingTransportPill() {
         bool playing = m_timeline.isPlaying();
         const float btnSize = 34.0f;
 
+        // Awesome-design: play button gets a prominent blue accent ring
+        // matching the reference. Stop/loop stay subtle so the play
+        // affordance reads as the primary action.
         auto pillBtn = [&](const char* id, int kind /*0 play/pause, 1 stop, 2 loop*/,
                            bool toggled = false) -> bool {
             ImVec2 cur = ImGui::GetCursorScreenPos();
@@ -4742,13 +4745,21 @@ void Application::renderFloatingTransportPill() {
             bool clicked = ImGui::InvisibleButton(id, sz);
             bool hov     = ImGui::IsItemHovered();
             ImDrawList* d = ImGui::GetWindowDrawList();
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
             ImU32 bgCol = toggled ? IM_COL32(255, 255, 255, 32)
                                   : (hov ? IM_COL32(255, 255, 255, 22)
                                          : IM_COL32(255, 255, 255, 0));
-            d->AddCircleFilled(ImVec2(cur.x + sz.x * 0.5f, cur.y + sz.y * 0.5f),
-                               sz.x * 0.5f, bgCol, 24);
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bgCol, 28);
+            // Play button — accent ring outside the fill, soft glow halo.
+            if (kind == 0) {
+                d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 1.0f,
+                             UITokens::kAccent, 28, 1.6f);
+                if (!playing) {
+                    d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f + 3.0f,
+                                 UITokens::kAccentGlow, 28, 2.0f);
+                }
+            }
             ImU32 glyphCol = IM_COL32(240, 244, 252, 240);
-            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
             float r  = sz.x * 0.30f;
             if (kind == 0) {
                 if (playing) {
@@ -4769,7 +4780,7 @@ void Application::renderFloatingTransportPill() {
                                  ImVec2(cx + r * 0.75f, cy + r * 0.75f),
                                  glyphCol, 2.0f);
             } else {
-                // Loop: lemniscate-ish with a slight bend.
+                // Loop: lemniscate (∞).
                 d->AddCircle(ImVec2(cx - r * 0.5f, cy), r * 0.6f, glyphCol, 16, 1.6f);
                 d->AddCircle(ImVec2(cx + r * 0.5f, cy), r * 0.6f, glyphCol, 16, 1.6f);
             }
@@ -4777,9 +4788,9 @@ void Application::renderFloatingTransportPill() {
         };
 
         if (pillBtn("##fp_play", 0))   m_timeline.togglePlay();
-        ImGui::SameLine(0, 6);
+        ImGui::SameLine(0, 8);
         if (pillBtn("##fp_stop", 1))   m_timeline.stop();
-        ImGui::SameLine(0, 6);
+        ImGui::SameLine(0, 8);
         if (pillBtn("##fp_loop", 2, m_timeline.looping()))
             m_timeline.setLooping(!m_timeline.looping());
 

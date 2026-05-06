@@ -62,12 +62,16 @@ static const ImU32 kPointFill     = IM_COL32(220, 220, 220, 255);
 static const ImU32 kPointRing     = IM_COL32(255, 255, 255, 180);
 static const ImU32 kBorderColor   = IM_COL32(255, 255, 255, 20);
 static const ImU32 kBorderGlow    = IM_COL32(0, 0, 0, 0);
-static const ImU32 kBBoxLine      = IM_COL32(255, 255, 255, 200);
-static const ImU32 kBBoxGlow      = IM_COL32(255, 255, 255, 40);
+// Awesome-design: layer selection bbox + handles use the global blue
+// accent (UITokens::kAccent) so the selected layer reads with the same
+// chromatic anchor as the active rail icon and the play button. Other
+// passive overlays (non-selected bbox, mask curves) stay white-alpha.
+static const ImU32 kBBoxLine      = IM_COL32(74, 140, 255, 220);
+static const ImU32 kBBoxGlow      = IM_COL32(74, 140, 255, 50);
 static const ImU32 kBBoxDim       = IM_COL32(255, 255, 255, 30);
-static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 240);
+static const ImU32 kLHandleFill   = IM_COL32(74, 140, 255, 255);
 static const ImU32 kLHandleStroke = IM_COL32(255, 255, 255, 255);
-static const ImU32 kLHandleActive = IM_COL32(255, 255, 255, 255);  // monochrome
+static const ImU32 kLHandleActive = IM_COL32(255, 255, 255, 255);
 
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
     return glm::vec2(
@@ -643,35 +647,23 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         // border on top of the already-clear darker letterbox.
         ImDrawList* draw = ImGui::GetWindowDrawList();
 
-        // Phase 5/B — crosshair grid centered on the canvas. Faint
-        // intersection lines (vertical + horizontal through center) plus
-        // a 4×4 dot lattice. Reads as compositional reference without
-        // distracting from the layer content. Letterbox area only.
+        // Awesome-design: regular dot grid across the entire viewport
+        // letterbox, matching the reference's compositional grid. Spacing
+        // scales with zoom so the lattice stays visually steady. Drawn
+        // BEFORE the layer image overlays so dots sit in the negative
+        // space, not over the layer content. (We drew after Image() so
+        // we layer over canvas; the dot alpha is low enough that it
+        // doesn't muddy the layer.)
         {
-            ImVec2 cMin = clipMin;
-            ImVec2 cMax = clipMax;
-            float cx = (cMin.x + cMax.x) * 0.5f;
-            float cy = (cMin.y + cMax.y) * 0.5f;
-            const ImU32 lineCol = IM_COL32(255, 255, 255, 14);
-            const ImU32 dotCol  = IM_COL32(255, 255, 255, 40);
-            // Center crosshair — stops short of canvas edges.
-            float crossR = std::min(cMax.x - cMin.x, cMax.y - cMin.y) * 0.45f;
-            draw->AddLine(ImVec2(cx - crossR, cy), ImVec2(cx + crossR, cy),
-                          lineCol, 1.0f);
-            draw->AddLine(ImVec2(cx, cy - crossR), ImVec2(cx, cy + crossR),
-                          lineCol, 1.0f);
-            // Tiny center dot.
-            draw->AddCircleFilled(ImVec2(cx, cy), 1.6f,
-                                  IM_COL32(255, 255, 255, 90), 12);
-            // 4×4 lattice of dots — aligned to canvas image bounds for
-            // compositional reference rather than viewport bounds.
-            for (int j = 1; j < 4; j++) {
-                for (int i = 1; i < 4; i++) {
-                    float dx = m_imageOrigin.x +
-                               m_imageSize.x * (i / 4.0f);
-                    float dy = m_imageOrigin.y +
-                               m_imageSize.y * (j / 4.0f);
-                    draw->AddCircleFilled(ImVec2(dx, dy), 1.0f, dotCol, 8);
+            const float gridStep = 28.0f;          // px between dots
+            const ImU32 dotCol   = IM_COL32(255, 255, 255, 22);
+            float startX = clipMin.x +
+                fmodf(clipMax.x - clipMin.x, gridStep) * 0.5f;
+            float startY = clipMin.y +
+                fmodf(clipMax.y - clipMin.y, gridStep) * 0.5f;
+            for (float gy = startY; gy < clipMax.y; gy += gridStep) {
+                for (float gx = startX; gx < clipMax.x; gx += gridStep) {
+                    draw->AddCircleFilled(ImVec2(gx, gy), 0.9f, dotCol, 8);
                 }
             }
         }

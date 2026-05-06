@@ -12,17 +12,6 @@
 #include "stb_image.h"
 #include "ui/ImGuizmo.h"
 
-// Phase 8 — design tokens. Single named source of truth for the chrome
-// surface so rails, panels, and float hosts share one luminance value.
-// Anyone touching the rail or applyTheme() should reference these.
-namespace UITokens {
-    static constexpr ImU32 kChromeSurface = IM_COL32(11, 13, 17, 255);
-    static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 30);
-    static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 22);
-    static constexpr ImU32 kButtonHover   = IM_COL32(255, 255, 255, 22);
-    static constexpr ImU32 kButtonActive  = IM_COL32(255, 255, 255, 36);
-}
-
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
 double UIManager::sModeTransitionStart = -1.0;
@@ -1189,13 +1178,20 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
             bool active = (m_activeLeftPanel == it.which);
             ImVec2 cursor = ImGui::GetCursorScreenPos();
             ImVec2 sz(kLeftRailW - 12.0f, 44.0f);
-            // Background pill
+            // Awesome-design: active button gets a circular accent ring
+            // (matches the reference's blue ring around the active rail
+            // icon). Inactive buttons stay flat. No fill — the ring is
+            // the affordance.
             ImU32 bgCol = active
-                ? IM_COL32(255, 255, 255, 26)
+                ? IM_COL32(255, 255, 255, 14)
                 : IM_COL32(255, 255, 255, 0);
             dl->AddRectFilled(cursor,
                               ImVec2(cursor.x + sz.x, cursor.y + sz.y),
                               bgCol, 8.0f);
+            if (active) {
+                ImVec2 c(cursor.x + sz.x * 0.5f, cursor.y + sz.y * 0.5f);
+                dl->AddCircle(c, 17.0f, UITokens::kAccent, 28, 1.6f);
+            }
             // Glyph
             ImVec2 gMin(cursor.x + (sz.x - 26.0f) * 0.5f,
                         cursor.y + (sz.y - 26.0f) * 0.5f);

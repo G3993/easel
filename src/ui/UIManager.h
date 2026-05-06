@@ -1,9 +1,29 @@
 #pragma once
 
 #include <functional>
+#include <imgui.h>
 
 struct GLFWwindow;
 struct ImFont;
+
+// Awesome-design tokens — single named source of truth used by rails,
+// pills, panels, and selection overlays. Anyone touching chrome surface
+// or active-state styling should reference these so the whole UI stays
+// in lockstep.
+namespace UITokens {
+    static constexpr ImU32 kChromeSurface = IM_COL32(11, 13, 17, 255);
+    static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 30);
+    static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 22);
+    static constexpr ImU32 kButtonHover   = IM_COL32(255, 255, 255, 22);
+    static constexpr ImU32 kButtonActive  = IM_COL32(255, 255, 255, 36);
+    // Single chromatic anchor — reference's cyan/blue accent. Used only
+    // for active states (selection handles, ring on the play button,
+    // active rail icon, active properties tab). Never as a plain fill
+    // color outside of the play-button glow.
+    static constexpr ImU32 kAccent        = IM_COL32(74, 140, 255, 255);
+    static constexpr ImU32 kAccentSoft    = IM_COL32(74, 140, 255, 100);
+    static constexpr ImU32 kAccentGlow    = IM_COL32(74, 140, 255, 60);
+}
 // Mirrors ImGui's `typedef unsigned int ImGuiID;` so we can store dock node
 // ids here without forcing imgui.h into every translation unit that includes
 // this header. Kept consistent with imgui.h — duplicate same-underlying-type
