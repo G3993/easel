@@ -4831,24 +4831,31 @@ void Application::renderFloatingTransportPill() {
                        : (hov ? IM_COL32(255, 255, 255, 22)
                               : IM_COL32(255, 255, 255, 0));
             d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bg, 28);
-            // Mic glyph — capsule body + base.
+            // Mic glyph — Lucide/Phosphor style. Vertical capsule for
+            // the body, an open semicircle below for the cradle arms,
+            // short stem + horizontal base. Drawn from primitives so it
+            // crisp at button size; no bezier guesswork.
             ImU32 col = m_voiceListening
                         ? IM_COL32(255, 90, 90, 240)
                         : IM_COL32(232, 238, 250, 240);
-            float micW = sz.x * 0.18f, micH = sz.x * 0.30f;
-            d->AddRectFilled(ImVec2(cx - micW, cy - micH * 0.7f),
-                             ImVec2(cx + micW, cy + micH * 0.4f),
-                             col, micW);
-            d->AddBezierCubic(
-                ImVec2(cx - micW * 1.6f, cy + micH * 0.2f),
-                ImVec2(cx - micW * 1.6f, cy + micH * 0.7f),
-                ImVec2(cx + micW * 1.6f, cy + micH * 0.7f),
-                ImVec2(cx + micW * 1.6f, cy + micH * 0.2f),
-                col, 1.5f, 16);
-            d->AddLine(ImVec2(cx, cy + micH * 0.5f),
-                       ImVec2(cx, cy + micH * 0.85f), col, 1.5f);
-            d->AddLine(ImVec2(cx - micW * 1.2f, cy + micH * 0.85f),
-                       ImVec2(cx + micW * 1.2f, cy + micH * 0.85f), col, 1.5f);
+            float bodyW   = 5.0f;          // half-width of mic body
+            float bodyTop = cy - 7.0f;     // top of mic capsule
+            float bodyBot = cy + 2.0f;     // bottom of mic capsule
+            float cradleR = 8.5f;          // radius of cradle arc
+            float baseY   = cy + 11.0f;    // y of horizontal base line
+            // Mic body — pill shape.
+            d->AddRectFilled(ImVec2(cx - bodyW, bodyTop),
+                             ImVec2(cx + bodyW, bodyBot),
+                             col, bodyW);
+            // Cradle — bottom-half arc, open at top.
+            d->PathArcTo(ImVec2(cx, cy), cradleR,
+                         0.10f * 3.14159f, 0.90f * 3.14159f, 16);
+            d->PathStroke(col, 0, 1.6f);
+            // Stem and base.
+            d->AddLine(ImVec2(cx, cy + cradleR),
+                       ImVec2(cx, baseY), col, 1.6f);
+            d->AddLine(ImVec2(cx - 4.0f, baseY),
+                       ImVec2(cx + 4.0f, baseY), col, 1.6f);
             // Pulse ring while listening.
             if (m_voiceListening) {
                 float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 4.0f);
