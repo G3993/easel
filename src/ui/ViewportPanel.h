@@ -77,6 +77,7 @@ public:
 
     // Canvas zoom
     float zoom() const { return m_zoom; }
+    void  setZoom(float z) { m_zoom = std::max(0.25f, std::min(8.0f, z)); }
     void resetZoom() { m_zoom = 1.0f; m_pan = {0, 0}; }
 
     // Reset ALL drag/interaction state (called on zone switch). Covers every

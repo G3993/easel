@@ -1309,7 +1309,10 @@ static void drawCenterGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
     dl->AddLine(ImVec2(cx, cy + cr), ImVec2(cx, cy + ce), col, 1.5f);
 }
 
-void UIManager::renderRightToolRail() {
+void UIManager::renderRightToolRail(
+    const std::function<void(RightTool)>& onTool,
+    const std::function<float()>& zoomGet,
+    const std::function<void(float)>& zoomSet) {
     if (sMode != WorkspaceMode::Canvas) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1344,14 +1347,14 @@ void UIManager::renderRightToolRail() {
                          ImVec2(wp.x + 0.5f, wp.y + wH),
                          IM_COL32(255, 255, 255, 22), 1.0f);
         }
-        struct Tool { const char* lbl;
+        struct Tool { const char* lbl; const char* tip; RightTool which;
                       void (*draw)(ImDrawList*, ImVec2, ImVec2, ImU32); };
         const Tool tools[] = {
-            { "##tr_move",   drawMoveGlyph   },
-            { "##tr_rotate", drawRotateGlyph },
-            { "##tr_scale",  drawScaleGlyph  },
-            { "##tr_flip",   drawFlipGlyph   },
-            { "##tr_center", drawCenterGlyph },
+            { "##tr_move",   "Center selection (X=0, Y=0)", RightTool::Move,   drawMoveGlyph   },
+            { "##tr_rotate", "Rotate +90°",                  RightTool::Rotate, drawRotateGlyph },
+            { "##tr_scale",  "Reset scale to 1.0",           RightTool::Scale,  drawScaleGlyph  },
+            { "##tr_flip",   "Flip horizontal",              RightTool::Flip,   drawFlipGlyph   },
+            { "##tr_center", "Reset transform",              RightTool::Center, drawCenterGlyph },
         };
         ImDrawList* dl = ImGui::GetWindowDrawList();
         for (const Tool& t : tools) {
@@ -1359,15 +1362,18 @@ void UIManager::renderRightToolRail() {
             ImVec2 sz(kRightToolRailW - 12.0f, 44.0f);
             ImU32 bgHov = ImGui::IsMouseHoveringRect(cur,
                 ImVec2(cur.x + sz.x, cur.y + sz.y))
-                ? IM_COL32(255, 255, 255, 22)
+                ? UITokens::kButtonHover
                 : IM_COL32(255, 255, 255, 0);
             dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
                               bgHov, 8.0f);
             ImVec2 gMin(cur.x + (sz.x - 26.0f) * 0.5f,
                         cur.y + (sz.y - 26.0f) * 0.5f);
             ImVec2 gMax(gMin.x + 26.0f, gMin.y + 26.0f);
-            t.draw(dl, gMin, gMax, IM_COL32(180, 188, 205, 230));
-            ImGui::InvisibleButton(t.lbl, sz);
+            t.draw(dl, gMin, gMax, IM_COL32(200, 208, 222, 240));
+            if (ImGui::InvisibleButton(t.lbl, sz)) {
+                if (onTool) onTool(t.which);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t.tip);
             ImGui::Dummy(ImVec2(0, 4));
         }
 
@@ -1392,12 +1398,15 @@ void UIManager::renderRightToolRail() {
         ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(255,255,255,15));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255,255,255,28));
         ImGui::PushStyleColor(ImGuiCol_SliderGrab,     IM_COL32(220,225,235,235));
-        ImGui::VSliderFloat("##CanvasZoom", ImVec2(sliderW, remainH),
-                            &m_canvasZoom, 0.25f, 4.0f, "");
+        float zVal = zoomGet ? zoomGet() : 1.0f;
+        if (ImGui::VSliderFloat("##CanvasZoom", ImVec2(sliderW, remainH),
+                                 &zVal, 0.25f, 4.0f, "")) {
+            if (zoomSet) zoomSet(zVal);
+        }
         ImGui::PopStyleColor(3);
         if (ImGui::IsItemHovered()) {
             char tip[64];
-            snprintf(tip, sizeof(tip), "Zoom %.2fx", m_canvasZoom);
+            snprintf(tip, sizeof(tip), "Zoom %.2fx", zVal);
             ImGui::SetTooltip("%s", tip);
         }
     }

@@ -4577,7 +4577,38 @@ void Application::renderUI() {
             ImGui::PopID();
         }
     });
-    m_ui.renderRightToolRail();
+    m_ui.renderRightToolRail(
+        [this](UIManager::RightTool t) {
+            if (m_selectedLayer < 0 || m_selectedLayer >= m_layerStack.count())
+                return;
+            auto layer = m_layerStack[m_selectedLayer];
+            if (!layer) return;
+            m_undoStack.pushState(m_layerStack, m_selectedLayer);
+            switch (t) {
+                case UIManager::RightTool::Move:
+                    layer->position = {0.0f, 0.0f};
+                    break;
+                case UIManager::RightTool::Rotate:
+                    layer->rotation += 90.0f;
+                    if (layer->rotation >= 360.0f) layer->rotation -= 360.0f;
+                    break;
+                case UIManager::RightTool::Scale:
+                    layer->scale = {1.0f, 1.0f};
+                    break;
+                case UIManager::RightTool::Flip:
+                    layer->flipH = !layer->flipH;
+                    break;
+                case UIManager::RightTool::Center:
+                    layer->position = {0.0f, 0.0f};
+                    layer->scale    = {1.0f, 1.0f};
+                    layer->rotation = 0.0f;
+                    layer->flipH    = false;
+                    layer->flipV    = false;
+                    break;
+            }
+        },
+        [this]() { return m_viewportPanel.zoom(); },
+        [this](float z) { m_viewportPanel.setZoom(z); });
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
@@ -7969,6 +8000,18 @@ void Application::loadShader(const std::string& path) {
     // Register with ShaderClaw bridge for hot-reload
     if (m_shaderClaw.isConnected()) {
         m_shaderClaw.watchSource(path, source);
+    }
+
+    // Voice-native shaders: bind their `msg` text input to the Cue transcript
+    // by default, so what the user says appears in the shader without manual
+    // setup. The user can still re-bind via the property panel.
+    {
+        std::string base = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+        std::string stem = base;
+        if (stem.size() > 3 && stem.substr(stem.size() - 3) == ".fs") stem.erase(stem.size() - 3);
+        if (stem == "text_clusters" || stem == "clusters") {
+            m_dataBus.bind(layer->id, "msg", "cue.latest");
+        }
     }
 }
 
