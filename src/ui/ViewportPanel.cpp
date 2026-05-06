@@ -1509,6 +1509,18 @@ void ViewportPanel::renderNavBar(bool stageActive,
             totalW += segW[i];
         }
 
+        // Phase 4: center the workspace pill horizontally in the row.
+        // Compute available content width and offset the cursor so the pill
+        // sits in the middle. Zone tabs and the right cluster still flow
+        // after via SameLine — the right cluster has its own targetX so it
+        // stays pinned to the edge.
+        {
+            float avail = ImGui::GetContentRegionAvail().x;
+            float curX  = ImGui::GetCursorPosX();
+            float targetCx = curX + (avail - totalW) * 0.5f;
+            if (targetCx > curX) ImGui::SetCursorPosX(targetCx);
+        }
+
         ImVec2 trackPos = ImGui::GetCursorScreenPos();
         ImDrawList* dl  = ImGui::GetWindowDrawList();
 

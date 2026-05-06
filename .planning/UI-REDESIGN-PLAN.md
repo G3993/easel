@@ -81,7 +81,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 4 — Minimal top bar
+### [x] Phase 4 — Minimal top bar
 **Goal:** remove EDIT/FILE/LAYER/ZONE menu strip; replace with center Canvas pill + right-edge Preview/Resolution/Live pills.
 
 **Tasks:**

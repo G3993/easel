@@ -249,6 +249,27 @@ bool Application::init() {
     if (!m_edgeBlendShader.loadFromFiles("shaders/passthrough.vert", "shaders/edgeblend.frag")) {
         return false;
     }
+    // Phase Q v4 — bloom pipeline shaders. Loaded best-effort: if the
+    // assets are missing the bloom path silently disables itself.
+    if (!m_bloomBrightShader.loadFromFiles("shaders/passthrough.vert",
+                                           "shaders/bloom_brightpass.frag")) {
+        m_bloomEnabled = false;
+    }
+    if (!m_bloomBlurShader.loadFromFiles("shaders/passthrough.vert",
+                                         "shaders/bloom_blur.frag")) {
+        m_bloomEnabled = false;
+    }
+    if (!m_bloomCompositeShader.loadFromFiles("shaders/passthrough.vert",
+                                              "shaders/bloom_composite.frag")) {
+        m_bloomEnabled = false;
+    }
+    // Linear-copy shader for the bloom pipeline's final blit-back. The
+    // regular m_passthroughShader would apply ACES + clamp here, double-
+    // tonemapping every shader (the fade users were noticing).
+    if (!m_linearCopyShader.loadFromFiles("shaders/passthrough.vert",
+                                          "shaders/linear_copy.frag")) {
+        m_bloomEnabled = false;
+    }
     if (!m_maskRenderer.init()) return false;
 
 #ifdef HAS_OPENCV
@@ -1224,6 +1245,107 @@ void Application::compositeZone(OutputZone& zone) {
     }
 
     Framebuffer::unbind();
+
+    // ── Phase Q v4 — bloom ─────────────────────────────────────────
+    // Bright-pass + separable Gaussian + screen-blend back into warpFBO.
+    // Pipeline: warpFBO → brightFBO → ping[0] (H blur) → ping[1] (V blur)
+    // → … N passes → composite(warpFBO, ping[N]) → compositeFBO
+    // → blit back to warpFBO.
+    if (m_bloomEnabled && m_bloomStrength > 0.001f) {
+        const int halfW = std::max(1, zone.width  / 2);
+        const int halfH = std::max(1, zone.height / 2);
+        // (Re)create FBOs lazily so resize is cheap.
+        if (m_bloomBrightFBO.width() != halfW || m_bloomBrightFBO.height() != halfH) {
+            m_bloomBrightFBO.createHalfFloat(halfW, halfH);
+            m_bloomPingPongFBO[0].createHalfFloat(halfW, halfH);
+            m_bloomPingPongFBO[1].createHalfFloat(halfW, halfH);
+        }
+        if (m_bloomCompositeFBO.width() != zone.width ||
+            m_bloomCompositeFBO.height() != zone.height) {
+            m_bloomCompositeFBO.createHalfFloat(zone.width, zone.height);
+        }
+
+        // ── 1. Bright-pass ───────────────────────────────────────
+        m_bloomBrightFBO.bind();
+        glViewport(0, 0, halfW, halfH);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        m_bloomBrightShader.use();
+        m_bloomBrightShader.setInt   ("uTexture",  0);
+        m_bloomBrightShader.setFloat ("uThreshold", m_bloomThreshold);
+        m_bloomBrightShader.setFloat ("uKnee",      m_bloomKnee);
+        m_bloomBrightShader.setMat3  ("uTransform", glm::mat3(1.0f));
+        m_bloomBrightShader.setBool  ("uFlipV",     false);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+        m_quad.draw();
+
+        // ── 2. Separable Gaussian — N ping-pong passes ───────────
+        m_bloomBlurShader.use();
+        m_bloomBlurShader.setInt  ("uTexture",  0);
+        m_bloomBlurShader.setMat3 ("uTransform", glm::mat3(1.0f));
+        m_bloomBlurShader.setBool ("uFlipV",     false);
+        GLuint srcTex = m_bloomBrightFBO.textureId();
+        int    pp     = 0;
+        const int passes = std::max(1, std::min(6, m_bloomBlurPasses));
+        for (int i = 0; i < passes; i++) {
+            // Horizontal
+            m_bloomPingPongFBO[pp].bind();
+            glViewport(0, 0, halfW, halfH);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_bloomBlurShader.setVec2("uDirection", glm::vec2(1.0f / (float)halfW, 0.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, srcTex);
+            m_quad.draw();
+            srcTex = m_bloomPingPongFBO[pp].textureId();
+            pp ^= 1;
+            // Vertical
+            m_bloomPingPongFBO[pp].bind();
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_bloomBlurShader.setVec2("uDirection", glm::vec2(0.0f, 1.0f / (float)halfH));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, srcTex);
+            m_quad.draw();
+            srcTex = m_bloomPingPongFBO[pp].textureId();
+            pp ^= 1;
+        }
+
+        // ── 3. Composite ─────────────────────────────────────────
+        m_bloomCompositeFBO.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        m_bloomCompositeShader.use();
+        m_bloomCompositeShader.setInt  ("uBase",     0);
+        m_bloomCompositeShader.setInt  ("uBloom",    1);
+        m_bloomCompositeShader.setFloat("uStrength", m_bloomStrength);
+        m_bloomCompositeShader.setFloat("uTint",     m_bloomTint);
+        m_bloomCompositeShader.setMat3 ("uTransform", glm::mat3(1.0f));
+        m_bloomCompositeShader.setBool ("uFlipV",     false);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, srcTex);
+        m_quad.draw();
+        Framebuffer::unbind();
+
+        // ── 4. Copy result back to warpFBO — linear, no tonemap ─
+        // CRITICAL: must use linearCopyShader, not passthroughShader.
+        // Passthrough applies ACES + clamps to 1.0 (Phase Q v3 final
+        // present step). Using it here would double-tonemap everything
+        // and cause a perceptible "opacity fade" across all shaders.
+        zone.warpFBO.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        m_linearCopyShader.use();
+        m_linearCopyShader.setInt  ("uTexture",   0);
+        m_linearCopyShader.setMat3 ("uTransform", glm::mat3(1.0f));
+        m_linearCopyShader.setBool ("uFlipV",     false);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_bloomCompositeFBO.textureId());
+        m_quad.draw();
+        Framebuffer::unbind();
+        glActiveTexture(GL_TEXTURE0);
+    }
 
     // Edge blend post-process (if any edge has blend width > 0)
     bool hasEdgeBlend = mp && (mp->edgeBlendLeft > 0 || mp->edgeBlendRight > 0 ||
@@ -2695,13 +2817,15 @@ void Application::renderUI() {
     // overwhelmed with tabs. Hidden in Stage and Show modes via the
     // mode-aware UIManager::isPanelVisible.
     bool sourcesVisible = m_ui.isPanelVisible("Sources");
-    bool sourcesOpen = sourcesVisible && ImGui::Begin("Sources");
+    // Icon-pad + ###ID — empty label space gives drawInspectorTabIcons()
+    // room to paint the Sources icon over the tab.
+    bool sourcesOpen = sourcesVisible && ImGui::Begin("        ###Sources");
     ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
                                      | ImGuiTabBarFlags_FittingPolicyScroll;
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
 
     // ShaderClaw tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("ShaderClaw")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###ShaderClaw")) {
     {
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -2849,6 +2973,91 @@ void Application::renderUI() {
                 subTabBtn("Text", 1);
                 ImGui::SameLine(0, 6);
                 subTabBtn("3D",   2);
+
+                // Right-aligned "+" pill — same visual treatment as the
+                // unselected VFX/Text/3D pills, just sits at the right
+                // edge of the row.
+                ImGui::SameLine(0, 0);
+                const char* importLbl = "+";
+                float importW = ImGui::CalcTextSize(importLbl).x
+                              + ImGui::GetStyle().FramePadding.x * 2.0f;
+                float importX = ImGui::GetWindowContentRegionMax().x - importW;
+                if (importX > ImGui::GetCursorPosX() + 6.0f)
+                    ImGui::SetCursorPosX(importX);
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                if (ImGui::Button(importLbl)) {
+                    std::string picked = openFileDialog("Fragment shader\0*.fs;*.frag;*.glsl\0\0");
+                    if (!picked.empty() && m_shaderClaw.isConnected()) {
+                        namespace fs = std::filesystem;
+                        try {
+                            fs::path src(picked);
+                            std::string base = src.filename().string();
+                            std::string ext  = src.extension().string();
+                            // Force .fs extension so manifest + ShaderSource recognise it
+                            if (ext != ".fs") {
+                                base = src.stem().string() + ".fs";
+                            }
+                            fs::path dst = fs::path(m_shaderClaw.shadersDir()) / base;
+                            // Don't clobber — append numeric suffix if collision
+                            int suffix = 1;
+                            while (fs::exists(dst)) {
+                                std::string stem = fs::path(base).stem().string();
+                                dst = fs::path(m_shaderClaw.shadersDir()) /
+                                      (stem + "_" + std::to_string(suffix) + ".fs");
+                                suffix++;
+                            }
+                            fs::copy_file(src, dst);
+
+                            // Append a manifest entry.
+                            fs::path manifestPath =
+                                fs::path(m_shaderClaw.shadersDir()) / "manifest.json";
+                            nlohmann::json manifest = nlohmann::json::array();
+                            if (fs::exists(manifestPath)) {
+                                std::ifstream mf(manifestPath);
+                                if (mf) mf >> manifest;
+                            }
+                            int nextId = 1000;
+                            for (auto& entry : manifest) {
+                                if (entry.contains("id") && entry["id"].is_number())
+                                    nextId = std::max(nextId, entry["id"].get<int>() + 1);
+                            }
+                            std::string title = dst.stem().string();
+                            // Title-case underscores: "my_shader" → "My Shader"
+                            std::string pretty;
+                            bool capNext = true;
+                            for (char c : title) {
+                                if (c == '_' || c == '-') { pretty += ' '; capNext = true; }
+                                else if (capNext) { pretty += (char)toupper(c); capNext = false; }
+                                else pretty += c;
+                            }
+                            nlohmann::json entry;
+                            entry["id"]          = nextId;
+                            entry["title"]       = pretty;
+                            entry["description"] = "Imported shader.";
+                            entry["type"]        = "generator";
+                            entry["categories"]  = nlohmann::json::array({"Imported", "Generator"});
+                            entry["file"]        = dst.filename().string();
+                            manifest.push_back(entry);
+
+                            std::ofstream out(manifestPath);
+                            out << manifest.dump(2);
+                            out.close();
+
+                            m_shaderClaw.refreshManifest();
+                            std::cout << "[ShaderClaw] Imported "
+                                      << dst.string() << " (id " << nextId << ")\n";
+                        } catch (const std::exception& e) {
+                            std::cerr << "[ShaderClaw] Import failed: " << e.what() << "\n";
+                        }
+                    }
+                }
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+
                 ImGui::Dummy(ImVec2(0, 6));
             }
 
@@ -3355,7 +3564,7 @@ void Application::renderUI() {
 
 
     // Etherea tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Etherea")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Etherea")) {
     {
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
@@ -3626,7 +3835,7 @@ void Application::renderUI() {
     // browser, since particles are conceptually another generator source.
 
 #ifdef HAS_OPENCV
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Camera")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Camera")) {
         ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
 
@@ -3655,7 +3864,7 @@ void Application::renderUI() {
 #endif
 
     // Capture tab (moved from position 1 to 4)
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Capture")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Capture")) {
     {
 #if defined(_WIN32) || defined(__APPLE__)
         if (flatSection("Screen Capture")) {
@@ -4273,6 +4482,14 @@ void Application::renderUI() {
     // panels have rendered so the icon painting lands on top of ImGui's
     // native tab bar text.
     m_ui.drawInspectorTabIcons();
+    // Sources panel internal-tab icons (ShaderClaw / Etherea / Camera /
+    // Capture). NDI + Spout retain plain text — no leading-space pad, no
+    // entry in the renderer.
+    m_ui.drawSourcesTabIcons();
+    // Activity rail — rendered LAST so its window draws on top of the
+    // dockspace + all panels. Earlier render order put it behind. Rail
+    // icons toggle which panel (Layers / Sources / Mapping) is active.
+    m_ui.renderLeftRail();
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
@@ -7059,7 +7276,13 @@ void Application::renderMenuBar() {
             ImGui::SetCursorPosX(12.0f);
         }
 #endif
-        if (ImGui::BeginMenu("EDIT")) {
+        // Phase 4 — minimal top bar. The four legacy EDIT/FILE/LAYER/ZONE
+        // strips collapse into a single "···" button. All items remain
+        // available as submenus under this single dropdown so existing
+        // muscle memory (Add Image, New Project, Move Up, etc.) still
+        // works — the chrome just gets out of the way.
+        if (ImGui::BeginMenu("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2")) {
+        if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
                 m_undoStack.undo(m_layerStack, m_selectedLayer);
             }
@@ -7068,7 +7291,7 @@ void Application::renderMenuBar() {
             }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("FILE")) {
+        if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New Project")) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 while (m_layerStack.count() > 0) {
@@ -7181,7 +7404,7 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("LAYER")) {
+        if (ImGui::BeginMenu("Layer")) {
             if (ImGui::MenuItem("Remove Selected") && m_selectedLayer >= 0) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
                 uint32_t rid = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count() && m_layerStack[m_selectedLayer])
@@ -7216,7 +7439,7 @@ void Application::renderMenuBar() {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("ZONE")) {
+        if (ImGui::BeginMenu("Zone")) {
             if (ImGui::MenuItem("Add Zone")) {
                 addZone();
             }
@@ -7235,6 +7458,8 @@ void Application::renderMenuBar() {
                 }
             }
             ImGui::EndMenu();
+        }
+        ImGui::EndMenu();  // close the "···" container menu
         }
 
         // (Voice mic moved to the timeline transport row — see renderTimelinePanel.
