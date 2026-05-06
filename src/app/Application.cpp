@@ -319,6 +319,42 @@ bool Application::init() {
     // Auto-connect to Etherea (no session ID — server gives us the active session)
     m_ethereaClient.connect("http://localhost:7860");
 
+    // Cue: parallel realtime cue harness. Pushes transcript + actions into DataBus.
+    m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
+        m_dataBus.set("cue.latest", text);
+        if (isFinal && !text.empty()) {
+            std::string prev = m_dataBus.get("cue.transcript");
+            if (!prev.empty()) prev += " ";
+            prev += text;
+            m_dataBus.set("cue.transcript", prev);
+        }
+    });
+    m_cueClient.setActionCallback([this](const CueAction& a) {
+        m_dataBus.set("cue.action.type", a.type);
+        m_dataBus.set("cue.action.payload", a.payload);
+        // But Coach demo: surface the structured feedback fields to shaders/UI.
+        if (a.type == "coach.feedback") {
+            // payload looks like {"headline":"...", "quote":"...", "feedback":"...", "alternative":"...", "severity":"..."}
+            auto extract = [](const std::string& json, const std::string& key) -> std::string {
+                std::string needle = "\"" + key + "\":\"";
+                size_t p = json.find(needle);
+                if (p == std::string::npos) return "";
+                p += needle.size();
+                size_t e = json.find('"', p);
+                return e == std::string::npos ? "" : json.substr(p, e - p);
+            };
+            m_dataBus.set("cue.coach.headline",    extract(a.payload, "headline"));
+            m_dataBus.set("cue.coach.quote",       extract(a.payload, "quote"));
+            m_dataBus.set("cue.coach.feedback",    extract(a.payload, "feedback"));
+            m_dataBus.set("cue.coach.alternative", extract(a.payload, "alternative"));
+            m_dataBus.set("cue.coach.severity",    extract(a.payload, "severity"));
+        }
+    });
+    m_cueClient.setPromptCallback([this](const std::string& p, bool /*reset*/) {
+        m_dataBus.set("cue.prompt", p);
+    });
+    m_cueClient.connect("http://localhost:8791", "easel");
+
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
     if (m_projectorAutoConnect && m_lastMonitorCount > 1) {
@@ -748,6 +784,7 @@ void Application::run() {
 
         // Dispatch Etherea events on main thread
         m_ethereaClient.poll();
+        m_cueClient.poll();
 
         // Push hints and prompt from Etherea into data bus
         {
@@ -847,6 +884,7 @@ void Application::shutdown() {
     m_spoutOutput.destroy();
 #endif
     m_ethereaClient.disconnect();
+    m_cueClient.disconnect();
 #ifdef HAS_OPENCV
     m_scanner.cancelScan();
     m_webcam.close();
@@ -4477,6 +4515,10 @@ void Application::renderUI() {
     if (m_ui.isPanelVisible("Timeline")) {
         renderTimelinePanel();
     }
+    // Phase 5 — floating transport pill above the docked timeline. Renders
+    // play/stop/loop + timecode in a single rounded surface that floats
+    // over the canvas, matching reference B's chrome-light vibe.
+    renderFloatingTransportPill();
 
     // Overlay inspector tab icons (Properties/Mapping/Audio/MIDI) after all
     // panels have rendered so the icon painting lands on top of ImGui's
@@ -4581,6 +4623,142 @@ void Application::startTimelineExport() {
 // Minimal show-programming timeline UI. Transport + ruler + per-layer tracks.
 // Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
 // move, drag clip edges to trim, right-click track for +Clip at cursor.
+void Application::renderFloatingTransportPill() {
+    // Phase 5 — compact floating pill that owns play/stop/loop + timecode.
+    // Sits above the docked Timeline panel, near the bottom of the viewport.
+    // Reference B vibe: a single rounded surface that floats over the canvas
+    // rather than docking flush to the bottom edge.
+    if (UIManager::sMode != UIManager::WorkspaceMode::Canvas) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    // Pill dimensions — tight horizontal, room for the controls + timecode.
+    const float pillW = 360.0f;
+    const float pillH = 56.0f;
+
+    // Anchor 16px above the docked timeline so the two surfaces never touch.
+    // m_lastTimelineH is updated each frame by UIManager::setupDockspace.
+    float bottomDock = (m_ui.workspaceBarHeight() < 0 ? 0 : 0);
+    (void)bottomDock;
+    float timelineH = 0.0f;
+    {
+        ImGuiID dockId = 0;
+        // Read cached timeline node height via the existing UI accessor.
+        // We just expose what the rails already use (kept on UIManager).
+        // No public getter exists; mirror the math: timeline panel docks
+        // at the bottom and its current height is inferred from the
+        // viewport vs. the docked Timeline window.
+        if (ImGuiWindow* w = ImGui::FindWindowByName("Timeline")) {
+            timelineH = w->Size.y;
+            dockId = w->DockId;
+        }
+        (void)dockId;
+    }
+    float yMargin = 14.0f;
+    float x = vp->WorkPos.x + (vp->WorkSize.x - pillW) * 0.5f;
+    float y = vp->WorkPos.y + vp->WorkSize.y - timelineH - pillH - yMargin;
+
+    ImGui::SetNextWindowPos (ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(pillW, pillH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize  |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings|
+        ImGuiWindowFlags_NoScrollbar;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(14, 10));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, pillH * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 28, 235));
+    ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(255, 255, 255, 22));
+
+    if (ImGui::Begin("##TransportPill", nullptr, flags)) {
+        // Subtle drop shadow under the pill.
+        {
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            (void)fg;
+            ImDrawList* bg = ImGui::GetBackgroundDrawList();
+            bg->AddRectFilled(ImVec2(wp.x + 4, wp.y + 6),
+                              ImVec2(wp.x + ws.x + 4, wp.y + ws.y + 6),
+                              IM_COL32(0, 0, 0, 80), pillH * 0.5f);
+        }
+
+        // Three transport buttons + timecode + loop.
+        bool playing = m_timeline.isPlaying();
+        const float btnSize = 34.0f;
+
+        auto pillBtn = [&](const char* id, int kind /*0 play/pause, 1 stop, 2 loop*/,
+                           bool toggled = false) -> bool {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(btnSize, btnSize);
+            bool clicked = ImGui::InvisibleButton(id, sz);
+            bool hov     = ImGui::IsItemHovered();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            ImU32 bgCol = toggled ? IM_COL32(255, 255, 255, 32)
+                                  : (hov ? IM_COL32(255, 255, 255, 22)
+                                         : IM_COL32(255, 255, 255, 0));
+            d->AddCircleFilled(ImVec2(cur.x + sz.x * 0.5f, cur.y + sz.y * 0.5f),
+                               sz.x * 0.5f, bgCol, 24);
+            ImU32 glyphCol = IM_COL32(240, 244, 252, 240);
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            float r  = sz.x * 0.30f;
+            if (kind == 0) {
+                if (playing) {
+                    d->AddRectFilled(ImVec2(cx - r * 0.7f, cy - r),
+                                     ImVec2(cx - r * 0.15f, cy + r),
+                                     glyphCol, 1.5f);
+                    d->AddRectFilled(ImVec2(cx + r * 0.15f, cy - r),
+                                     ImVec2(cx + r * 0.7f, cy + r),
+                                     glyphCol, 1.5f);
+                } else {
+                    d->AddTriangleFilled(
+                        ImVec2(cx - r * 0.5f, cy - r),
+                        ImVec2(cx - r * 0.5f, cy + r),
+                        ImVec2(cx + r * 0.85f, cy), glyphCol);
+                }
+            } else if (kind == 1) {
+                d->AddRectFilled(ImVec2(cx - r * 0.75f, cy - r * 0.75f),
+                                 ImVec2(cx + r * 0.75f, cy + r * 0.75f),
+                                 glyphCol, 2.0f);
+            } else {
+                // Loop: lemniscate-ish with a slight bend.
+                d->AddCircle(ImVec2(cx - r * 0.5f, cy), r * 0.6f, glyphCol, 16, 1.6f);
+                d->AddCircle(ImVec2(cx + r * 0.5f, cy), r * 0.6f, glyphCol, 16, 1.6f);
+            }
+            return clicked;
+        };
+
+        if (pillBtn("##fp_play", 0))   m_timeline.togglePlay();
+        ImGui::SameLine(0, 6);
+        if (pillBtn("##fp_stop", 1))   m_timeline.stop();
+        ImGui::SameLine(0, 6);
+        if (pillBtn("##fp_loop", 2, m_timeline.looping()))
+            m_timeline.setLooping(!m_timeline.looping());
+
+        // Timecode — inline, monospace feel.
+        ImGui::SameLine(0, 14);
+        double ph = m_timeline.playhead();
+        double dur = m_timeline.duration();
+        int pm = (int)ph / 60, ps = (int)ph % 60;
+        int dm = (int)dur / 60, ds = (int)dur % 60;
+        char tc[32];
+        snprintf(tc, sizeof(tc), "%02d:%02d / %02d:%02d", pm, ps, dm, ds);
+        ImVec2 tcPos = ImGui::GetCursorScreenPos();
+        float pillCenterY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f;
+        ImVec2 tcSize = ImGui::CalcTextSize(tc);
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(tcPos.x, pillCenterY - tcSize.y * 0.5f),
+            IM_COL32(232, 238, 250, 240), tc);
+        ImGui::Dummy(ImVec2(tcSize.x + 8, btnSize));
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+}
+
 void Application::renderTimelinePanel() {
     // Tight edge margins — left 12px matches the Canvas/Stage nav indent,
     // vertical 16px keeps the transport row centred inside the minimised

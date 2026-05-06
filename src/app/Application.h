@@ -46,6 +46,7 @@
 #endif
 
 #include "speech/EthereaClient.h"
+#include "speech/CueClient.h"
 #include "app/AudioAnalyzer.h"
 #include "app/AudioMixer.h"
 #include "app/BPMSync.h"
@@ -143,6 +144,23 @@ private:
     Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
     Texture m_testPattern;
 
+    // Phase Q v4 — bloom pipeline. Half-res FBOs ping-pong for the
+    // separable Gaussian; uCompositeFBO holds the screen-blended
+    // result before it's copied back to warpFBO.
+    ShaderProgram m_bloomBrightShader;
+    ShaderProgram m_bloomBlurShader;
+    ShaderProgram m_bloomCompositeShader;
+    ShaderProgram m_linearCopyShader;     // bloom copy-back, no ACES
+    Framebuffer   m_bloomBrightFBO;       // half-res, 16F
+    Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
+    Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
+    bool          m_bloomEnabled   = true;
+    float         m_bloomThreshold = 0.85f;
+    float         m_bloomKnee      = 0.30f;
+    float         m_bloomStrength  = 0.55f;
+    float         m_bloomTint      = 0.40f;
+    int           m_bloomBlurPasses = 2;  // 1..6 — more = wider, softer halo
+
     int m_selectedLayer = -1;
     AudioAnalyzer m_audioAnalyzer;
     AudioMixer m_audioMixer;
@@ -239,6 +257,7 @@ private:
 
     SpeechState m_speechState;
     EthereaClient m_ethereaClient;
+    CueClient m_cueClient;
     DataBus m_dataBus;
     std::string m_prevTranscript;       // Last full_transcript for diffing
 
@@ -283,6 +302,11 @@ private:
     std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
     void renderTransportBar();
     void renderTimelinePanel();
+    // Phase 5 — floating transport pill at viewport bottom-center. Draws
+    // play/stop/loop + timecode in a single rounded pill that overlays the
+    // canvas, matching reference B's minimal control surface. Independent
+    // of the docked timeline panel which still hosts tracks/audio lane.
+    void renderFloatingTransportPill();
 
     // Timeline export flow — when true, render loop auto-stops the recorder
     // and pauses playback when the playhead crosses the Work Area end.

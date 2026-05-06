@@ -642,7 +642,39 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         // around it; removed because it read as an unwanted "work area"
         // border on top of the already-clear darker letterbox.
         ImDrawList* draw = ImGui::GetWindowDrawList();
-        (void)draw;
+
+        // Phase 5/B — crosshair grid centered on the canvas. Faint
+        // intersection lines (vertical + horizontal through center) plus
+        // a 4×4 dot lattice. Reads as compositional reference without
+        // distracting from the layer content. Letterbox area only.
+        {
+            ImVec2 cMin = clipMin;
+            ImVec2 cMax = clipMax;
+            float cx = (cMin.x + cMax.x) * 0.5f;
+            float cy = (cMin.y + cMax.y) * 0.5f;
+            const ImU32 lineCol = IM_COL32(255, 255, 255, 14);
+            const ImU32 dotCol  = IM_COL32(255, 255, 255, 40);
+            // Center crosshair — stops short of canvas edges.
+            float crossR = std::min(cMax.x - cMin.x, cMax.y - cMin.y) * 0.45f;
+            draw->AddLine(ImVec2(cx - crossR, cy), ImVec2(cx + crossR, cy),
+                          lineCol, 1.0f);
+            draw->AddLine(ImVec2(cx, cy - crossR), ImVec2(cx, cy + crossR),
+                          lineCol, 1.0f);
+            // Tiny center dot.
+            draw->AddCircleFilled(ImVec2(cx, cy), 1.6f,
+                                  IM_COL32(255, 255, 255, 90), 12);
+            // 4×4 lattice of dots — aligned to canvas image bounds for
+            // compositional reference rather than viewport bounds.
+            for (int j = 1; j < 4; j++) {
+                for (int i = 1; i < 4; i++) {
+                    float dx = m_imageOrigin.x +
+                               m_imageSize.x * (i / 4.0f);
+                    float dy = m_imageOrigin.y +
+                               m_imageSize.y * (j / 4.0f);
+                    draw->AddCircleFilled(ImVec2(dx, dy), 1.0f, dotCol, 8);
+                }
+            }
+        }
     }
 
     m_hovered = ImGui::IsWindowHovered();

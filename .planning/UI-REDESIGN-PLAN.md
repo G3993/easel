@@ -98,7 +98,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [~] Phase 5 — Floating transport pill (skipped — see UI-REDESIGN-NOTES.md, blocked on Phase 7)
+### [x] Phase 5 — Floating transport pill (ships pill; docked timeline retained for tracks + REC)
 **Goal:** replace docked bottom transport with a floating pill at bottom-center.
 
 **Tasks:**
