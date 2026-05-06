@@ -791,6 +791,61 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // buried under a wall of position/scale/rotation.
     static bool transformOpen = false;
     if (sectionHeader("Transform", &transformOpen)) {
+        // Phase 6 — circular xy-pad. Drag the dot to translate the layer
+        // along X/Y in NDC (-1..1). Doubles as the visual anchor that
+        // reference A leads with at the top of its Transform section.
+        // Sits left of the X/Y drag fields so the numeric and graphical
+        // inputs read as one combined transform widget.
+        {
+            const float padR = 36.0f;          // outer radius
+            const float padPad = 6.0f;
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 center(cur.x + padR + padPad, cur.y + padR);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            // Outer ring (track) and inner softer ring (mid-detent at 0,0).
+            dl->AddCircleFilled(center, padR, IM_COL32(255, 255, 255, 12), 36);
+            dl->AddCircle(center, padR,        IM_COL32(255, 255, 255, 60), 36, 1.2f);
+            dl->AddCircle(center, padR * 0.5f, IM_COL32(255, 255, 255, 22), 36, 1.0f);
+            // Crosshair through center.
+            dl->AddLine(ImVec2(center.x - padR, center.y),
+                        ImVec2(center.x + padR, center.y),
+                        IM_COL32(255, 255, 255, 18), 1.0f);
+            dl->AddLine(ImVec2(center.x, center.y - padR),
+                        ImVec2(center.x, center.y + padR),
+                        IM_COL32(255, 255, 255, 18), 1.0f);
+            // Position dot — clamped position.x/y from [-1..1] map to ring.
+            float px = std::max(-1.0f, std::min(1.0f, layer->position.x));
+            float py = std::max(-1.0f, std::min(1.0f, layer->position.y));
+            ImVec2 dot(center.x + px * padR,
+                       center.y - py * padR);  // y inverted (up = +y in NDC)
+            dl->AddCircleFilled(dot, 5.0f, IM_COL32(247, 248, 248, 240), 16);
+            dl->AddCircle      (dot, 5.0f, IM_COL32(0,   0,   0, 90 ), 16, 1.0f);
+            // Hit area
+            ImGui::SetCursorScreenPos(ImVec2(center.x - padR, center.y - padR));
+            ImGui::InvisibleButton("##XYPad", ImVec2(padR * 2.0f, padR * 2.0f));
+            if (ImGui::IsItemActivated()) undoNeeded = true;
+            if (ImGui::IsItemActive()) {
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                float nx = (mp.x - center.x) / padR;
+                float ny = -(mp.y - center.y) / padR;
+                // Soft clamp to unit disk.
+                float r = sqrtf(nx * nx + ny * ny);
+                if (r > 1.0f) { nx /= r; ny /= r; }
+                layer->position.x = nx;
+                layer->position.y = ny;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Drag to translate (X %.2f, Y %.2f)\nDouble-click → 0,0",
+                                  layer->position.x, layer->position.y);
+            }
+            if (ImGui::IsMouseDoubleClicked(0) && ImGui::IsItemHovered()) {
+                undoNeeded = true;
+                layer->position = {0.0f, 0.0f};
+            }
+            // Layout: numeric fields ride right of the pad on the same row.
+            ImGui::SetCursorScreenPos(ImVec2(cur.x + padR * 2.0f + padPad * 3.0f,
+                                             cur.y));
+        }
         if (dragPair("##PosX", "X", &layer->position.x, "##PosY", "Y", &layer->position.y,
                      0.01f, -2.0f, 2.0f))
         {}

@@ -173,7 +173,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 6 — Properties as contextual flyout
+### [x] Phase 6 — Properties as contextual flyout (xy-pad widget shipped; mini-tabs reverted as redundant)
 **Goal:** PropertyPanel matches reference A/B style — mini-tabs, collapsible sections, xy-pad widget.
 
 **Tasks:**
