@@ -7640,6 +7640,28 @@ void Application::renderMenuBar() {
             ImGui::SetCursorPosX(12.0f);
         }
 #endif
+        // Awesome-design: brand glyph in the top-left corner. A small
+        // V-triangle inside a circular ring — single procedural shape so
+        // we don't need an asset. Sits flush with traffic-light row,
+        // reads as the app's identity at a glance.
+        {
+            float baseY = ImGui::GetCursorPosY();
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            const float r = 11.0f;
+            ImVec2 c(cur.x + r + 2.0f, cur.y + ImGui::GetFrameHeight() * 0.5f);
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            d->AddCircle(c, r, IM_COL32(255, 255, 255, 80), 28, 1.2f);
+            // Inverted-V triangle (the "Easel" mark) — apex up, two feet
+            // pointing down.
+            float tw = r * 0.85f, th = r * 0.85f;
+            d->AddTriangle(ImVec2(c.x,        c.y - th * 0.55f),
+                           ImVec2(c.x - tw,   c.y + th * 0.55f),
+                           ImVec2(c.x + tw,   c.y + th * 0.55f),
+                           IM_COL32(232, 238, 250, 235), 1.5f);
+            ImGui::Dummy(ImVec2(r * 2.0f + 12.0f, 0));
+            ImGui::SameLine();
+            ImGui::SetCursorPosY(baseY);
+        }
         // Phase 4 — minimal top bar. The four legacy EDIT/FILE/LAYER/ZONE
         // strips collapse into a single "···" button. All items remain
         // available as submenus under this single dropdown so existing

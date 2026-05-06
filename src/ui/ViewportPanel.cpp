@@ -261,9 +261,15 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         }
 
         // --- Zone tabs ---
+        // Awesome-design: zone tabs only render when there are MULTIPLE
+        // zones. Single-zone projects (the common case) get a clean
+        // top bar with just the workspace pill + Preview/Resolution.
+        // Renaming + adding zones still works via the right-click menu
+        // and the "+" affordance below.
+        bool showZoneTabs = ((int)zones->size() > 1);
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
-        for (int i = 0; i < (int)zones->size(); i++) {
+        for (int i = 0; showZoneTabs && i < (int)zones->size(); i++) {
             ImGui::PushID(9000 + i);
             bool isActive = (i == *activeZone);
             auto& z = *(*zones)[i];
@@ -349,17 +355,21 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             ImGui::EndPopup();
         }
 
-        // "+" button to add zone
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
-        if (ImGui::Button("+")) {
-            *activeZone = -(100 + (int)zones->size()); // signal: want add
+        // "+" button to add zone — only when zone tabs are shown.
+        // Single-zone projects skip the affordance to keep the bar clean
+        // (still reachable via Zone menu in the "···" dropdown).
+        if (showZoneTabs) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+            if (ImGui::Button("+")) {
+                *activeZone = -(100 + (int)zones->size());
+            }
+            if (ImGui::IsItemHovered()) {
+                ParamRow::Tooltip("Add output zone");
+            }
+            ImGui::PopStyleColor(3);
         }
-        if (ImGui::IsItemHovered()) {
-            ParamRow::Tooltip("Add output zone");
-        }
-        ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(2);
 
         // --- Output + Mapping routing (same row as zone tabs) ---
