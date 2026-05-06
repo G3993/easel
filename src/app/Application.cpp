@@ -4524,15 +4524,17 @@ void Application::renderUI() {
     // Audio Mixer panel merged into Audio; transport controls now live inside
     // the Timeline panel's transport row (renderTransportBar() is a no-op).
 
-    // Timeline panel — shows per-layer tracks with clips along a time ruler.
-    // Single playhead, linear time, clip-on-track model (AE/Resolume style).
-    if (m_ui.isPanelVisible("Timeline")) {
-        renderTimelinePanel();
-    }
+    // Timeline panel — hidden by default per the reference design; the
+    // floating transport pill + floating REC/LIVE pills cover all the
+    // primary affordances. Tracks/audio lane/Work Area still live in
+    // renderTimelinePanel for power users — surface via a future
+    // "Tracks" toggle on the rail. For now, no docked strip.
+    (void)0;
     // Phase 5 — floating transport pill above the docked timeline. Renders
     // play/stop/loop + timecode in a single rounded surface that floats
     // over the canvas, matching reference B's chrome-light vibe.
     renderFloatingTransportPill();
+    renderFloatingActionPills();
 
     // Overlay inspector tab icons (Properties/Mapping/Audio/MIDI) after all
     // panels have rendered so the icon painting lands on top of ImGui's
@@ -4813,6 +4815,101 @@ void Application::renderFloatingTransportPill() {
     ImGui::End();
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(3);
+}
+
+void Application::renderFloatingActionPills() {
+    // Two separate rounded pills bottom-right — REC and LIVE — matching
+    // the reference's split record/broadcast affordances. Each is its own
+    // ImGui::Begin window so they animate, hover, and reposition cleanly
+    // without sharing layout with the docked timeline.
+    if (UIManager::sMode != UIManager::WorkspaceMode::Canvas) return;
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    float timelineH = 0.0f;
+    if (ImGuiWindow* w = ImGui::FindWindowByName("Timeline"))
+        timelineH = w->Size.y;
+
+    const float pillH = 38.0f;
+    const float yMargin = 14.0f;
+    const float rightMargin = 70.0f;  // clear of the right tool rail
+    const float gap = 8.0f;
+    float baseY = vp->WorkPos.y + vp->WorkSize.y - timelineH - pillH - yMargin;
+
+    auto pill = [&](const char* id, const char* label, ImU32 dotCol,
+                    float pillW, float xRight, bool active,
+                    std::function<void()> onClick) {
+        float x = xRight - pillW;
+        ImGui::SetNextWindowPos (ImVec2(x, baseY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(pillW, pillH), ImGuiCond_Always);
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize  |
+            ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
+            ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings|
+            ImGuiWindowFlags_NoScrollbar;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(12, 4));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   pillH * 0.5f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 28, 235));
+        ImGui::PushStyleColor(ImGuiCol_Border,
+            active ? dotCol : IM_COL32(255, 255, 255, 22));
+        if (ImGui::Begin(id, nullptr, flags)) {
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            // Drop shadow.
+            ImGui::GetBackgroundDrawList()->AddRectFilled(
+                ImVec2(wp.x + 3, wp.y + 5),
+                ImVec2(wp.x + ws.x + 3, wp.y + ws.y + 5),
+                IM_COL32(0, 0, 0, 70), pillH * 0.5f);
+            // Click hit area covers the entire pill.
+            ImGui::SetCursorPos(ImVec2(0, 0));
+            if (ImGui::InvisibleButton("##hit", ws) && onClick) onClick();
+            // Status dot + label, centred.
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            float cy = wp.y + ws.y * 0.5f;
+            float dotX = wp.x + 14.0f;
+            d->AddCircleFilled(ImVec2(dotX, cy), 4.5f, dotCol, 16);
+            ImVec2 ts = ImGui::CalcTextSize(label);
+            d->AddText(ImVec2(dotX + 12.0f, cy - ts.y * 0.5f),
+                       active ? dotCol : IM_COL32(232, 238, 250, 240),
+                       label);
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(3);
+    };
+
+    bool recording = m_recorder.isActive();
+#ifdef HAS_FFMPEG
+    bool living = m_rtmpOutput.isActive();
+#else
+    bool living = false;
+#endif
+    float xRight = vp->WorkPos.x + vp->WorkSize.x - rightMargin;
+    // LIVE pill sits at the right edge; REC sits to its left.
+    pill("##LivePill", living ? "LIVE" : "Go Live",
+         living ? IM_COL32(74, 230, 144, 255) : UITokens::kAccentSoft,
+         92.0f, xRight, living,
+         [this]() {
+#ifdef HAS_FFMPEG
+            if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
+            else ImGui::OpenPopup("##GoLivePopup");
+#endif
+         });
+    xRight -= 92.0f + gap;
+    pill("##RecPill", recording ? "Recording" : "REC",
+         IM_COL32(255, 70, 70, 255),
+         84.0f, xRight, recording,
+         [this]() {
+#ifdef HAS_FFMPEG
+            if (m_recorder.isActive()) {
+                m_recorder.stop();
+                m_timelineExporting = false;
+            } else {
+                m_recorder.setAudioDevice(m_selectedAudioDevice);
+                startTimelineExport();
+            }
+#endif
+         });
 }
 
 void Application::renderTimelinePanel() {

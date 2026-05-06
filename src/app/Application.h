@@ -307,6 +307,10 @@ private:
     // canvas, matching reference B's minimal control surface. Independent
     // of the docked timeline panel which still hosts tracks/audio lane.
     void renderFloatingTransportPill();
+    // Floating REC + LIVE pills at viewport bottom-right — two separate
+    // rounded surfaces matching the reference's split record/broadcast
+    // affordances. Independent of the docked timeline.
+    void renderFloatingActionPills();
 
     // Timeline export flow — when true, render loop auto-stops the recorder
     // and pauses playback when the playhead crosses the Work Area end.

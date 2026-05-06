@@ -63,15 +63,15 @@ static const ImU32 kPointRing     = IM_COL32(255, 255, 255, 180);
 static const ImU32 kBorderColor   = IM_COL32(255, 255, 255, 20);
 static const ImU32 kBorderGlow    = IM_COL32(0, 0, 0, 0);
 // Awesome-design: layer selection bbox + handles use the global blue
-// accent (UITokens::kAccent) so the selected layer reads with the same
-// chromatic anchor as the active rail icon and the play button. Other
-// passive overlays (non-selected bbox, mask curves) stay white-alpha.
-static const ImU32 kBBoxLine      = IM_COL32(74, 140, 255, 220);
-static const ImU32 kBBoxGlow      = IM_COL32(74, 140, 255, 50);
+// accent so the selected layer reads with the same chromatic anchor as
+// the active rail icon and the play button. Handle = white fill +
+// blue ring, matching the reference's corner-dot appearance.
+static const ImU32 kBBoxLine      = IM_COL32(74, 140, 255, 235);
+static const ImU32 kBBoxGlow      = IM_COL32(74, 140, 255, 60);
 static const ImU32 kBBoxDim       = IM_COL32(255, 255, 255, 30);
-static const ImU32 kLHandleFill   = IM_COL32(74, 140, 255, 255);
-static const ImU32 kLHandleStroke = IM_COL32(255, 255, 255, 255);
-static const ImU32 kLHandleActive = IM_COL32(255, 255, 255, 255);
+static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 255);
+static const ImU32 kLHandleStroke = IM_COL32(74, 140, 255, 255);
+static const ImU32 kLHandleActive = IM_COL32(74, 140, 255, 255);
 
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
     return glm::vec2(
@@ -415,7 +415,12 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             } else {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             }
-            ImGui::TextUnformatted("OUTPUT");
+            // Compact reference-style: drop the literal "OUTPUT" word
+            // and let the "Preview Only" combo carry the meaning. The
+            // combo's chevron + label is enough affordance, and the
+            // omission tightens the cluster to the 3-pill rhythm in
+            // the reference (Preview ⌄ / 1920×1080 ⌄ / 🟢).
+            ImGui::TextUnformatted("");
             ImGui::PopStyleColor();
             ImGui::SameLine();
 
@@ -1521,7 +1526,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
         const float kPillH      = 30.0f;
         const float kSegPadX    = 16.0f;
         const float kTrackPad   = 4.0f;   // inner padding around active pill
-        const char* labels[3]   = {"CANVAS", "STAGE", "SHOW"};
+        const char* labels[3]   = {"Canvas", "Stage", "Show"};
         Mode      modes[3]      = {Mode::Canvas, Mode::Stage, Mode::Show};
 
         // Measure each segment so the active pill can be drawn behind
