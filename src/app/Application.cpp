@@ -1874,6 +1874,13 @@ void Application::startVoiceRecording() {
     m_voicePartial.clear();
     m_voiceRecognizer.onPartial = [this](const std::string& s) {
         m_voicePartial = s;
+        // Stream partials into the same DataBus key the Cue transcript
+        // callback uses so text_clusters.fs (and any other shader bound
+        // to "cue.latest") sees live speech as the user is speaking.
+        // Mirrors CueClient::setTranscriptCallback's path so the bubbles
+        // light up whether the words come from local speech or a remote
+        // Cue session.
+        m_dataBus.set("cue.latest", s);
     };
     m_voiceRecognizer.onFinal = [this](const std::string& s) {
         m_voicePartial.clear();
@@ -1881,6 +1888,13 @@ void Application::startVoiceRecording() {
         if (s.empty()) return;
         m_voiceLastEcho = std::string("\"") + s + "\"";
         m_voiceLastEchoTime = glfwGetTime();
+        // Push the final to the DataBus too so it persists in the bubbles
+        // after speech stops, and append to the running transcript.
+        m_dataBus.set("cue.latest", s);
+        std::string prev = m_dataBus.get("cue.transcript");
+        if (!prev.empty()) prev += " ";
+        prev += s;
+        m_dataBus.set("cue.transcript", prev);
         auto intent = easel::voice::parse(s);
         std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
         if (!intent.target.empty()) std::cerr << " target=" << intent.target;
