@@ -1145,7 +1145,14 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 6.0f;
-    float h = vp->WorkSize.y - topReserve - 12.0f;
+    // Rail terminates above the docked timeline so REC / GO LIVE on the
+    // far-right of the transport row aren't clipped by the right tool
+    // rail (and symmetrically the left rail doesn't sit on top of the
+    // play/timecode cluster). m_lastTimelineH is updated each frame in
+    // setupDockspace's reflow block.
+    float bottomReserve = m_lastTimelineH > 0.0f ? m_lastTimelineH + 8.0f : 12.0f;
+    float h = vp->WorkSize.y - topReserve - bottomReserve;
+    if (h < 80.0f) h = 80.0f;
     ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x,
                                      vp->WorkPos.y + topReserve),
                               ImGuiCond_Always);
@@ -1307,7 +1314,12 @@ void UIManager::renderRightToolRail() {
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 6.0f;
-    float h = vp->WorkSize.y - topReserve - 12.0f;
+    // Same bottom reservation as left rail — keeps the timeline transport
+    // strip's REC / GO LIVE buttons fully clickable instead of clipped by
+    // the tool rail.
+    float bottomReserve = m_lastTimelineH > 0.0f ? m_lastTimelineH + 8.0f : 12.0f;
+    float h = vp->WorkSize.y - topReserve - bottomReserve;
+    if (h < 80.0f) h = 80.0f;
     ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + vp->WorkSize.x - kRightToolRailW,
                                      vp->WorkPos.y + topReserve),
                               ImGuiCond_Always);
