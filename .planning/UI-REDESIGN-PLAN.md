@@ -117,7 +117,7 @@ After each loop the agent **MUST**:
 
 ---
 
-### [ ] Phase 2 — Rail layer thumbnails
+### [x] Phase 2 — Rail layer thumbnails
 **Goal:** layer stack thumbnails appear at the bottom of the rail, below a divider.
 
 **Tasks:**

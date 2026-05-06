@@ -4489,7 +4489,52 @@ void Application::renderUI() {
     // Activity rail — rendered LAST so its window draws on top of the
     // dockspace + all panels. Earlier render order put it behind. Rail
     // icons toggle which panel (Layers / Sources / Mapping) is active.
-    m_ui.renderLeftRail();
+    m_ui.renderLeftRail([&](float innerW) {
+        // Phase 2 — per-layer thumbnails. We re-use Layer::textureId() (the
+        // raw source texture) rather than allocating a separate thumb FBO
+        // — pixel-perfect at any scale, zero per-frame GPU cost beyond the
+        // ImGui sampler. Selection is bidirectional with the Layer panel.
+        const float kThumbSz = 56.0f;
+        const float kThumbR  = 10.0f;
+        const float xPad     = (innerW - kThumbSz) * 0.5f;
+        for (int i = m_layerStack.count() - 1; i >= 0; --i) {
+            auto layer = m_layerStack[i];
+            if (!layer) continue;
+            ImGui::PushID(20000 + i);
+            // Center the thumbnail horizontally within the rail's inner width.
+            float curX = ImGui::GetCursorPosX();
+            ImGui::SetCursorPosX(curX + xPad);
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(kThumbSz, kThumbSz);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            // Background card — subtle so empty-source layers still read.
+            dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                              IM_COL32(28, 32, 40, 255), kThumbR);
+            // Thumbnail image (clipped to rounded rect via push/pop clip).
+            GLuint tex = layer->textureId();
+            if (tex) {
+                dl->PushClipRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y), true);
+                dl->AddImageRounded((ImTextureID)(intptr_t)tex,
+                                    cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                                    ImVec2(0, 1), ImVec2(1, 0),  // V-flip GL
+                                    IM_COL32(255, 255, 255, 255), kThumbR);
+                dl->PopClipRect();
+            }
+            // Active border — bright when selected; thin gray otherwise.
+            bool active = (i == m_selectedLayer);
+            ImU32 borderCol = active ? IM_COL32(247, 248, 248, 255)
+                                     : IM_COL32(255, 255, 255, 30);
+            float borderW = active ? 2.0f : 1.0f;
+            dl->AddRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                        borderCol, kThumbR, 0, borderW);
+            // Click → select.
+            if (ImGui::InvisibleButton("##thumb", sz)) {
+                m_selectedLayer = i;
+            }
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::PopID();
+        }
+    });
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
@@ -7281,7 +7326,9 @@ void Application::renderMenuBar() {
         // available as submenus under this single dropdown so existing
         // muscle memory (Add Image, New Project, Move Up, etc.) still
         // works — the chrome just gets out of the way.
-        if (ImGui::BeginMenu("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2")) {
+        // U+22EF MIDLINE HORIZONTAL ELLIPSIS — the typographic "more" glyph;
+        // single codepoint, cleaner kerning than three U+2022 bullets.
+        if (ImGui::BeginMenu("\xe2\x8b\xaf")) {
         if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
                 m_undoStack.undo(m_layerStack, m_selectedLayer);

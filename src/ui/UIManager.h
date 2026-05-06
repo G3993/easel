@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 struct GLFWwindow;
 struct ImFont;
 // Mirrors ImGui's `typedef unsigned int ImGuiID;` so we can store dock node
@@ -123,7 +125,11 @@ public:
     // position rightward by this much. Constant for now.
     static constexpr float kLeftRailW = 64.0f;
     // Renders the rail itself; called once per frame from Application.
-    void renderLeftRail();
+    // The optional `drawExtra` runs inside the rail window after the nav
+    // buttons, with `kLeftRailW - 12` of horizontal space available. Use it
+    // to draw a hairline divider + per-layer thumbnails (Phase 2) without
+    // coupling UIManager to LayerStack.
+    void renderLeftRail(const std::function<void(float innerW)>& drawExtra = {});
 
 private:
     LeftPanel m_activeLeftPanel = LeftPanel::Layers;

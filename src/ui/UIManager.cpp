@@ -917,6 +917,14 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockAlways("        ###MIDI",       rightFloatId);
         ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
 
+        // Strip the dock chrome (tab bar + chevron) from the left float
+        // so the rail's icons are the sole way to switch panels — no
+        // duplicate tab strip + collapse arrow inside the panel header.
+        if (ImGuiDockNode* ln = ImGui::DockBuilderGetNode(leftFloatId)) {
+            ln->LocalFlags |= ImGuiDockNodeFlags_NoTabBar
+                            | ImGuiDockNodeFlags_NoWindowMenuButton;
+        }
+
         ImGui::DockBuilderFinish(dockspaceId);
 
         m_timelineDockId = timelineDockId;
@@ -1109,7 +1117,7 @@ bool UIManager::isPanelVisible(const char* title) const {
     return true;
 }
 
-void UIManager::renderLeftRail() {
+void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtra) {
     // Activity rail — fixed-width vertical strip on the left edge with
     // icon buttons that toggle which left panel is active. Reuses the
     // procedural glyphs already defined for the float-panel tabs.
@@ -1180,6 +1188,20 @@ void UIManager::renderLeftRail() {
                 m_activeLeftPanel = active ? LeftPanel::None : it.which;
             }
             ImGui::Dummy(ImVec2(0, 4));
+        }
+        // Phase 2 — divider + per-layer thumbnails callback. Application
+        // owns the layer stack so it draws thumbs itself; we just provide
+        // a hairline divider and the inner width so it can size correctly.
+        if (drawExtra) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImVec2 dPos = ImGui::GetCursorScreenPos();
+            float divW = kLeftRailW - 16.0f;
+            ImGui::GetWindowDrawList()->AddLine(
+                ImVec2(dPos.x + 8.0f, dPos.y),
+                ImVec2(dPos.x + 8.0f + divW, dPos.y),
+                IM_COL32(255, 255, 255, 30), 1.0f);
+            ImGui::Dummy(ImVec2(0, 10));
+            drawExtra(kLeftRailW - 12.0f);
         }
     }
     ImGui::End();
