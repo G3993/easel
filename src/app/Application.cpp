@@ -4679,8 +4679,10 @@ void Application::renderFloatingTransportPill() {
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
 
-    // Pill dimensions — tight horizontal, room for the controls + timecode.
-    const float pillW = 360.0f;
+    // Pill dimensions — wider now to host the mic affordance alongside
+    // play/stop/loop + timecode. Without this, the mic was unreachable
+    // when the docked timeline was hidden.
+    const float pillW = 460.0f;
     const float pillH = 56.0f;
 
     // Anchor 16px above the docked timeline so the two surfaces never touch.
@@ -4811,6 +4813,60 @@ void Application::renderFloatingTransportPill() {
             ImVec2(tcPos.x, pillCenterY - tcSize.y * 0.5f),
             IM_COL32(232, 238, 250, 240), tc);
         ImGui::Dummy(ImVec2(tcSize.x + 8, btnSize));
+
+        // Mic / voice — restored here because the docked transport row
+        // (which used to host this) is hidden. Without it, voice
+        // recording is unreachable from the canvas chrome.
+#ifdef __APPLE__
+        ImGui::SameLine(0, 12);
+        {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(btnSize, btnSize);
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            bool hov = ImGui::IsMouseHoveringRect(cur,
+                ImVec2(cur.x + sz.x, cur.y + sz.y));
+            ImU32 bg = m_voiceListening
+                       ? IM_COL32(255, 70, 70, 90)
+                       : (hov ? IM_COL32(255, 255, 255, 22)
+                              : IM_COL32(255, 255, 255, 0));
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bg, 28);
+            // Mic glyph — capsule body + base.
+            ImU32 col = m_voiceListening
+                        ? IM_COL32(255, 90, 90, 240)
+                        : IM_COL32(232, 238, 250, 240);
+            float micW = sz.x * 0.18f, micH = sz.x * 0.30f;
+            d->AddRectFilled(ImVec2(cx - micW, cy - micH * 0.7f),
+                             ImVec2(cx + micW, cy + micH * 0.4f),
+                             col, micW);
+            d->AddBezierCubic(
+                ImVec2(cx - micW * 1.6f, cy + micH * 0.2f),
+                ImVec2(cx - micW * 1.6f, cy + micH * 0.7f),
+                ImVec2(cx + micW * 1.6f, cy + micH * 0.7f),
+                ImVec2(cx + micW * 1.6f, cy + micH * 0.2f),
+                col, 1.5f, 16);
+            d->AddLine(ImVec2(cx, cy + micH * 0.5f),
+                       ImVec2(cx, cy + micH * 0.85f), col, 1.5f);
+            d->AddLine(ImVec2(cx - micW * 1.2f, cy + micH * 0.85f),
+                       ImVec2(cx + micW * 1.2f, cy + micH * 0.85f), col, 1.5f);
+            // Pulse ring while listening.
+            if (m_voiceListening) {
+                float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 4.0f);
+                d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 1.0f,
+                             IM_COL32(255, 70, 70, (int)(60 + pulse * 140)),
+                             28, 1.6f);
+            }
+            if (ImGui::InvisibleButton("##fp_mic", sz)) {
+                if (m_voiceListening) stopVoiceRecording();
+                else                  startVoiceRecording();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(m_voiceListening
+                    ? "Listening — click to stop"
+                    : "Click to start voice transcription\n(words appear in shaders bound to cue.latest)");
+            }
+        }
+#endif
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
