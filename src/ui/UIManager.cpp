@@ -270,64 +270,255 @@ unsigned int UIManager::tabIconTex(TabIcon w) const {
     return m_tabIconTex[i];
 }
 
-void UIManager::drawInspectorTabIcons() {
-    if (m_rightFloatId == 0) return;
-    ImGuiDockNode* node = ImGui::DockBuilderGetNode(m_rightFloatId);
-    if (!node || !node->TabBar) return;
-    ImGuiTabBar* tabBar = node->TabBar;
+// Draws Layers tab icon — two offset rounded squares overlapping at the
+// corner (Figma/Sketch convention). Reads as "layered things" more
+// clearly than horizontal-band stacks (which look like a menu).
+static void drawLayersGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x;
+    float h = mx.y - mn.y;
+    float side = (w < h ? w : h) * 0.62f;
+    float ofs  = side * 0.42f;
+    float cx = (mn.x + mx.x) * 0.5f;
+    float cy = (mn.y + mx.y) * 0.5f;
 
-    // Window name → icon index. Matches the ###ID suffixes on the Begin()
-    // calls in each panel. Order of appearance doesn't matter — we look
-    // each up by window name.
-    struct Entry { const char* suffix; int iconIdx; };
-    const Entry table[] = {
-        { "###Properties", 0 },
-        { "###Mapping",    1 },
-        { "###Audio",      2 },
-        { "###MIDI",       3 },
-    };
+    // Back square (dimmer, top-left).
+    ImU32 backCol = (col & 0x00FFFFFF) | (((col >> 24) * 110 / 255) << 24);
+    ImVec2 ba(cx - side * 0.5f - ofs * 0.5f, cy - side * 0.5f - ofs * 0.5f);
+    ImVec2 bb(ba.x + side, ba.y + side);
+    dl->AddRectFilled(ba, bb, backCol, 2.5f);
+    // Front square (full alpha, bottom-right).
+    ImVec2 fa(cx - side * 0.5f + ofs * 0.5f, cy - side * 0.5f + ofs * 0.5f);
+    ImVec2 fb(fa.x + side, fa.y + side);
+    dl->AddRectFilled(fa, fb, col, 2.5f);
+    // Outline the front square so the overlap reads cleanly.
+    dl->AddRect(fa, fb, IM_COL32(0, 0, 0, 60), 2.5f, 0, 1.0f);
+}
+
+// Draws Sources tab icon procedurally — 2x2 grid of small squares (gallery).
+static void drawSourcesGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x;
+    float h = mx.y - mn.y;
+    float cellW = (w - 2.0f) * 0.5f;
+    float cellH = (h - 2.0f) * 0.5f;
+    for (int j = 0; j < 2; j++) {
+        for (int i = 0; i < 2; i++) {
+            ImVec2 a(mn.x + i * (cellW + 2.0f),
+                     mn.y + j * (cellH + 2.0f));
+            ImVec2 b(a.x + cellW, a.y + cellH);
+            dl->AddRectFilled(a, b, col, 1.5f);
+        }
+    }
+}
+
+// Helper: paint the icon for one tab item. Splits texture vs procedural
+// glyphs so future tabs can land on either path without duplicating the
+// fill/center boilerplate.
+static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
+                           ImGuiTabItem& tab, const char* tabName,
+                           unsigned int* iconTex /* size 4 */) {
+    if (!tabName) return;
+
+    // Layers/Sources: procedural (no PNG texture).
+    // Mapping/Properties/Audio/MIDI: texture from m_tabIconTex.
+    enum class Kind { None, Tex, Layers, Sources };
+    Kind kind = Kind::None;
+    int  texIdx = -1;
+    if      (std::strstr(tabName, "###Layers"))     kind = Kind::Layers;
+    else if (std::strstr(tabName, "###Sources"))    kind = Kind::Sources;
+    else if (std::strstr(tabName, "###Properties")) { kind = Kind::Tex; texIdx = 0; }
+    else if (std::strstr(tabName, "###Mapping"))    { kind = Kind::Tex; texIdx = 1; }
+    else if (std::strstr(tabName, "###Audio"))      { kind = Kind::Tex; texIdx = 2; }
+    else if (std::strstr(tabName, "###MIDI"))       { kind = Kind::Tex; texIdx = 3; }
+    if (kind == Kind::None) return;
+    if (kind == Kind::Tex && (texIdx < 0 || iconTex[texIdx] == 0)) return;
+
+    float tabX0 = tabBar->BarRect.Min.x + tab.Offset;
+    float tabX1 = tabX0 + tab.Width;
+    float tabY0 = tabBar->BarRect.Min.y;
+    float tabY1 = tabBar->BarRect.Max.y;
+
+    // Fill over the text with the matching tab background colour so
+    // the space-padded label vanishes visually; the icon renders on top.
+    ImGuiCol bgCol = (tabBar->SelectedTabId == tab.ID)
+                      ? ImGuiCol_TabActive : ImGuiCol_Tab;
+    ImU32 fillCol = ImGui::GetColorU32(bgCol);
+    fg->AddRectFilled(ImVec2(tabX0 + 1, tabY0 + 1),
+                       ImVec2(tabX1 - 1, tabY1),
+                       fillCol, 4.0f);
+
+    // Icon box — centred, scaled to fit the tab with a small inset.
+    float availH = (tabY1 - tabY0) - 8.0f;
+    if (availH < 10.0f) availH = 10.0f;
+    if (availH > 20.0f) availH = 20.0f;
+    float availW = (tabX1 - tabX0) - 8.0f;
+    float iconSize = availH < availW ? availH : availW;
+    float cx = (tabX0 + tabX1) * 0.5f;
+    float cy = (tabY0 + tabY1) * 0.5f;
+    ImVec2 imin(cx - iconSize * 0.5f, cy - iconSize * 0.5f);
+    ImVec2 imax(cx + iconSize * 0.5f, cy + iconSize * 0.5f);
+    ImU32 tint = (tabBar->SelectedTabId == tab.ID)
+                 ? IM_COL32(235, 240, 250, 245)
+                 : IM_COL32(170, 180, 200, 200);
+
+    if (kind == Kind::Tex) {
+        fg->AddImage((ImTextureID)(intptr_t)iconTex[texIdx],
+                      imin, imax, ImVec2(0, 0), ImVec2(1, 1), tint);
+    } else if (kind == Kind::Layers) {
+        drawLayersGlyph(fg, imin, imax, tint);
+    } else if (kind == Kind::Sources) {
+        drawSourcesGlyph(fg, imin, imax, tint);
+    }
+}
+
+// ─── Sources-tab procedural glyphs ──────────────────────────────────
+// Three lightning bolts — ShaderClaw signature.
+static void drawShaderClawGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float boltW = w * 0.22f;
+    for (int i = 0; i < 3; i++) {
+        float x = mn.x + w * (0.18f + 0.32f * float(i));
+        ImVec2 p1(x,           mn.y + h * 0.05f);
+        ImVec2 p2(x + boltW * 0.55f, mn.y + h * 0.45f);
+        ImVec2 p3(x - boltW * 0.10f, mn.y + h * 0.45f);
+        ImVec2 p4(x + boltW * 0.45f, mn.y + h * 0.95f);
+        dl->AddTriangleFilled(p1, p2, p3, col);
+        dl->AddTriangleFilled(p2, p3, p4, col);
+    }
+}
+// Microphone — capsule head + stem.
+static void drawMicGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float cx = (mn.x + mx.x) * 0.5f;
+    float headTopY = mn.y + h * 0.10f;
+    float headBotY = mn.y + h * 0.55f;
+    float headHalfW = w * 0.22f;
+    dl->AddRectFilled(ImVec2(cx - headHalfW, headTopY),
+                      ImVec2(cx + headHalfW, headBotY),
+                      col, headHalfW);
+    // Stem
+    dl->AddLine(ImVec2(cx, headBotY + 2.0f),
+                ImVec2(cx, mn.y + h * 0.78f),
+                col, 1.6f);
+    // Base
+    dl->AddRectFilled(ImVec2(cx - w * 0.20f, mn.y + h * 0.78f),
+                      ImVec2(cx + w * 0.20f, mn.y + h * 0.86f),
+                      col, 1.0f);
+    dl->AddLine(ImVec2(cx - w * 0.30f, mn.y + h * 0.94f),
+                ImVec2(cx + w * 0.30f, mn.y + h * 0.94f),
+                col, 1.4f);
+}
+// Camera — body box + circular lens.
+static void drawCameraGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    // Viewfinder bump
+    dl->AddRectFilled(ImVec2(mn.x + w * 0.30f, mn.y + h * 0.10f),
+                      ImVec2(mn.x + w * 0.55f, mn.y + h * 0.25f),
+                      col, 1.0f);
+    // Body
+    dl->AddRectFilled(ImVec2(mn.x + w * 0.05f, mn.y + h * 0.25f),
+                      ImVec2(mx.x - w * 0.05f, mn.y + h * 0.85f),
+                      col, 2.0f);
+    // Lens (cut out as background-coloured circle)
+    ImU32 hole = IM_COL32(0, 0, 0, 0);
+    float cx = (mn.x + mx.x) * 0.5f;
+    float cy = mn.y + h * 0.55f;
+    float r  = h * 0.18f;
+    dl->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(0, 0, 0, 110), 14);
+    // Lens highlight ring
+    dl->AddCircle(ImVec2(cx, cy), r * 0.55f,
+                  IM_COL32(((col >> 0) & 0xff),
+                           ((col >> 8) & 0xff),
+                           ((col >> 16) & 0xff), 200), 12, 1.2f);
+    (void)hole;
+}
+// Window display — rectangle with title-bar strip + dot.
+static void drawWindowGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    ImVec2 a(mn.x + w * 0.05f, mn.y + h * 0.18f);
+    ImVec2 b(mx.x - w * 0.05f, mx.y - h * 0.18f);
+    dl->AddRect(a, b, col, 2.0f, 0, 1.6f);
+    // Title bar (filled top strip)
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + h * 0.18f), col, 2.0f);
+    // Traffic-light dot
+    dl->AddCircleFilled(ImVec2(a.x + w * 0.10f, a.y + h * 0.09f),
+                        h * 0.04f, IM_COL32(0, 0, 0, 130), 8);
+}
+
+void UIManager::drawSourcesTabIcons() {
+    // The Sources tab bar lives inside the Sources window. Find its
+    // node by the docked-window name and walk its tabs.
+    ImGuiWindow* win = ImGui::FindWindowByName("        ###Sources");
+    if (!win || !win->DockNode) return;
+    ImGuiTabBar* tabBar = nullptr;
+    // The internal TabBar is searched by the storage ID that
+    // BeginTabBar("##SourcesTabs") generates. Easier path: scan all
+    // TabBars in the current ImGui context for one matching the name.
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    for (int i = 0; i < g.TabBars.GetMapSize(); i++) {
+        ImGuiTabBar* tb = g.TabBars.TryGetMapData(i);
+        if (!tb) continue;
+        // Match by checking if any of its tabs has a name with
+        // "###ShaderClaw" — that's only true for our Sources bar.
+        for (int t = 0; t < tb->Tabs.Size; t++) {
+            const char* nm = ImGui::TabBarGetTabName(tb, &tb->Tabs[t]);
+            if (nm && std::strstr(nm, "###ShaderClaw")) {
+                tabBar = tb; break;
+            }
+        }
+        if (tabBar) break;
+    }
+    if (!tabBar) return;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
-
     for (int t = 0; t < tabBar->Tabs.Size; t++) {
         ImGuiTabItem& tab = tabBar->Tabs[t];
         const char* tabName = ImGui::TabBarGetTabName(tabBar, &tab);
         if (!tabName) continue;
-        int iconIdx = -1;
-        for (const auto& e : table) {
-            if (std::strstr(tabName, e.suffix)) { iconIdx = e.iconIdx; break; }
-        }
-        if (iconIdx < 0 || m_tabIconTex[iconIdx] == 0) continue;
+        enum Kind { K_None, K_Shader, K_Mic, K_Cam, K_Win };
+        Kind kind = K_None;
+        if      (std::strstr(tabName, "###ShaderClaw")) kind = K_Shader;
+        else if (std::strstr(tabName, "###Etherea"))    kind = K_Mic;
+        else if (std::strstr(tabName, "###Camera"))     kind = K_Cam;
+        else if (std::strstr(tabName, "###Capture"))    kind = K_Win;
+        if (kind == K_None) continue;
 
         float tabX0 = tabBar->BarRect.Min.x + tab.Offset;
-        float tabX1 = tabX0 + tab.Width;
         float tabY0 = tabBar->BarRect.Min.y;
         float tabY1 = tabBar->BarRect.Max.y;
 
-        // Fill over the text with the matching tab background colour so
-        // the space-padded label vanishes visually; the icon renders on top.
-        ImGuiCol bgCol = (tabBar->SelectedTabId == tab.ID)
-                          ? ImGuiCol_TabActive : ImGuiCol_Tab;
-        ImU32 fillCol = ImGui::GetColorU32(bgCol);
-        fg->AddRectFilled(ImVec2(tabX0 + 1, tabY0 + 1),
-                           ImVec2(tabX1 - 1, tabY1),
-                           fillCol, 4.0f);
-
-        // Icon — centred, scaled to fit the tab with a small inset.
-        float availH = (tabY1 - tabY0) - 8.0f;
-        if (availH < 10.0f) availH = 10.0f;
-        if (availH > 20.0f) availH = 20.0f;
-        float availW = (tabX1 - tabX0) - 8.0f;
-        float iconSize = availH < availW ? availH : availW;
-        float cx = (tabX0 + tabX1) * 0.5f;
-        float cy = (tabY0 + tabY1) * 0.5f;
-        ImVec2 imin(cx - iconSize * 0.5f, cy - iconSize * 0.5f);
-        ImVec2 imax(cx + iconSize * 0.5f, cy + iconSize * 0.5f);
+        // Icon sits in the leading 4-space pad — about 18px wide.
+        float iconSize = (tabY1 - tabY0) - 8.0f;
+        if (iconSize < 12.0f) iconSize = 12.0f;
+        if (iconSize > 18.0f) iconSize = 18.0f;
+        float ix = tabX0 + 6.0f;
+        float iy = (tabY0 + tabY1) * 0.5f - iconSize * 0.5f;
+        ImVec2 imin(ix, iy), imax(ix + iconSize, iy + iconSize);
         ImU32 tint = (tabBar->SelectedTabId == tab.ID)
                      ? IM_COL32(235, 240, 250, 245)
                      : IM_COL32(170, 180, 200, 200);
-        fg->AddImage((ImTextureID)(intptr_t)m_tabIconTex[iconIdx],
-                      imin, imax, ImVec2(0, 0), ImVec2(1, 1), tint);
+
+        if      (kind == K_Shader) drawShaderClawGlyph(fg, imin, imax, tint);
+        else if (kind == K_Mic)    drawMicGlyph(fg, imin, imax, tint);
+        else if (kind == K_Cam)    drawCameraGlyph(fg, imin, imax, tint);
+        else if (kind == K_Win)    drawWindowGlyph(fg, imin, imax, tint);
+    }
+}
+
+void UIManager::drawInspectorTabIcons() {
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    // Walk both float-panel TabBars. Mapping moved into the LEFT float
+    // (next to Layers + Sources); Properties/Audio/MIDI still on the right.
+    ImGuiID floatIds[2] = { m_leftFloatId, m_rightFloatId };
+    for (int f = 0; f < 2; f++) {
+        if (floatIds[f] == 0) continue;
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(floatIds[f]);
+        if (!node || !node->TabBar) continue;
+        ImGuiTabBar* tabBar = node->TabBar;
+        for (int t = 0; t < tabBar->Tabs.Size; t++) {
+            ImGuiTabItem& tab = tabBar->Tabs[t];
+            const char* tabName = ImGui::TabBarGetTabName(tabBar, &tab);
+            drawOneTabIcon(fg, tabBar, tab, tabName, m_tabIconTex);
+        }
     }
 }
 
@@ -716,10 +907,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         const ImGuiID leftFloatId  = 0xE45E1FF7;
         const ImGuiID rightFloatId = 0xE45E2008;
 
-        dockAlways("Layers",  leftFloatId);
-        dockAlways("Sources", leftFloatId);
+        // All three left-float panels use the icon-pad pattern so
+        // drawInspectorTabIcons() can render their tab icons consistently.
+        dockAlways("        ###Layers",     leftFloatId);
+        dockAlways("        ###Sources",    leftFloatId);
+        dockAlways("        ###Mapping",    leftFloatId);
         dockAlways("        ###Properties", rightFloatId);
-        dockAlways("        ###Mapping",    rightFloatId);
         dockAlways("        ###Audio",      rightFloatId);
         dockAlways("        ###MIDI",       rightFloatId);
         ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
@@ -810,9 +1003,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         bool rightHasContent = isPanelVisible("Properties") || isPanelVisible("Mapping")
                             || isPanelVisible("Audio")      || isPanelVisible("MIDI");
 
-        // Left host
+        // Left host — shifted right of the activity rail.
         if (leftHasContent) {
-            ImGui::SetNextWindowPos (ImVec2(viewport->WorkPos.x + kFloatMargin, floatY),
+            ImGui::SetNextWindowPos (ImVec2(viewport->WorkPos.x + kLeftRailW + kFloatMargin, floatY),
                                      ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(leftW, floatH), ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -883,20 +1076,23 @@ bool UIManager::isPanelVisible(const char* title) const {
 
     switch (sMode) {
     case WorkspaceMode::Canvas:
-        // Editing the comp: Layers, Sources, Properties on the right;
-        // Timeline at the bottom. Mapping/Audio/MIDI live in other modes.
-        if (eq("Layers"))     return true;
-        if (eq("Sources"))    return true;
+        // Editing the comp: only ONE of {Layers, Sources, Mapping} is
+        // visible at a time, gated by the activity rail's selection.
+        // Properties stays docked on the right rail. Masks ride along
+        // with Mapping.
+        if (eq("Layers"))     return m_activeLeftPanel == LeftPanel::Layers;
+        if (eq("Sources"))    return m_activeLeftPanel == LeftPanel::Sources;
+        if (eq("Mapping"))    return m_activeLeftPanel == LeftPanel::Mapping;
         if (eq("Properties")) return true;
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;
         return false;
 
     case WorkspaceMode::Stage:
-        // Calibrating the projector: Mapping + Properties only.
-        // Sources/Audio/MIDI/Layers are out of scope.
+        // Stage is the 3D pre-viz: physical surfaces, projector frusta,
+        // environment. Mapping + Masks moved out to Canvas — Stage now
+        // focuses on the spatial setup, not warp calibration.
         if (eq("Stage"))      return true;
-        if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
         if (eq("Timeline"))   return true;
         return false;
@@ -911,6 +1107,84 @@ bool UIManager::isPanelVisible(const char* title) const {
         return false;
     }
     return true;
+}
+
+void UIManager::renderLeftRail() {
+    // Activity rail — fixed-width vertical strip on the left edge with
+    // icon buttons that toggle which left panel is active. Reuses the
+    // procedural glyphs already defined for the float-panel tabs.
+    if (sMode != WorkspaceMode::Canvas) return;  // Stage/Show have no left panels
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 6.0f;
+    float h = vp->WorkSize.y - topReserve - 12.0f;
+    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x,
+                                     vp->WorkPos.y + topReserve),
+                              ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(kLeftRailW, h), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize  |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 11, 14, 255));
+
+    if (ImGui::Begin("##LeftRail", nullptr, flags)) {
+        // Hairline divider at top, just below where the workspace bar ends.
+        {
+            ImDrawList* dlTop = ImGui::GetWindowDrawList();
+            ImVec2 wp = ImGui::GetWindowPos();
+            float wW = ImGui::GetWindowSize().x;
+            dlTop->AddLine(ImVec2(wp.x, wp.y + 0.5f),
+                           ImVec2(wp.x + wW, wp.y + 0.5f),
+                           IM_COL32(255, 255, 255, 22), 1.0f);
+        }
+        struct Item { LeftPanel which; const char* lbl; };
+        const Item items[] = {
+            { LeftPanel::Layers,  "##rail_layers"  },
+            { LeftPanel::Sources, "##rail_sources" },
+            { LeftPanel::Mapping, "##rail_mapping" },
+        };
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (int i = 0; i < 3; i++) {
+            const Item& it = items[i];
+            bool active = (m_activeLeftPanel == it.which);
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            ImVec2 sz(kLeftRailW - 12.0f, 44.0f);
+            // Background pill
+            ImU32 bgCol = active
+                ? IM_COL32(255, 255, 255, 26)
+                : IM_COL32(255, 255, 255, 0);
+            dl->AddRectFilled(cursor,
+                              ImVec2(cursor.x + sz.x, cursor.y + sz.y),
+                              bgCol, 8.0f);
+            // Glyph
+            ImVec2 gMin(cursor.x + (sz.x - 26.0f) * 0.5f,
+                        cursor.y + (sz.y - 26.0f) * 0.5f);
+            ImVec2 gMax(gMin.x + 26.0f, gMin.y + 26.0f);
+            ImU32 tint = active ? IM_COL32(240, 245, 255, 255)
+                                : IM_COL32(160, 170, 190, 220);
+            if      (it.which == LeftPanel::Layers)  drawLayersGlyph (dl, gMin, gMax, tint);
+            else if (it.which == LeftPanel::Sources) drawSourcesGlyph(dl, gMin, gMax, tint);
+            else if (it.which == LeftPanel::Mapping) {
+                if (m_tabIconTex[1]) {
+                    dl->AddImage((ImTextureID)(intptr_t)m_tabIconTex[1],
+                                 gMin, gMax, ImVec2(0,0), ImVec2(1,1), tint);
+                }
+            }
+            // Invisible button captures the click.
+            if (ImGui::InvisibleButton(it.lbl, sz)) {
+                m_activeLeftPanel = active ? LeftPanel::None : it.which;
+            }
+            ImGui::Dummy(ImVec2(0, 4));
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void UIManager::renderWorkspaceBar() {

@@ -106,8 +106,27 @@ public:
     // the matching icon over each inspector tab's title text. Called by
     // Application::renderUI() after all panels have rendered.
     void drawInspectorTabIcons();
+    // Walks the Sources panel's internal TabBar and paints procedural
+    // icon glyphs over the leading-space pad of each tab label.
+    // Tabs: ShaderClaw (3 thunderbolts), Etherea (mic), Camera (lens),
+    // Capture (window). NDI/Spout keep plain text.
+    void drawSourcesTabIcons();
+
+    // Left activity rail — pinned to the left edge of the viewport.
+    // Icons toggle which panel (Layers / Sources / Mapping) is the
+    // active flyout. Only one is visible at a time. None means the
+    // rail is collapsed and the canvas reaches the rail's right edge.
+    enum class LeftPanel { None = 0, Layers, Sources, Mapping };
+    LeftPanel activeLeftPanel() const   { return m_activeLeftPanel; }
+    void setActiveLeftPanel(LeftPanel p) { m_activeLeftPanel = p; }
+    // Rail width — used by the float-host code to shift the flyout
+    // position rightward by this much. Constant for now.
+    static constexpr float kLeftRailW = 64.0f;
+    // Renders the rail itself; called once per frame from Application.
+    void renderLeftRail();
 
 private:
+    LeftPanel m_activeLeftPanel = LeftPanel::Layers;
     unsigned int m_tabIconTex[4] = {0, 0, 0, 0};
     int          m_tabIconW[4]   = {0, 0, 0, 0};
     int          m_tabIconH[4]   = {0, 0, 0, 0};
