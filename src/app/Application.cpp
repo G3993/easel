@@ -2134,7 +2134,10 @@ void Application::renderUI() {
     // the full window so we don't leak a dead empty black band below the
     // dock node.
     float transportBarH = 0.0f;
-    renderMenuBar();
+    // Main menu bar removed — the brand glyph + overflow menu now live in
+    // the workspace nav row inside the viewport, eliminating the previous
+    // 3-row chrome stack (macOS title bar + ImGui menu bar + workspace nav).
+    // renderMenuBar() is kept as a no-op so any future caller doesn't break.
     m_ui.setupDockspace(transportBarH);
     // (renderVoiceCommandBar() removed — voice UI now lives in a popup
     // anchored to the mic icon next to System Audio in the transport bar.)
@@ -2713,7 +2716,8 @@ void Application::renderUI() {
                 }
                 m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
                 m_viewportPanel.renderNavBar(true, &m_zones, &m_activeZone,
-                                             &monitors, ndiAvail, editorMon);
+                                             &monitors, ndiAvail, editorMon,
+                                             [this]() { renderNavBarPrefix(); });
                 if (m_viewportPanel.wantsFullscreenToggle()) {
                     m_viewportPanel.clearFullscreenSignal();
                     toggleEditorFullscreen();
@@ -2826,7 +2830,8 @@ void Application::renderUI() {
                 }
                 m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
                 m_viewportPanel.renderNavBar(false, &m_zones, &m_activeZone,
-                                             &monitors, ndiAvail, editorMon);
+                                             &monitors, ndiAvail, editorMon,
+                                             [this]() { renderNavBarPrefix(); });
                 if (m_viewportPanel.wantsFullscreenToggle()) {
                     m_viewportPanel.clearFullscreenSignal();
                     toggleEditorFullscreen();
@@ -8353,12 +8358,165 @@ void Application::renderTransportBar() {
 #endif
 
 void Application::renderMenuBar() {
-    // Taller main menu row with even top/bottom padding around the text so
-    // EDIT/FILE/LAYER/ZONE sit centred in the row next to the traffic-light
-    // buttons. Slight font-scale-down (via SetWindowFontScale on the menu
-    // window) makes the caps sit a notch smaller than body text.
-    // Slimmer menu bar — was reading as a tall empty band over the logo
-    // and "···" menu, contributing to the "three headers" feel.
+    // No-op. The brand mark + overflow menu it used to draw now live in
+    // the workspace nav row (Application::renderNavBarPrefix), so we have
+    // ONE chrome row instead of two. Body kept for git history / ABI.
+}
+
+// Brand mark + overflow ("more") menu. Drawn inline at the start of the
+// workspace nav row in ViewportPanel::renderNavBar. NO BeginMainMenuBar —
+// this writes into whatever window is current (the viewport's docked
+// window) so the chrome reads as a single row.
+void Application::renderNavBarPrefix() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 kMark = IM_COL32(232, 238, 250, 235);
+
+    const float kBtn   = 28.0f;   // matches the inner pill height in the row
+    const float kGap   = 8.0f;
+    const float kGlyph = 16.0f;
+
+    // Brand mark — clean Lucide-style stroke. Click is a no-op for now;
+    // future could open an "About" sheet or focus the workspace.
+    {
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        ImVec2 sz(kBtn, kBtn);
+        ImGui::InvisibleButton("##nav_brand", sz);
+        float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+        lucide::easelMark(dl, cx, cy, kGlyph, kMark, 1.4f);
+    }
+
+    ImGui::SameLine(0, kGap);
+
+    // Overflow ("···") menu — three Lucide dots, opens an ImGui popup with
+    // Edit / File / Layer / Zone submenus.
+    {
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        ImVec2 sz(kBtn, kBtn);
+        bool clicked = ImGui::InvisibleButton("##nav_more", sz);
+        bool hov     = ImGui::IsItemHovered();
+        float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+        if (hov) {
+            dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                IM_COL32(255, 255, 255, 18), 24);
+        }
+        ImU32 dotsCol = hov ? kMark : IM_COL32(170, 178, 195, 220);
+        lucide::moreHorizontal(dl, cx, cy, kGlyph, dotsCol);
+        if (clicked) ImGui::OpenPopup("##nav_more_popup");
+    }
+    if (ImGui::BeginPopup("##nav_more_popup")) {
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
+                m_undoStack.undo(m_layerStack, m_selectedLayer);
+            }
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, m_undoStack.canRedo())) {
+                m_undoStack.redo(m_layerStack, m_selectedLayer);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New Project")) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                while (m_layerStack.count() > 0) {
+                    int li = m_layerStack.count() - 1;
+                    uint32_t rid = m_layerStack[li] ? m_layerStack[li]->id : 0;
+                    m_layerStack.removeLayer(li);
+                    if (rid) m_timeline.removeTrackForLayer(rid);
+                }
+                m_selectedLayer = -1;
+                m_mappings.clear();
+                auto mp = std::make_unique<MappingProfile>();
+                mp->init();
+                m_mappings.push_back(std::move(mp));
+                m_zones.clear();
+                auto zone = std::make_unique<OutputZone>();
+                zone->mappingIndex = 0;
+                zone->init();
+                m_zones.push_back(std::move(zone));
+                m_activeZone = 0;
+                m_viewportPanel.resetZoom();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Add Image Layer...")) {
+                std::string path = openFileDialog(
+                    "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
+                if (!path.empty()) loadImage(path);
+            }
+#ifdef HAS_FFMPEG
+            if (ImGui::MenuItem("Add Video Layer...")) {
+                std::string path = openFileDialog(
+                    "Videos\0*.mp4;*.avi;*.mkv;*.mov;*.webm\0All Files\0*.*\0");
+                if (!path.empty()) loadVideo(path);
+            }
+#endif
+            if (ImGui::MenuItem("Add Shader Layer...")) {
+                std::string path = openFileDialog(
+                    "ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
+                if (!path.empty()) loadShader(path);
+            }
+            if (ImGui::MenuItem("Add Particle System")) {
+                addParticles();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save Project...")) {
+                std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
+                if (!path.empty()) saveProject(path);
+            }
+            if (ImGui::MenuItem("Load Project...")) {
+                std::string path = openFileDialog("Easel Project\0*.easel\0All Files\0*.*\0");
+                if (!path.empty()) loadProject(path);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Screenshot...", "F12")) {
+                std::string path = saveFileDialog("PNG Image\0*.png\0", "png");
+                if (!path.empty()) captureScreenshot(path);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit")) {
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Layer")) {
+            if (ImGui::MenuItem("Remove Selected") && m_selectedLayer >= 0) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                uint32_t rid = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count() && m_layerStack[m_selectedLayer])
+                    ? m_layerStack[m_selectedLayer]->id : 0;
+                m_layerStack.removeLayer(m_selectedLayer);
+                if (rid) m_timeline.removeTrackForLayer(rid);
+                m_selectedLayer = std::min(m_selectedLayer, m_layerStack.count() - 1);
+            }
+            if (ImGui::MenuItem("Move Up") && m_selectedLayer < m_layerStack.count() - 1) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                m_layerStack.moveLayer(m_selectedLayer, m_selectedLayer + 1);
+                m_selectedLayer++;
+            }
+            if (ImGui::MenuItem("Move Down") && m_selectedLayer > 0) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                m_layerStack.moveLayer(m_selectedLayer, m_selectedLayer - 1);
+                m_selectedLayer--;
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Zone")) {
+            if (ImGui::MenuItem("Add Zone")) addZone();
+            if (ImGui::MenuItem("Duplicate Active Zone")) {
+                duplicateZone(m_activeZone);
+                m_activeZone = (int)m_zones.size() - 1;
+            }
+            if (m_zones.size() > 1 && ImGui::MenuItem("Remove Active Zone")) {
+                removeZone(m_activeZone);
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine(0, kGap + 4.0f);
+}
+
+// Legacy menu bar implementation — disabled, body kept for diff history.
+#if 0
+void Application::renderMenuBar_legacy() {
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 4));
     if (ImGui::BeginMainMenuBar()) {
         if (ImGuiWindow* mw = ImGui::GetCurrentWindow()) mw->FontWindowScale = 0.88f;
@@ -8388,17 +8546,20 @@ void Application::renderMenuBar() {
         {
             float baseY = ImGui::GetCursorPosY();
             ImVec2 cur = ImGui::GetCursorScreenPos();
-            const float r = 7.0f;
+            const float r = 9.0f;
             ImVec2 c(cur.x + r + 2.0f, cur.y + ImGui::GetFrameHeight() * 0.5f);
             ImDrawList* d = ImGui::GetWindowDrawList();
-            d->AddCircle(c, r, IM_COL32(255, 255, 255, 80), 24, 1.0f);
-            // Inverted-V triangle (the "Easel" mark) — apex up, two feet
-            // pointing down.
-            float tw = r * 0.75f, th = r * 0.75f;
-            d->AddTriangle(ImVec2(c.x,        c.y - th * 0.55f),
-                           ImVec2(c.x - tw,   c.y + th * 0.55f),
-                           ImVec2(c.x + tw,   c.y + th * 0.55f),
-                           IM_COL32(232, 238, 250, 235), 1.2f);
+            // Faint inner fill + sharper ring outline for visible weight.
+            d->AddCircleFilled(c, r, IM_COL32(255, 255, 255, 10), 24);
+            d->AddCircle      (c, r, IM_COL32(255, 255, 255, 130), 24, 1.1f);
+            // Apex-up V mark, filled — reads as a confident brand mark
+            // even at this small size. Slightly inset so the ring breathes.
+            float tw = r * 0.60f, th = r * 0.66f;
+            d->AddTriangleFilled(
+                ImVec2(c.x,        c.y - th * 0.60f),
+                ImVec2(c.x - tw,   c.y + th * 0.50f),
+                ImVec2(c.x + tw,   c.y + th * 0.50f),
+                IM_COL32(232, 238, 250, 245));
             ImGui::Dummy(ImVec2(r * 2.0f + 10.0f, 0));
             ImGui::SameLine();
             ImGui::SetCursorPosY(baseY);
@@ -8603,6 +8764,7 @@ void Application::renderMenuBar() {
     }
     ImGui::PopStyleVar();
 }
+#endif // #if 0 — legacy renderMenuBar disabled
 
 #ifdef HAS_FFMPEG
 void Application::renderGoLiveButton() {
