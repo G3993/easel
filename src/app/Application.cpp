@@ -4823,7 +4823,12 @@ void Application::renderFloatingTransportPill() {
     const float kInsetY  = (pillH - 36.0f) * 0.5f;   // = 14, keeps 36px buttons centered
     const float kGap     = 10.0f;
     const float kDivPad  = 12.0f;
-    const float pillW    = 800.0f;
+    // Pill width — tightened from 800 to 720 to remove the dead space
+    // the user spotted between the audio meter and the right divider.
+    // Content is fixed-width (8 buttons + timecode block + audio combo +
+    // meter + chevron), so the pill should hug the content instead of
+    // floating in extra padding.
+    const float pillW    = 720.0f;
 
     // Anchor 16px above the docked timeline so the two surfaces never touch.
     // m_lastTimelineH is updated each frame by UIManager::setupDockspace.
@@ -4874,8 +4879,12 @@ void Application::renderFloatingTransportPill() {
         }
 
         bool playing = m_timeline.isPlaying();
-        const float btnSize  = 36.0f;   // small circular buttons
-        const float playSize = 44.0f;   // play is the visual anchor
+        const float btnSize  = 36.0f;   // every circular button — same size, no exceptions
+        const float playSize = btnSize; // play stays in line; cyan ring is the anchor, not size
+        // Single glyph size used for EVERY icon in the row. Don't pass
+        // ad-hoc multipliers per icon — that's how the row ended up with
+        // visually different-sized icons. One value, one rhythm.
+        const float kGlyphSize = btnSize * 0.50f;
         ImDrawList* dl       = ImGui::GetWindowDrawList();
         const ImU32 kFgWhite = IM_COL32(232, 238, 250, 240);
         const ImU32 kFgDim   = IM_COL32(170, 178, 195, 220);
@@ -4923,15 +4932,9 @@ void Application::renderFloatingTransportPill() {
             bool clicked = ImGui::InvisibleButton("##fp_play", sz);
             bool hov     = ImGui::IsItemHovered();
             float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
-            // Glow halo when paused — fades when playing. Halo extends ~6px
-            // beyond the button edge; window padding (kInsetX=20) keeps it
-            // clear of the pill rim.
-            if (!playing) {
-                for (int i = 0; i < 3; i++) {
-                    dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f + 3.0f + i * 1.5f,
-                                  IM_COL32(74, 174, 236, 32 - i * 8), 32, 1.6f);
-                }
-            }
+            // Halo removed — it visually bled into the gap between play and
+            // stop, breaking the equal-rhythm rule. The cyan ring at the rim
+            // is enough of an anchor.
             if (hov) {
                 dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
                                     IM_COL32(74, 174, 236, 22), 32);
@@ -4939,9 +4942,9 @@ void Application::renderFloatingTransportPill() {
             // Accent ring — replaces the hairline border for play only.
             dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 0.5f,
                           IM_COL32(74, 174, 236, 240), 32, 1.8f);
-            // Slightly larger play/pause glyph for emphasis without breaking row size.
-            if (playing) lucide::pause(dl, cx, cy, sz.x * 0.62f, kFgWhite);
-            else         lucide::play (dl, cx, cy, sz.x * 0.62f, kFgWhite);
+            // Same glyph size as every other icon in the row.
+            if (playing) lucide::pause(dl, cx, cy, kGlyphSize, kFgWhite);
+            else         lucide::play (dl, cx, cy, kGlyphSize, kFgWhite);
             if (clicked) m_timeline.togglePlay();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
         }
@@ -4950,7 +4953,7 @@ void Application::renderFloatingTransportPill() {
         // ── Stop (Lucide square) ──────────────────────────────────────────
         ImGui::SameLine(0, kGap);
         if (smallBtn("##fp_stop", [&](float cx, float cy) {
-            lucide::squareFilled(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+            lucide::squareFilled(dl, cx, cy, kGlyphSize, kFgWhite);
         })) m_timeline.stop();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
 
@@ -4959,7 +4962,7 @@ void Application::renderFloatingTransportPill() {
         bool looping = m_timeline.looping();
         if (smallBtn("##fp_loop", [&](float cx, float cy) {
             ImU32 c = looping ? IM_COL32(74, 174, 236, 245) : kFgWhite;
-            lucide::repeat(dl, cx, cy, btnSize * 0.55f, c);
+            lucide::repeat(dl, cx, cy, kGlyphSize, c);
         })) m_timeline.setLooping(!looping);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip(looping ? "Loop on — click to disable" : "Loop");
 
@@ -4971,7 +4974,7 @@ void Application::renderFloatingTransportPill() {
             if (smallBtn("##fp_rec", [&](float cx, float cy) {
                 ImU32 col = recActive ? IM_COL32(255, 90, 90, 245)
                                       : IM_COL32(255, 80, 80, 200);
-                lucide::circleDot(dl, cx, cy, btnSize * 0.55f, col);
+                lucide::circleDot(dl, cx, cy, kGlyphSize, col);
             })) {
                 if (m_recorder.isActive()) {
                     m_recorder.stop();
@@ -4991,7 +4994,7 @@ void Application::renderFloatingTransportPill() {
             bool liveActive = m_rtmpOutput.isActive();
             if (smallBtn("##fp_stream", [&](float cx, float cy) {
                 ImU32 c = liveActive ? IM_COL32(74, 230, 144, 245) : kFgWhite;
-                lucide::radio(dl, cx, cy, btnSize * 0.55f, c);
+                lucide::radio(dl, cx, cy, kGlyphSize, c);
             })) {
                 if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
                 else                         ImGui::OpenPopup("##fp_stream_popup");
@@ -5090,8 +5093,8 @@ void Application::renderFloatingTransportPill() {
         if (smallBtn("##fp_mic", [&](float cx, float cy) {
             // Lucide mic when on (continuous), Lucide mic-off when off.
             // Listening adds a small pulsing red dot at top-right.
-            if (m_voiceContinuous) lucide::mic   (dl, cx, cy, btnSize * 0.55f, kFgWhite);
-            else                   lucide::micOff(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+            if (m_voiceContinuous) lucide::mic   (dl, cx, cy, kGlyphSize, kFgWhite);
+            else                   lucide::micOff(dl, cx, cy, kGlyphSize, kFgWhite);
             if (m_voiceListening) {
                 float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 3.0f);
                 ImU32 dotCol = IM_COL32(255, 90, 90, (int)(180 + pulse * 75));
@@ -5193,7 +5196,7 @@ void Application::renderFloatingTransportPill() {
         // ── Speaker (mute toggle / monitor — currently informational) ─────
         ImGui::SameLine(0, kGap);
         if (smallBtn("##fp_speaker", [&](float cx, float cy) {
-            lucide::volume(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+            lucide::volume(dl, cx, cy, kGlyphSize, kFgWhite);
         })) {
             // No-op: monitor toggle could land here later.
         }
@@ -5225,8 +5228,8 @@ void Application::renderFloatingTransportPill() {
 
         // ── Timeline toggle (Lucide chevron — expand/collapse the timeline) ─
         if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
-            if (m_timelineMinimized) lucide::chevronUp  (dl, cx, cy, btnSize * 0.45f, kFgWhite);
-            else                     lucide::chevronDown(dl, cx, cy, btnSize * 0.45f, kFgWhite);
+            if (m_timelineMinimized) lucide::chevronUp  (dl, cx, cy, kGlyphSize, kFgWhite);
+            else                     lucide::chevronDown(dl, cx, cy, kGlyphSize, kFgWhite);
         })) m_timelineMinimized = !m_timelineMinimized;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(m_timelineMinimized ? "Expand timeline" : "Collapse timeline");

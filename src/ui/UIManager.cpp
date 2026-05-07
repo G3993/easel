@@ -11,6 +11,7 @@
 #include <GLFW/glfw3.h>
 #include "stb_image.h"
 #include "ui/ImGuizmo.h"
+#include "ui/LucideIcons.h"
 
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
@@ -360,13 +361,22 @@ static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
                  ? IM_COL32(235, 240, 250, 245)
                  : IM_COL32(170, 180, 200, 200);
 
-    if (kind == Kind::Tex) {
-        fg->AddImage((ImTextureID)(intptr_t)iconTex[texIdx],
-                      imin, imax, ImVec2(0, 0), ImVec2(1, 1), tint);
-    } else if (kind == Kind::Layers) {
-        drawLayersGlyph(fg, imin, imax, tint);
+    // All tab icons routed through Lucide so the entire app speaks the
+    // same icon language. Properties → sliders, Mapping → frame,
+    // Audio → audio-lines, MIDI → music note, Layers/Sources → layers/folder.
+    float lcx2 = (imin.x + imax.x) * 0.5f;
+    float lcy2 = (imin.y + imax.y) * 0.5f;
+    float lsz2 = (imax.x - imin.x);
+    if (kind == Kind::Layers) {
+        lucide::layers(fg, lcx2, lcy2, lsz2, tint);
     } else if (kind == Kind::Sources) {
-        drawSourcesGlyph(fg, imin, imax, tint);
+        lucide::folder(fg, lcx2, lcy2, lsz2, tint);
+    } else if (kind == Kind::Tex) {
+        // texIdx: 0=Properties, 1=Mapping, 2=Audio, 3=MIDI
+        if      (texIdx == 0) lucide::sliders   (fg, lcx2, lcy2, lsz2, tint);
+        else if (texIdx == 1) lucide::frame     (fg, lcx2, lcy2, lsz2, tint);
+        else if (texIdx == 2) lucide::audioLines(fg, lcx2, lcy2, lsz2, tint);
+        else if (texIdx == 3) lucide::music     (fg, lcx2, lcy2, lsz2, tint);
     }
 }
 
@@ -445,10 +455,20 @@ static void drawWindowGlyph(ImDrawList* dl, ImVec2 mn, ImVec2 mx, ImU32 col) {
 }
 
 void UIManager::drawSourcesTabIcons() {
+    // Only draw tab icons when the Sources panel is the active left panel.
+    // Otherwise the foreground-draw-list calls leak orphaned icons over the
+    // canvas at the panel's last known coordinates.
+    if (m_activeLeftPanel != LeftPanel::Sources) return;
+
     // The Sources tab bar lives inside the Sources window. Find its
     // node by the docked-window name and walk its tabs.
     ImGuiWindow* win = ImGui::FindWindowByName("        ###Sources");
     if (!win || !win->DockNode) return;
+    // Skip if the window is hidden, collapsed, or not the visible tab in
+    // its dock node (e.g. another tab is selected) — its tab bar exists in
+    // storage even when the panel isn't on screen.
+    if (win->Hidden || win->SkipItems) return;
+    if (win->DockNode && win->DockNode->VisibleWindow != win) return;
     ImGuiTabBar* tabBar = nullptr;
     // The internal TabBar is searched by the storage ID that
     // BeginTabBar("##SourcesTabs") generates. Easier path: scan all
@@ -497,10 +517,19 @@ void UIManager::drawSourcesTabIcons() {
                      ? IM_COL32(235, 240, 250, 245)
                      : IM_COL32(170, 180, 200, 200);
 
-        if      (kind == K_Shader) drawShaderClawGlyph(fg, imin, imax, tint);
-        else if (kind == K_Mic)    drawMicGlyph(fg, imin, imax, tint);
-        else if (kind == K_Cam)    drawCameraGlyph(fg, imin, imax, tint);
-        else if (kind == K_Win)    drawWindowGlyph(fg, imin, imax, tint);
+        // Lucide icons — same family as the transport bar, left rail, and
+        // nav prefix. Map source kinds to the closest semantic Lucide glyph:
+        //   ShaderClaw → film    (procedural shaders / motion sources)
+        //   Mic / Etherea → mic  (voice transcript source)
+        //   Camera → camera
+        //   Capture / Window → frame  (window capture / monitor frame)
+        float lcx = (imin.x + imax.x) * 0.5f;
+        float lcy = (imin.y + imax.y) * 0.5f;
+        float lsz = (imax.x - imin.x);
+        if      (kind == K_Shader) lucide::film  (fg, lcx, lcy, lsz, tint);
+        else if (kind == K_Mic)    lucide::mic   (fg, lcx, lcy, lsz, tint);
+        else if (kind == K_Cam)    lucide::camera(fg, lcx, lcy, lsz, tint);
+        else if (kind == K_Win)    lucide::frame (fg, lcx, lcy, lsz, tint);
     }
 }
 
@@ -513,6 +542,14 @@ void UIManager::drawInspectorTabIcons() {
         if (floatIds[f] == 0) continue;
         ImGuiDockNode* node = ImGui::DockBuilderGetNode(floatIds[f]);
         if (!node || !node->TabBar) continue;
+        // Skip nodes whose host window isn't currently visible — otherwise
+        // the icons render over empty canvas where the panel used to be.
+        if (node->HostWindow &&
+            (node->HostWindow->Hidden || node->HostWindow->SkipItems)) continue;
+        // Left float: only paint when the matching left-rail panel is active
+        // (Layers / Sources / Mapping). Right float (Properties/Audio/MIDI)
+        // is always considered visible — it doesn't have a rail toggle.
+        if (f == 0 && m_activeLeftPanel == LeftPanel::None) continue;
         ImGuiTabBar* tabBar = node->TabBar;
         for (int t = 0; t < tabBar->Tabs.Size; t++) {
             ImGuiTabItem& tab = tabBar->Tabs[t];
@@ -765,10 +802,15 @@ void UIManager::endFrame() {
 
 void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImVec2 dockPos = viewport->WorkPos;
-    dockPos.y += m_workspaceBarHeight;           // shift below the primary nav bar
+    // Use viewport->Pos / Size (the full GLFW content rect) instead of
+    // WorkPos / WorkSize. With the ImGui main menu bar removed, the work
+    // area still carried a stale top offset on macOS — that left a black
+    // strip above the nav row. The full content rect starts at y=0 of the
+    // window's client area, which is what we want.
+    ImVec2 dockPos = viewport->Pos;
+    dockPos.y += m_workspaceBarHeight;           // legacy hook (currently 0)
     ImGui::SetNextWindowPos(dockPos);
-    ImVec2 dockSize = viewport->WorkSize;
+    ImVec2 dockSize = viewport->Size;
     dockSize.y -= (bottomBarHeight + m_workspaceBarHeight);
     ImGui::SetNextWindowSize(dockSize);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -973,28 +1015,37 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         const ImGuiID kRightFloatId = 0xE45E2008;
         const float kFloatTopReserve = 6.0f;
         const float kFloatMargin     = 12.0f;
+        // Extra clearance between the right parameter panel and the floating
+        // tool-rail icons. With the rail now transparent, a flat 12px margin
+        // made the icons read as if they were embedded in the panel's right
+        // edge. Pushing the panel ~24px further left gives the icons a clear
+        // floating column.
+        const float kRailToPanelGap  = 28.0f;
 
         // Vertical band: from below the menu/secondary-nav row, to just
         // above the timeline. Use the timeline dock node's actual height
         // (so the float panels follow the timeline splitter live).
-        float headerReserve = ImGui::GetFrameHeight() + 22.0f;
+        // Bigger header reserve so float panels start clearly below the
+        // top nav (Canvas/Stage/Show + Main/Zone 2 + OUTPUT) rather than
+        // bumping into it.
+        float headerReserve = ImGui::GetFrameHeight() + 56.0f;
         float timelineH = 60.0f;
         if (m_timelineDockId != 0) {
             if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(m_timelineDockId))
                 timelineH = tln->Size.y;
         }
-        float floatY = viewport->WorkPos.y + headerReserve + kFloatTopReserve;
+        float floatY = viewport->WorkPos.y + headerReserve;
+        // Run panels all the way down to the timeline top with no dead
+        // strip below.
         float floatH = std::max(120.0f,
-            dockSize.y - headerReserve - timelineH - kFloatTopReserve - kFloatMargin);
+            dockSize.y - headerReserve - timelineH);
 
         float leftW  = std::min(360.0f, dockSize.x * 0.22f);
-        // In Stage mode the user wants a noticeably wider, anchored right
-        // column (Mapping & Properties) that reads as a fixed dock — bump
-        // it to ~26% of the work area, no upper clamp short of the dock
-        // width itself, so it stops feeling like a thin floating overlay.
-        float rightW = (sMode == WorkspaceMode::Stage)
-                         ? std::max(320.0f, dockSize.x * 0.26f)
-                         : std::min(340.0f, dockSize.x * 0.22f);
+        // Right column (Properties/Mapping) mirrors the left column width
+        // exactly so the editor reads as symmetric. Previously the right
+        // ran narrower (340px clamp) which made the parameter panel feel
+        // squeezed compared to the layer list — now they match 1:1.
+        float rightW = leftW;
         // Persist for other UI code that needs to reserve space (e.g. Stage
         // panel reserves the right column out of its central content width).
         m_rightFloatW = rightW;
@@ -1012,13 +1063,19 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // visible in the current mode — otherwise an empty dock chrome
         // sits over the canvas (e.g. blank Layers/Sources strip in
         // Stage mode where both panels are hidden).
-        bool leftHasContent  = isPanelVisible("Layers")  || isPanelVisible("Sources");
-        bool rightHasContent = isPanelVisible("Properties") || isPanelVisible("Mapping")
+        // Mapping docks into the LEFT float (see dockAlways above) — must be
+        // included here or selecting Mapping in the activity rail produces
+        // no visible host and the panel never appears.
+        bool leftHasContent  = isPanelVisible("Layers")  || isPanelVisible("Sources")
+                            || isPanelVisible("Mapping");
+        bool rightHasContent = isPanelVisible("Properties")
                             || isPanelVisible("Audio")      || isPanelVisible("MIDI");
 
-        // Left host — shifted right of the activity rail.
+        // Left host — shifted right of the activity rail. The +12 matches the
+        // kLeftRailInset used by renderLeftRail() so the layer-panel doesn't
+        // collide with the floating rail.
         if (leftHasContent) {
-            ImGui::SetNextWindowPos (ImVec2(viewport->WorkPos.x + kLeftRailW + kFloatMargin, floatY),
+            ImGui::SetNextWindowPos (ImVec2(viewport->WorkPos.x + 12.0f + kLeftRailW + kFloatMargin, floatY),
                                      ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(leftW, floatH), ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1031,9 +1088,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::PopStyleVar();
         }
 
-        // Right host — shifted left by kRightToolRailW so the new transform
-        // tool rail (Phase 3) has dedicated space on the far-right edge and
-        // doesn't overlap Properties/Mapping/Audio/MIDI.
+        // Right host — anchored to the right edge with kFloatMargin +
+        // kRightToolRailW gap so the Properties dock doesn't overlap the
+        // 56-px right transform rail. The earlier comment claiming the
+        // rail was removed was stale; the rail is still rendered by
+        // renderRightToolRail().
         if (rightHasContent) {
             ImGui::SetNextWindowPos (
                 ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kFloatMargin
@@ -1133,16 +1192,17 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
     if (sMode != WorkspaceMode::Canvas) return;  // Stage/Show have no left panels
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 6.0f;
-    // Rail terminates above the docked timeline so REC / GO LIVE on the
-    // far-right of the transport row aren't clipped by the right tool
-    // rail (and symmetrically the left rail doesn't sit on top of the
-    // play/timecode cluster). m_lastTimelineH is updated each frame in
-    // setupDockspace's reflow block.
-    float bottomReserve = m_lastTimelineH > 0.0f ? m_lastTimelineH + 8.0f : 12.0f;
+    // Larger top reserve so the rail starts BELOW the menu bar / nav row
+    // rather than poking into it (was causing the Layers icon to overlap
+    // the top nav).
+    float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 56.0f;
+    float bottomReserve = m_lastTimelineH > 0.0f ? m_lastTimelineH + 24.0f : 24.0f;
     float h = vp->WorkSize.y - topReserve - bottomReserve;
     if (h < 80.0f) h = 80.0f;
-    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x,
+    // Inset the rail from the screen edge so it floats as its own column
+    // instead of jamming against the window's left wall.
+    const float kLeftRailInset = 12.0f;
+    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + kLeftRailInset,
                                      vp->WorkPos.y + topReserve),
                               ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(kLeftRailW, h), ImGuiCond_Always);
@@ -1152,20 +1212,16 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
         ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
+    // Symmetric window padding — matches the transport pill's grid so the
+    // rail reads as part of the same family. Don't tweak X without Y.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 14));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, UITokens::kChromeSurface);
+    // Transparent rail bg — icons and thumbnails float as standalone
+    // affordances over the canvas, mirroring the right tool-rail style.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
 
     if (ImGui::Begin("##LeftRail", nullptr, flags)) {
-        // Hairline divider at top, just below where the workspace bar ends.
-        {
-            ImDrawList* dlTop = ImGui::GetWindowDrawList();
-            ImVec2 wp = ImGui::GetWindowPos();
-            float wW = ImGui::GetWindowSize().x;
-            dlTop->AddLine(ImVec2(wp.x, wp.y + 0.5f),
-                           ImVec2(wp.x + wW, wp.y + 0.5f),
-                           IM_COL32(255, 255, 255, 22), 1.0f);
-        }
+        // No top hairline — rail is now a floating column, not a paneled chrome.
         struct Item { LeftPanel which; const char* lbl; };
         const Item items[] = {
             { LeftPanel::Layers,  "##rail_layers"  },
@@ -1173,57 +1229,87 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
             { LeftPanel::Mapping, "##rail_mapping" },
         };
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float kBtn   = 36.0f;        // circular hit + visual diameter — matches transport pill
+        const float kGlyph = 16.0f;        // smaller glyph, generous margin
+        const float kIconGap = 10.0f;      // sibling gap — same value as transport pill kGap
+        // Vertical centering: compute total icon-stack height, then push the
+        // cursor down by half of the leftover space so the three icons sit
+        // visually centered within the rail's available height.
+        const float kThumbReserve = 110.0f;  // approximate space the layer thumbnail callback uses
+        float stackH = 3.0f * kBtn + 2.0f * kIconGap;
+        float availH = h - kThumbReserve - 24.0f;  // 24 = window padding (12 top + 12 bottom)
+        float topSpacer = std::max(0.0f, (availH - stackH) * 0.5f);
+        if (topSpacer > 0) ImGui::Dummy(ImVec2(0, topSpacer));
         for (int i = 0; i < 3; i++) {
             const Item& it = items[i];
             bool active = (m_activeLeftPanel == it.which);
+            // Center each circular button horizontally inside the rail.
+            float padX = (kLeftRailW - 12.0f - kBtn) * 0.5f;
+            if (padX > 0) ImGui::Dummy(ImVec2(padX, 0));
+            ImGui::SameLine(0, 0);
             ImVec2 cursor = ImGui::GetCursorScreenPos();
-            ImVec2 sz(kLeftRailW - 12.0f, 44.0f);
-            // Awesome-design: active button gets a circular accent ring
-            // (matches the reference's blue ring around the active rail
-            // icon). Inactive buttons stay flat. No fill — the ring is
-            // the affordance.
-            ImU32 bgCol = active
-                ? IM_COL32(255, 255, 255, 14)
-                : IM_COL32(255, 255, 255, 0);
-            dl->AddRectFilled(cursor,
-                              ImVec2(cursor.x + sz.x, cursor.y + sz.y),
-                              bgCol, 8.0f);
+            ImVec2 sz(kBtn, kBtn);
+            float cx = cursor.x + sz.x * 0.5f, cy = cursor.y + sz.y * 0.5f;
+            bool hov = ImGui::IsMouseHoveringRect(cursor,
+                ImVec2(cursor.x + sz.x, cursor.y + sz.y));
+            // Permanent subtle circle background so each icon reads as a
+            // distinct floating button, not a bare glyph on the canvas.
+            // Hover/active states layer brighter fills + accent ring on top.
+            ImU32 baseBg = IM_COL32(20, 22, 28, 220);
+            dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, baseBg, 28);
             if (active) {
-                ImVec2 c(cursor.x + sz.x * 0.5f, cursor.y + sz.y * 0.5f);
-                dl->AddCircle(c, 17.0f, UITokens::kAccent, 28, 1.6f);
+                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                    IM_COL32(255, 255, 255, 28), 28);
+                dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 1.0f,
+                              UITokens::kAccent, 28, 1.6f);
+            } else if (hov) {
+                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                    IM_COL32(255, 255, 255, 22), 28);
             }
-            // Glyph
-            ImVec2 gMin(cursor.x + (sz.x - 26.0f) * 0.5f,
-                        cursor.y + (sz.y - 26.0f) * 0.5f);
-            ImVec2 gMax(gMin.x + 26.0f, gMin.y + 26.0f);
+            // 1px border so the bg-filled circle separates from the canvas.
+            dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f,
+                          IM_COL32(255, 255, 255, 30), 28, 1.0f);
+            ImVec2 gMin(cx - kGlyph * 0.5f, cy - kGlyph * 0.5f);
+            ImVec2 gMax(gMin.x + kGlyph, gMin.y + kGlyph);
             ImU32 tint = active ? IM_COL32(240, 245, 255, 255)
                                 : IM_COL32(160, 170, 190, 220);
-            if      (it.which == LeftPanel::Layers)  drawLayersGlyph (dl, gMin, gMax, tint);
-            else if (it.which == LeftPanel::Sources) drawSourcesGlyph(dl, gMin, gMax, tint);
-            else if (it.which == LeftPanel::Mapping) {
-                if (m_tabIconTex[1]) {
-                    dl->AddImage((ImTextureID)(intptr_t)m_tabIconTex[1],
-                                 gMin, gMax, ImVec2(0,0), ImVec2(1,1), tint);
-                }
-            }
-            // Invisible button captures the click.
+            // Lucide icons — same visual language as the transport pill.
+            // Glyph size 18 inside the 36px button: ~0.5 ratio, matches
+            // the transport bar's btn*0.55 sizing so the eye reads them
+            // as one icon family across the whole UI.
+            float gSize = 18.0f;
+            (void)gMin; (void)gMax;
+            if      (it.which == LeftPanel::Layers)  lucide::layers(dl, cx, cy, gSize, tint);
+            else if (it.which == LeftPanel::Sources) lucide::folder(dl, cx, cy, gSize, tint);
+            else if (it.which == LeftPanel::Mapping) lucide::frame (dl, cx, cy, gSize, tint);
             if (ImGui::InvisibleButton(it.lbl, sz)) {
                 m_activeLeftPanel = active ? LeftPanel::None : it.which;
+                // Force-focus the chosen panel's window so its content
+                // surfaces immediately. Without this, switching to Mapping
+                // sets the active flag but the window never raises.
+                if (m_activeLeftPanel == LeftPanel::Layers)
+                    m_pendingFocus = "        ###Layers";
+                else if (m_activeLeftPanel == LeftPanel::Sources)
+                    m_pendingFocus = "        ###Sources";
+                else if (m_activeLeftPanel == LeftPanel::Mapping)
+                    m_pendingFocus = "        ###Mapping";
+                m_pendingFocusFramesLeft = 3;
             }
-            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::Dummy(ImVec2(0, kIconGap));
         }
-        // Phase 2 — divider + per-layer thumbnails callback. Application
-        // owns the layer stack so it draws thumbs itself; we just provide
-        // a hairline divider and the inner width so it can size correctly.
+        // Per-layer thumbnails — always visible. They're the persistent
+        // representation of the layer stack regardless of which left panel
+        // is active; gating them on the active panel left users without a
+        // visual reference for what they had loaded.
         if (drawExtra) {
-            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::Dummy(ImVec2(0, kIconGap + 4.0f));
             ImVec2 dPos = ImGui::GetCursorScreenPos();
             float divW = kLeftRailW - 16.0f;
             ImGui::GetWindowDrawList()->AddLine(
                 ImVec2(dPos.x + 8.0f, dPos.y),
                 ImVec2(dPos.x + 8.0f + divW, dPos.y),
                 IM_COL32(255, 255, 255, 30), 1.0f);
-            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::Dummy(ImVec2(0, kIconGap + 4.0f));
             drawExtra(kLeftRailW - 12.0f);
         }
     }
@@ -1331,18 +1417,13 @@ void UIManager::renderRightToolRail(
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 12));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, UITokens::kChromeSurface);
+    // Transparent rail — icons float over the canvas/property-panel edge as
+    // standalone circular buttons rather than sitting on a grey strip.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
 
     if (ImGui::Begin("##RightToolRail", nullptr, flags)) {
-        // Hairline divider (left edge — visual seam against canvas).
-        {
-            ImDrawList* dlT = ImGui::GetWindowDrawList();
-            ImVec2 wp = ImGui::GetWindowPos();
-            float wH = ImGui::GetWindowSize().y;
-            dlT->AddLine(ImVec2(wp.x + 0.5f, wp.y),
-                         ImVec2(wp.x + 0.5f, wp.y + wH),
-                         IM_COL32(255, 255, 255, 22), 1.0f);
-        }
+        // No hairline divider — the rail is meant to be a floating column
+        // of circular icons, not a paneled chrome surface.
         struct Tool { const char* lbl; const char* tip; RightTool which;
                       void (*draw)(ImDrawList*, ImVec2, ImVec2, ImU32); };
         const Tool tools[] = {
@@ -1353,24 +1434,32 @@ void UIManager::renderRightToolRail(
             { "##tr_center", "Reset transform",              RightTool::Center, drawCenterGlyph },
         };
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float kBtn = 36.0f;        // circular hit + visual diameter
+        const float kGlyph = 22.0f;
         for (const Tool& t : tools) {
             ImVec2 cur = ImGui::GetCursorScreenPos();
-            ImVec2 sz(kRightToolRailW - 12.0f, 44.0f);
-            ImU32 bgHov = ImGui::IsMouseHoveringRect(cur,
-                ImVec2(cur.x + sz.x, cur.y + sz.y))
-                ? UITokens::kButtonHover
-                : IM_COL32(255, 255, 255, 0);
-            dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
-                              bgHov, 8.0f);
-            ImVec2 gMin(cur.x + (sz.x - 26.0f) * 0.5f,
-                        cur.y + (sz.y - 26.0f) * 0.5f);
-            ImVec2 gMax(gMin.x + 26.0f, gMin.y + 26.0f);
-            t.draw(dl, gMin, gMax, IM_COL32(200, 208, 222, 240));
+            // Center the circular hit area inside the rail column.
+            float padX = (kRightToolRailW - 12.0f - kBtn) * 0.5f;
+            if (padX > 0) ImGui::Dummy(ImVec2(padX, 0));
+            ImGui::SameLine(0, 0);
+            cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(kBtn, kBtn);
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            bool hov = ImGui::IsMouseHoveringRect(cur,
+                ImVec2(cur.x + sz.x, cur.y + sz.y));
+            // Hover-only fill — at rest the icon is bg-less, just the glyph.
+            if (hov) {
+                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                    IM_COL32(255, 255, 255, 22), 28);
+            }
+            ImVec2 gMin(cx - kGlyph * 0.5f, cy - kGlyph * 0.5f);
+            ImVec2 gMax(gMin.x + kGlyph, gMin.y + kGlyph);
+            t.draw(dl, gMin, gMax, IM_COL32(220, 226, 240, 235));
             if (ImGui::InvisibleButton(t.lbl, sz)) {
                 if (onTool) onTool(t.which);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t.tip);
-            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::Dummy(ImVec2(0, 6));
         }
 
         // Hairline + vertical zoom slider — fills the rest of the rail.
