@@ -123,15 +123,14 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // during the cross-fade which exposed the GL backbuffer underneath as a
     // white flash. Re-introduce only with a non-translucent technique
     // such as snapshotting the outgoing panel into a texture overlay.)
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    // Canvas background — almost black so layer content reads as the only
-    // luminous thing on screen. Slightly above #000 so it's distinguishable
-    // from a fully unlit projector test pattern.
+    // Top padding gives the nav row breathing room from the macOS title
+    // bar / menu bar / fullscreen icon above. Previously WindowPadding=0
+    // meant the workspace pill was clipped by anything overlaying the
+    // top edge. (8,4) keeps the canvas image close to the rails on the
+    // sides while reserving 8px headroom for the pill.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 8));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
-    // NoScrollbar/NoScrollWithMouse so canvas zoom never lets the
-    // workspace nav row scroll up out of view — the nav must stay
-    // pinned to the top of the work area.
     ImGui::Begin("Canvas", nullptr,
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -155,6 +154,12 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // and switching workspaces doesn't shift element positions.
     if (zones && activeZone) {
         renderNavBar(false, zones, activeZone, monitors, ndiAvailable, editorMonitor);
+        // Move m_panelMin.y BELOW the nav row so the layer overlay's
+        // PushClipRect (which uses m_panelMin/m_panelMax) doesn't draw
+        // selection outlines / handles on top of the nav. Without this,
+        // a selected layer that spans the full canvas would paint a
+        // horizontal white line right through Canvas/Stage/Show.
+        m_panelMin.y = ImGui::GetCursorScreenPos().y;
         ImDrawList* tabDraw = ImGui::GetWindowDrawList();
         // Subtle separator line before preview (kept here because the
         // viewport texture draws immediately below).
@@ -1553,9 +1558,13 @@ void ViewportPanel::renderNavBar(bool stageActive,
         using Mode = UIManager::WorkspaceMode;
         Mode mode = UIManager::sMode;
 
-        const float kPillH      = 30.0f;
-        const float kSegPadX    = 16.0f;
-        const float kTrackPad   = 4.0f;   // inner padding around active pill
+        // Pill height bumped 30 → 36 so descenders ("g" in "Stage", lower
+        // halves of "C", "S", "h" against the dark canvas) have room to
+        // sit clear of any top-of-window clipping. Track padding scales
+        // with height so the active inner pill stays proportional.
+        const float kPillH      = 36.0f;
+        const float kSegPadX    = 18.0f;
+        const float kTrackPad   = 5.0f;
         const char* labels[3]   = {"Canvas", "Stage", "Show"};
         Mode      modes[3]      = {Mode::Canvas, Mode::Stage, Mode::Show};
 
@@ -1673,7 +1682,13 @@ void ViewportPanel::renderNavBar(bool stageActive,
         rightW += 28.0f;
 
         ImGui::SameLine();
-        float targetX = ImGui::GetContentRegionMax().x - rightW;
+        // Shift the right cluster left by the right tool rail's footprint
+        // (kRightToolRailW=56 + small breathing margin). Without this the
+        // fullscreen icon at the cluster's right end is hidden under the
+        // floating right tool rail because the canvas window's content
+        // region extends under the rail.
+        const float kRailReserve = 64.0f;
+        float targetX = ImGui::GetContentRegionMax().x - rightW - kRailReserve;
         float curX    = ImGui::GetCursorPosX();
         if (targetX > curX) ImGui::SetCursorPosX(targetX);
     }
