@@ -4685,12 +4685,14 @@ void Application::renderUI() {
     // Audio Mixer panel merged into Audio; transport controls now live inside
     // the Timeline panel's transport row (renderTransportBar() is a no-op).
 
-    // Timeline panel — hidden by default per the reference design; the
-    // floating transport pill + floating REC/LIVE pills cover all the
-    // primary affordances. Tracks/audio lane/Work Area still live in
-    // renderTimelinePanel for power users — surface via a future
-    // "Tracks" toggle on the rail. For now, no docked strip.
-    (void)0;
+    // Timeline panel — driven by the film button on the floating
+    // transport pill. m_timelineMinimized=true → fully hidden (no docked
+    // strip, canvas reaches the bottom). m_timelineMinimized=false →
+    // renderTimelinePanel() draws the docked tracks / Work Area / audio
+    // lane the user has been asking for.
+    if (m_ui.isPanelVisible("Timeline") && !m_timelineMinimized) {
+        renderTimelinePanel();
+    }
     // Phase 5 — floating transport pill above the docked timeline. Renders
     // play/stop/loop + timecode in a single rounded surface that floats
     // over the canvas, matching reference B's chrome-light vibe.
@@ -5226,13 +5228,17 @@ void Application::renderFloatingTransportPill() {
         // (window control), not part of the audio cluster on its left.
         divider();
 
-        // ── Timeline toggle (Lucide chevron — expand/collapse the timeline) ─
+        // ── Timeline toggle — Lucide `film` glyph reads as "show me the
+        // tracks/strip" much better than a chevron. Tinted the active
+        // accent when the timeline is currently expanded so the on/off
+        // state reads at a glance.
         if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
-            if (m_timelineMinimized) lucide::chevronUp  (dl, cx, cy, kGlyphSize, kFgWhite);
-            else                     lucide::chevronDown(dl, cx, cy, kGlyphSize, kFgWhite);
+            ImU32 c = m_timelineMinimized ? kFgWhite
+                                          : IM_COL32(74, 174, 236, 245);
+            lucide::film(dl, cx, cy, kGlyphSize, c);
         })) m_timelineMinimized = !m_timelineMinimized;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(m_timelineMinimized ? "Expand timeline" : "Collapse timeline");
+            ImGui::SetTooltip(m_timelineMinimized ? "Show timeline" : "Hide timeline");
 
         // (legacy pillBtn / mic / REC / STREAM / AUDIO blocks below this point
         //  have been removed — the new top-down layout above is the entire pill.)
@@ -8403,7 +8409,9 @@ void Application::renderNavBarPrefix() {
                                 IM_COL32(255, 255, 255, 18), 24);
         }
         ImU32 dotsCol = hov ? kMark : IM_COL32(170, 178, 195, 220);
-        lucide::moreHorizontal(dl, cx, cy, kGlyph, dotsCol);
+        // Settings gear — clearer affordance than the previous "···"
+        // dots. Same popup contents (Edit / File / Layer / Zone).
+        lucide::settings(dl, cx, cy, kGlyph, dotsCol);
         if (clicked) ImGui::OpenPopup("##nav_more_popup");
     }
     if (ImGui::BeginPopup("##nav_more_popup")) {
