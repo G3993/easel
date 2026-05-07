@@ -796,21 +796,30 @@ void UIManager::beginFrame() {
 }
 
 void UIManager::endFrame() {
+    // Suppress ImGui's auto-created "Debug##Default" fallback window.
+    // It appears when any widget call lands outside a Begin/End pair —
+    // a known transient state during dock-layout reflow that left a
+    // visible "Debug" pill floating over the canvas. Marking it
+    // inactive each frame hides it without touching any Begin()/End()
+    // bookkeeping elsewhere.
+    if (ImGuiWindow* w = ImGui::FindWindowByName("Debug##Default")) {
+        w->Active = false;
+        w->Hidden = true;
+        w->WasActive = false;
+    }
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
 void UIManager::setupDockspace(float bottomBarHeight) {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    // Use viewport->Pos / Size (the full GLFW content rect) instead of
-    // WorkPos / WorkSize. With the ImGui main menu bar removed, the work
-    // area still carried a stale top offset on macOS — that left a black
-    // strip above the nav row. The full content rect starts at y=0 of the
-    // window's client area, which is what we want.
-    ImVec2 dockPos = viewport->Pos;
-    dockPos.y += m_workspaceBarHeight;           // legacy hook (currently 0)
+    // Reverted to WorkPos/WorkSize — switching to Pos shifted the
+    // dockspace ~30px on macOS without the menu bar and broke the
+    // cached dock-node layout (timeline rendered at the wrong height).
+    ImVec2 dockPos = viewport->WorkPos;
+    dockPos.y += m_workspaceBarHeight;           // shift below the primary nav bar
     ImGui::SetNextWindowPos(dockPos);
-    ImVec2 dockSize = viewport->Size;
+    ImVec2 dockSize = viewport->WorkSize;
     dockSize.y -= (bottomBarHeight + m_workspaceBarHeight);
     ImGui::SetNextWindowSize(dockSize);
     ImGui::SetNextWindowViewport(viewport->ID);
@@ -832,15 +841,10 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     ImGui::Begin("DockSpace", nullptr, flags);
     ImGui::PopStyleVar(3);
 
-    // 1px hairline along the dockspace top edge — this is the underline
-    // beneath the main nav. Drawn explicitly because WindowBorderSize is now
-    // 0 globally (so panels stop bleeding outlines into the viewport).
-    {
-        ImDrawList* fg = ImGui::GetForegroundDrawList();
-        fg->AddLine(ImVec2(dockPos.x, dockPos.y),
-                    ImVec2(dockPos.x + dockSize.x, dockPos.y),
-                    IM_COL32(255, 255, 255, 25), 1.0f);
-    }
+    // (Top-edge hairline removed. After collapsing the menu bar and
+    // switching to viewport->Pos, this line drew at y=0 of the GLFW
+    // client area — right against the nav row's top edge — and read as
+    // an unintended border on the header.)
 
     ImGuiID dockspaceId = ImGui::GetID("EaselDockSpace");
     // Push a taller frame padding for the DockSpace only — ImGui derives
@@ -958,7 +962,10 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // drawInspectorTabIcons() can render their tab icons consistently.
         dockAlways("        ###Layers",     leftFloatId);
         dockAlways("        ###Sources",    leftFloatId);
-        dockAlways("        ###Mapping",    leftFloatId);
+        // Mapping moves to the RIGHT float — it's an output/transform
+        // concern that pairs with Properties (also a transform-edit
+        // surface), not with the layer/source pickers on the left.
+        dockAlways("        ###Mapping",    rightFloatId);
         dockAlways("        ###Properties", rightFloatId);
         dockAlways("        ###Audio",      rightFloatId);
         dockAlways("        ###MIDI",       rightFloatId);
@@ -1066,9 +1073,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // Mapping docks into the LEFT float (see dockAlways above) — must be
         // included here or selecting Mapping in the activity rail produces
         // no visible host and the panel never appears.
-        bool leftHasContent  = isPanelVisible("Layers")  || isPanelVisible("Sources")
-                            || isPanelVisible("Mapping");
-        bool rightHasContent = isPanelVisible("Properties")
+        // Mapping moved to the right float (alongside Properties) so it
+        // no longer counts toward leftHasContent. The right float now
+        // shows whichever of Properties / Mapping / Audio / MIDI is
+        // currently visible.
+        bool leftHasContent  = isPanelVisible("Layers")  || isPanelVisible("Sources");
+        bool rightHasContent = isPanelVisible("Properties") || isPanelVisible("Mapping")
                             || isPanelVisible("Audio")      || isPanelVisible("MIDI");
 
         // Left host — shifted right of the activity rail. The +12 matches the
@@ -1223,10 +1233,13 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
     if (ImGui::Begin("##LeftRail", nullptr, flags)) {
         // No top hairline — rail is now a floating column, not a paneled chrome.
         struct Item { LeftPanel which; const char* lbl; };
+        // Mapping was removed from the left rail — it lives in the right
+        // float now (next to Properties), where it belongs as an output
+        // / transform concern. Left rail stays focused on input picking
+        // (which layer / which source).
         const Item items[] = {
             { LeftPanel::Layers,  "##rail_layers"  },
             { LeftPanel::Sources, "##rail_sources" },
-            { LeftPanel::Mapping, "##rail_mapping" },
         };
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float kBtn   = 36.0f;        // circular hit + visual diameter — matches transport pill
@@ -1302,14 +1315,10 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // is active; gating them on the active panel left users without a
         // visual reference for what they had loaded.
         if (drawExtra) {
-            ImGui::Dummy(ImVec2(0, kIconGap + 4.0f));
-            ImVec2 dPos = ImGui::GetCursorScreenPos();
-            float divW = kLeftRailW - 16.0f;
-            ImGui::GetWindowDrawList()->AddLine(
-                ImVec2(dPos.x + 8.0f, dPos.y),
-                ImVec2(dPos.x + 8.0f + divW, dPos.y),
-                IM_COL32(255, 255, 255, 30), 1.0f);
-            ImGui::Dummy(ImVec2(0, kIconGap + 4.0f));
+            // No divider line — the spacing between the nav buttons and
+            // the layer thumbnails is enough rhythm. The hairline was
+            // adding visual noise the user flagged.
+            ImGui::Dummy(ImVec2(0, kIconGap * 2.0f + 4.0f));
             drawExtra(kLeftRailW - 12.0f);
         }
     }

@@ -5195,10 +5195,13 @@ void Application::renderFloatingTransportPill() {
         }
 #endif
 
-        // ── Speaker (mute toggle / monitor — currently informational) ─────
+        // ── Audio monitor — Lucide `audio-lines` (4 vertical EQ bars).
+        // Reads as "audio levels" much more directly than the prior
+        // speaker glyph, and groups visually with the level meter that
+        // sits immediately to its right.
         ImGui::SameLine(0, kGap);
         if (smallBtn("##fp_speaker", [&](float cx, float cy) {
-            lucide::volume(dl, cx, cy, kGlyphSize, kFgWhite);
+            lucide::audioLines(dl, cx, cy, kGlyphSize, kFgWhite);
         })) {
             // No-op: monitor toggle could land here later.
         }
