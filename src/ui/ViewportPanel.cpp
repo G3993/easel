@@ -154,16 +154,17 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // and switching workspaces doesn't shift element positions.
     if (zones && activeZone) {
         renderNavBar(false, zones, activeZone, monitors, ndiAvailable, editorMonitor);
-        // Move m_panelMin.y BELOW the nav row so the layer overlay's
-        // PushClipRect (which uses m_panelMin/m_panelMax) doesn't draw
-        // selection outlines / handles on top of the nav. Without this,
-        // a selected layer that spans the full canvas would paint a
-        // horizontal white line right through Canvas/Stage/Show.
-        m_panelMin.y = ImGui::GetCursorScreenPos().y;
-        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
-        // Subtle separator line before preview (kept here because the
-        // viewport texture draws immediately below).
+        // Capture the nav row's bottom Y in screen space. We use this to
+        // (a) seed m_panelMin.y for the layer overlay clip rect AND
+        // (b) expose m_navRowBottomY so the overlay can additionally
+        //     skip any draw whose top half would punch above the nav.
+        // Without (b), a layer whose bbox top sits flush with the canvas
+        // image edge produced corner handles whose top halves rendered
+        // ON TOP of the nav row.
         ImGui::Dummy(ImVec2(0, 2));
+        m_navRowBottomY = ImGui::GetCursorScreenPos().y;
+        m_panelMin.y    = m_navRowBottomY;
+        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
         {
             ImVec2 p = ImGui::GetCursorScreenPos();
             float w = ImGui::GetContentRegionAvail().x;
@@ -822,8 +823,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 m_warpDragIndex = -1;
             }
 
-            // Draw warp handles (zone-colored)
+            // Draw warp handles (zone-colored). Same clip-below-nav rule
+            // as renderLayerOverlay so a corner-pin handle dragged up to
+            // the canvas top edge can't paint over the workspace pill.
             ImDrawList* draw = ImGui::GetWindowDrawList();
+            float warpClipTop = std::max(m_panelMin.y, m_navRowBottomY);
+            draw->PushClipRect(ImVec2(m_panelMin.x, warpClipTop),
+                               ImVec2(m_panelMax.x, m_panelMax.y), true);
             auto ndc2scr = [&](glm::vec2 ndc) -> ImVec2 { return toImVec2(ndcToScreen(ndc)); };
             int zi = activeZone ? *activeZone : 0;
 
@@ -857,6 +863,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                     draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 32, 1.2f);
                 }
             }
+            draw->PopClipRect();  // matches the PushClipRect at the start
+                                  // of the warp-handle block.
         }
     }
 
@@ -901,8 +909,13 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
     // nav / timeline; the floating dock panels render on top regardless.
     ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    // Clip overlay drawing to viewport panel bounds
-    draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
+    // Clip overlay drawing to viewport panel bounds. Force the top of
+    // the clip down to m_navRowBottomY so corner handles sitting at the
+    // canvas image's top edge never punch above the nav row. Without
+    // this, the bbox + handles z-order on top of the workspace pill
+    // and the OUTPUT cluster (visible in the user's screenshot).
+    float clipTop = std::max(m_panelMin.y, m_navRowBottomY);
+    draw->PushClipRect(ImVec2(m_panelMin.x, clipTop),
                        ImVec2(m_panelMax.x, m_panelMax.y), true);
     ImVec2 mouse = ImGui::GetMousePos();
     glm::vec2 mouseNDC = screenToNDC({mouse.x, mouse.y});

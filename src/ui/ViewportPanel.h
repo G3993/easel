@@ -39,7 +39,8 @@ public:
                       int* activeZone,
                       const std::vector<MonitorInfo>* monitors,
                       bool ndiAvailable,
-                      int editorMonitor);
+                      int editorMonitor,
+                      std::function<void()> prefixContent = nullptr);
 
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
@@ -102,6 +103,11 @@ private:
     bool m_hovered = false;
     EditMode m_editMode = EditMode::Normal;
     bool m_layerSelected = false;
+
+    // Top of the visible nav row in screen coords — set during render() so
+    // overlay code (renderLayerOverlay / warp handles) can clip itself to
+    // strictly BELOW the nav row, no matter where the layer's bbox sits.
+    float m_navRowBottomY = 0.0f;
 
     // Warp dragging state
     int m_warpDragIndex = -1;
