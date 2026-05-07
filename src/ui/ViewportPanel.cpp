@@ -715,19 +715,25 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         }
     }
 
-    // Middle-mouse pan
-    if (m_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+    // Middle-mouse pan, OR Space-held + Left-mouse drag (Photoshop / Figma idiom).
+    bool spaceHeld = ImGui::IsKeyDown(ImGuiKey_Space);
+    bool spacePanStart = m_hovered && spaceHeld &&
+                         ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    if (m_hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || spacePanStart)) {
         m_panDragging = true;
         ImVec2 mp = ImGui::GetMousePos();
         m_panDragStart = {mp.x, mp.y};
         m_panStart = m_pan;
     }
-    if (m_panDragging && ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+    bool spacePanActive = m_panDragging && spaceHeld &&
+                          ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (m_panDragging && (ImGui::IsMouseDown(ImGuiMouseButton_Middle) || spacePanActive)) {
         ImVec2 mp = ImGui::GetMousePos();
         m_pan.x = m_panStart.x + (mp.x - m_panDragStart.x);
         m_pan.y = m_panStart.y + (mp.y - m_panDragStart.y);
     }
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle)) {
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Middle) ||
+        (m_panDragging && !spaceHeld && !ImGui::IsMouseDown(ImGuiMouseButton_Middle))) {
         m_panDragging = false;
     }
 
@@ -882,10 +888,13 @@ void ViewportPanel::renderLayerOverlay(LayerStack& stack, int& selectedLayer, in
     }
 
     bool warpBusy = m_warpDragging;
-    // BackgroundDrawList so gizmo overlays sit ABOVE the canvas but BELOW
-    // floating panels — previously used ForegroundDrawList which punched
-    // through any panel docked over the viewport.
-    ImDrawList* draw = ImGui::GetBackgroundDrawList();
+    // Use the Canvas window's own draw list — BackgroundDrawList sits
+    // BEHIND windows and gets occluded by the opaque canvas BG, which
+    // hid all the warp / mapping / layer handles. WindowDrawList draws
+    // on top of the Image() call so gizmo overlays are actually visible.
+    // Manual clip below keeps overlays from spilling onto the workspace
+    // nav / timeline; the floating dock panels render on top regardless.
+    ImDrawList* draw = ImGui::GetWindowDrawList();
 
     // Clip overlay drawing to viewport panel bounds
     draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
@@ -1516,11 +1525,22 @@ void ViewportPanel::renderNavBar(bool stageActive,
                                  int* activeZone,
                                  const std::vector<MonitorInfo>* monitors,
                                  bool ndiAvailable,
-                                 int editorMonitor) {
+                                 int editorMonitor,
+                                 std::function<void()> prefixContent) {
     if (!zones || !activeZone) return;
     ImGui::Dummy(ImVec2(0, 2));
     // Match timeline/header edge padding (~12px from window edge).
     ImGui::Indent(12);
+    // Prefix cluster — Application injects the brand mark + ellipsis/overflow
+    // menu here so the row carries the chrome (no separate ImGui menu bar
+    // above the viewport). Keep it on the same line as Canvas/Stage/Show
+    // and let the pill below center using the FULL row width, not the
+    // remaining-after-prefix width — so the pill stays visually centered
+    // regardless of prefix width.
+    if (prefixContent) {
+        prefixContent();
+        ImGui::SameLine(0, 0);
+    }
     ImDrawList* tabDraw = ImGui::GetWindowDrawList();
 
     // CANVAS / STAGE / SHOW segmented pill — iOS-style three-segment
@@ -1548,16 +1568,18 @@ void ViewportPanel::renderNavBar(bool stageActive,
             totalW += segW[i];
         }
 
-        // Phase 4: center the workspace pill horizontally in the row.
-        // Compute available content width and offset the cursor so the pill
-        // sits in the middle. Zone tabs and the right cluster still flow
-        // after via SameLine — the right cluster has its own targetX so it
-        // stays pinned to the edge.
+        // Center the workspace pill horizontally relative to the FULL row
+        // width — not the remaining-after-prefix width. With a prefix
+        // cluster (brand + overflow menu) on the left, naive centering on
+        // remaining space would shift the pill right. Use absolute window
+        // coordinates so the pill always sits at the row's true midpoint.
         {
-            float avail = ImGui::GetContentRegionAvail().x;
-            float curX  = ImGui::GetCursorPosX();
-            float targetCx = curX + (avail - totalW) * 0.5f;
-            if (targetCx > curX) ImGui::SetCursorPosX(targetCx);
+            float winContentW = ImGui::GetWindowContentRegionMax().x
+                              - ImGui::GetWindowContentRegionMin().x;
+            float targetX = ImGui::GetWindowContentRegionMin().x
+                          + (winContentW - totalW) * 0.5f;
+            float curX = ImGui::GetCursorPosX();
+            if (targetX > curX) ImGui::SetCursorPosX(targetX);
         }
 
         ImVec2 trackPos = ImGui::GetCursorScreenPos();
