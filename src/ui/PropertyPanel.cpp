@@ -73,34 +73,26 @@ static bool accentBtn(const char* label, float w = 0) {
 //  - Aesthetic-usability: chevron + label stay calm; hover brightens label.
 //  - Fitts: full-row hit target (InvisibleButton spans the panel width).
 static bool sectionHeader(const char* label, bool* open) {
-    // Flat headline. No chevron, no collapse — sections are always
-    // expanded so parameters are immediately visible. Heading reads
-    // like a bold H2: larger font scale, bright label, generous top
-    // padding, thin separator hairline below to delineate the group.
-    (void)open;  // kept in signature for compatibility with call sites
-    ImGui::Dummy(ImVec2(0, 18));               // generous top breathing room
+    // Calm-editor section header. Inspired by the reference's grass.visu
+    // panel: bold H2-scale label, NO underline (rhythm comes from
+    // generous whitespace, not hairlines), and lots of breathing room
+    // above + below so each section reads as its own quiet block.
+    (void)open;
+    ImGui::Dummy(ImVec2(0, 24));               // wide top breathing room
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float rowW  = ImGui::GetContentRegionAvail().x;
     float fontSize = ImGui::GetFontSize();
-    float headlineSize = fontSize * 1.45f;     // bigger, headline scale
+    float headlineSize = fontSize * 1.65f;     // H2 scale — confident header
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    // Bright headline. Eye-catching but not distracting. The label is
-    // drawn at a larger font size by passing it explicitly to AddText.
     dl->AddText(ImGui::GetFont(), headlineSize,
                 ImVec2(rowStart.x, rowStart.y),
-                IM_COL32(245, 248, 254, 255), label);
+                IM_COL32(247, 249, 254, 255), label);
 
-    // Reserve vertical space so subsequent widgets render below.
-    ImGui::Dummy(ImVec2(rowW, headlineSize + 6.0f));
-
-    // Hairline separator below the headline for clear group rhythm.
-    float lineY = ImGui::GetCursorScreenPos().y + 2.0f;
-    dl->AddLine(ImVec2(rowStart.x, lineY),
-                ImVec2(rowStart.x + rowW, lineY),
-                IM_COL32(255, 255, 255, 22), 1.0f);
-    ImGui::Dummy(ImVec2(0, 8));               // bottom breathing room
-    return true;                              // always expanded
+    // Reserve vertical space + bottom padding. No divider line —
+    // typography + space carry the hierarchy.
+    ImGui::Dummy(ImVec2(rowW, headlineSize + 14.0f));
+    return true;
 }
 
 // Horizontal pill-group selector: active pill is filled, others are outlined.
@@ -436,7 +428,9 @@ static bool paramToggleRow(const char* id, const char* label, bool* b) {
     bool clicked = ImGui::InvisibleButton("##sw", ImVec2(switchW, switchH));
     if (clicked) { *b = !*b; }
 
-    ImU32 trackCol = *b ? IM_COL32(232, 150, 70, 200) : IM_COL32(255, 255, 255, 28);
+    // White when ON, faint white track when OFF — matches the rest of the
+    // chrome and removes the lone orange accent that was reading as warning.
+    ImU32 trackCol = *b ? IM_COL32(232, 238, 250, 220) : IM_COL32(255, 255, 255, 28);
     dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + switchW, sy + switchH),
                       trackCol, switchH * 0.5f);
     float knobR = switchH * 0.5f - 2.0f;
@@ -510,7 +504,165 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // then paints the filter icon over the tab rect so the tab reads as
     // an icon. The "###ID" half keeps the internal window name stable
     // for dock/focus lookups.
+    //
+    // Generous padding + vertical spacing — the parameter panel is meant to
+    // read as airy and minimal, more breathing room than the default tight
+    // ImGui rhythm. Mirrors the calm-editor reference (grass.visu) where
+    // section headers stand alone and rows have ample vertical air between
+    // them. Also bump frame padding so individual fields breathe.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(10, 16));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(12, 9));
     ImGui::Begin("        ###Properties");
+    ImGui::PopStyleVar(3);
+
+#if 0
+    // ── SOURCES tab strip ─────────────────────────────────────────────
+    // Top of the inspector: 4 big circular icon tabs (VOICE / CAMERA /
+    // DATA / CONTENT). Active tab glows red and reveals its config block
+    // (transcript area + mic toggle + audio device + decay for VOICE).
+    // Modeled on ShaderClaw3's controls panel — the inspector is "what's
+    // driving the shader" first, "shader params" second.
+    {
+        static int s_sourceTab = 0;  // 0=Voice 1=Camera 2=Data 3=Content
+        struct Src { const char* label; ImU32 accent; };
+        const Src srcs[] = {
+            { "VOICE",   IM_COL32(255, 90, 110, 255) },
+            { "CAMERA",  IM_COL32(120, 180, 240, 255) },
+            { "DATA",    IM_COL32(150, 200, 140, 255) },
+            { "CONTENT", IM_COL32(220, 175, 110, 255) },
+        };
+        const float iconR = 24.0f;          // circle radius
+        const float colW  = 78.0f;          // per-column width
+        const float ICON_TOP_PAD = 8.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGui::Dummy(ImVec2(0, ICON_TOP_PAD));
+        ImVec2 stripStart = ImGui::GetCursorScreenPos();
+        float availW = ImGui::GetContentRegionAvail().x;
+        float groupW = colW * 4.0f;
+        float baseX  = stripStart.x + (availW - groupW) * 0.5f;
+
+        for (int i = 0; i < 4; i++) {
+            float cx = baseX + i * colW + colW * 0.5f;
+            float cy = stripStart.y + iconR + 2.0f;
+            bool active = (s_sourceTab == i);
+
+            // Hit area (square covering circle + label)
+            ImGui::SetCursorScreenPos(ImVec2(baseX + i * colW,
+                                              stripStart.y));
+            ImGui::PushID(i);
+            bool clicked = ImGui::InvisibleButton("##src", ImVec2(colW, iconR * 2.0f + 22.0f));
+            bool hov     = ImGui::IsItemHovered();
+            ImGui::PopID();
+
+            // Active glow halo
+            if (active) {
+                for (int k = 0; k < 3; k++) {
+                    dl->AddCircle(ImVec2(cx, cy), iconR + 2.0f + k * 1.5f,
+                                  (srcs[i].accent & 0x00FFFFFF) | (((28 - k * 8) << 24)),
+                                  32, 1.6f);
+                }
+            }
+            ImU32 bgFill = active ? IM_COL32(255, 90, 110, 80)
+                                  : (hov ? IM_COL32(255, 255, 255, 22)
+                                         : IM_COL32(20, 22, 28, 220));
+            dl->AddCircleFilled(ImVec2(cx, cy), iconR, bgFill, 32);
+            dl->AddCircle(ImVec2(cx, cy), iconR,
+                          IM_COL32(255, 255, 255, active ? 60 : 40), 32, 1.0f);
+
+            // Glyph
+            ImU32 glyph = active ? IM_COL32(255, 255, 255, 255)
+                                 : IM_COL32(180, 188, 200, 230);
+            if (i == 0) {
+                // Mic
+                float bw = 4.5f;
+                dl->AddRectFilled(ImVec2(cx - bw, cy - 8.0f),
+                                  ImVec2(cx + bw, cy + 1.0f), glyph, bw);
+                dl->PathArcTo(ImVec2(cx, cy - 1.0f), 8.0f,
+                              0.10f * 3.14159f, 0.90f * 3.14159f, 14);
+                dl->PathStroke(glyph, 0, 1.6f);
+                dl->AddLine(ImVec2(cx, cy + 7.0f), ImVec2(cx, cy + 11.0f), glyph, 1.6f);
+                dl->AddLine(ImVec2(cx - 4.0f, cy + 11.0f),
+                            ImVec2(cx + 4.0f, cy + 11.0f), glyph, 1.6f);
+            } else if (i == 1) {
+                // Camera body + lens
+                dl->AddRectFilled(ImVec2(cx - 10.0f, cy - 6.0f),
+                                  ImVec2(cx + 10.0f, cy + 6.0f), glyph, 2.0f);
+                dl->AddCircleFilled(ImVec2(cx, cy), 3.5f, IM_COL32(0, 0, 0, 200), 16);
+                dl->AddCircle(ImVec2(cx, cy), 3.5f, glyph, 16, 1.4f);
+                // Top notch
+                dl->AddRectFilled(ImVec2(cx - 4.0f, cy - 8.5f),
+                                  ImVec2(cx + 4.0f, cy - 6.0f), glyph, 1.0f);
+            } else if (i == 2) {
+                // Database cylinders (3 stacked ellipses)
+                for (int k = 0; k < 3; k++) {
+                    float yk = cy - 6.0f + k * 5.0f;
+                    dl->AddCircle(ImVec2(cx, yk), 8.0f, glyph, 18, 1.4f);
+                }
+            } else {
+                // Content: play triangle inside a box
+                dl->AddRect(ImVec2(cx - 9.0f, cy - 7.0f),
+                            ImVec2(cx + 9.0f, cy + 7.0f), glyph, 2.0f, 0, 1.4f);
+                dl->AddTriangleFilled(
+                    ImVec2(cx - 2.0f, cy - 4.0f),
+                    ImVec2(cx - 2.0f, cy + 4.0f),
+                    ImVec2(cx + 4.0f, cy), glyph);
+            }
+
+            // Label below
+            ImVec2 ts = ImGui::CalcTextSize(srcs[i].label);
+            dl->AddText(ImVec2(cx - ts.x * 0.5f, cy + iconR + 4.0f),
+                        active ? IM_COL32(232, 238, 250, 240)
+                               : IM_COL32(150, 160, 175, 220),
+                        srcs[i].label);
+
+            if (clicked) s_sourceTab = i;
+        }
+        ImGui::Dummy(ImVec2(0, iconR * 2.0f + 28.0f));
+
+        // ── Tab content ────────────────────────────────────────────────
+        if (s_sourceTab == 0) {
+            // VOICE: transcript display + mic toggle + audio device + decay
+            const char* transcript = (speech && speech->dataBus) ?
+                "" : "";
+            // Read latest words from DataBus.
+            std::string words;
+            if (speech && speech->dataBus) {
+                words = speech->dataBus->get("cue.latest");
+                if (words.empty()) words = speech->dataBus->get("etherea.latest");
+            }
+            ImVec2 fp = ImGui::GetCursorScreenPos();
+            float fw = ImGui::GetContentRegionAvail().x;
+            float fh = 48.0f;
+            dl->AddRectFilled(fp, ImVec2(fp.x + fw, fp.y + fh),
+                              IM_COL32(20, 22, 28, 220), 8.0f);
+            dl->AddRect(fp, ImVec2(fp.x + fw, fp.y + fh),
+                        IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+            const char* placeholder = "START TALKING..";
+            const char* shown = words.empty() ? placeholder : words.c_str();
+            ImU32 textCol = words.empty() ? IM_COL32(110, 118, 130, 220)
+                                          : IM_COL32(232, 238, 250, 240);
+            ImVec2 tts = ImGui::CalcTextSize(shown);
+            dl->AddText(ImVec2(fp.x + 14.0f, fp.y + (fh - tts.y) * 0.5f),
+                        textCol, shown);
+            ImGui::Dummy(ImVec2(0, fh + 8.0f));
+
+            // (mic toggle / audio device / decay come from Application —
+            //  this tab will gain those rows once we pass the data through.)
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.9f));
+            ImGui::TextWrapped("(%s controls coming soon)", srcs[s_sourceTab].label);
+            ImGui::PopStyleColor();
+        }
+
+        // Section divider before layer params
+        ImVec2 dp = ImGui::GetCursorScreenPos();
+        float dw = ImGui::GetContentRegionAvail().x;
+        dl->AddLine(dp, ImVec2(dp.x + dw, dp.y),
+                    IM_COL32(255, 255, 255, 30), 1.0f);
+        ImGui::Dummy(ImVec2(0, 8));
+    }
+#endif // SOURCES tab strip — moved to Sources panel per design
     // 1px outline only when floating — when docked, dock-node edges already
     // separate the panel from its neighbours and a window border just adds
     // a visual seam.
@@ -796,10 +948,17 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         // reference A leads with at the top of its Transform section.
         // Sits left of the X/Y drag fields so the numeric and graphical
         // inputs read as one combined transform widget.
+        const float padR = 36.0f;          // outer radius
+        const float padPad = 6.0f;
+        ImVec2 padTopLeft = ImGui::GetCursorScreenPos();
+        float pillsX = padTopLeft.x + padR * 2.0f + padPad * 3.0f;
+        // Convert screen-x to window-relative cursor X (the value SetCursorPosX expects).
+        float windowX = ImGui::GetWindowPos().x;
+        float scrollX = ImGui::GetScrollX();
+        float pillsCursorX = pillsX - windowX + scrollX;
+        float padBottomY  = padTopLeft.y + padR * 2.0f;
         {
-            const float padR = 36.0f;          // outer radius
-            const float padPad = 6.0f;
-            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 cur = padTopLeft;
             ImVec2 center(cur.x + padR + padPad, cur.y + padR);
             ImDrawList* dl = ImGui::GetWindowDrawList();
             // Outer ring (track) and inner softer ring (mid-detent at 0,0).
@@ -851,6 +1010,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         {}
         if (ImGui::IsItemActivated()) undoNeeded = true;
 
+        // Pin Size/Rot and W/H to the same pillsCursorX so they ride right
+        // of the xy-pad instead of falling back under it.
+        ImGui::SetCursorPosX(pillsCursorX);
         {
             float uniformScale = (layer->scale.x + layer->scale.y) * 0.5f;
             auto sr = dragPair2(
@@ -864,10 +1026,24 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             if (sr.activated) undoNeeded = true;
         }
 
+        ImGui::SetCursorPosX(pillsCursorX);
         if (dragPair("##ScaleX", "W", &layer->scale.x, "##ScaleY", "H", &layer->scale.y,
                      0.01f, 0.01f, 10.0f))
         {}
         if (ImGui::IsItemActivated()) undoNeeded = true;
+
+        // After the three pill rows, ensure the cursor is below the pad's
+        // bottom edge before Flip H / Flip V / Reset row.
+        {
+            ImVec2 nowPos = ImGui::GetCursorScreenPos();
+            if (nowPos.y < padBottomY + 6.0f) {
+                ImGui::SetCursorScreenPos(ImVec2(padTopLeft.x, padBottomY + 6.0f));
+            } else {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() -
+                    (pillsCursorX - (padTopLeft.x - ImGui::GetWindowPos().x + ImGui::GetScrollX())));
+                ImGui::SetCursorScreenPos(ImVec2(padTopLeft.x, nowPos.y));
+            }
+        }
 
         if (ImGui::Checkbox("Flip H", &layer->flipH)) undoNeeded = true;
         ImGui::SameLine();
