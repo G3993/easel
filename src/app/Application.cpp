@@ -1,5 +1,6 @@
 #include "app/Application.h"
 #include "ui/ParamRow.h"
+#include "ui/LucideIcons.h"
 #include "sources/ImageSource.h"
 #ifdef HAS_FFMPEG
 #include "sources/VideoSource.h"
@@ -795,6 +796,25 @@ void Application::run() {
             if (!prompt.empty())
                 m_dataBus.set("etherea.prompt", prompt);
         }
+
+#ifdef __APPLE__
+        // Continuous mic: keep the recognizer always-on so the user can keep
+        // talking and the transcript keeps growing in shaders bound to
+        // cue.transcript. Two paths land here:
+        //   1) onFinal set m_voiceRestartPending — Apple closed the task,
+        //      we tear down and restart for the next utterance.
+        //   2) Mic isn't running yet (initial boot before TCC granted, or
+        //      a manual stop) — try to start once permission is available.
+        if (m_voiceContinuous) {
+            if (m_voiceRestartPending && m_voiceListening) {
+                m_voiceRestartPending = false;
+                stopVoiceRecording();
+                startVoiceRecording();
+            } else if (!m_voiceListening && m_voiceRecognizer.available()) {
+                startVoiceRecording();
+            }
+        }
+#endif
 
         // Voice decay: fade layers with DataBus text bindings after speech stops
         // 2s hold at full opacity, then ease-out over decay duration
@@ -1900,6 +1920,12 @@ void Application::startVoiceRecording() {
         if (!intent.target.empty()) std::cerr << " target=" << intent.target;
         std::cerr << "\n";
         handleVoiceIntent(intent);
+        // Apple's SFSpeechRecognitionTask is single-shot — once isFinal fires
+        // the task is done. To keep the mic continuously transcribing while
+        // m_voiceContinuous is true, ask the main loop to tear down and
+        // restart the session on its next tick (don't restart from inside
+        // this callback; it runs on the Speech framework's queue).
+        if (m_voiceContinuous) m_voiceRestartPending = true;
     };
     m_voiceRecognizer.start();
     m_voiceListening = m_voiceRecognizer.isRecording();
@@ -1918,6 +1944,15 @@ void Application::stopVoiceRecording() {
 
 void Application::renderVoiceCommandBar() {
     if (!m_voiceBarOpen) return;
+    // Auto-tuck: voice bar only appears when actively listening or when
+    // there's recent transcript activity (last echo within 6s). The mic
+    // button on the floating transport pill is the primary entry point;
+    // this command bar is for typed fallback + log review and only needs
+    // to surface when the user is in-flow.
+    bool recentActivity = (m_voiceLastEchoTime > 0.0 &&
+                           (glfwGetTime() - m_voiceLastEchoTime) < 6.0);
+    if (!m_voiceListening && !recentActivity && m_voicePartial.empty())
+        return;
     ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Voice##VoiceBar", &m_voiceBarOpen,
                       ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -2875,6 +2910,127 @@ void Application::renderUI() {
     ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
                                      | ImGuiTabBarFlags_FittingPolicyScroll;
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
+
+    // ── VOICE tab ──────────────────────────────────────────────────────
+    // Mic toggle, audio device picker, decay slider, live transcript.
+    // The voice transcript drives `cue.transcript` / `cue.latest` in
+    // DataBus, which is what text-shader `msg` inputs auto-bind to.
+    if (sourcesTabsOpen && ImGui::BeginTabItem("Voice")) {
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // Live transcript display
+        std::string words = m_dataBus.get("cue.latest");
+        if (words.empty()) words = m_dataBus.get("etherea.latest");
+        ImVec2 fp = ImGui::GetCursorScreenPos();
+        float fw = ImGui::GetContentRegionAvail().x;
+        float fh = 56.0f;
+        ImDrawList* tdl = ImGui::GetWindowDrawList();
+        tdl->AddRectFilled(fp, ImVec2(fp.x + fw, fp.y + fh),
+                           IM_COL32(20, 22, 28, 220), 8.0f);
+        tdl->AddRect(fp, ImVec2(fp.x + fw, fp.y + fh),
+                     IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+        const char* placeholder = "START TALKING..";
+        const char* shown = words.empty() ? placeholder : words.c_str();
+        ImU32 textCol = words.empty() ? IM_COL32(110, 118, 130, 220)
+                                      : IM_COL32(232, 238, 250, 240);
+        ImVec2 tts = ImGui::CalcTextSize(shown);
+        tdl->AddText(ImVec2(fp.x + 14.0f, fp.y + (fh - tts.y) * 0.5f),
+                     textCol, shown);
+        ImGui::Dummy(ImVec2(0, fh + 10.0f));
+
+#ifdef __APPLE__
+        // Mic level meter (driven by m_audioRMS)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("MIC LEVEL");
+            ImGui::PopStyleColor();
+            ImVec2 mp = ImGui::GetCursorScreenPos();
+            float mw = ImGui::GetContentRegionAvail().x;
+            float mh = 6.0f;
+            tdl->AddRectFilled(mp, ImVec2(mp.x + mw, mp.y + mh),
+                               IM_COL32(255, 255, 255, 22), mh * 0.5f);
+            float lvl = std::min(1.0f, m_audioRMS * 4.0f);
+            tdl->AddRectFilled(mp, ImVec2(mp.x + mw * lvl, mp.y + mh),
+                               IM_COL32(255, 90, 110, 240), mh * 0.5f);
+            ImGui::Dummy(ImVec2(0, mh + 10.0f));
+        }
+
+        // Mic toggle
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("MIC");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            float w = ImGui::GetContentRegionAvail().x;
+            float switchW = 44.0f, switchH = 22.0f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - switchW));
+            ImVec2 sp = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton("##miconoff", ImVec2(switchW, switchH));
+            ImU32 trackCol = m_voiceContinuous
+                ? IM_COL32(255, 90, 110, 220)
+                : IM_COL32(255, 255, 255, 28);
+            tdl->AddRectFilled(sp, ImVec2(sp.x + switchW, sp.y + switchH),
+                               trackCol, switchH * 0.5f);
+            float knobR = switchH * 0.5f - 3.0f;
+            float knobX = m_voiceContinuous ? sp.x + switchW - knobR - 3.0f : sp.x + knobR + 3.0f;
+            tdl->AddCircleFilled(ImVec2(knobX, sp.y + switchH * 0.5f), knobR,
+                                 IM_COL32(240, 244, 250, 255));
+            if (clicked) {
+                m_voiceContinuous = !m_voiceContinuous;
+                if (m_voiceContinuous) {
+                    if (!m_voiceListening) startVoiceRecording();
+                } else {
+                    if (m_voiceListening) stopVoiceRecording();
+                    m_voiceRestartPending = false;
+                }
+            }
+            ImGui::Dummy(ImVec2(0, 14));
+        }
+#endif
+
+#ifdef HAS_FFMPEG
+        // Audio device picker
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("AUDIO DEVICE");
+            ImGui::PopStyleColor();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            const char* preview = "Default";
+            if (m_selectedAudioDevice >= 0 &&
+                m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                preview = m_audioDevices[m_selectedAudioDevice].name.c_str();
+            }
+            if (ImGui::BeginCombo("##voice_audio", preview)) {
+                if (ImGui::Selectable("Default", m_selectedAudioDevice == -1)) {
+                    m_selectedAudioDevice = -1;
+                    m_recorder.setAudioDevice(-1);
+                }
+                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                    if (!m_audioDevices[i].isCapture) continue;
+                    if (ImGui::Selectable(m_audioDevices[i].name.c_str(),
+                                          m_selectedAudioDevice == i)) {
+                        m_selectedAudioDevice = i;
+                        m_recorder.setAudioDevice(i);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::Dummy(ImVec2(0, 10));
+        }
+#endif
+
+        // Decay slider
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("DECAY");
+            ImGui::PopStyleColor();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::SliderFloat("##voice_decay", &m_voiceDecayDuration,
+                               0.5f, 10.0f, "%.1fs");
+        }
+
+        ImGui::EndTabItem();
+    }
 
     // ShaderClaw tab
     if (sourcesTabsOpen && ImGui::BeginTabItem("    ###ShaderClaw")) {
@@ -4593,38 +4749,10 @@ void Application::renderUI() {
             ImGui::PopID();
         }
     });
-    m_ui.renderRightToolRail(
-        [this](UIManager::RightTool t) {
-            if (m_selectedLayer < 0 || m_selectedLayer >= m_layerStack.count())
-                return;
-            auto layer = m_layerStack[m_selectedLayer];
-            if (!layer) return;
-            m_undoStack.pushState(m_layerStack, m_selectedLayer);
-            switch (t) {
-                case UIManager::RightTool::Move:
-                    layer->position = {0.0f, 0.0f};
-                    break;
-                case UIManager::RightTool::Rotate:
-                    layer->rotation += 90.0f;
-                    if (layer->rotation >= 360.0f) layer->rotation -= 360.0f;
-                    break;
-                case UIManager::RightTool::Scale:
-                    layer->scale = {1.0f, 1.0f};
-                    break;
-                case UIManager::RightTool::Flip:
-                    layer->flipH = !layer->flipH;
-                    break;
-                case UIManager::RightTool::Center:
-                    layer->position = {0.0f, 0.0f};
-                    layer->scale    = {1.0f, 1.0f};
-                    layer->rotation = 0.0f;
-                    layer->flipH    = false;
-                    layer->flipV    = false;
-                    break;
-            }
-        },
-        [this]() { return m_viewportPanel.zoom(); },
-        [this](float z) { m_viewportPanel.setZoom(z); });
+    // Right tool rail removed — the move/rotate/scale/flip/center
+    // icons + vertical zoom slider are no longer surfaced. The same
+    // transform actions remain available in the Properties panel
+    // (Reset / Flip H / Flip V / X / Y / Size / Rot rows).
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
 }
@@ -4671,19 +4799,26 @@ void Application::startTimelineExport() {
 // Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
 // move, drag clip edges to trim, right-click track for +Clip at cursor.
 void Application::renderFloatingTransportPill() {
-    // Phase 5 — compact floating pill that owns play/stop/loop + timecode.
-    // Sits above the docked Timeline panel, near the bottom of the viewport.
-    // Reference B vibe: a single rounded surface that floats over the canvas
-    // rather than docking flush to the bottom edge.
+    // Floating transport pill — reference design:
+    //   [⏮] [▶ accent] [⏹] [∞] | [MM:SS / DUR ns] | [🎙] [System Audio ▾] [🔊] [▮▮▮▮▮]
+    // Single long pill with grouped sections separated by hairlines. Play
+    // is the visual anchor (larger + cyan accent ring + halo when paused).
     if (UIManager::sMode != UIManager::WorkspaceMode::Canvas) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
 
-    // Pill dimensions — wider now to host the mic affordance alongside
-    // play/stop/loop + timecode. Without this, the mic was unreachable
-    // when the docked timeline was hidden.
-    const float pillW = 460.0f;
-    const float pillH = 56.0f;
+    // Spacing grid — every gap in this pill must come from one of these.
+    // Don't add ad-hoc SameLine(0, N) values; reach for a constant.
+    //   kInsetX/Y  : window padding (left/right, top/bottom)
+    //   kGap       : between two adjacent inline items (icon→icon, icon→pill)
+    //   kDivPad    : each side of a divider — symmetric so the line sits centered
+    //   kBtn       : every circular icon button (play uses kPlayBtn but stays centered on the same row baseline)
+    const float pillH    = 64.0f;
+    const float kInsetX  = 20.0f;
+    const float kInsetY  = (pillH - 36.0f) * 0.5f;   // = 14, keeps 36px buttons centered
+    const float kGap     = 10.0f;
+    const float kDivPad  = 12.0f;
+    const float pillW    = 800.0f;
 
     // Anchor 16px above the docked timeline so the two surfaces never touch.
     // m_lastTimelineH is updated each frame by UIManager::setupDockspace.
@@ -4703,7 +4838,7 @@ void Application::renderFloatingTransportPill() {
         }
         (void)dockId;
     }
-    float yMargin = 14.0f;
+    float yMargin = 18.0f;
     float x = vp->WorkPos.x + (vp->WorkSize.x - pillW) * 0.5f;
     float y = vp->WorkPos.y + vp->WorkSize.y - timelineH - pillH - yMargin;
 
@@ -4716,32 +4851,384 @@ void Application::renderFloatingTransportPill() {
         ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings|
         ImGuiWindowFlags_NoScrollbar;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(14, 10));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(kInsetX, kInsetY));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, pillH * 0.5f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 28, 235));
     ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(255, 255, 255, 22));
 
     if (ImGui::Begin("##TransportPill", nullptr, flags)) {
-        // Subtle drop shadow under the pill.
+        // Drop shadow under the pill.
         {
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();
-            ImDrawList* fg = ImGui::GetForegroundDrawList();
-            (void)fg;
             ImDrawList* bg = ImGui::GetBackgroundDrawList();
-            bg->AddRectFilled(ImVec2(wp.x + 4, wp.y + 6),
-                              ImVec2(wp.x + ws.x + 4, wp.y + ws.y + 6),
-                              IM_COL32(0, 0, 0, 80), pillH * 0.5f);
+            bg->AddRectFilled(ImVec2(wp.x + 4, wp.y + 8),
+                              ImVec2(wp.x + ws.x + 4, wp.y + ws.y + 8),
+                              IM_COL32(0, 0, 0, 90), pillH * 0.5f);
         }
 
-        // Three transport buttons + timecode + loop.
         bool playing = m_timeline.isPlaying();
-        const float btnSize = 34.0f;
+        const float btnSize  = 36.0f;   // small circular buttons
+        const float playSize = 44.0f;   // play is the visual anchor
+        ImDrawList* dl       = ImGui::GetWindowDrawList();
+        const ImU32 kFgWhite = IM_COL32(232, 238, 250, 240);
+        const ImU32 kFgDim   = IM_COL32(170, 178, 195, 220);
+        const ImU32 kHair    = IM_COL32(255, 255, 255, 28);
 
-        // Awesome-design: play button gets a prominent blue accent ring
-        // matching the reference. Stop/loop stay subtle so the play
-        // affordance reads as the primary action.
+        // ── Helper: small circular button (no fill, thin border, hover lifts) ─
+        auto smallBtn = [&](const char* id,
+                            std::function<void(float cx, float cy)> drawGlyph) -> bool {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(btnSize, btnSize);
+            bool clicked = ImGui::InvisibleButton(id, sz);
+            bool hov     = ImGui::IsItemHovered();
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            if (hov) {
+                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                    IM_COL32(255, 255, 255, 18), 28);
+            }
+            dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 0.5f, kHair, 28, 1.0f);
+            drawGlyph(cx, cy);
+            return clicked;
+        };
+
+        // ── Vertical hairline divider (group separator) ────────────────────
+        // Symmetric kDivPad on each side so the line is perfectly centered
+        // in the gap between groups. Don't change one side without the other.
+        auto divider = [&]() {
+            ImGui::SameLine(0, kDivPad);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float yMid = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f;
+            float halfH = 14.0f;
+            dl->AddLine(ImVec2(p.x, yMid - halfH),
+                        ImVec2(p.x, yMid + halfH),
+                        IM_COL32(255, 255, 255, 36), 1.0f);
+            ImGui::Dummy(ImVec2(1, btnSize));
+            ImGui::SameLine(0, kDivPad);
+        };
+
+        // ── Play (anchor): same 36px footprint as siblings — anchored by
+        // color (cyan ring + paused-state halo + slightly larger glyph),
+        // NOT by size. Keeping the hit area equal to btnSize means the row
+        // baseline is shared and every other button stays vertically aligned.
+        {
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(btnSize, btnSize);
+            bool clicked = ImGui::InvisibleButton("##fp_play", sz);
+            bool hov     = ImGui::IsItemHovered();
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            // Glow halo when paused — fades when playing. Halo extends ~6px
+            // beyond the button edge; window padding (kInsetX=20) keeps it
+            // clear of the pill rim.
+            if (!playing) {
+                for (int i = 0; i < 3; i++) {
+                    dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f + 3.0f + i * 1.5f,
+                                  IM_COL32(74, 174, 236, 32 - i * 8), 32, 1.6f);
+                }
+            }
+            if (hov) {
+                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                                    IM_COL32(74, 174, 236, 22), 32);
+            }
+            // Accent ring — replaces the hairline border for play only.
+            dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 0.5f,
+                          IM_COL32(74, 174, 236, 240), 32, 1.8f);
+            // Slightly larger play/pause glyph for emphasis without breaking row size.
+            if (playing) lucide::pause(dl, cx, cy, sz.x * 0.62f, kFgWhite);
+            else         lucide::play (dl, cx, cy, sz.x * 0.62f, kFgWhite);
+            if (clicked) m_timeline.togglePlay();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
+        }
+        (void)playSize;
+
+        // ── Stop (Lucide square) ──────────────────────────────────────────
+        ImGui::SameLine(0, kGap);
+        if (smallBtn("##fp_stop", [&](float cx, float cy) {
+            lucide::squareFilled(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+        })) m_timeline.stop();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
+
+        // ── Loop (Lucide repeat-2) ────────────────────────────────────────
+        ImGui::SameLine(0, kGap);
+        bool looping = m_timeline.looping();
+        if (smallBtn("##fp_loop", [&](float cx, float cy) {
+            ImU32 c = looping ? IM_COL32(74, 174, 236, 245) : kFgWhite;
+            lucide::repeat(dl, cx, cy, btnSize * 0.55f, c);
+        })) m_timeline.setLooping(!looping);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(looping ? "Loop on — click to disable" : "Loop");
+
+        // ── REC ──────────────────────────────────────────────────────────
+#ifdef HAS_FFMPEG
+        ImGui::SameLine(0, kGap);
+        {
+            bool recActive = m_recorder.isActive();
+            if (smallBtn("##fp_rec", [&](float cx, float cy) {
+                ImU32 col = recActive ? IM_COL32(255, 90, 90, 245)
+                                      : IM_COL32(255, 80, 80, 200);
+                lucide::circleDot(dl, cx, cy, btnSize * 0.55f, col);
+            })) {
+                if (m_recorder.isActive()) {
+                    m_recorder.stop();
+                    m_timelineExporting = false;
+                } else {
+                    m_recorder.setAudioDevice(m_selectedAudioDevice);
+                    startTimelineExport();
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(recActive ? "Recording — click to stop" : "Record");
+        }
+
+        // ── STREAM ────────────────────────────────────────────────────────
+        ImGui::SameLine(0, kGap);
+        {
+            bool liveActive = m_rtmpOutput.isActive();
+            if (smallBtn("##fp_stream", [&](float cx, float cy) {
+                ImU32 c = liveActive ? IM_COL32(74, 230, 144, 245) : kFgWhite;
+                lucide::radio(dl, cx, cy, btnSize * 0.55f, c);
+            })) {
+                if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
+                else                         ImGui::OpenPopup("##fp_stream_popup");
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(liveActive ? "Streaming — click to stop" : "Stream to RTMP");
+            if (ImGui::BeginPopup("##fp_stream_popup")) {
+                ImGui::TextDisabled("Stream to RTMP");
+                ImGui::Separator();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                ImGui::Text("YouTube Stream Key");
+                ImGui::PopStyleColor();
+                ImGui::SetNextItemWidth(260);
+                ImGui::InputText("##fp_streamkey", m_streamKeyBuf, sizeof(m_streamKeyBuf),
+                                 ImGuiInputTextFlags_Password);
+                ImGui::Separator();
+                bool hasKey = m_streamKeyBuf[0] != '\0';
+                ImGui::BeginDisabled(!hasKey);
+                if (ImGui::Button("Start streaming", ImVec2(-1, 0))) {
+                    auto& z = activeZone();
+                    m_rtmpOutput.start(m_streamKeyBuf, z.warpFBO.width(), z.warpFBO.height(),
+                                       16, 9, 30);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+        }
+#endif
+
+        divider();
+
+        // ── Timecode block: big "MM:SS" + small "DUR Xs" ──────────────────
+        {
+            double ph = m_timeline.playhead();
+            double dur = m_timeline.duration();
+            int pm = (int)ph / 60, ps = (int)ph % 60;
+            char tc[16], du[16];
+            snprintf(tc, sizeof(tc), "%02d:%02d", pm, ps);
+            snprintf(du, sizeof(du), "DUR  %ds", (int)(dur + 0.5));
+
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            float yMid = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f;
+            // Big "MM:SS" — manual scale via ImFont so it stands out like
+            // the reference's prominent timecode.
+            ImFont* font = ImGui::GetFont();
+            const float baseSize = ImGui::GetFontSize();
+            const float bigSize  = baseSize * 1.25f;
+            const float smSize   = baseSize * 0.78f;
+            ImVec2 tcSize = font->CalcTextSizeA(bigSize, FLT_MAX, 0.0f, tc);
+            ImVec2 duSize = font->CalcTextSizeA(smSize,  FLT_MAX, 0.0f, du);
+            float blockW  = std::max(tcSize.x, duSize.x);
+            // Top "MM:SS" — slightly lifted; "DUR ns" sits below it.
+            dl->AddText(font, bigSize,
+                        ImVec2(p.x + (blockW - tcSize.x) * 0.5f, yMid - tcSize.y - 1.0f),
+                        kFgWhite, tc);
+            dl->AddText(font, smSize,
+                        ImVec2(p.x + (blockW - duSize.x) * 0.5f, yMid + 3.0f),
+                        kFgDim, du);
+            // Click-to-edit on the DUR text block — opens an inline popup
+            // for typing a new total duration.
+            ImGui::SetCursorScreenPos(p);
+            if (ImGui::InvisibleButton("##fp_dur", ImVec2(blockW, btnSize))) {
+                ImGui::OpenPopup("##fp_dur_popup");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Playhead / duration\nClick to edit timeline length");
+            if (ImGui::BeginPopup("##fp_dur_popup")) {
+                ImGui::TextDisabled("Timeline duration");
+                ImGui::Separator();
+                static int s_mm = 0, s_ss = 0;
+                int dm = (int)dur / 60, ds = (int)dur % 60;
+                if (!ImGui::IsAnyItemActive()) { s_mm = dm; s_ss = ds; }
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##mm", &s_mm, 0); ImGui::SameLine();
+                ImGui::TextUnformatted("m"); ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##ss", &s_ss, 0); ImGui::SameLine();
+                ImGui::TextUnformatted("s");
+                if (ImGui::Button("Set", ImVec2(-1, 0))) {
+                    if (s_mm < 0) s_mm = 0; if (s_ss < 0) s_ss = 0;
+                    if (s_ss > 59) s_ss = 59;
+                    double d = s_mm * 60.0 + s_ss;
+                    if (d < 1.0) d = 1.0;
+                    m_timeline.setDuration(d);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
+
+        divider();
+
+        // ── Mic — toggles continuous voice capture ────────────────────────
+#ifdef __APPLE__
+        if (smallBtn("##fp_mic", [&](float cx, float cy) {
+            // Lucide mic when on (continuous), Lucide mic-off when off.
+            // Listening adds a small pulsing red dot at top-right.
+            if (m_voiceContinuous) lucide::mic   (dl, cx, cy, btnSize * 0.55f, kFgWhite);
+            else                   lucide::micOff(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+            if (m_voiceListening) {
+                float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 3.0f);
+                ImU32 dotCol = IM_COL32(255, 90, 90, (int)(180 + pulse * 75));
+                dl->AddCircleFilled(ImVec2(cx + 8.5f, cy - 8.5f), 3.0f, dotCol, 12);
+            }
+        })) {
+            // Toggle continuous mic mode. Continuous=on starts capture and
+            // auto-restarts after every final; off both stops + clears the
+            // restart flag so it stays off.
+            m_voiceContinuous = !m_voiceContinuous;
+            if (m_voiceContinuous) {
+                if (!m_voiceListening) startVoiceRecording();
+            } else {
+                if (m_voiceListening) stopVoiceRecording();
+                m_voiceRestartPending = false;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(m_voiceListening
+                ? "Mic on — click to mute"
+                : (m_voiceContinuous
+                    ? "Mic off (no permission yet)"
+                    : "Mic muted — click to start"));
+        }
+#endif
+
+        // ── System Audio — inline pill with chevron, opens device picker ──
+        ImGui::SameLine(0, kGap);
+        {
+            const char* label = "System Audio";
+#ifdef HAS_FFMPEG
+            if (m_selectedAudioDevice >= 0 &&
+                m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                label = m_audioDevices[m_selectedAudioDevice].name.c_str();
+            }
+#endif
+            // Pill geometry — padX matches kGap so internal/external rhythm
+            // are consistent; chevron sits in the same 12px slot it occupies
+            // visually next to surrounding 36px circles.
+            const float chevW = 12.0f;
+            ImVec2 ts = ImGui::CalcTextSize(label);
+            float maxLabelW = 110.0f;
+            float labelW = std::min(ts.x, maxLabelW);
+            float padX = kGap + 2.0f, padY = 8.0f; (void)padY;
+            ImVec2 sz(labelW + chevW + padX * 2.0f, btnSize);
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton("##fp_sysaudio", sz);
+            bool hov = ImGui::IsItemHovered();
+            ImU32 bg = hov ? IM_COL32(255, 255, 255, 22)
+                           : IM_COL32(255, 255, 255, 10);
+            dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                              bg, sz.y * 0.5f);
+            dl->AddRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
+                        kHair, sz.y * 0.5f, 0, 1.0f);
+            // Truncate label if too long
+            char shown[64];
+            if (ts.x > maxLabelW) {
+                int n = std::min((int)strlen(label), 12);
+                snprintf(shown, sizeof(shown), "%.*s…", n, label);
+            } else {
+                snprintf(shown, sizeof(shown), "%s", label);
+            }
+            ImVec2 sts = ImGui::CalcTextSize(shown);
+            float yMid2 = cur.y + sz.y * 0.5f;
+            dl->AddText(ImVec2(cur.x + padX, yMid2 - sts.y * 0.5f),
+                        kFgWhite, shown);
+            // Chevron (Lucide chevron-down) — same visual language as the
+            // timeline-toggle chevron at the far right of the pill.
+            float cxv = cur.x + sz.x - padX - chevW * 0.5f;
+            lucide::chevronDown(dl, cxv, yMid2, chevW * 0.95f, kFgDim);
+            if (clicked) {
+#ifdef HAS_FFMPEG
+                m_audioDevices = VideoRecorder::enumerateAudioDevices();
+#endif
+                ImGui::OpenPopup("##fp_sysaudio_popup");
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("System audio source");
+        }
+#ifdef HAS_FFMPEG
+        if (ImGui::BeginPopup("##fp_sysaudio_popup")) {
+            ImGui::TextDisabled("System audio capture");
+            ImGui::Separator();
+            if (ImGui::Selectable("System default", m_selectedAudioDevice == -1)) {
+                m_selectedAudioDevice = -1;
+                m_recorder.setAudioDevice(-1);
+            }
+            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                const auto& dv = m_audioDevices[i];
+                if (!dv.isCapture) continue;
+                if (ImGui::Selectable(dv.name.c_str(), m_selectedAudioDevice == i)) {
+                    m_selectedAudioDevice = i;
+                    m_recorder.setAudioDevice(i);
+                }
+            }
+            ImGui::EndPopup();
+        }
+#endif
+
+        // ── Speaker (mute toggle / monitor — currently informational) ─────
+        ImGui::SameLine(0, kGap);
+        if (smallBtn("##fp_speaker", [&](float cx, float cy) {
+            lucide::volume(dl, cx, cy, btnSize * 0.55f, kFgWhite);
+        })) {
+            // No-op: monitor toggle could land here later.
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Audio monitor");
+
+        // ── Compact level meter — single horizontal pill that fills with
+        // the smoothed RMS, sitting flush next to the speaker icon. The old
+        // 7-bar VU was reading as decorative noise next to the volume icon.
+        ImGui::SameLine(0, kGap);
+        {
+            const float meterW = 56.0f, meterH = 5.0f;
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(meterW, btnSize));
+            float yMidM = cur.y + btnSize * 0.5f;
+            ImVec2 a(cur.x, yMidM - meterH * 0.5f);
+            ImVec2 b(cur.x + meterW, yMidM + meterH * 0.5f);
+            dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 28), meterH * 0.5f);
+            float lvl = std::min(1.0f, m_audioRMS * 4.0f);
+            if (lvl > 0.01f) {
+                ImU32 fillCol = IM_COL32(74, 174, 236, 240);
+                dl->AddRectFilled(a, ImVec2(cur.x + meterW * lvl, b.y),
+                                  fillCol, meterH * 0.5f);
+            }
+        }
+
+        // Divider before the timeline-toggle chevron — it's its own group
+        // (window control), not part of the audio cluster on its left.
+        divider();
+
+        // ── Timeline toggle (Lucide chevron — expand/collapse the timeline) ─
+        if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
+            if (m_timelineMinimized) lucide::chevronUp  (dl, cx, cy, btnSize * 0.45f, kFgWhite);
+            else                     lucide::chevronDown(dl, cx, cy, btnSize * 0.45f, kFgWhite);
+        })) m_timelineMinimized = !m_timelineMinimized;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(m_timelineMinimized ? "Expand timeline" : "Collapse timeline");
+
+        // (legacy pillBtn / mic / REC / STREAM / AUDIO blocks below this point
+        //  have been removed — the new top-down layout above is the entire pill.)
+#if 0
         auto pillBtn = [&](const char* id, int kind /*0 play/pause, 1 stop, 2 loop*/,
                            bool toggled = false) -> bool {
             ImVec2 cur = ImGui::GetCursorScreenPos();
@@ -4750,10 +5237,17 @@ void Application::renderFloatingTransportPill() {
             bool hov     = ImGui::IsItemHovered();
             ImDrawList* d = ImGui::GetWindowDrawList();
             float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
-            ImU32 bgCol = toggled ? IM_COL32(255, 255, 255, 32)
+            // Permanent dark circle bg + 1px hairline so each icon reads as a
+            // standalone floating button. Toggled / hover layer brighter fills
+            // on top.
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                               IM_COL32(20, 22, 28, 220), 28);
+            ImU32 bgCol = toggled ? IM_COL32(255, 255, 255, 36)
                                   : (hov ? IM_COL32(255, 255, 255, 22)
                                          : IM_COL32(255, 255, 255, 0));
             d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bgCol, 28);
+            d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f,
+                         IM_COL32(255, 255, 255, 30), 28, 1.0f);
             // Play button — accent ring outside the fill, soft glow halo.
             if (kind == 0) {
                 d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 1.0f,
@@ -4826,18 +5320,25 @@ void Application::renderFloatingTransportPill() {
             ImDrawList* d = ImGui::GetWindowDrawList();
             bool hov = ImGui::IsMouseHoveringRect(cur,
                 ImVec2(cur.x + sz.x, cur.y + sz.y));
+            // Permanent dark circle base + state-dependent overlay.
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                               IM_COL32(20, 22, 28, 220), 28);
             ImU32 bg = m_voiceListening
                        ? IM_COL32(255, 70, 70, 90)
                        : (hov ? IM_COL32(255, 255, 255, 22)
                               : IM_COL32(255, 255, 255, 0));
             d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bg, 28);
+            d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f,
+                         IM_COL32(255, 255, 255, 30), 28, 1.0f);
             // Mic glyph — Lucide/Phosphor style. Vertical capsule for
             // the body, an open semicircle below for the cradle arms,
             // short stem + horizontal base. Drawn from primitives so it
             // crisp at button size; no bezier guesswork.
-            ImU32 col = m_voiceListening
-                        ? IM_COL32(255, 90, 90, 240)
-                        : IM_COL32(232, 238, 250, 240);
+            //
+            // Glyph color stays white when listening so it reads against
+            // the red listening bg — red-on-red made the mic look like a
+            // featureless red blob next to the REC dot.
+            ImU32 col = IM_COL32(232, 238, 250, 240);
             float bodyW   = 5.0f;          // half-width of mic body
             float bodyTop = cy - 7.0f;     // top of mic capsule
             float bodyBot = cy + 2.0f;     // bottom of mic capsule
@@ -4874,6 +5375,177 @@ void Application::renderFloatingTransportPill() {
             }
         }
 #endif
+
+        // ── REC / STREAM / SYSTEM-AUDIO icons ─────────────────────────────
+        // These replace the bottom-right floating "REC" and "Go Live" text
+        // pills. Same visual rhythm as play/stop/loop above so the whole row
+        // reads as one compact transport.
+#ifdef HAS_FFMPEG
+        bool recActive  = m_recorder.isActive();
+        bool liveActive = m_rtmpOutput.isActive();
+
+        auto iconBtn = [&](const char* id, bool active, ImU32 activeBg,
+                           std::function<void(ImDrawList*, float cx, float cy, float r, ImU32 col)> drawGlyph)
+                       -> bool {
+            ImGui::SameLine(0, 8);
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            ImVec2 sz(btnSize, btnSize);
+            bool clicked = ImGui::InvisibleButton(id, sz);
+            bool hov     = ImGui::IsItemHovered();
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+            // Permanent dark circle bg + 1px hairline border so REC / STREAM /
+            // AUDIO read as floating buttons. State overlay (active/hover)
+            // sits on top.
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
+                               IM_COL32(20, 22, 28, 220), 28);
+            ImU32 bg = active ? activeBg
+                              : (hov ? IM_COL32(255, 255, 255, 22)
+                                     : IM_COL32(255, 255, 255, 0));
+            d->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f, bg, 28);
+            d->AddCircle(ImVec2(cx, cy), sz.x * 0.5f,
+                         IM_COL32(255, 255, 255, 30), 28, 1.0f);
+            ImU32 col = active ? IM_COL32(255, 90, 90, 240)
+                               : IM_COL32(232, 238, 250, 240);
+            drawGlyph(d, cx, cy, sz.x * 0.30f, col);
+            return clicked;
+        };
+
+        // REC — classic "record" mark: a thin red ring with a small
+        // filled red dot in the centre. While recording, the dot grows
+        // and pulses so the active state reads at a glance, and so it
+        // never collides visually with the listening-mic icon (which
+        // shows a white mic glyph on a red bg).
+        if (iconBtn("##fp_rec", recActive, IM_COL32(255, 70, 70, 90),
+                    [&](ImDrawList* d, float cx, float cy, float r, ImU32 /*c*/) {
+                        ImU32 ringCol = recActive ? IM_COL32(255, 90, 90, 245)
+                                                  : IM_COL32(255, 80, 80, 200);
+                        d->AddCircle(ImVec2(cx, cy), r * 0.95f, ringCol, 28, 1.6f);
+                        float dotR = recActive
+                            ? r * (0.45f + 0.08f * sinf((float)ImGui::GetTime() * 4.0f))
+                            : r * 0.35f;
+                        d->AddCircleFilled(ImVec2(cx, cy), dotR, ringCol, 20);
+                    })) {
+            if (m_recorder.isActive()) {
+                m_recorder.stop();
+                m_timelineExporting = false;
+            } else {
+                m_recorder.setAudioDevice(m_selectedAudioDevice);
+                startTimelineExport();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(recActive ? "Recording — click to stop" : "Record (work area)");
+
+        // STREAM — three broadcast arcs from a base dot.
+        if (iconBtn("##fp_stream", liveActive, IM_COL32(74, 230, 144, 60),
+                    [&](ImDrawList* d, float cx, float cy, float r, ImU32 col) {
+                        ImU32 useCol = liveActive ? IM_COL32(74, 230, 144, 245) : col;
+                        // Base dot at bottom-left.
+                        float bx = cx - r * 0.4f, by = cy + r * 0.6f;
+                        d->AddCircleFilled(ImVec2(bx, by), 2.0f, useCol, 12);
+                        // Three quarter-arcs radiating up-right.
+                        for (int i = 1; i <= 3; i++) {
+                            float ar = r * 0.45f * (float)i;
+                            d->PathArcTo(ImVec2(bx, by), ar,
+                                         -1.55f, 0.0f, 14);
+                            d->PathStroke(useCol, 0, 1.6f);
+                        }
+                    })) {
+            if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
+            else                         ImGui::OpenPopup("##fp_stream_popup");
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(liveActive ? "Streaming — click to stop" : "Stream to RTMP");
+        if (ImGui::BeginPopup("##fp_stream_popup")) {
+            ImGui::TextDisabled("Stream to RTMP");
+            ImGui::Separator();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("YouTube Stream Key");
+            ImGui::PopStyleColor();
+            ImGui::SetNextItemWidth(260);
+            ImGui::InputText("##fp_streamkey", m_streamKeyBuf, sizeof(m_streamKeyBuf),
+                             ImGuiInputTextFlags_Password);
+            static const char* aspectNames[] = { "16:9", "4:3", "16:10", "Source" };
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+            ImGui::Text("Aspect");
+            ImGui::PopStyleColor();
+            ImGui::SetNextItemWidth(260);
+            ImGui::Combo("##fp_aspect", &m_streamAspect, aspectNames, 4);
+            ImGui::Separator();
+            bool hasKey = m_streamKeyBuf[0] != '\0';
+            ImGui::BeginDisabled(!hasKey);
+            if (ImGui::Button("Start streaming", ImVec2(-1, 0))) {
+                static const int aspectNums[] = { 16, 4, 16, 0 };
+                static const int aspectDens[] = { 9,  3, 10, 0 };
+                auto& z = activeZone();
+                m_rtmpOutput.start(m_streamKeyBuf, z.warpFBO.width(), z.warpFBO.height(),
+                                   aspectNums[m_streamAspect], aspectDens[m_streamAspect], 30);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (!hasKey) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.6f, 0.2f, 1.0f));
+                ImGui::TextWrapped("Paste a YouTube stream key to enable.");
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndPopup();
+        }
+
+        // SYSTEM AUDIO — speaker glyph + arc waves; click opens device picker.
+        if (iconBtn("##fp_audio", false, IM_COL32(255, 255, 255, 0),
+                    [&](ImDrawList* d, float cx, float cy, float r, ImU32 col) {
+                        // Speaker body: trapezoid (rect + triangle).
+                        float bx = cx - r * 0.3f;
+                        d->AddRectFilled(ImVec2(bx - r * 0.5f, cy - r * 0.45f),
+                                         ImVec2(bx,           cy + r * 0.45f), col);
+                        d->AddTriangleFilled(
+                            ImVec2(bx,           cy - r * 0.45f),
+                            ImVec2(bx,           cy + r * 0.45f),
+                            ImVec2(bx + r * 0.7f, cy + r * 0.85f), col);
+                        d->AddTriangleFilled(
+                            ImVec2(bx,           cy - r * 0.45f),
+                            ImVec2(bx + r * 0.7f, cy - r * 0.85f),
+                            ImVec2(bx,           cy + r * 0.45f), col);
+                        // Waves — two outward arcs.
+                        float wx = cx + r * 0.4f;
+                        d->PathArcTo(ImVec2(wx, cy), r * 0.45f, -1.0f, 1.0f, 12);
+                        d->PathStroke(col, 0, 1.4f);
+                        d->PathArcTo(ImVec2(wx, cy), r * 0.75f, -1.0f, 1.0f, 14);
+                        d->PathStroke(col, 0, 1.4f);
+                    })) {
+            // Refresh device list before opening so it's current.
+            m_audioDevices = VideoRecorder::enumerateAudioDevices();
+            ImGui::OpenPopup("##fp_audio_popup");
+        }
+        {
+            const char* preview = "System default";
+            if (m_selectedAudioDevice >= 0 &&
+                m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                preview = m_audioDevices[m_selectedAudioDevice].name.c_str();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("System audio: %s\n(click to choose capture device)", preview);
+        }
+        if (ImGui::BeginPopup("##fp_audio_popup")) {
+            ImGui::TextDisabled("System audio capture");
+            ImGui::Separator();
+            if (ImGui::Selectable("System default",
+                                  m_selectedAudioDevice == -1)) {
+                m_selectedAudioDevice = -1;
+                m_recorder.setAudioDevice(-1);
+            }
+            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                const auto& dv = m_audioDevices[i];
+                if (!dv.isCapture) continue;
+                if (ImGui::Selectable(dv.name.c_str(),
+                                      m_selectedAudioDevice == i)) {
+                    m_selectedAudioDevice = i;
+                    m_recorder.setAudioDevice(i);
+                }
+            }
+            ImGui::EndPopup();
+        }
+#endif
+#endif // #if 0 — legacy transport blocks disabled
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
@@ -4881,6 +5553,10 @@ void Application::renderFloatingTransportPill() {
 }
 
 void Application::renderFloatingActionPills() {
+    // Replaced by the REC / STREAM icon buttons in renderFloatingTransportPill.
+    // Kept as an empty stub so the existing call sites stay compile-clean and
+    // the feature is one diff away from being restored if needed.
+    return;
     // Two separate rounded pills bottom-right — REC and LIVE — matching
     // the reference's split record/broadcast affordances. Each is its own
     // ImGui::Begin window so they animate, hover, and reposition cleanly
@@ -7681,7 +8357,9 @@ void Application::renderMenuBar() {
     // EDIT/FILE/LAYER/ZONE sit centred in the row next to the traffic-light
     // buttons. Slight font-scale-down (via SetWindowFontScale on the menu
     // window) makes the caps sit a notch smaller than body text.
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 8));
+    // Slimmer menu bar — was reading as a tall empty band over the logo
+    // and "···" menu, contributing to the "three headers" feel.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 4));
     if (ImGui::BeginMainMenuBar()) {
         if (ImGuiWindow* mw = ImGui::GetCurrentWindow()) mw->FontWindowScale = 0.88f;
 #ifdef __APPLE__
@@ -7710,18 +8388,18 @@ void Application::renderMenuBar() {
         {
             float baseY = ImGui::GetCursorPosY();
             ImVec2 cur = ImGui::GetCursorScreenPos();
-            const float r = 11.0f;
+            const float r = 7.0f;
             ImVec2 c(cur.x + r + 2.0f, cur.y + ImGui::GetFrameHeight() * 0.5f);
             ImDrawList* d = ImGui::GetWindowDrawList();
-            d->AddCircle(c, r, IM_COL32(255, 255, 255, 80), 28, 1.2f);
+            d->AddCircle(c, r, IM_COL32(255, 255, 255, 80), 24, 1.0f);
             // Inverted-V triangle (the "Easel" mark) — apex up, two feet
             // pointing down.
-            float tw = r * 0.85f, th = r * 0.85f;
+            float tw = r * 0.75f, th = r * 0.75f;
             d->AddTriangle(ImVec2(c.x,        c.y - th * 0.55f),
                            ImVec2(c.x - tw,   c.y + th * 0.55f),
                            ImVec2(c.x + tw,   c.y + th * 0.55f),
-                           IM_COL32(232, 238, 250, 235), 1.5f);
-            ImGui::Dummy(ImVec2(r * 2.0f + 12.0f, 0));
+                           IM_COL32(232, 238, 250, 235), 1.2f);
+            ImGui::Dummy(ImVec2(r * 2.0f + 10.0f, 0));
             ImGui::SameLine();
             ImGui::SetCursorPosY(baseY);
         }
@@ -8196,15 +8874,19 @@ void Application::loadShader(const std::string& path) {
         m_shaderClaw.watchSource(path, source);
     }
 
-    // Voice-native shaders: bind their `msg` text input to the Cue transcript
-    // by default, so what the user says appears in the shader without manual
-    // setup. The user can still re-bind via the property panel.
-    {
-        std::string base = (slash != std::string::npos) ? path.substr(slash + 1) : path;
-        std::string stem = base;
-        if (stem.size() > 3 && stem.substr(stem.size() - 3) == ".fs") stem.erase(stem.size() - 3);
-        if (stem == "text_clusters" || stem == "clusters") {
-            m_dataBus.bind(layer->id, "msg", "cue.latest");
+    // Voice-native auto-binding: any TEXT shader (one whose ISF declares a
+    // `msg` text input) gets its message bound to the live transcript so
+    // what the user says appears on-shader by default. Non-text shaders
+    // (visual generators, effects) get NO transcript binding, so voice
+    // doesn't bleed into unrelated parameters.
+    if (source) {
+        const auto& inputs = source->inputs();
+        bool hasMsg = false;
+        for (const auto& inp : inputs) {
+            if (inp.type == "text" && inp.name == "msg") { hasMsg = true; break; }
+        }
+        if (hasMsg) {
+            m_dataBus.bind(layer->id, "msg", "cue.transcript");
         }
     }
 }
