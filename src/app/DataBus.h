@@ -75,6 +75,13 @@ public:
             {"etherea.hint.1",       "Hint 2"},
             {"etherea.hint.2",       "Hint 3"},
             {"etherea.prompt",       "Prompt"},
+            {"cue.latest",           "Cue: Latest"},
+            {"cue.transcript",       "Cue: Transcript"},
+            {"cue.prompt",           "Cue: Prompt"},
+            {"cue.coach.headline",   "Cue Coach: Headline"},
+            {"cue.coach.quote",      "Cue Coach: Quote"},
+            {"cue.coach.feedback",   "Cue Coach: Feedback"},
+            {"cue.coach.alternative","Cue Coach: Alternative"},
         };
     }
 

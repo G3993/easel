@@ -109,7 +109,19 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                            bool ndiAvailable,
                            int editorMonitor,
                            const std::vector<std::unique_ptr<MappingProfile>>* allMappings,
-                           std::function<void()> inlineSetupSection) {
+                           std::function<void()> inlineSetupSection,
+                           std::function<void()> navPrefix) {
+    // First-render reset — guarantee the canvas opens at the default
+    // out-of-the-box state (zoom=1, pan=0,0) regardless of what was in
+    // the loaded project or any stale runtime state. Without this, a
+    // fresh launch could land with the canvas dragged off-screen and
+    // the user with no obvious recovery path.
+    static bool s_firstRender = true;
+    if (s_firstRender) {
+        s_firstRender = false;
+        m_zoom = 1.0f;
+        m_pan = {0, 0};
+    }
     // Unpack mapping for warp overlay
     WarpMode warpMode = mapping ? mapping->warpMode : WarpMode::CornerPin;
     CornerPinWarp* cornerPinPtr = mapping ? &mapping->cornerPin : nullptr;
@@ -128,9 +140,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // meant the workspace pill was clipped by anything overlaying the
     // top edge. (8,4) keeps the canvas image close to the rails on the
     // sides while reserving 8px headroom for the pill.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 8));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.012f, 0.012f, 0.016f, 1.0f));
+    // WindowPadding.y dropped 8 → 0 so the nav row sits flush at the top of
+    // the window — same row as the macOS traffic-light buttons. Matches
+    // Figma's single thin chrome row instead of a stacked title-bar + nav.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    // #141414 — exact hex requested for the canvas background.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0x14/255.0f, 0x14/255.0f, 0x14/255.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0x14/255.0f, 0x14/255.0f, 0x14/255.0f, 1.0f));
     ImGui::Begin("Canvas", nullptr,
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -153,7 +169,8 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // shared renderNavBar so the Stage panel can render an identical row
     // and switching workspaces doesn't shift element positions.
     if (zones && activeZone) {
-        renderNavBar(false, zones, activeZone, monitors, ndiAvailable, editorMonitor);
+        renderNavBar(false, zones, activeZone, monitors, ndiAvailable, editorMonitor,
+                     navPrefix);
         // Capture the nav row's bottom Y in screen space. We use this to
         // (a) seed m_panelMin.y for the layer overlay clip rect AND
         // (b) expose m_navRowBottomY so the overlay can additionally
@@ -161,17 +178,12 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         // Without (b), a layer whose bbox top sits flush with the canvas
         // image edge produced corner handles whose top halves rendered
         // ON TOP of the nav row.
-        ImGui::Dummy(ImVec2(0, 2));
+        // Capture the nav row's bottom edge for overlay clipping. No hairline
+        // separator and no dummy spacer band below it — the canvas should
+        // sit flush against the bottom of the nav row so there's no visible
+        // strip between them.
         m_navRowBottomY = ImGui::GetCursorScreenPos().y;
         m_panelMin.y    = m_navRowBottomY;
-        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
-        {
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float w = ImGui::GetContentRegionAvail().x;
-            tabDraw->AddLine(ImVec2(p.x, p.y), ImVec2(p.x + w, p.y),
-                             IM_COL32(255, 255, 255, 25));
-        }
-        ImGui::Dummy(ImVec2(0, 2));
         if (inlineSetupSection) {
             ImGui::Indent(6);
             inlineSetupSection();
@@ -561,7 +573,15 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
-                if (ImGui::Button(compLabel)) ImGui::OpenPopup("##CompPreset");
+                if (ImGui::Button(compLabel)) {
+                    // Clicking the aspect/composition chip also re-centers the
+                    // canvas in the editor viewport. After heavy panning the
+                    // canvas can drift off-screen with no obvious way back —
+                    // making the resolution chip double as a "reset view" hit
+                    // gives users a single, discoverable recovery action.
+                    resetZoom();
+                    ImGui::OpenPopup("##CompPreset");
+                }
                 ImGui::PopStyleColor(3);
                 // Fullscreen toggle — sits inline with the composition chip
                 // so "display setup" actions (pick output size, go fullscreen)
@@ -580,6 +600,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                         if (ImGui::Selectable(presetLabels[p], sel)) {
                             az.resize(presetW[p], presetH[p]);
                             az.compPreset = p;
+                            resetZoom();
                         }
                     }
                     ImGui::Separator();
@@ -610,6 +631,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                     if (ImGui::SmallButton("Apply")) {
                         az.resize(s_customCompW, s_customCompH);
                         az.compPreset = presetCount - 1;
+                        resetZoom();
                         ImGui::CloseCurrentPopup();
                     }
                     if (!valid) ImGui::EndDisabled();
@@ -625,7 +647,30 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
 #endif
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
+    ImVec2 availOrigin = ImGui::GetCursorScreenPos();
+
+    // The Properties/Sources/Audio/MIDI float panel on the right is rendered
+    // ON TOP of the Canvas window (it's a separate floating ImGui window with
+    // ImGuiWindowFlags_NoBringToFrontOnFocus). GetContentRegionAvail returns
+    // the FULL canvas width including the area behind the floating panel, so
+    // without this adjustment the canvas image gets sized to span the whole
+    // window and the right side is clipped past the window edge / hidden
+    // under the panel. Find the right-float host via the always-docked
+    // Properties tab and trim avail.x by the overlap so the image fits in
+    // the actually-visible viewport.
+    // Panel-overlap trims removed. The previous version computed avail.x
+    // from floating-panel positions and could collapse the canvas to a
+    // tiny strip at the wrong edge if the side panel positions weren't
+    // what the trim code assumed. Floating panels now simply render on
+    // top of the canvas image — z-order handles the overlap, the canvas
+    // itself always uses the full content region.
+    (void)availOrigin;
     m_size = {avail.x, avail.y};
+    // Push the cursor to availOrigin so the image (and its clip rect, both
+    // read from GetCursorScreenPos below) start at the post-trim left edge,
+    // not at the original full-window left edge that would put the image
+    // behind the Layers float.
+    ImGui::SetCursorScreenPos(availOrigin);
 
     if (texture && avail.x > 1 && avail.y > 1) {
         // Base image size (fit to panel)
@@ -660,6 +705,15 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         ImVec2 imgMax = ImGui::GetItemRectMax();
         m_imageOrigin = {imgMin.x, imgMin.y};
         m_imageSize = {imgMax.x - imgMin.x, imgMax.y - imgMin.y};
+        // Base bounds: where the canvas would sit at zoom=1, pan=0.
+        // The image's parent (panel content rect) has its top-left at the
+        // current cursor screen-pos; the base centred offset is just half
+        // the panel-vs-base difference. Stored separately so chrome that
+        // wants a stable canvas anchor doesn't follow the zoom.
+        float baseOffX = (avail.x - baseW) * 0.5f;
+        float baseOffY = (avail.y - baseH) * 0.5f;
+        m_baseImageOrigin = {clipMin.x + baseOffX, clipMin.y + baseOffY};
+        m_baseImageSize   = {baseW, baseH};
 
         ImGui::PopClipRect();
 
@@ -725,6 +779,11 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     bool spaceHeld = ImGui::IsKeyDown(ImGuiKey_Space);
     bool spacePanStart = m_hovered && spaceHeld &&
                          ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    // Hand cursor whenever space is held over the canvas (or already
+    // panning). Matches the Photoshop / Figma affordance.
+    if ((m_hovered && spaceHeld) || (m_panDragging && spaceHeld)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
     if (m_hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || spacePanStart)) {
         m_panDragging = true;
         ImVec2 mp = ImGui::GetMousePos();
@@ -743,8 +802,27 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         m_panDragging = false;
     }
 
-    // Double-click middle mouse to reset zoom/pan
-    if (m_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle)) {
+    // (Pan clamp removed — it was interacting badly with initial layout
+    // when avail dimensions weren't yet stable. Reset shortcuts below
+    // are the recovery path instead.)
+    if (!std::isfinite(m_pan.x) || !std::isfinite(m_pan.y)) m_pan = {0, 0};
+    if (!std::isfinite(m_zoom)  || m_zoom <= 0.0f)         m_zoom = 1.0f;
+
+    // Reset zoom/pan — three ways:
+    //  • double-click middle mouse (mouse-only)
+    //  • `0` while hovering the canvas (no modifier needed)
+    //  • Cmd/Ctrl + 0  (works regardless of focus — escape hatch when the
+    //    canvas has been panned entirely off-screen and there's nothing
+    //    left to hover over).
+    bool wantReset = false;
+    if (m_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Middle))
+        wantReset = true;
+    if (m_hovered && ImGui::IsKeyPressed(ImGuiKey_0, false))
+        wantReset = true;
+    bool cmdOrCtrl = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
+    if (cmdOrCtrl && ImGui::IsKeyPressed(ImGuiKey_0, false))
+        wantReset = true;
+    if (wantReset) {
         m_zoom = 1.0f;
         m_pan = {0, 0};
     }
@@ -1244,16 +1322,23 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     };
 
 
-    ImDrawList* draw = ImGui::GetBackgroundDrawList();
-    // Clip mask overlay drawing to viewport panel bounds
+    // Foreground draw list — handles must render ABOVE the Canvas window's
+    // opaque background fill. BackgroundDrawList rendered FIRST (before any
+    // window) and the Canvas's near-black bg obscured the mask handles
+    // entirely; switching to foreground guarantees they sit on top.
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    // Clip mask overlay drawing to viewport panel bounds (below the nav row).
     draw->PushClipRect(ImVec2(m_panelMin.x, m_panelMin.y),
                        ImVec2(m_panelMax.x, m_panelMax.y), true);
     ImVec2 mousePos = ImGui::GetMousePos();
     glm::vec2 mouseUV = screenToLayerUV({mousePos.x, mousePos.y});
 
     // --- Compute banner rect early so clicks on the banner/Save button
-    // don't leak through to the mask-point-add handler below. The banner
-    // sits at the top-right of the viewport away from common drawing areas.
+    // don't leak through to the mask-point-add handler below. Centered
+    // horizontally near the top of the canvas — the previous top-right
+    // pin pushed Save off-screen on narrow layouts and made it hard to
+    // find. Centered placement also reads as a focused "you're in mask
+    // edit mode" affordance.
     ImVec2 bannerMin, bannerMax, saveBtnMin, saveBtnMax;
     {
         const char* banner = mask.closed()
@@ -1262,11 +1347,14 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         ImVec2 ts = ImGui::CalcTextSize(banner);
         const char* saveLbl = "Save";
         ImVec2 sts = ImGui::CalcTextSize(saveLbl);
-        float pad = 8.0f;
-        float saveBtnW = sts.x + 18.0f;
-        float totalW = ts.x + pad * 2 + saveBtnW + 6.0f;
-        float totalH = ts.y + pad;
-        bannerMin = ImVec2(m_panelMax.x - totalW - 12, m_panelMin.y + 8);
+        float pad = 10.0f;
+        float saveBtnW = sts.x + 22.0f;
+        float totalW = ts.x + pad * 2 + saveBtnW + 8.0f;
+        float totalH = ts.y + pad * 1.4f;
+        // Center horizontally, sit 16px below the canvas content top.
+        float panelW = m_panelMax.x - m_panelMin.x;
+        float bannerX = m_panelMin.x + (panelW - totalW) * 0.5f;
+        bannerMin = ImVec2(bannerX, m_panelMin.y + 16);
         bannerMax = ImVec2(bannerMin.x + totalW, bannerMin.y + totalH);
         saveBtnMin = ImVec2(bannerMin.x + pad + ts.x + pad, bannerMin.y);
         saveBtnMax = ImVec2(saveBtnMin.x + saveBtnW, bannerMin.y + totalH);
@@ -1406,7 +1494,11 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
     ImU32 kMPointFill, kMPointRing, kMSelFill, kMSelRing, kMSelGlow;
     if (zoneIndex >= 0) {
         auto c = kZoneColors[zoneIndex % 8];
-        kMFill       = IM_COL32(c.r, c.g, c.b, 25);
+        // Inside of mask = NO color overlay so the user sees the canvas
+        // exactly as it will look after Save. The outside is dimmed to
+        // 25% via a separate pass below — that's the "this will be cut"
+        // affordance, not the inside fill.
+        kMFill       = IM_COL32(0, 0, 0, 0);
         kMCurveGlow  = IM_COL32(c.r, c.g, c.b, 55);
         kMCurve      = IM_COL32(c.r, c.g, c.b, 230);
         kMHandleLine = IM_COL32(c.r, c.g, c.b, 110);
@@ -1418,7 +1510,7 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         kMSelRing    = IM_COL32(255, 255, 255, 255);
         kMSelGlow    = IM_COL32(c.r, c.g, c.b, 60);
     } else {
-        kMFill       = IM_COL32(255, 200, 60, 25);
+        kMFill       = IM_COL32(0, 0, 0, 0); // no inside fill — see canvas-mask branch comment
         kMCurveGlow  = IM_COL32(255, 200, 60, 55);
         kMCurve      = IM_COL32(255, 210, 90, 230);
         kMHandleLine = IM_COL32(255, 200, 60, 110);
@@ -1460,8 +1552,34 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
 
     if (pts.empty()) { draw->PopClipRect(); return; }
 
-    // Closed mask: subtle fill inside to show masked region
+    // Closed mask: dim the OUTSIDE area to ~25% black so the user can
+    // preview "this is what gets cut after Save" without coloring the
+    // inside. Implemented as 4 axis-aligned quads bounding the polygon's
+    // bbox — covers the usual rectangular use cases. Concave-polygon
+    // gaps in the bbox→polygon corners are acceptable for a preview.
     if (pts.size() >= 3 && mask.closed()) {
+        // Bbox of the polygon in screen space.
+        float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+        for (const auto& p : pts) {
+            ImVec2 sp = toImVec2(layerUVToScreen(p.position));
+            if (sp.x < minX) minX = sp.x;
+            if (sp.y < minY) minY = sp.y;
+            if (sp.x > maxX) maxX = sp.x;
+            if (sp.y > maxY) maxY = sp.y;
+        }
+        const ImU32 kDim = IM_COL32(0, 0, 0, 64);  // ~25% black
+        // Top band, bottom band, left band, right band — together they
+        // cover the canvas area outside the polygon's bounding rect.
+        draw->AddRectFilled(ImVec2(m_panelMin.x, m_panelMin.y),
+                            ImVec2(m_panelMax.x, minY), kDim);
+        draw->AddRectFilled(ImVec2(m_panelMin.x, maxY),
+                            ImVec2(m_panelMax.x, m_panelMax.y), kDim);
+        draw->AddRectFilled(ImVec2(m_panelMin.x, minY),
+                            ImVec2(minX,         maxY), kDim);
+        draw->AddRectFilled(ImVec2(maxX,         minY),
+                            ImVec2(m_panelMax.x, maxY), kDim);
+        // Inside fill (kMFill is now alpha=0, so this is a no-op — left
+        // in place for future re-introduction with a different vocab).
         auto tv = mask.tessellate(24);
         if (tv.size() >= 3) {
             ImVec2 cs = toImVec2(layerUVToScreen(mask.centroid()));
@@ -1546,8 +1664,51 @@ void ViewportPanel::renderNavBar(bool stageActive,
                                  int editorMonitor,
                                  std::function<void()> prefixContent) {
     if (!zones || !activeZone) return;
-    ImGui::Dummy(ImVec2(0, 2));
-    // Match timeline/header edge padding (~12px from window edge).
+
+    // Nav row height = 28 so its 28-tall items (gear, System Audio pill,
+    // workspace pill, etc.) center exactly on y=14 — the same vertical line
+    // the macOS traffic-light buttons live on (titlebar = 28, lights centered
+    // → y=14). No dummy spacer, no separate strip color: the row sits directly
+    // on the Canvas window's dark-gray background so there's no black band
+    // visible above the canvas content on launch.
+    const float kNavRowH = 28.0f;
+    // Capture the actual screen-Y of the nav row's first drawable position
+    // BEFORE any item advances the cursor. This is the canonical center-line
+    // for every element in the row: the hamburger glyph (drawn via
+    // GetCursorScreenPos in renderNavBarPrefix), the Canvas/Stage/Show tabs
+    // (drawn at rowPos.y + kPillH * 0.5), and the floating right-cluster
+    // window (anchored explicitly to this Y below). Using viewport->Pos.y
+    // can drift if ImGui adds an internal title-bar reserve to the docked
+    // window, so we use the live cursor instead.
+    const float navRowScreenY = ImGui::GetCursorScreenPos().y;
+
+    // The top nav must visually win against EVERY other surface — no
+    // floating panel, no docked window, no overlay should ever paint over
+    // it. Routing the band AND every nav glyph through the viewport
+    // FOREGROUND draw list (rendered last, after all windows) gives it
+    // an absolute z-priority. The geometric clamp in UIManager still
+    // keeps panels out of the nav-row Y range, but z-priority is the
+    // belt-and-suspenders guarantee.
+    ImGuiViewport* vpFG = ImGui::GetMainViewport();
+    ImDrawList* navFG = ImGui::GetForegroundDrawList(vpFG);
+    {
+        navFG->AddRectFilled(
+            ImVec2(vpFG->Pos.x, navRowScreenY),
+            ImVec2(vpFG->Pos.x + vpFG->Size.x, navRowScreenY + kNavRowH),
+            IM_COL32(0x20, 0x24, 0x28, 255));
+        navFG->AddLine(
+            ImVec2(vpFG->Pos.x,                  navRowScreenY + kNavRowH),
+            ImVec2(vpFG->Pos.x + vpFG->Size.x,   navRowScreenY + kNavRowH),
+            IM_COL32(255, 255, 255, 28), 1.0f);
+    }
+
+    // Traffic-light clearance is owned by Application::renderNavBarPrefix
+    // (it knows about macOS fullscreen state, where AppKit hides the lights
+    // and the inset should collapse). Don't double-stack an Indent here —
+    // earlier the 78px Indent + 70px inset put the gear at x=148, leaving a
+    // wide dead band between the green light and the gear that read as a
+    // dark "shape". Keep ViewportPanel agnostic; only inset 12px so non-
+    // prefix nav items get the same edge breathing room as the timeline.
     ImGui::Indent(12);
     // Prefix cluster — Application injects the brand mark + ellipsis/overflow
     // menu here so the row carries the chrome (no separate ImGui menu bar
@@ -1561,332 +1722,487 @@ void ViewportPanel::renderNavBar(bool stageActive,
     }
     ImDrawList* tabDraw = ImGui::GetWindowDrawList();
 
-    // CANVAS / STAGE / SHOW segmented pill — iOS-style three-segment
-    // control inside a single rounded container. Active segment is a
-    // solid white pill (with dark text), inactive segments are
-    // transparent over the container background. The container sits on
-    // the dark canvas, so its fill is a light-gray "track" that reads
-    // as a single grouped control rather than three loose buttons.
+    // CANVAS / STAGE / SHOW — Figma-style text tabs with a thin underline
+    // under the active label. No track, no pill, no segmented background.
+    // Active = full-saturated text + 2px underline; inactive = muted text;
+    // hover lifts the muted text toward white.
     {
         using Mode = UIManager::WorkspaceMode;
         Mode mode = UIManager::sMode;
 
-        // Pill height bumped 30 → 36 so descenders ("g" in "Stage", lower
-        // halves of "C", "S", "h" against the dark canvas) have room to
-        // sit clear of any top-of-window clipping. Track padding scales
-        // with height so the active inner pill stays proportional.
-        const float kPillH      = 36.0f;
-        const float kSegPadX    = 18.0f;
-        const float kTrackPad   = 5.0f;
-        const char* labels[3]   = {"Canvas", "Stage", "Show"};
-        Mode      modes[3]      = {Mode::Canvas, Mode::Stage, Mode::Show};
+        // Slightly smaller workspace labels so they share the same visual
+        // weight as the right cluster (Main / OUTPUT / 1920x1080 chip) and
+        // sit one notch lighter than the hamburger / traffic lights.
+        ImGui::SetWindowFontScale(0.93f);
 
-        // Measure each segment so the active pill can be drawn behind
-        // the right label.
+        const float kPillH       = 28.0f;
+        const float kSegGap      = 26.0f;   // breathing room between segments
+        const char* labels[3] = {"CANVAS", "STAGE", "SHOW"};
+        Mode      modes[3]    = {Mode::Canvas, Mode::Stage, Mode::Show};
+
+        // Each segment = label width. Icons removed — the workspace tabs
+        // now read as text-only, mirroring the rest of the nav row's
+        // borderless typographic style.
         float segW[3];
-        float totalW = kTrackPad * 2.0f;
+        float totalW = 0.0f;
         for (int i = 0; i < 3; i++) {
-            segW[i] = ImGui::CalcTextSize(labels[i]).x + kSegPadX * 2.0f;
+            segW[i] = ImGui::CalcTextSize(labels[i]).x;
             totalW += segW[i];
+            if (i < 2) totalW += kSegGap;
         }
 
-        // Center the workspace pill horizontally relative to the FULL row
-        // width — not the remaining-after-prefix width. With a prefix
-        // cluster (brand + overflow menu) on the left, naive centering on
-        // remaining space would shift the pill right. Use absolute window
-        // coordinates so the pill always sits at the row's true midpoint.
-        {
-            float winContentW = ImGui::GetWindowContentRegionMax().x
-                              - ImGui::GetWindowContentRegionMin().x;
-            float targetX = ImGui::GetWindowContentRegionMin().x
-                          + (winContentW - totalW) * 0.5f;
-            float curX = ImGui::GetCursorPosX();
-            if (targetX > curX) ImGui::SetCursorPosX(targetX);
-        }
-
-        ImVec2 trackPos = ImGui::GetCursorScreenPos();
-        ImDrawList* dl  = ImGui::GetWindowDrawList();
-
-        // Track (container)
-        dl->AddRectFilled(
-            trackPos,
-            ImVec2(trackPos.x + totalW, trackPos.y + kPillH),
-            IM_COL32(255, 255, 255, 14),  // subtle light track on dark
-            kPillH * 0.5f);
-        dl->AddRect(
-            trackPos,
-            ImVec2(trackPos.x + totalW, trackPos.y + kPillH),
-            IM_COL32(255, 255, 255, 18),
-            kPillH * 0.5f, 0, 1.0f);
-
-        // Active pill highlight (drawn before InvisibleButton hit zones
-        // so the button rect still receives clicks).
-        int activeIdx = (mode == Mode::Stage) ? 1 : (mode == Mode::Show) ? 2 : 0;
-        float activeX = trackPos.x + kTrackPad;
-        for (int i = 0; i < activeIdx; i++) activeX += segW[i];
-        dl->AddRectFilled(
-            ImVec2(activeX, trackPos.y + kTrackPad),
-            ImVec2(activeX + segW[activeIdx] - kTrackPad * 2.0f,
-                   trackPos.y + kPillH - kTrackPad),
-            IM_COL32(247, 248, 248, 255), // textPrimary near-white pill
-            (kPillH - kTrackPad * 2.0f) * 0.5f);
-
-        // Hit zones + labels
-        float x = trackPos.x;
-        for (int i = 0; i < 3; i++) {
-            ImGui::SetCursorScreenPos(ImVec2(x, trackPos.y));
-            ImGui::PushID(i);
-            bool clicked = ImGui::InvisibleButton("##seg", ImVec2(segW[i], kPillH));
-            ImGui::PopID();
-            if (clicked) {
-                UIManager::setMode(modes[i]);
-                if (modes[i] == Mode::Show && stageActive) {
-                    // Show mode currently shares Canvas chrome — nothing
-                    // special to do until pass 2 wires up the live focus.
-                }
-            }
-            // Label, vertically centered
-            ImVec2 ts = ImGui::CalcTextSize(labels[i]);
-            ImU32 fg  = (i == activeIdx)
-                ? IM_COL32(13, 18, 26, 255)         // dark on light pill
-                : IM_COL32(204, 209, 224, 220);     // muted on track
-            dl->AddText(
-                ImVec2(x + (segW[i] - ts.x) * 0.5f,
-                       trackPos.y + (kPillH - ts.y) * 0.5f),
-                fg, labels[i]);
-            x += segW[i];
-        }
-
-        // Advance cursor to end of track + a small gap so following
-        // SameLine() calls land cleanly.
-        ImGui::SetCursorScreenPos(ImVec2(trackPos.x + totalW + 6.0f, trackPos.y));
-        ImGui::Dummy(ImVec2(0, kPillH));
+        // Left-align the workspace tabs — they sit a comfortable distance
+        // after the prefix cluster (settings gear / System Audio) so the
+        // two groups read as separate clusters, not one mashed strip.
+        ImGui::Dummy(ImVec2(24.0f, 0));
         ImGui::SameLine(0, 0);
-    }
 
-    // Right-align the cluster
-    {
-        const float kPadX        = 14.0f * 2.0f;
-        const float kZoneSpacing = 4.0f;
-        const float kSectionGap  = 14.0f;
-        const float kInnerGap    = 8.0f;
-        const float kComboW      = 150.0f;
-        float rightW = 0.0f;
-        for (auto& zp : *zones)
-            rightW += ImGui::CalcTextSize(zp->name.c_str()).x + kPadX + kZoneSpacing;
-        rightW += ImGui::CalcTextSize("+").x + kPadX;
-        rightW += kSectionGap;
-        rightW += ImGui::CalcTextSize("OUTPUT").x + kInnerGap;
-        rightW += kComboW + kInnerGap;
-        int aiLookup = *activeZone;
-        if (aiLookup >= 0 && aiLookup < (int)zones->size()) {
-            char compLabel[48];
-            snprintf(compLabel, sizeof(compLabel), "%d x %d",
-                     (*zones)[aiLookup]->width, (*zones)[aiLookup]->height);
-            rightW += ImGui::CalcTextSize(compLabel).x + kPadX;
-        } else {
-            rightW += 120.0f;
-        }
-        rightW += kInnerGap;
-        // Fullscreen icon button — same FrameHeight + 6 footprint as the
-        // play/stop transport buttons, no text width.
-        rightW += ImGui::GetFrameHeight() + 6.0f;
-        // ~12px right margin to mirror the left inset, plus combo-arrow slack.
-        rightW += 28.0f;
+        ImVec2 rowPos = ImGui::GetCursorScreenPos();
+        // Workspace tab labels paint into the foreground draw list so they
+        // sit above any panel that might be near the nav row in z-order.
+        ImDrawList* dl = navFG;
+        int activeIdx = (mode == Mode::Stage) ? 1 : (mode == Mode::Show) ? 2 : 0;
 
-        ImGui::SameLine();
-        // Shift the right cluster left by the right tool rail's footprint
-        // (kRightToolRailW=56 + small breathing margin). Without this the
-        // fullscreen icon at the cluster's right end is hidden under the
-        // floating right tool rail because the canvas window's content
-        // region extends under the rail.
-        const float kRailReserve = 64.0f;
-        float targetX = ImGui::GetContentRegionMax().x - rightW - kRailReserve;
-        float curX    = ImGui::GetCursorPosX();
-        if (targetX > curX) ImGui::SetCursorPosX(targetX);
-    }
+        // Pre-allocate the entire row's footprint with a single Dummy.
+        // ImGui asserts at frame end if SetCursorScreenPos pushes the cursor
+        // past content bounds without a subsequent item that grows them, so
+        // we declare the bounds upfront, then drop the per-tab InvisibleButtons
+        // inside the now-already-claimed rect with AllowOverlap.
+        const float kRowPadRight = 8.0f;
+        ImGui::Dummy(ImVec2(totalW + kRowPadRight, kPillH));
 
-    // Zone tabs
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
-    for (int i = 0; i < (int)zones->size(); i++) {
-        ImGui::PushID(9000 + i);
-        bool isActive = (i == *activeZone);
-        auto& z = *(*zones)[i];
-        static const float zoneColors[][3] = {
-            {0.96f, 0.96f, 0.96f}, {0.86f, 0.86f, 0.86f}, {0.76f, 0.76f, 0.76f}, {0.66f, 0.66f, 0.66f},
-            {0.56f, 0.56f, 0.56f}, {0.80f, 0.80f, 0.80f}, {0.70f, 0.70f, 0.70f}, {0.60f, 0.60f, 0.60f},
-        };
-        const float* zc = zoneColors[i % 8];
-        if (isActive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0], zc[1], zc[2], 0.25f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.35f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(zc[0] * 0.15f, zc[1] * 0.15f, zc[2] * 0.15f, 0.9f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0] * 0.25f, zc[1] * 0.25f, zc[2] * 0.25f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0] * 0.6f, zc[1] * 0.6f, zc[2] * 0.6f, 1.0f));
-        }
-        if (ImGui::Button(z.name.c_str())) *activeZone = i;
-        ImGui::PopStyleColor(3);
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            m_renaming = true;
-            m_renameIndex = i;
-            strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
-            m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
-        }
-        if (ImGui::BeginPopupContextItem("ZoneTabCtx")) {
-            if (ImGui::MenuItem("Rename")) {
-                m_renaming = true;
-                m_renameIndex = i;
-                strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
-                m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+        // Vertical centerline for the row. Label baselines hang off this
+        // so the segment reads as a single horizontal run.
+        float yCenter = rowPos.y + kPillH * 0.5f;
+
+        float x = rowPos.x;
+        for (int i = 0; i < 3; i++) {
+            ImGui::SetCursorScreenPos(ImVec2(x, rowPos.y));
+            ImGui::PushID(i);
+            ImGui::SetNextItemAllowOverlap();
+            bool clicked = ImGui::InvisibleButton("##wsTab", ImVec2(segW[i], kPillH));
+            bool hov     = ImGui::IsItemHovered();
+            ImGui::PopID();
+            if (clicked) UIManager::setMode(modes[i]);
+
+            ImVec2 ts = ImGui::CalcTextSize(labels[i]);
+            bool isActive = (i == activeIdx);
+            ImU32 fg = isActive
+                ? IM_COL32(255, 255, 255, 255)
+                : (hov ? IM_COL32(200, 208, 220, 230)
+                       : IM_COL32(135, 142, 158, 200));
+
+            // ── Label (vertically centered on yCenter) ─────────────
+            float lblX = x;
+            float lblY = yCenter - ts.y * 0.5f;
+            dl->AddText(ImVec2(lblX, lblY), fg, labels[i]);
+            // Faux-bold for the active label
+            if (isActive) {
+                dl->AddText(ImVec2(lblX + 0.6f, lblY), fg, labels[i]);
             }
-            if (ImGui::MenuItem("Duplicate")) *activeZone = -(200 + i);
-            if ((int)zones->size() > 1) {
-                if (ImGui::MenuItem("Remove")) *activeZone = -(300 + i);
-            }
-            ImGui::EndPopup();
-        }
-        ImVec2 btnMin = ImGui::GetItemRectMin();
-        if (z.outputDest == OutputDest::Fullscreen || z.outputDest == OutputDest::NDI) {
-            ImU32 dotCol = IM_COL32((int)(zc[0]*255), (int)(zc[1]*255), (int)(zc[2]*255), 255);
-            tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, dotCol);
-        }
-        ImGui::SameLine();
-        ImGui::PopID();
-    }
-    if (m_renaming) ImGui::OpenPopup("##RenameZone");
-    if (ImGui::BeginPopup("##RenameZone")) {
-        ImGui::Text("Rename Zone");
-        ImGui::SetNextItemWidth(200);
-        bool enter = ImGui::InputText("##RenameInput", m_renameBuf, sizeof(m_renameBuf),
-                                      ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-        if (m_renaming) { ImGui::SetKeyboardFocusHere(-1); m_renaming = false; }
-        if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            if (enter && m_renameIndex >= 0 && m_renameIndex < (int)zones->size() && m_renameBuf[0]) {
-                (*zones)[m_renameIndex]->name = m_renameBuf;
-            }
-            m_renameIndex = -1;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
-    if (ImGui::Button("+")) *activeZone = -(100 + (int)zones->size());
-    if (ImGui::IsItemHovered()) ParamRow::Tooltip("Add output zone");
-    ImGui::PopStyleColor(3);
-    ImGui::PopStyleVar(2);
 
-    // OUTPUT + composition + Fullscreen
+            x += segW[i];
+            if (i < 2) x += kSegGap;
+        }
+
+        // Reset cursor to the right edge of the row's pre-allocated rect.
+        // SetCursorPos (window-relative) avoids the SetCursorScreenPos
+        // boundary-extension assertion entirely.
+        float windowRelX = (rowPos.x + totalW + kRowPadRight)
+                         - ImGui::GetWindowPos().x;
+        float windowRelY = rowPos.y - ImGui::GetWindowPos().y;
+        ImGui::SetCursorPos(ImVec2(windowRelX, windowRelY));
+        ImGui::SameLine(0, 0);
+        // Reset font scale so the rest of the canvas window renders at
+        // its normal size — the smaller scale only applies to the
+        // CANVAS/STAGE/SHOW row.
+        ImGui::SetWindowFontScale(1.0f);
+    }
+
+    // Stage workspace: skip the entire zones / OUTPUT cluster on the right.
+    // Stage is a 3D pre-viz surface — zone routing and OUTPUT destination
+    // are Canvas concerns. The only right-side affordance Stage needs is
+    // System Audio (the source the workspace listens to). The settings
+    // gear is already drawn on the left via prefixContent.
+    if (stageActive) {
+        // Right-align a single "System Audio" pill identical to the one
+        // in the floating transport pill, opening the same picker popup.
+        ImGui::Unindent(12);
+        // Reuse the workspace-pill's window-wide centering math so the
+        // System Audio pill lines up against the right edge.
+        float winW = ImGui::GetWindowContentRegionMax().x
+                   - ImGui::GetWindowContentRegionMin().x;
+        const float kPillH = 30.0f;
+        const float kPadX  = 14.0f;
+        const char* label  = "System Audio";
+        float labelW = ImGui::CalcTextSize(label).x;
+        float pillW  = labelW + kPadX * 2.0f + 18.0f; // 18 = chevron column
+        // Set cursor to right edge inset by 12px so it visually mirrors
+        // the workspace nav's left inset.
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMin().x + winW - pillW - 12.0f);
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        bool clicked = ImGui::InvisibleButton("##stage_audio", ImVec2(pillW, kPillH));
+        bool hov     = ImGui::IsItemHovered();
+        ImU32 bg = hov ? IM_COL32(255, 255, 255, 22)
+                       : IM_COL32(255, 255, 255, 10);
+        dl->AddRectFilled(cur, ImVec2(cur.x + pillW, cur.y + kPillH),
+                          bg, kPillH * 0.5f);
+        dl->AddRect(cur, ImVec2(cur.x + pillW, cur.y + kPillH),
+                    IM_COL32(255, 255, 255, 28),
+                    kPillH * 0.5f, 0, 1.0f);
+        ImVec2 ts = ImGui::CalcTextSize(label);
+        float yMid = cur.y + kPillH * 0.5f;
+        dl->AddText(ImVec2(cur.x + kPadX, yMid - ts.y * 0.5f),
+                    IM_COL32(232, 238, 250, 240), label);
+        // Chevron-down on the right
+        float cxv = cur.x + pillW - kPadX - 6.0f;
+        dl->AddTriangleFilled(
+            ImVec2(cxv - 4.0f, yMid - 2.0f),
+            ImVec2(cxv + 4.0f, yMid - 2.0f),
+            ImVec2(cxv,        yMid + 3.0f),
+            IM_COL32(170, 178, 195, 220));
+        if (clicked) ImGui::OpenPopup("##stage_sysaudio_popup");
+        // (Popup contents are wired separately in Application.cpp where
+        // the audio device list lives — this nav row only owns the
+        // visible pill. Click-through opens the same popup name.)
+        ImGui::Indent(12);
+        return;
+    }
+
+    // (void) silences unused warnings for params that are only consumed by
+    // the floating zone+output dock — kept on the signature so the existing
+    // call sites don't need refactoring.
+    (void)tabDraw;
+    (void)monitors;
+    (void)ndiAvailable;
+    (void)editorMonitor;
+
+    // Right cluster — zones (Main / + ) + OUTPUT combo + composition chip
+    // + fullscreen icon. AlwaysAutoResize + top-right pivot anchor lets
+    // the window grow leftward as the active zone name / OUTPUT label
+    // change length, without us having to compute width by hand.
     int ai = *activeZone;
     if (ai >= 0 && ai < (int)zones->size()) {
         auto& az = *(*zones)[ai];
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 7));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 2));
-        ImGui::SameLine(0, 14);
 
-        static char destBuf[128] = {};
-        const char* destLabel = "Preview Only";
-        if (az.outputDest == OutputDest::Fullscreen && monitors) {
-            int mi = az.outputMonitor;
-            if (mi >= 0 && mi < (int)monitors->size()) {
-                snprintf(destBuf, sizeof(destBuf), "Fullscreen: %s", (*monitors)[mi].name.c_str());
+        char compLabel[48];
+        snprintf(compLabel, sizeof(compLabel), "%d x %d", az.width, az.height);
+        ImVec2 lblSz = ImGui::CalcTextSize(compLabel);
+        const float fsBtnSize = 28.0f;
+        const float gap = 8.0f;
+        const float caretW = 10.0f;        // chevron + breathing space
+        const float caretGap = 4.0f;       // gap between label and chevron
+        float chipW = lblSz.x + caretGap + caretW;
+
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        const float kRightInset = 8.0f;
+        const float kBtn = 28.0f;
+        // Pivot (1, 0) anchors the window's TOP-RIGHT to the given point so
+        // the cluster grows leftward as content gets wider. The cluster is
+        // composed entirely of InvisibleButton(fsBtnSize=28) + manually
+        // centred text/glyphs, so its content already lives in a 28px band
+        // identical to the workspace tabs and the macOS traffic-light row.
+        // Anchor at navRowScreenY (no Y offset) so all three groups —
+        // traffic lights, CANVAS/STAGE/SHOW, and the right cluster — share
+        // exactly one vertical centerline.
+        float anchorX = vp->Pos.x + vp->Size.x - kRightInset;
+        float anchorY = navRowScreenY;
+
+        ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY),
+                                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowViewport(vp->ID);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+        ImGuiWindowFlags fr = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+            | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking
+            | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar
+            | ImGuiWindowFlags_AlwaysAutoResize;
+        if (ImGui::Begin("##NavRightCluster", nullptr, fr)) {
+        // Slightly smaller text across the entire right cluster so the
+        // labels (Main / OUTPUT / Preview Only / 1920x1080) read as a
+        // compact secondary row instead of competing with body content.
+        ImGui::SetWindowFontScale(0.93f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 3));
+        // Bumped 8 → 16 so MAIN / + / OUTPUT / PREVIEW ONLY / 1920x1080 /
+        // fullscreen all have breathing room between them.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(16.0f, 2));
+
+        // ── Zone tabs (MAIN / ZONE 2 / + ) — borderless text-only style ──
+        // Active zone reads as full-saturated white text; inactive zones as
+        // muted gray. No pill background, no chip, no rounded fill — the
+        // active state is carried by text weight/colour alone, mirroring
+        // CANVAS/STAGE/SHOW. The "+" is a thin 12px glyph, no disc.
+        // Right-cluster glyphs route to the foreground draw list so they
+        // can never be obscured by a floating panel that brushes the
+        // nav-row Y range.
+        ImDrawList* tabDraw = navFG;
+        for (int zi = 0; zi < (int)zones->size(); zi++) {
+            ImGui::PushID(9000 + zi);
+            bool isActive = (zi == *activeZone);
+            auto& z = *(*zones)[zi];
+
+            std::string zNameUpper = z.name;
+            for (char& ch : zNameUpper) ch = (char)std::toupper((unsigned char)ch);
+            ImVec2 lblSz = ImGui::CalcTextSize(zNameUpper.c_str());
+
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            // Hit area = label width + 6px breathing room on each side; row
+            // height matches fsBtnSize so the centerline aligns with OUTPUT,
+            // PREVIEW ONLY, the resolution chip, and the fullscreen icon.
+            float hitW = lblSz.x + 12.0f;
+            bool clicked = ImGui::InvisibleButton("##zoneTab", ImVec2(hitW, fsBtnSize));
+            bool hov     = ImGui::IsItemHovered();
+
+            ImU32 fg = isActive
+                ? IM_COL32(245, 247, 252, 255)
+                : (hov ? IM_COL32(220, 225, 235, 230)
+                       : IM_COL32(150, 158, 175, 200));
+            float yMid = cur.y + fsBtnSize * 0.5f;
+            tabDraw->AddText(ImVec2(cur.x + 6.0f, yMid - lblSz.y * 0.5f),
+                             fg, zNameUpper.c_str());
+
+            // Routing indicator — small dot to the left of the label when
+            // this zone is sending output to a destination.
+            if (z.outputDest == OutputDest::Fullscreen || z.outputDest == OutputDest::NDI) {
+                ImU32 dotCol = IM_COL32(85, 210, 130, 245);
+                tabDraw->AddCircleFilled(ImVec2(cur.x + 2.0f, yMid), 2.0f, dotCol, 12);
+            }
+
+            if (clicked) *activeZone = zi;
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                m_renaming = true;
+                m_renameIndex = zi;
+                strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+            }
+            if (ImGui::BeginPopupContextItem("ZoneTabCtx")) {
+                if (ImGui::MenuItem("Rename")) {
+                    m_renaming = true;
+                    m_renameIndex = zi;
+                    strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                    m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+                }
+                if (ImGui::MenuItem("Duplicate")) *activeZone = -(200 + zi);
+                if ((int)zones->size() > 1) {
+                    if (ImGui::MenuItem("Remove")) *activeZone = -(300 + zi);
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine(0, 0);
+            ImGui::PopID();
+        }
+        if (m_renaming) ImGui::OpenPopup("##NavRenameZone");
+        if (ImGui::BeginPopup("##NavRenameZone")) {
+            ImGui::Text("Rename Zone");
+            ImGui::SetNextItemWidth(200);
+            bool enter = ImGui::InputText("##NavRenameInput", m_renameBuf, sizeof(m_renameBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+            if (m_renaming) { ImGui::SetKeyboardFocusHere(-1); m_renaming = false; }
+            if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                if (enter && m_renameIndex >= 0 && m_renameIndex < (int)zones->size() && m_renameBuf[0]) {
+                    (*zones)[m_renameIndex]->name = m_renameBuf;
+                }
+                m_renameIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        // ── + (add zone) — borderless thin plus glyph, no disc ─────────
+        {
+            const float kAddW = fsBtnSize;        // matches the row band height
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton("##addZone", ImVec2(kAddW, fsBtnSize));
+            bool hov     = ImGui::IsItemHovered();
+            ImDrawList* dAdd = navFG;
+            float cx = cur.x + kAddW * 0.5f;
+            float cy = cur.y + fsBtnSize * 0.5f;
+            ImU32 col = hov ? IM_COL32(235, 240, 250, 240)
+                            : IM_COL32(150, 158, 175, 220);
+            float a = 5.0f;        // half-length of each plus arm
+            float th = 1.4f;       // stroke thickness, matches the chevrons
+            dAdd->AddLine(ImVec2(cx - a, cy), ImVec2(cx + a, cy), col, th);
+            dAdd->AddLine(ImVec2(cx, cy - a), ImVec2(cx, cy + a), col, th);
+            if (clicked) *activeZone = -(100 + (int)zones->size());
+            if (ImGui::IsItemHovered()) ParamRow::Tooltip("Add output zone");
+        }
+
+        // ── OUTPUT label + destination combo ────────────────────────
+        // Bumped 14 → 24 to give the zone/+ cluster more breathing room
+        // before the OUTPUT cluster — they read as separate groups now.
+        ImGui::SameLine(0, 24);
+        {
+            static char destBuf[128] = {};
+            const char* destLabel = "PREVIEW ONLY";
+            if (az.outputDest == OutputDest::Fullscreen && monitors) {
+                int mi = az.outputMonitor;
+                if (mi >= 0 && mi < (int)monitors->size()) {
+                    snprintf(destBuf, sizeof(destBuf), "FULLSCREEN: %s",
+                             (*monitors)[mi].name.c_str());
+                    destLabel = destBuf;
+                }
+            } else if (az.outputDest == OutputDest::NDI) {
+                snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
+                         az.ndiStreamName.empty() ? az.name.c_str()
+                                                  : az.ndiStreamName.c_str());
                 destLabel = destBuf;
             }
-        } else if (az.outputDest == OutputDest::NDI) {
-            snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
-                     az.ndiStreamName.empty() ? az.name.c_str() : az.ndiStreamName.c_str());
-            destLabel = destBuf;
-        }
+            bool live = (az.outputDest != OutputDest::None);
 
-        bool live = (az.outputDest != OutputDest::None);
-        // (Status dot removed — the OUTPUT label + combo carry enough
-        //  signal on their own; the dot read as visual noise next to
-        //  the bigger composition chip and Fullscreen icon.)
-        ImGui::AlignTextToFramePadding();
-        if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-        else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::TextUnformatted("OUTPUT");
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-
-        if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
-        else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
-        ImGui::SetNextItemWidth(150.0f);
-        if (ImGui::BeginCombo("##ZoneOutput", destLabel, ImGuiComboFlags_HeightLarge)) {
-            if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
-                az.outputDest = OutputDest::None;
-                az.outputMonitor = -1;
+            // OUTPUT label — drawn manually, vertically centered inside the
+            // same fsBtnSize-tall band the composition chip + fullscreen
+            // icon use. This puts the OUTPUT label, the PREVIEW ONLY chip,
+            // the 1920x1080 chip and the fullscreen icon on a single
+            // shared centerline.
+            {
+                const char* outLbl = "OUTPUT";
+                ImVec2 outSz = ImGui::CalcTextSize(outLbl);
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                ImGui::Dummy(ImVec2(outSz.x, fsBtnSize));
+                ImU32 outCol = live ? IM_COL32(56, 209, 132, 245)
+                                    : IM_COL32(115, 128, 149, 245);
+                float yMid = cur.y + fsBtnSize * 0.5f;
+                navFG->AddText(
+                    ImVec2(cur.x, yMid - outSz.y * 0.5f), outCol, outLbl);
             }
-            if (monitors && !monitors->empty()) {
-                ImGui::Separator();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
-                ImGui::Text("  Fullscreen");
-                ImGui::PopStyleColor();
-                for (int mi = 0; mi < (int)monitors->size(); mi++) {
-                    ImGui::PushID(mi);
-                    if (mi == editorMonitor) { ImGui::PopID(); continue; }
-                    std::string claimedBy;
-                    for (int zi = 0; zi < (int)zones->size(); zi++) {
-                        if (zi == ai) continue;
-                        auto& oz = *(*zones)[zi];
-                        if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
-                            claimedBy = oz.name; break;
-                        }
-                    }
-                    char label[256];
-                    if (!claimedBy.empty()) {
-                        snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
-                                 (*monitors)[mi].name.c_str(),
-                                 (*monitors)[mi].width, (*monitors)[mi].height,
-                                 claimedBy.c_str());
-                    } else {
-                        snprintf(label, sizeof(label), "%s  %dx%d",
-                                 (*monitors)[mi].name.c_str(),
-                                 (*monitors)[mi].width, (*monitors)[mi].height);
-                    }
-                    if (!claimedBy.empty())
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
-                    bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
-                    if (ImGui::Selectable(label, sel)) {
-                        if (!claimedBy.empty()) {
-                            for (int zi = 0; zi < (int)zones->size(); zi++) {
-                                if (zi == ai) continue;
-                                auto& oz = *(*zones)[zi];
-                                if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
-                                    oz.outputDest = OutputDest::None;
-                                    oz.outputMonitor = -1;
-                                    break;
-                                }
+            ImGui::SameLine(0, 6);
+
+            // Chip-style picker (no frame, no background) — same family as
+            // the aspect-ratio chip beside it: label + tiny chevron, click
+            // opens a popup. The chip uses fsBtnSize so it shares the exact
+            // vertical centerline of the composition chip and fullscreen
+            // icon to its right.
+            ImVec2 outChipBR;  // bottom-right of trigger — anchors popup
+            {
+                ImVec2 lblSz = ImGui::CalcTextSize(destLabel);
+                const float chevW   = 7.0f;
+                const float chevGap = 4.0f;
+                float chipW = lblSz.x + chevGap + chevW;
+                // Match the composition chip + fullscreen icon height so all
+                // three controls share the same vertical centerline.
+                float chipH = fsBtnSize;
+
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##NavOutputChip",
+                                                     ImVec2(chipW, chipH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* dOut = navFG;
+
+                ImU32 textCol;
+                if (live)      textCol = IM_COL32(85, 210, 130, 245);
+                else if (hov)  textCol = IM_COL32(235, 240, 250, 240);
+                else           textCol = IM_COL32(170, 175, 185, 230);
+
+                float yMid = cur.y + chipH * 0.5f;
+                dOut->AddText(ImVec2(cur.x, yMid - lblSz.y * 0.5f),
+                              textCol, destLabel);
+                // tiny chevron-down — three lines forming a triangle
+                float cxv = cur.x + lblSz.x + chevGap + chevW * 0.5f;
+                float chevY = yMid - 0.5f;
+                dOut->AddTriangleFilled(
+                    ImVec2(cxv - chevW * 0.5f, chevY - 1.5f),
+                    ImVec2(cxv + chevW * 0.5f, chevY - 1.5f),
+                    ImVec2(cxv,                chevY + 2.5f),
+                    textCol);
+
+                outChipBR = ImVec2(cur.x + chipW, cur.y + chipH);
+                if (clicked) ImGui::OpenPopup("##NavOutputPopup");
+            }
+            // Anchor the popup's TOP-RIGHT to the trigger's bottom-right
+            // corner (pivot 1,0) so it grows LEFTWARD — keeps the popup
+            // fully on-screen even when the trigger sits flush against
+            // the viewport's right edge. Without this, a 320px popup
+            // anchored to a near-right-edge trigger gets clipped.
+            ImGui::SetNextWindowPos(outChipBR, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+            ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+            ImGui::SetNextWindowFocus();
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(14, 12));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(10, 9));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(8, 5));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   8.0f);
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(8, 9, 12, 255));
+            ImGui::PushStyleColor(ImGuiCol_Border,  IM_COL32(255, 255, 255, 22));
+            bool navOutputPopupOpen = ImGui::BeginPopup("##NavOutputPopup");
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(4);
+            if (navOutputPopupOpen) {
+                if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
+                    az.outputDest = OutputDest::None;
+                    az.outputMonitor = -1;
+                }
+                if (monitors && !monitors->empty()) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  Fullscreen");
+                    ImGui::PopStyleColor();
+                    for (int mi = 0; mi < (int)monitors->size(); mi++) {
+                        ImGui::PushID(mi);
+                        if (mi == editorMonitor) { ImGui::PopID(); continue; }
+                        std::string claimedBy;
+                        for (int zi = 0; zi < (int)zones->size(); zi++) {
+                            if (zi == ai) continue;
+                            auto& oz = *(*zones)[zi];
+                            if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                claimedBy = oz.name; break;
                             }
                         }
-                        az.outputDest = OutputDest::Fullscreen;
-                        az.outputMonitor = mi;
+                        char label[256];
+                        if (!claimedBy.empty()) {
+                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height,
+                                     claimedBy.c_str());
+                        } else {
+                            snprintf(label, sizeof(label), "%s  %dx%d",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height);
+                        }
+                        if (!claimedBy.empty())
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+                        bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
+                        if (ImGui::Selectable(label, sel)) {
+                            if (!claimedBy.empty()) {
+                                for (int zi = 0; zi < (int)zones->size(); zi++) {
+                                    if (zi == ai) continue;
+                                    auto& oz = *(*zones)[zi];
+                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                        oz.outputDest = OutputDest::None;
+                                        oz.outputMonitor = -1;
+                                        break;
+                                    }
+                                }
+                            }
+                            az.outputDest = OutputDest::Fullscreen;
+                            az.outputMonitor = mi;
+                        }
+                        if (!claimedBy.empty()) ImGui::PopStyleColor();
+                        ImGui::PopID();
                     }
-                    if (!claimedBy.empty()) ImGui::PopStyleColor();
-                    ImGui::PopID();
                 }
-            }
-            if (ndiAvailable) {
-                ImGui::Separator();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
-                ImGui::Text("  NDI");
-                ImGui::PopStyleColor();
-                char ndiLabel[256];
-                std::string streamName = az.ndiStreamName.empty() ? az.name : az.ndiStreamName;
-                snprintf(ndiLabel, sizeof(ndiLabel), "Easel - %s", streamName.c_str());
-                bool sel = (az.outputDest == OutputDest::NDI);
-                if (ImGui::Selectable(ndiLabel, sel)) {
-                    az.outputDest = OutputDest::NDI;
-                    if (az.ndiStreamName.empty()) az.ndiStreamName = az.name;
+                if (ndiAvailable) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  NDI");
+                    ImGui::PopStyleColor();
+                    char ndiLabel[256];
+                    std::string streamName = az.ndiStreamName.empty() ? az.name : az.ndiStreamName;
+                    snprintf(ndiLabel, sizeof(ndiLabel), "Easel - %s", streamName.c_str());
+                    bool sel = (az.outputDest == OutputDest::NDI);
+                    if (ImGui::Selectable(ndiLabel, sel)) {
+                        az.outputDest = OutputDest::NDI;
+                        if (az.ndiStreamName.empty()) az.ndiStreamName = az.name;
+                    }
                 }
+                ImGui::EndPopup();
             }
-            ImGui::EndCombo();
         }
-        ImGui::PopStyleColor();
+
+        // Bumped 14 → 24 so the OUTPUT cluster has space before the
+        // resolution chip + fullscreen icon.
+        ImGui::SameLine(0, 24);
 
         // Composition chip + Fullscreen
         {
@@ -1898,81 +2214,122 @@ void ViewportPanel::renderNavBar(bool stageActive,
             static const int presetH[] = { 1080, 2160, 720, 1440, 2000, 768, 0 };
             const int presetCount = 7;
 
-            ImGui::SameLine(0, 12);
-            char compLabel[48];
-            snprintf(compLabel, sizeof(compLabel), "%d x %d", az.width, az.height);
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
-            if (ImGui::Button(compLabel)) ImGui::OpenPopup("##CompPreset");
-            ImGui::PopStyleColor(3);
-
-            ImGui::SameLine();
-            // Fullscreen icon button — replaces the "Fullscreen / Exit FS"
-            // text button. Two glyphs:
-            //   not-fullscreen → four arrows pointing OUTWARD (expand)
-            //   fullscreen     → four arrows pointing INWARD  (contract)
-            // Drawn with ImDrawList so the icon scales with FrameHeight
-            // and there's no font dependency.
+            // Borderless text + chevron — the chip itself doesn't carry a
+            // visible background; affordance comes from the small ▾ glyph
+            // and a subtle hover tint on text only.
+            ImVec2 compChipBR;  // bottom-right of chip — anchors popup
             {
-                float h = ImGui::GetFrameHeight();
-                ImVec2 size(h + 6.0f, h);
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                bool clicked = ImGui::InvisibleButton("##FSToggle", size);
-                bool hov     = ImGui::IsItemHovered();
-                ImDrawList* d = ImGui::GetWindowDrawList();
-                ImU32 bg = hov ? IM_COL32(255, 255, 255, 36)
-                               : IM_COL32(255, 255, 255, 14);
-                ImU32 fg = IM_COL32(220, 226, 235, 235);
-                d->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y),
-                                 bg, 6.0f);
-                float cx = p.x + size.x * 0.5f;
-                float cy = p.y + size.y * 0.5f;
-                float r  = 5.0f;        // half-extent of the icon
-                float a  = 2.0f;        // arrow head length
-                float th = 1.5f;        // line thickness
-                if (m_editorFullscreenHint) {
-                    // Inward arrows — exit fullscreen. Each arrow is a
-                    // short diagonal segment with a tick at its corner.
-                    // TL → in toward center
-                    d->AddLine(ImVec2(cx - r, cy - r), ImVec2(cx - r + a, cy - r + a), fg, th);
-                    d->AddLine(ImVec2(cx - r, cy - r),       ImVec2(cx - r + a + 2, cy - r), fg, th);
-                    d->AddLine(ImVec2(cx - r, cy - r),       ImVec2(cx - r, cy - r + a + 2), fg, th);
-                    // TR
-                    d->AddLine(ImVec2(cx + r, cy - r), ImVec2(cx + r - a, cy - r + a), fg, th);
-                    d->AddLine(ImVec2(cx + r, cy - r),       ImVec2(cx + r - a - 2, cy - r), fg, th);
-                    d->AddLine(ImVec2(cx + r, cy - r),       ImVec2(cx + r, cy - r + a + 2), fg, th);
-                    // BL
-                    d->AddLine(ImVec2(cx - r, cy + r), ImVec2(cx - r + a, cy + r - a), fg, th);
-                    d->AddLine(ImVec2(cx - r, cy + r),       ImVec2(cx - r + a + 2, cy + r), fg, th);
-                    d->AddLine(ImVec2(cx - r, cy + r),       ImVec2(cx - r, cy + r - a - 2), fg, th);
-                    // BR
-                    d->AddLine(ImVec2(cx + r, cy + r), ImVec2(cx + r - a, cy + r - a), fg, th);
-                    d->AddLine(ImVec2(cx + r, cy + r),       ImVec2(cx + r - a - 2, cy + r), fg, th);
-                    d->AddLine(ImVec2(cx + r, cy + r),       ImVec2(cx + r, cy + r - a - 2), fg, th);
-                } else {
-                    // Outward L-brackets in the four corners — enter
-                    // fullscreen. Two short orthogonal segments each.
-                    d->AddLine(ImVec2(cx - r,       cy - r), ImVec2(cx - r + a + 1, cy - r), fg, th);
-                    d->AddLine(ImVec2(cx - r,       cy - r), ImVec2(cx - r,         cy - r + a + 1), fg, th);
-                    d->AddLine(ImVec2(cx + r,       cy - r), ImVec2(cx + r - a - 1, cy - r), fg, th);
-                    d->AddLine(ImVec2(cx + r,       cy - r), ImVec2(cx + r,         cy - r + a + 1), fg, th);
-                    d->AddLine(ImVec2(cx - r,       cy + r), ImVec2(cx - r + a + 1, cy + r), fg, th);
-                    d->AddLine(ImVec2(cx - r,       cy + r), ImVec2(cx - r,         cy + r - a - 1), fg, th);
-                    d->AddLine(ImVec2(cx + r,       cy + r), ImVec2(cx + r - a - 1, cy + r), fg, th);
-                    d->AddLine(ImVec2(cx + r,       cy + r), ImVec2(cx + r,         cy + r - a - 1), fg, th);
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##compChip",
+                                                      ImVec2(chipW, fsBtnSize));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* dl = navFG;
+
+                ImU32 textCol = hov ? IM_COL32(235, 240, 250, 240)
+                                    : IM_COL32(170, 175, 185, 230);
+                ImVec2 lblPos(cur.x,
+                              cur.y + (fsBtnSize - lblSz.y) * 0.5f);
+                dl->AddText(lblPos, textCol, compLabel);
+
+                // Tiny chevron — 6px wide, 3px tall, 1.4px thick.
+                float chx = cur.x + lblSz.x + caretGap + 1.0f;
+                float chy = cur.y + fsBtnSize * 0.5f + 1.0f;
+                float chr = 3.0f;
+                dl->AddLine(ImVec2(chx,             chy - 1.5f),
+                            ImVec2(chx + chr,       chy + 1.5f),
+                            textCol, 1.4f);
+                dl->AddLine(ImVec2(chx + chr,       chy + 1.5f),
+                            ImVec2(chx + chr * 2.f, chy - 1.5f),
+                            textCol, 1.4f);
+
+                compChipBR = ImVec2(cur.x + chipW, cur.y + fsBtnSize);
+                if (clicked) {
+                    // Chip doubles as "reset view" — see comment in the
+                    // legacy nav-row chip above for rationale.
+                    resetZoom();
+                    ImGui::OpenPopup("##CompPreset");
                 }
-                if (clicked) m_wantsFullscreenToggle = true;
-                if (hov) ParamRow::Tooltip(m_editorFullscreenHint
-                    ? "Exit fullscreen" : "Enter fullscreen");
             }
 
-            if (ImGui::BeginPopup("##CompPreset")) {
+            // Fullscreen icon — 4 corner brackets, drawn directly so the
+            // affordance is iconographic rather than a wide text button.
+            // Click toggles editor fullscreen.
+            {
+                ImGui::SameLine(0, 6);
+                const float fsBtnSize = 28.0f;
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##fs_icon", ImVec2(fsBtnSize, fsBtnSize));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* dlfs = navFG;
+                float cx = cur.x + fsBtnSize * 0.5f;
+                float cy = cur.y + fsBtnSize * 0.5f;
+                if (hov) {
+                    dlfs->AddRectFilled(cur,
+                                        ImVec2(cur.x + fsBtnSize, cur.y + fsBtnSize),
+                                        IM_COL32(255, 255, 255, 24), 6.0f);
+                }
+                float r  = 7.0f;
+                float a  = 4.0f;
+                float th = 1.6f;
+                ImU32 c  = hov ? IM_COL32(235, 240, 250, 240)
+                               : IM_COL32(190, 195, 205, 230);
+                if (m_editorFullscreenHint) {
+                    // Inward-pointing brackets — "exit fullscreen" glyph.
+                    dlfs->AddLine(ImVec2(cx - r,     cy - r + a), ImVec2(cx - r + a, cy - r + a), c, th);
+                    dlfs->AddLine(ImVec2(cx - r + a, cy - r + a), ImVec2(cx - r + a, cy - r),     c, th);
+                    dlfs->AddLine(ImVec2(cx + r,     cy - r + a), ImVec2(cx + r - a, cy - r + a), c, th);
+                    dlfs->AddLine(ImVec2(cx + r - a, cy - r + a), ImVec2(cx + r - a, cy - r),     c, th);
+                    dlfs->AddLine(ImVec2(cx - r,     cy + r - a), ImVec2(cx - r + a, cy + r - a), c, th);
+                    dlfs->AddLine(ImVec2(cx - r + a, cy + r - a), ImVec2(cx - r + a, cy + r),     c, th);
+                    dlfs->AddLine(ImVec2(cx + r,     cy + r - a), ImVec2(cx + r - a, cy + r - a), c, th);
+                    dlfs->AddLine(ImVec2(cx + r - a, cy + r - a), ImVec2(cx + r - a, cy + r),     c, th);
+                } else {
+                    // Outward-pointing brackets — "enter fullscreen" glyph.
+                    dlfs->AddLine(ImVec2(cx - r, cy - r), ImVec2(cx - r + a, cy - r),     c, th);
+                    dlfs->AddLine(ImVec2(cx - r, cy - r), ImVec2(cx - r,     cy - r + a), c, th);
+                    dlfs->AddLine(ImVec2(cx + r, cy - r), ImVec2(cx + r - a, cy - r),     c, th);
+                    dlfs->AddLine(ImVec2(cx + r, cy - r), ImVec2(cx + r,     cy - r + a), c, th);
+                    dlfs->AddLine(ImVec2(cx - r, cy + r), ImVec2(cx - r + a, cy + r),     c, th);
+                    dlfs->AddLine(ImVec2(cx - r, cy + r), ImVec2(cx - r,     cy + r - a), c, th);
+                    dlfs->AddLine(ImVec2(cx + r, cy + r), ImVec2(cx + r - a, cy + r),     c, th);
+                    dlfs->AddLine(ImVec2(cx + r, cy + r), ImVec2(cx + r,     cy + r - a), c, th);
+                }
+                if (clicked) m_wantsFullscreenToggle = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(m_editorFullscreenHint ? "Exit fullscreen"
+                                                             : "Enter fullscreen");
+            }
+
+            // Wider, darker, with generous vertical rhythm so the resolution
+            // list breathes and the Custom row (W × H inputs + Apply) fits
+            // comfortably without truncation. Anchor top-right of popup at
+            // chip's bottom-right (pivot 1,0) so it grows leftward —
+            // keeps the popup fully on-screen even when the chip sits flush
+            // against the viewport's right edge.
+            ImGui::SetNextWindowPos(compChipBR, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+            // Pull the popup viewport to the same logical viewport as the
+            // chip and force focus so it renders above the floating
+            // Properties / Layers control-panel hosts that would otherwise
+            // submit later in the frame and z-order over the popup.
+            ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+            ImGui::SetNextWindowFocus();
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(14, 12));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(10, 9));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(8, 5));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   8.0f);
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(8, 9, 12, 255));
+            ImGui::PushStyleColor(ImGuiCol_Border,  IM_COL32(255, 255, 255, 22));
+            bool compPresetOpen = ImGui::BeginPopup("##CompPreset");
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(4);
+            if (compPresetOpen) {
                 for (int p = 0; p < presetCount - 1; p++) {
                     bool sel = (az.width == presetW[p] && az.height == presetH[p]);
                     if (ImGui::Selectable(presetLabels[p], sel)) {
                         az.resize(presetW[p], presetH[p]);
                         az.compPreset = p;
+                        resetZoom();
                     }
                 }
                 ImGui::Separator();
@@ -2000,6 +2357,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
                 if (ImGui::SmallButton("Apply")) {
                     az.resize(s_customCompW, s_customCompH);
                     az.compPreset = presetCount - 1;
+                    resetZoom();
                     ImGui::CloseCurrentPopup();
                 }
                 if (!valid) ImGui::EndDisabled();
@@ -2008,7 +2366,242 @@ void ViewportPanel::renderNavBar(bool stageActive,
         }
 
         ImGui::PopStyleVar(2);
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(3);
     }
 
     ImGui::Unindent(12);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Floating zone + OUTPUT secondary nav, anchored at the canvas
+// top-left. Holds the zone tabs (Main / + ) and the OUTPUT destination
+// combo so the main nav row can stay focused on workspace switching
+// and display setup (composition + fullscreen).
+// ─────────────────────────────────────────────────────────────────────
+void ViewportPanel::renderZoneOutputDock(
+        std::vector<std::unique_ptr<OutputZone>>* zones,
+        int* activeZone,
+        const std::vector<MonitorInfo>* monitors,
+        bool ndiAvailable,
+        int editorMonitor) {
+    // Floating dock disabled — zones + OUTPUT moved into the top-nav
+    // right cluster (next to the aspect-ratio chip and Fullscreen icon).
+    // Function body kept for diff history.
+    (void)zones; (void)activeZone; (void)monitors; (void)ndiAvailable; (void)editorMonitor;
+    return;
+
+#if 0
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    // 20px from the GLFW window's left edge — symmetric with the 20px
+    // right inset on the top-nav fullscreen cluster. Y offset clears the
+    // workspace nav row plus a small breathing margin.
+    float dockX = vp->Pos.x + 20.0f;
+    float dockY = vp->Pos.y + ImGui::GetFrameHeight() + 24.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(dockX, dockY), ImGuiCond_Always);
+
+    ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
+        | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking
+        | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(10, 6));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(28, 28, 32, 240));
+    ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(255, 255, 255, 24));
+
+    if (ImGui::Begin("##ZoneOutputDock", nullptr, fl)) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 6));
+
+        ImDrawList* tabDraw = ImGui::GetWindowDrawList();
+
+        // ── Zone tabs ───────────────────────────────────────────────
+        for (int i = 0; i < (int)zones->size(); i++) {
+            ImGui::PushID(9000 + i);
+            bool isActive = (i == *activeZone);
+            auto& z = *(*zones)[i];
+            static const float zoneColors[][3] = {
+                {0.96f, 0.96f, 0.96f}, {0.86f, 0.86f, 0.86f}, {0.76f, 0.76f, 0.76f}, {0.66f, 0.66f, 0.66f},
+                {0.56f, 0.56f, 0.56f}, {0.80f, 0.80f, 0.80f}, {0.70f, 0.70f, 0.70f}, {0.60f, 0.60f, 0.60f},
+            };
+            const float* zc = zoneColors[i % 8];
+            if (isActive) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(zc[0], zc[1], zc[2], 0.25f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0], zc[1], zc[2], 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(zc[0], zc[1], zc[2], 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(zc[0]*0.15f, zc[1]*0.15f, zc[2]*0.15f, 0.9f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(zc[0]*0.25f, zc[1]*0.25f, zc[2]*0.25f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(zc[0]*0.6f,  zc[1]*0.6f,  zc[2]*0.6f,  1.0f));
+            }
+            if (ImGui::Button(z.name.c_str())) *activeZone = i;
+            ImGui::PopStyleColor(3);
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                m_renaming = true;
+                m_renameIndex = i;
+                strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+            }
+            if (ImGui::BeginPopupContextItem("ZoneTabCtx")) {
+                if (ImGui::MenuItem("Rename")) {
+                    m_renaming = true;
+                    m_renameIndex = i;
+                    strncpy(m_renameBuf, z.name.c_str(), sizeof(m_renameBuf) - 1);
+                    m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+                }
+                if (ImGui::MenuItem("Duplicate")) *activeZone = -(200 + i);
+                if ((int)zones->size() > 1) {
+                    if (ImGui::MenuItem("Remove")) *activeZone = -(300 + i);
+                }
+                ImGui::EndPopup();
+            }
+            ImVec2 btnMin = ImGui::GetItemRectMin();
+            if (z.outputDest == OutputDest::Fullscreen || z.outputDest == OutputDest::NDI) {
+                ImU32 dotCol = IM_COL32((int)(zc[0]*255), (int)(zc[1]*255), (int)(zc[2]*255), 255);
+                tabDraw->AddCircleFilled(ImVec2(btnMin.x + 5, btnMin.y + 5), 3.0f, dotCol);
+            }
+            ImGui::SameLine();
+            ImGui::PopID();
+        }
+        if (m_renaming) ImGui::OpenPopup("##RenameZone");
+        if (ImGui::BeginPopup("##RenameZone")) {
+            ImGui::Text("Rename Zone");
+            ImGui::SetNextItemWidth(200);
+            bool enter = ImGui::InputText("##RenameInput", m_renameBuf, sizeof(m_renameBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+            if (m_renaming) { ImGui::SetKeyboardFocusHere(-1); m_renaming = false; }
+            if (enter || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                if (enter && m_renameIndex >= 0 && m_renameIndex < (int)zones->size() && m_renameBuf[0]) {
+                    (*zones)[m_renameIndex]->name = m_renameBuf;
+                }
+                m_renameIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // ── + button (add zone) ─────────────────────────────────────
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+        if (ImGui::Button("+")) *activeZone = -(100 + (int)zones->size());
+        if (ImGui::IsItemHovered()) ParamRow::Tooltip("Add output zone");
+        ImGui::PopStyleColor(3);
+
+        // ── OUTPUT label + destination combo ────────────────────────
+        int ai = *activeZone;
+        if (ai >= 0 && ai < (int)zones->size()) {
+            auto& az = *(*zones)[ai];
+            ImGui::SameLine(0, 14);
+
+            static char destBuf[128] = {};
+            const char* destLabel = "PREVIEW ONLY";
+            if (az.outputDest == OutputDest::Fullscreen && monitors) {
+                int mi = az.outputMonitor;
+                if (mi >= 0 && mi < (int)monitors->size()) {
+                    snprintf(destBuf, sizeof(destBuf), "FULLSCREEN: %s",
+                             (*monitors)[mi].name.c_str());
+                    destLabel = destBuf;
+                }
+            } else if (az.outputDest == OutputDest::NDI) {
+                snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
+                         az.ndiStreamName.empty() ? az.name.c_str()
+                                                  : az.ndiStreamName.c_str());
+                destLabel = destBuf;
+            }
+
+            bool live = (az.outputDest != OutputDest::None);
+            ImGui::AlignTextToFramePadding();
+            if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextUnformatted("OUTPUT");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+
+            if (live) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+            else      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.73f, 0.78f, 1.0f));
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::BeginCombo("##ZoneOutputDockCombo", destLabel, ImGuiComboFlags_HeightLarge)) {
+                if (ImGui::Selectable("Preview Only", az.outputDest == OutputDest::None)) {
+                    az.outputDest = OutputDest::None;
+                    az.outputMonitor = -1;
+                }
+                if (monitors && !monitors->empty()) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  Fullscreen");
+                    ImGui::PopStyleColor();
+                    for (int mi = 0; mi < (int)monitors->size(); mi++) {
+                        ImGui::PushID(mi);
+                        if (mi == editorMonitor) { ImGui::PopID(); continue; }
+                        std::string claimedBy;
+                        for (int zi = 0; zi < (int)zones->size(); zi++) {
+                            if (zi == ai) continue;
+                            auto& oz = *(*zones)[zi];
+                            if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                claimedBy = oz.name; break;
+                            }
+                        }
+                        char label[256];
+                        if (!claimedBy.empty()) {
+                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height,
+                                     claimedBy.c_str());
+                        } else {
+                            snprintf(label, sizeof(label), "%s  %dx%d",
+                                     (*monitors)[mi].name.c_str(),
+                                     (*monitors)[mi].width, (*monitors)[mi].height);
+                        }
+                        if (!claimedBy.empty())
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.6f));
+                        bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
+                        if (ImGui::Selectable(label, sel)) {
+                            if (!claimedBy.empty()) {
+                                for (int zi = 0; zi < (int)zones->size(); zi++) {
+                                    if (zi == ai) continue;
+                                    auto& oz = *(*zones)[zi];
+                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
+                                        oz.outputDest = OutputDest::None;
+                                        oz.outputMonitor = -1;
+                                        break;
+                                    }
+                                }
+                            }
+                            az.outputDest = OutputDest::Fullscreen;
+                            az.outputMonitor = mi;
+                        }
+                        if (!claimedBy.empty()) ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
+                }
+                if (ndiAvailable) {
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+                    ImGui::Text("  NDI");
+                    ImGui::PopStyleColor();
+                    char ndiLabel[256];
+                    std::string streamName = az.ndiStreamName.empty() ? az.name : az.ndiStreamName;
+                    snprintf(ndiLabel, sizeof(ndiLabel), "Easel - %s", streamName.c_str());
+                    bool sel = (az.outputDest == OutputDest::NDI);
+                    if (ImGui::Selectable(ndiLabel, sel)) {
+                        az.outputDest = OutputDest::NDI;
+                        if (az.ndiStreamName.empty()) az.ndiStreamName = az.name;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::PopStyleVar(2);
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+#endif
 }

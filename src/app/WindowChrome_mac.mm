@@ -28,6 +28,18 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     ns.titlebarAppearsTransparent = YES;
     ns.titleVisibility = NSWindowTitleHidden;
     ns.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    // Suppress AppKit's "+" tab-add button and tab-bar overlay that can
+    // peek through the chrome row near the traffic-light cluster as a
+    // small dark sliver. Easel never opens window tabs, so disallow.
+    if ([ns respondsToSelector:@selector(setTabbingMode:)]) {
+        ns.tabbingMode = NSWindowTabbingModeDisallowed;
+    }
+    // Some AppKit builds add a translucent edge on the title-bar separator
+    // between titlebar and content view; clear it so our gray bg is the
+    // sole tone in that band.
+    if ([ns respondsToSelector:@selector(setTitlebarSeparatorStyle:)]) {
+        ns.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+    }
     // Move the standard buttons down so they sit on the same vertical
     // centerline as the ImGui menu row (which starts at y=0 of the content
     // view). Default AppKit position is ~3px from the window top edge; a

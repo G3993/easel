@@ -3,6 +3,12 @@ build/
 external/ffmpeg-*/
 external/opencv/
 external/Spout2/
+external/cue/
+
+# Local secrets — never commit
+.env
+.env.*
+!.env.example
 CMakeCache.txt
 CMakeFiles/
 deps/

@@ -521,7 +521,7 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
     if (!m_shader.loadFromSource(vertSrc, fragSrc)) {
         std::cerr << "Failed to compile ISF shader" << std::endl;
         {
-            FILE* f = fopen("etherea_debug.log", "a");
+            FILE* f = fopen("/tmp/etherea_debug.log", "a");
             if (f) {
                 fprintf(f, "FAILED SHADER: %s\n", m_path.c_str());
                 fprintf(f, "GENERATED FRAG:\n%s\n===\n", fragSrc.c_str());

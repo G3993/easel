@@ -393,10 +393,14 @@ void AudioAnalyzer::detectBeat(float dt) {
 // --- Smoothing ---
 
 void AudioAnalyzer::smoothBands(float dt) {
-    // Attack: 8/s, Release: 3/s (dt-independent)
-    // Lower attack rate reduces jitter while staying responsive to beats
+    // Asymmetric attack/release envelope (dt-independent exponential).
+    // Rates are now user-adjustable via the Audio panel — lower values
+    // glide more, higher values snap. Floor at 0.05 so a "0" slider
+    // doesn't freeze the value at its current sample.
+    const float aRate = std::max(0.05f, m_smoothAttackRate);
+    const float rRate = std::max(0.05f, m_smoothReleaseRate);
     auto smooth = [&](float& current, float raw) {
-        float rate = (raw > current) ? 8.0f : 3.0f;
+        float rate = (raw > current) ? aRate : rRate;
         current = expSmooth(current, raw, rate, dt);
     };
 

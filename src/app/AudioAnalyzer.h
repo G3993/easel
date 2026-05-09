@@ -85,6 +85,16 @@ public:
     float& trebleGain() { return m_trebleGain; }
     float& noiseGate() { return m_noiseGate; }
 
+    // Per-frame envelope smoothing rates (1/s). The smoother always uses
+    // the asymmetric attack-vs-release model: when the raw band energy is
+    // RISING toward a new target, current → target advances at the attack
+    // rate; when it's FALLING, the release rate is used instead. Higher
+    // rate = faster response = less smooth. Lower rate = slower response
+    // = smoother / more glide. Reasonable musical range is roughly 0.5
+    // (very smooth, ~2s glide) to 30 (snappy, ~30ms glide).
+    float& smoothAttack()  { return m_smoothAttackRate; }
+    float& smoothRelease() { return m_smoothReleaseRate; }
+
 private:
 #ifdef _WIN32
     // WASAPI capture
@@ -129,6 +139,12 @@ private:
     float m_highMidGain = 1.0f;
     float m_trebleGain = 1.0f;
     float m_noiseGate = 0.0f;   // values below this threshold are squashed to 0
+
+    // Default smoothing rates — chosen so a typical reactive shader gets
+    // a punchy attack but a soft release that doesn't strobe on every
+    // beat. Mutable via smoothAttack() / smoothRelease() accessors.
+    float m_smoothAttackRate  = 8.0f;
+    float m_smoothReleaseRate = 3.0f;
 
     // Smoothed values
     float m_smoothBass = 0, m_smoothLowMid = 0, m_smoothHighMid = 0, m_smoothTreble = 0;

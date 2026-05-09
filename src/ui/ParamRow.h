@@ -7,10 +7,13 @@ namespace ParamRow {
 
 // Begin a parameter row: draws the label on the left in `kLabelFrac` of
 // the row, primes the next ImGui widget to consume the rest. Use BEFORE
-// the widget call (e.g. ImGui::DragFloat("##xyz", ...)).
+// the widget call (e.g. ImGui::DragFloat("##xyz", ...)). Label width
+// auto-grows to fit the actual text so longer labels (TRANSITION,
+// RESETFIELD, SPLATTERDENSITY) don't get clipped by the trailing widget.
 inline void Begin(const char* label, float labelFrac = 0.34f) {
     float rowW = ImGui::GetContentRegionAvail().x;
-    float lblW = std::max(70.0f, rowW * labelFrac);
+    float textW = ImGui::CalcTextSize(label).x + 12.0f; // 12px gutter
+    float lblW = std::max({70.0f, rowW * labelFrac, textW});
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     ImGui::SameLine(lblW);

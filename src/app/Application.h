@@ -108,6 +108,8 @@ private:
     bool m_voiceBarOpen = true;                // command bar visibility
     std::string m_voicePartial;                // streaming partial transcript while listening
     bool m_voiceListening = false;             // mic gate (push-to-talk)
+    bool m_voiceContinuous = true;             // when true, mic stays on; auto-restart after every final
+    bool m_voiceRestartPending = false;        // set in onFinal; main loop tears down + restarts
 #ifdef __APPLE__
     MacSpeechRecognizer m_voiceRecognizer;
 #endif
@@ -151,6 +153,7 @@ private:
     ShaderProgram m_bloomBlurShader;
     ShaderProgram m_bloomCompositeShader;
     ShaderProgram m_linearCopyShader;     // bloom copy-back, no ACES
+    ShaderProgram m_warpDownsampleShader; // 4-tap explicit-offset SS → 1× downsample
     Framebuffer   m_bloomBrightFBO;       // half-res, 16F
     Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
     Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
@@ -188,6 +191,10 @@ private:
 
     // Editor fullscreen toggle (F11)
     bool m_editorFullscreen = false;
+    // Set to true when Esc is pressed in fullscreen — actual exit runs
+    // at the TOP of the next frame so AppKit has time to settle the
+    // window-style transition without racing the GL/ImGui dock setup.
+    bool m_pendingExitFullscreen = false;
     int m_savedWindowX = 0, m_savedWindowY = 0;
     int m_savedWindowW = 1280, m_savedWindowH = 720;
 
@@ -198,6 +205,10 @@ private:
     void renderReadbackFBO(OutputZone& zone);
     void renderUI();
     void renderMenuBar();
+    // Inline brand mark + overflow menu drawn at the start of the workspace
+    // nav row. Replaces the standalone main menu bar so we have ONE chrome
+    // row instead of two stacked ones.
+    void renderNavBarPrefix();
     void toggleEditorFullscreen();
 #ifdef HAS_FFMPEG
     void renderGoLiveButton();

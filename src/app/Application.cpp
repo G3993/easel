@@ -271,6 +271,14 @@ bool Application::init() {
                                           "shaders/linear_copy.frag")) {
         m_bloomEnabled = false;
     }
+    // Warp 4× SS downsample shader. Loads with a graceful fallback: if
+    // it fails to compile we'll still have a valid pipeline because the
+    // SS path falls back to m_linearCopyShader's single bilinear sample.
+    if (!m_warpDownsampleShader.loadFromFiles("shaders/passthrough.vert",
+                                              "shaders/warp_downsample.frag")) {
+        std::cerr << "Failed to load warp_downsample.frag — falling back "
+                     "to linear_copy for warp SS downsample\n";
+    }
     if (!m_maskRenderer.init()) return false;
 
 #ifdef HAS_OPENCV
@@ -440,26 +448,63 @@ void Application::run() {
     while (!glfwWindowShouldClose(m_window)) {
         glfwPollEvents();
 
-        // Escape exits presentation fullscreen first, then closes projectors
-        if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            if (m_editorFullscreen) {
-                glfwSetWindowMonitor(m_window, nullptr,
-                                     m_savedWindowX, m_savedWindowY,
-                                     m_savedWindowW, m_savedWindowH, 0);
-                m_editorFullscreen = false;
+        // ── Esc handling ──────────────────────────────────────────────
+        // Edge-triggered, deferred-exit. Calling glfwSetWindowMonitor
+        // synchronously inside the input branch was crashing on macOS
+        // because AppKit tears down + rebuilds the NSWindow's content
+        // view mid-frame, and the next ImGui pass touched dead GL/dock
+        // state. Fix: when Esc is pressed, set a pending flag; at the
+        // TOP of the next frame (before any rendering / dock setup),
+        // run the actual fullscreen exit then `continue` so macOS
+        // gets a clean frame to settle. We also suppress the handler
+        // entirely while in macOS native fullscreen (green-button) —
+        // Esc has no defined exit there and trying to call
+        // glfwSetWindowMonitor against an AppKit-managed FS window is
+        // exactly the case that was crashing.
+        {
+            // 1. Drain any pending fullscreen exit from the previous frame.
+            if (m_pendingExitFullscreen) {
+                m_pendingExitFullscreen = false;
+                if (m_editorFullscreen) {
+                    glfwSetWindowMonitor(m_window, nullptr,
+                                         m_savedWindowX, m_savedWindowY,
+                                         m_savedWindowW, m_savedWindowH, 0);
+                    m_editorFullscreen = false;
+                }
                 continue;
             }
-            bool hadOutput = !m_projectors.empty();
-            for (auto& [idx, proj] : m_projectors) proj->destroy();
-            m_projectors.clear();
-            for (auto& zone : m_zones) {
-                if (zone->outputDest == OutputDest::Fullscreen) {
-                    zone->outputDest = OutputDest::None;
-                    zone->outputMonitor = -1;
-                    hadOutput = true;
+
+            static bool escWasPressed = false;
+            bool escNow = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+            bool escEdge = escNow && !escWasPressed;
+            escWasPressed = escNow;
+
+#ifdef __APPLE__
+            // Skip Esc entirely when AppKit owns the fullscreen state —
+            // calling glfwSetWindowMonitor against a native-FS NSWindow
+            // races the AppKit transition and crashes.
+            bool nativeFs = EaselMac_IsNativeFullScreen(m_window) != 0;
+            if (nativeFs) escEdge = false;
+#endif
+
+            if (escEdge && !ImGui::GetIO().WantTextInput) {
+                if (m_editorFullscreen) {
+                    // Defer one frame — actual exit runs at top of next loop.
+                    m_pendingExitFullscreen = true;
+                    continue;
                 }
+                bool hadOutput = !m_projectors.empty();
+                for (auto& [idx, proj] : m_projectors) proj->destroy();
+                m_projectors.clear();
+                for (auto& zone : m_zones) {
+                    if (zone->outputDest == OutputDest::Fullscreen) {
+                        zone->outputDest = OutputDest::None;
+                        zone->outputMonitor = -1;
+                        hadOutput = true;
+                    }
+                }
+                if (hadOutput) continue;
             }
-            if (hadOutput) continue;
         }
 
 
@@ -722,10 +767,48 @@ void Application::run() {
             m_ui.beginFrame();
             m_ui.endFrame();
         } else {
-            glClearColor(0.031f, 0.035f, 0.039f, 1.0f); // #08090a — Linear marketing black, so translucent panels blend correctly
+            glClearColor(0x14/255.0f, 0x14/255.0f, 0x14/255.0f, 1.0f); // #141414 — matches Canvas WindowBg so the launch is one continuous tone
             glClear(GL_COLOR_BUFFER_BIT);
 
             m_ui.beginFrame();
+
+            // Cmd/Ctrl + Shift + 0 — global "RESET EVERYTHING" escape hatch.
+            // Lives OUTSIDE the WantTextInput gate so it works no matter
+            // where keyboard focus is — this is the user's lifeline when
+            // the editor preview is in an unrecoverable state.
+            {
+                static bool sResetAllPrev = false;
+                bool gCtrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                             glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS ||
+                             glfwGetKey(m_window, GLFW_KEY_LEFT_SUPER)   == GLFW_PRESS ||
+                             glfwGetKey(m_window, GLFW_KEY_RIGHT_SUPER)  == GLFW_PRESS;
+                bool gShift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                              glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+                bool gZero  = glfwGetKey(m_window, GLFW_KEY_0) == GLFW_PRESS;
+                bool resetAllNow = gCtrl && gShift && gZero;
+                if (resetAllNow && !sResetAllPrev) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    m_viewportPanel.resetZoom();
+                    std::array<glm::vec2, 4> def = {{
+                        {-1.0f, -1.0f}, {1.0f, -1.0f},
+                        {1.0f,  1.0f}, {-1.0f, 1.0f}
+                    }};
+                    for (auto& mp : m_mappings) {
+                        if (mp) mp->cornerPin.setCorners(def);
+                    }
+                    if (m_selectedLayer >= 0
+                        && m_selectedLayer < m_layerStack.count()) {
+                        if (auto l = m_layerStack[m_selectedLayer]) {
+                            l->position = {0.0f, 0.0f};
+                            l->scale    = {1.0f, 1.0f};
+                            l->rotation = 0.0f;
+                            l->anchor   = {0.0f, 0.0f};
+                            l->flipH = false; l->flipV = false;
+                        }
+                    }
+                }
+                sResetAllPrev = resetAllNow;
+            }
 
             // Undo / Redo keybinds — use GLFW for reliable detection.
             // macOS uses Cmd (Super), everything else uses Ctrl; accept both so
@@ -847,7 +930,12 @@ void Application::run() {
             }
         }
 
-        // Apply data bus bindings to shader text params
+        // Apply data bus bindings to shader text params. Skip when the
+        // bound value is empty — otherwise the binding fires every frame
+        // before any transcript arrives and blanks the shader's default
+        // `msg` (e.g. text_clusters.fs's "FLUX MODULAR SOFT CELLS…"),
+        // making the shader render nothing until the user starts the mic
+        // or the cue session pushes its first event.
         for (auto& [bindKey, dataKey] : m_dataBus.bindings()) {
             if (dataKey.empty()) continue;
             auto sep = bindKey.find(':');
@@ -859,7 +947,7 @@ void Application::run() {
                 if (layer->id == layerId && layer->source && layer->source->isShader()) {
                     auto* shader = static_cast<ShaderSource*>(layer->source.get());
                     std::string val = m_dataBus.get(dataKey);
-                    // Uppercase for shader text encoding
+                    if (val.empty()) break;
                     for (auto& c : val) c = (char)toupper((unsigned char)c);
                     shader->setText(paramName, val);
                     break;
@@ -1271,7 +1359,26 @@ void Application::compositeZone(OutputZone& zone) {
     // Store composite texture for canvas preview
     zone.canvasTexture = sourceTex;
 
-    zone.warpFBO.bind();
+    // ── Warp pass — 4× supersample + 4-tap explicit downsample ─────
+    // Render the warp mesh into a 4× FBO (16× the pixel count of
+    // warpFBO), then run a custom downsample shader that takes 4
+    // bilinear samples at offset positions — each tap reads 4 source
+    // texels, so the output pixel averages 16 source texels. That's
+    // 16× effective MSAA on every silhouette pixel of the corner-pin
+    // diamond, MeshWarp grid, or ObjMesh outline.
+    //
+    // Cost: ~16× fragment work in the warp shader (still cheap — it's a
+    // passthrough sample with a homography on UVs) plus 4 texture reads
+    // in the downsample. M-series GPUs are fine.
+    const int kWarpSS = 4;
+    static Framebuffer s_warpSSFBO;
+    const int ssW = zone.width  * kWarpSS;
+    const int ssH = zone.height * kWarpSS;
+    if (s_warpSSFBO.width() != ssW || s_warpSSFBO.height() != ssH) {
+        s_warpSSFBO.createHalfFloat(ssW, ssH);
+    }
+
+    s_warpSSFBO.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1302,6 +1409,31 @@ void Application::compositeZone(OutputZone& zone) {
         m_quad.draw();
     }
 
+    Framebuffer::unbind();
+
+    // 4-tap explicit-offset downsample: 4 bilinear samples × 4 source
+    // texels each = 16 texels averaged per output pixel. Falls back to
+    // the linear-copy shader (single bilinear sample) if the dedicated
+    // downsample shader failed to compile.
+    zone.warpFBO.bind();
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (m_warpDownsampleShader.id() != 0) {
+        m_warpDownsampleShader.use();
+        m_warpDownsampleShader.setInt ("uTexture",   0);
+        m_warpDownsampleShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_warpDownsampleShader.setBool("uFlipV",     false);
+        m_warpDownsampleShader.setVec2("uTexelSize",
+            glm::vec2(1.0f / (float)ssW, 1.0f / (float)ssH));
+    } else {
+        m_linearCopyShader.use();
+        m_linearCopyShader.setInt ("uTexture",   0);
+        m_linearCopyShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_linearCopyShader.setBool("uFlipV",     false);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_warpSSFBO.textureId());
+    m_quad.draw();
     Framebuffer::unbind();
 
     // ── Phase Q v4 — bloom ─────────────────────────────────────────
@@ -2133,7 +2265,10 @@ void Application::renderUI() {
     // widgets render in the reserved strip anymore. Dockspace now spans
     // the full window so we don't leak a dead empty black band below the
     // dock node.
-    float transportBarH = 0.0f;
+    // Floating transport pill is now a docked full-width bottom bar — must
+    // match renderFloatingTransportPill's pillH so the dockspace shrinks and
+    // its content (timeline, panels) doesn't render under the bar.
+    float transportBarH = 56.0f;
     // Main menu bar removed — the brand glyph + overflow menu now live in
     // the workspace nav row inside the viewport, eliminating the previous
     // 3-row chrome stack (macOS title bar + ImGui menu bar + workspace nav).
@@ -2192,7 +2327,22 @@ void Application::renderUI() {
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
-                               &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings);
+                               &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings,
+                               nullptr,  // inlineSetupSection (Canvas mode doesn't need it)
+                               [this]() { renderNavBarPrefix(); });
+        // Tell UIManager where the canvas image lives at zoom=1 — the
+        // BASE bounds, not the zoomed ones, so panning/zooming the canvas
+        // doesn't drag the right Control Panel float along with it.
+        {
+            glm::vec2 io = m_viewportPanel.baseImageOrigin();
+            glm::vec2 isz = m_viewportPanel.baseImageSize();
+            if (isz.y > 0) {
+                m_ui.setCanvasBoundsY(io.y, io.y + isz.y);
+            }
+        }
+        // Floating zone + OUTPUT dock — visible only in Canvas mode.
+        m_viewportPanel.renderZoneOutputDock(&m_zones, &m_activeZone,
+                                             &monitors, ndiAvail, editorMon);
         if (m_viewportPanel.wantsFullscreenToggle()) {
             m_viewportPanel.clearFullscreenSignal();
             toggleEditorFullscreen();
@@ -2353,6 +2503,10 @@ void Application::renderUI() {
             if (ImGui::Button("+ Canvas Mask", ImVec2(-1, 0))) {
                 MappingMask newMask;
                 newMask.name = "Canvas " + std::to_string(canvasMaskMapping->masks.size() + 1);
+                // Empty path — user clicks on the canvas to add points,
+                // then clicks the first point again (or hits the Save
+                // banner) to close the polygon. Matches the prior
+                // free-draw mask flow.
                 canvasMaskMapping->masks.push_back(std::move(newMask));
                 canvasMaskMapping->activeMaskIndex = (int)canvasMaskMapping->masks.size() - 1;
                 m_maskEditMode = true;
@@ -2912,15 +3066,57 @@ void Application::renderUI() {
     // Icon-pad + ###ID — empty label space gives drawInspectorTabIcons()
     // room to paint the Sources icon over the tab.
     bool sourcesOpen = sourcesVisible && ImGui::Begin("        ###Sources");
-    ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_Reorderable
-                                     | ImGuiTabBarFlags_FittingPolicyScroll;
+    // Tab bar — pinned at uniform icon-only width. Reorderable was the
+    // culprit behind the "first tab wide / rest clustered" spacing
+    // bug: combined with ImGui's tab-cache it preserved a stretched
+    // width for the originally-leading tab even after subsequent layouts
+    // wanted them all the same size. Disabling Reorderable + forcing
+    // ItemSpacing.x to 0 nails the tabs to a tight, uniform horizontal
+    // rhythm.
+    ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_FittingPolicyResizeDown
+                                     | ImGuiTabBarFlags_NoTabListScrollingButtons;
+    // Per-tab width = panelWidth / N so the 4 round pills sit on a
+    // uniform horizontal grid spanning the entire Sources panel header.
+    // ImGui sizes each tab as label_width + 2*FramePadding.x; with
+    // ItemSpacing.x = 0 the row total is N*(label + 2*pad). Solve for
+    // pad given the available content width.
+    float kTabCount = 4.0f;  // Shaders / Etherea / Camera / Display
+    float kPanelW   = ImGui::GetContentRegionAvail().x;
+    float kLabelW   = ImGui::CalcTextSize("           ").x;
+    float kTabPadX  = std::max(4.0f,
+                               (kPanelW - kTabCount * kLabelW) / (2.0f * kTabCount));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(kTabPadX, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(0.0f, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0.0f, 0.0f));
+    // Suppress ImGui's default rounded-rect tab chrome AND the selected
+    // overline — drawSourcesTabIcons paints a circular pill behind each
+    // icon instead. ImGui defers tab-strip rendering until EndTabBar(),
+    // so the colours must remain pushed across all the BeginTabItem
+    // blocks; the matching PopStyleColor sits next to EndTabBar below.
+    // Gated on sourcesVisible so the push/pop pair stays balanced when
+    // the Sources panel is hidden (e.g. Stage/Show modes) — otherwise
+    // we'd push without the pop and ImGui asserts on a stack imbalance.
+    if (sourcesVisible) {
+        ImGui::PushStyleColor(ImGuiCol_Tab,                       IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabHovered,                IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabSelected,               IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline,       IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabDimmed,                 IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected,         IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, IM_COL32(0, 0, 0, 0));
+    }
     bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
+    ImGui::PopStyleVar(3);
 
     // ── VOICE tab ──────────────────────────────────────────────────────
     // Mic toggle, audio device picker, decay slider, live transcript.
     // The voice transcript drives `cue.transcript` / `cue.latest` in
     // DataBus, which is what text-shader `msg` inputs auto-bind to.
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Voice")) {
+    // Voice tab moved out of the Sources panel — voice controls are now
+    // reachable from the bottom-nav mic button (planned popup). Gate the
+    // tab body behind `false` so the voice settings code stays in source
+    // history while the tab disappears from the UI.
+    if (false && sourcesTabsOpen && ImGui::BeginTabItem("Voice")) {
         ImGui::Dummy(ImVec2(0, 6));
 
         // Live transcript display
@@ -3038,7 +3234,7 @@ void Application::renderUI() {
     }
 
     // ShaderClaw tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###ShaderClaw")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Shaders")) {
     {
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -3100,14 +3296,11 @@ void Application::renderUI() {
             // below so it reads as "another shader" instead of a
             // separate command.
 
-            // Update animated preview shader (for hovered item)
+            // (Animated hover preview disabled — was running a live shader
+            // per hover, which felt like "too much preview" stacked on top
+            // of the static thumbnails. Tiles now show only the static
+            // thumbnail; hover is just the highlight.)
             bool previewValid = false;
-            if (m_scPreview) {
-                m_scPreview->setResolution(64, 64);
-                m_scPreview->update();
-                m_scPreviewFrame++;
-                previewValid = (m_scPreviewFrame > 2);
-            }
 
             // Generate static thumbnails (one shader per frame to avoid lag).
             // Rendered at 160x160 for the gallery grid — bigger than the old
@@ -3537,27 +3730,20 @@ void Application::renderUI() {
                 ImGui::PopID();
             }
 
-            // Load/switch animated preview shader on hover
-            if (!hoveredPath.empty() && hoveredPath != m_scPreviewPath) {
-                m_scPreview = std::make_shared<ShaderSource>();
-                if (m_scPreview->loadFromFile(hoveredPath)) {
-                    m_scPreviewPath = hoveredPath;
-                    m_scPreviewFrame = 0;
-                } else {
-                    m_scPreview.reset();
-                    m_scPreviewPath.clear();
-                }
-            } else if (hoveredPath.empty()) {
-                m_scPreview.reset();
-                m_scPreviewPath.clear();
-            }
+            // (Hover preview removed — was loading a fresh ShaderSource on
+            // every tile hover. Static thumbs alone now; less GPU thrash,
+            // less visual noise.)
+            (void)hoveredPath;
         }
     }
     ImGui::EndTabItem();
     }  // end ShaderClaw tab
     // NDI tab (moved from position 4 to 1)
 #ifdef HAS_NDI
-    if (sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
+    // NDI tab folded into "Display" — gated false so the body stays in
+    // history while the standalone tab disappears. Plan: relocate the NDI
+    // broadcasting + source-list UI inside the Display tab body.
+    if (false && sourcesTabsOpen && NDIRuntime::instance().isAvailable() && ImGui::BeginTabItem("NDI")) {
         {
             // --- Broadcasting section ---
             if (flatSection("Broadcasting")) {
@@ -3768,7 +3954,9 @@ void Application::renderUI() {
         ImGui::EndTabItem();
     }
 #else
-    if (sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
+    // NDI fallback tab also gated — Display tab will surface the
+    // "NDI not installed" hint inline instead.
+    if (false && sourcesTabsOpen && ImGui::BeginTabItem("NDI")) {
         ImGui::TextDisabled("NDI SDK not installed");
         ImGui::TextWrapped("Place NDI SDK headers in external/ndi/include/ and rebuild to enable NDI support.");
         ImGui::EndTabItem();
@@ -3777,7 +3965,7 @@ void Application::renderUI() {
 
 
     // Etherea tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Etherea")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Etherea")) {
     {
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
@@ -4048,7 +4236,7 @@ void Application::renderUI() {
     // browser, since particles are conceptually another generator source.
 
 #ifdef HAS_OPENCV
-    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Camera")) {
+    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Camera")) {
         ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
 
@@ -4076,8 +4264,9 @@ void Application::renderUI() {
     }
 #endif
 
-    // Capture tab (moved from position 1 to 4)
-    if (sourcesTabsOpen && ImGui::BeginTabItem("    ###Capture")) {
+    // Display tab (was "Capture") — hosts both screen capture and the
+    // NDI source list so all "incoming display feed" routes live together.
+    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Display")) {
     {
 #if defined(_WIN32) || defined(__APPLE__)
         if (flatSection("Screen Capture")) {
@@ -4149,6 +4338,101 @@ void Application::renderUI() {
         ImGui::TextDisabled("Desktop capture is not available on Linux yet.");
         ImGui::TextWrapped("Use video files, shader sources, NDI, WHEP, or external network sources on this build.");
 #endif
+
+#ifdef HAS_NDI
+        // ── NDI section — folded in from the disabled NDI tab so a
+        //    single Capture/Display tab is the home for "incoming pixels":
+        //    Screen + Window capture above, NDI sources below.
+        ImGui::Dummy(ImVec2(0, 8));
+        if (NDIRuntime::instance().isAvailable()) {
+            if (flatSection("NDI Sources")) {
+                // Auto-refresh every ~2s so the list stays in sync
+                // with the network without a manual button press.
+                {
+                    static double lastRefresh = 0.0;
+                    double now = glfwGetTime();
+                    if (now - lastRefresh > 2.0) {
+                        m_ndiSources = m_ndiFinder.sources();
+                        lastRefresh = now;
+                    }
+                }
+
+                if (m_ndiSources.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::TextWrapped(
+                        "Searching for NDI sources on the local network…");
+                    ImGui::PopStyleColor();
+                } else {
+                    for (int i = 0; i < (int)m_ndiSources.size(); i++) {
+                        ImGui::PushID(7000 + i);
+                        std::string name = m_ndiSources[i].name;
+                        if (name.length() > 40) name = name.substr(0, 37) + "...";
+
+                        ImGui::PushStyleColor(ImGuiCol_Text,
+                            ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                        ImGui::TextUnformatted(name.c_str());
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine();
+
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.15f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.30f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.50f));
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
+                        if (ImGui::Button("Add")) {
+                            addNDISource(m_ndiSources[i].name);
+                        }
+                        ImGui::PopStyleColor(4);
+                        ImGui::PopID();
+                    }
+                }
+            }
+
+            // ── NDI Broadcast — outbound senders (composition + per-layer)
+            if (flatSection("NDI Broadcast")) {
+                {
+                    bool compositionOn = m_ndiOutputEnabled && m_ndiOutput.isActive();
+                    if (compositionOn)
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    else
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
+                        if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
+                            m_ndiOutput.create("Easel");
+                        } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
+                            m_ndiOutput.destroy();
+                        }
+                    }
+                    ImGui::PopStyleColor();
+                }
+
+                for (int i = 0; i < m_layerStack.count(); i++) {
+                    ImGui::PushID(8000 + i);
+                    auto& layer = m_layerStack[i];
+                    bool active = layer->ndiSender.isActive();
+                    if (active)
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                    else
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    std::string label = "Easel - " + layer->name;
+                    if (label.length() > 50) label = label.substr(0, 47) + "...";
+                    ImGui::Checkbox(label.c_str(), &layer->ndiEnabled);
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+                if (m_layerStack.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::TextWrapped("Add a layer to broadcast it as an NDI source.");
+                    ImGui::PopStyleColor();
+                }
+            }
+        } else {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::TextDisabled("NDI runtime not loaded");
+            ImGui::TextWrapped(
+                "Install the NDI Tools / NDI Runtime from ndi.video, then "
+                "restart Easel. The runtime is loaded via dlopen at startup.");
+        }
+#endif // HAS_NDI
     }
     ImGui::EndTabItem();
     }  // end Capture tab
@@ -4185,6 +4469,10 @@ void Application::renderUI() {
     // Close the Sources tab bar + window (opened before the Capture tab).
     // Match the conditional Begin() above — only End() if we Begin'd.
     if (sourcesTabsOpen) ImGui::EndTabBar();
+    // Pop the 7 transparent tab-chrome colours pushed before BeginTabBar.
+    // EndTabBar is where the deferred tab-strip render happens, so the
+    // colours have to stay live until *after* this point.
+    if (sourcesVisible) ImGui::PopStyleColor(7);
     if (sourcesVisible) ImGui::End();
 
 // (Stream panel removed — stream key + aspect now live in the GO LIVE
@@ -4343,6 +4631,18 @@ void Application::renderUI() {
         ImGui::Dummy(ImVec2(0, 4));
         gainRow("Gate", "##nGate", &m_audioAnalyzer.noiseGate(), 0.0f, 0.5f, "%.2f");
 
+        // ── Smoothness ────────────────────────────────────────────────────
+        // Asymmetric envelope on every audio band the shaders read.
+        // Attack = how fast a rising audio peak hits the shader uniform.
+        // Release = how fast it falls back. Lower = more glide / smoother;
+        // higher = snappier / more reactive. Defaults (8 / 3) keep punchy
+        // beats while softening the decay so reactive shaders don't
+        // strobe — drag Release down further for a syrupy feel.
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::SeparatorText("Smoothness");
+        gainRow("Attack",  "##audAttack",  &m_audioAnalyzer.smoothAttack(),  0.5f, 30.0f, "%.1f /s");
+        gainRow("Release", "##audRelease", &m_audioAnalyzer.smoothRelease(), 0.5f, 30.0f, "%.1f /s");
+
         if (ImGui::SmallButton("Reset Gains")) {
             m_audioAnalyzer.inputGain() = 1.0f;
             m_audioAnalyzer.bassGain() = 1.0f;
@@ -4350,6 +4650,8 @@ void Application::renderUI() {
             m_audioAnalyzer.highMidGain() = 1.0f;
             m_audioAnalyzer.trebleGain() = 1.0f;
             m_audioAnalyzer.noiseGate() = 0.0f;
+            m_audioAnalyzer.smoothAttack()  = 8.0f;
+            m_audioAnalyzer.smoothRelease() = 3.0f;
         }
 
 #ifdef HAS_FFMPEG
@@ -4820,39 +5122,18 @@ void Application::renderFloatingTransportPill() {
     //   kGap       : between two adjacent inline items (icon→icon, icon→pill)
     //   kDivPad    : each side of a divider — symmetric so the line sits centered
     //   kBtn       : every circular icon button (play uses kPlayBtn but stays centered on the same row baseline)
-    const float pillH    = 64.0f;
+    const float pillH    = 56.0f;
     const float kInsetX  = 20.0f;
-    const float kInsetY  = (pillH - 36.0f) * 0.5f;   // = 14, keeps 36px buttons centered
+    const float kInsetY  = (pillH - 36.0f) * 0.5f;   // keeps 36px buttons centered
     const float kGap     = 10.0f;
     const float kDivPad  = 12.0f;
-    // Pill width — tightened from 800 to 720 to remove the dead space
-    // the user spotted between the audio meter and the right divider.
-    // Content is fixed-width (8 buttons + timecode block + audio combo +
-    // meter + chevron), so the pill should hug the content instead of
-    // floating in extra padding.
-    const float pillW    = 720.0f;
 
-    // Anchor 16px above the docked timeline so the two surfaces never touch.
-    // m_lastTimelineH is updated each frame by UIManager::setupDockspace.
-    float bottomDock = (m_ui.workspaceBarHeight() < 0 ? 0 : 0);
-    (void)bottomDock;
-    float timelineH = 0.0f;
-    {
-        ImGuiID dockId = 0;
-        // Read cached timeline node height via the existing UI accessor.
-        // We just expose what the rails already use (kept on UIManager).
-        // No public getter exists; mirror the math: timeline panel docks
-        // at the bottom and its current height is inferred from the
-        // viewport vs. the docked Timeline window.
-        if (ImGuiWindow* w = ImGui::FindWindowByName("Timeline")) {
-            timelineH = w->Size.y;
-            dockId = w->DockId;
-        }
-        (void)dockId;
-    }
-    float yMargin = 18.0f;
-    float x = vp->WorkPos.x + (vp->WorkSize.x - pillW) * 0.5f;
-    float y = vp->WorkPos.y + vp->WorkSize.y - timelineH - pillH - yMargin;
+    // Full-width bottom bar — docked to the very bottom of the window.
+    // Width spans the whole viewport, no horizontal margin. The dockspace
+    // is sized in setupDockspace() to leave (pillH) of room here.
+    float x = vp->Pos.x;
+    float y = vp->Pos.y + vp->Size.y - pillH;
+    float pillW = vp->Size.x;
 
     ImGui::SetNextWindowPos (ImVec2(x, y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(pillW, pillH), ImGuiCond_Always);
@@ -4864,20 +5145,25 @@ void Application::renderFloatingTransportPill() {
         ImGuiWindowFlags_NoScrollbar;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(kInsetX, kInsetY));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, pillH * 0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);  // sharp edges — docked bar
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 28, 235));
-    ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(255, 255, 255, 22));
+    // Bottom bar uses the same family as the top nav (canvas WindowBg
+    // = (33, 33, 36)) but a few notches darker so the chrome row reads as
+    // its own surface. Top hairline separates it from the canvas above.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(24, 24, 27, 250));
+    ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(255, 255, 255, 28));
 
     if (ImGui::Begin("##TransportPill", nullptr, flags)) {
-        // Drop shadow under the pill.
+        // (Drop shadow removed — bar is docked at the bottom edge so a
+        // floating shadow would just darken the canvas above for no reason.
+        // A 1px top hairline reads cleaner.)
         {
             ImVec2 wp = ImGui::GetWindowPos();
             ImVec2 ws = ImGui::GetWindowSize();
-            ImDrawList* bg = ImGui::GetBackgroundDrawList();
-            bg->AddRectFilled(ImVec2(wp.x + 4, wp.y + 8),
-                              ImVec2(wp.x + ws.x + 4, wp.y + ws.y + 8),
-                              IM_COL32(0, 0, 0, 90), pillH * 0.5f);
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddLine(ImVec2(wp.x, wp.y),
+                        ImVec2(wp.x + ws.x, wp.y),
+                        IM_COL32(255, 255, 255, 30), 1.0f);
         }
 
         bool playing = m_timeline.isPlaying();
@@ -4888,23 +5174,22 @@ void Application::renderFloatingTransportPill() {
         // visually different-sized icons. One value, one rhythm.
         const float kGlyphSize = btnSize * 0.50f;
         ImDrawList* dl       = ImGui::GetWindowDrawList();
-        const ImU32 kFgWhite = IM_COL32(232, 238, 250, 240);
-        const ImU32 kFgDim   = IM_COL32(170, 178, 195, 220);
-        const ImU32 kHair    = IM_COL32(255, 255, 255, 28);
+        // Light glyphs on near-black bottom bar. Variable name kept the
+        // same so every call site reads as "the primary glyph colour".
+        const ImU32 kFgWhite = IM_COL32(235, 240, 250, 245);
+        const ImU32 kFgDim   = IM_COL32(140, 148, 165, 220);
+        const ImU32 kHair    = IM_COL32(255, 255, 255, 30);
 
-        // ── Helper: small circular button (no fill, thin border, hover lifts) ─
+        // ── Helper: glyph-only button (no circle bg, no outline). Click area
+        // matches glyph footprint; hover state is communicated by the glyph
+        // itself via the per-button drawGlyph callback (callers are tinting
+        // kFgWhite/kFgDim already), keeping the row visually quiet.
         auto smallBtn = [&](const char* id,
                             std::function<void(float cx, float cy)> drawGlyph) -> bool {
             ImVec2 cur = ImGui::GetCursorScreenPos();
             ImVec2 sz(btnSize, btnSize);
             bool clicked = ImGui::InvisibleButton(id, sz);
-            bool hov     = ImGui::IsItemHovered();
             float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
-            if (hov) {
-                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
-                                    IM_COL32(255, 255, 255, 18), 28);
-            }
-            dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 0.5f, kHair, 28, 1.0f);
             drawGlyph(cx, cy);
             return clicked;
         };
@@ -4919,193 +5204,29 @@ void Application::renderFloatingTransportPill() {
             float halfH = 14.0f;
             dl->AddLine(ImVec2(p.x, yMid - halfH),
                         ImVec2(p.x, yMid + halfH),
-                        IM_COL32(255, 255, 255, 36), 1.0f);
+                        IM_COL32(255, 255, 255, 28), 1.0f);
             ImGui::Dummy(ImVec2(1, btnSize));
             ImGui::SameLine(0, kDivPad);
         };
 
-        // ── Play (anchor): same 36px footprint as siblings — anchored by
-        // color (cyan ring + paused-state halo + slightly larger glyph),
-        // NOT by size. Keeping the hit area equal to btnSize means the row
-        // baseline is shared and every other button stays vertically aligned.
-        {
-            ImVec2 cur = ImGui::GetCursorScreenPos();
-            ImVec2 sz(btnSize, btnSize);
-            bool clicked = ImGui::InvisibleButton("##fp_play", sz);
-            bool hov     = ImGui::IsItemHovered();
-            float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
-            // Halo removed — it visually bled into the gap between play and
-            // stop, breaking the equal-rhythm rule. The cyan ring at the rim
-            // is enough of an anchor.
-            if (hov) {
-                dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
-                                    IM_COL32(74, 174, 236, 22), 32);
-            }
-            // Accent ring — replaces the hairline border for play only.
-            dl->AddCircle(ImVec2(cx, cy), sz.x * 0.5f - 0.5f,
-                          IM_COL32(74, 174, 236, 240), 32, 1.8f);
-            // Same glyph size as every other icon in the row.
-            if (playing) lucide::pause(dl, cx, cy, kGlyphSize, kFgWhite);
-            else         lucide::play (dl, cx, cy, kGlyphSize, kFgWhite);
-            if (clicked) m_timeline.togglePlay();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
-        }
+        // Layout: LEFT cluster (timeline toggle + timecode), CENTER cluster
+        // (Stop / Play / Loop with Play at exact window midpoint), RIGHT
+        // cluster (System Audio + Mic + Meter + Fullscreen + REC + STREAM).
+        // The three clusters are positioned with absolute SetCursorPosX
+        // calls so Play sits dead center regardless of label widths on
+        // either side.
         (void)playSize;
-
-        // ── Stop (Lucide square) ──────────────────────────────────────────
-        ImGui::SameLine(0, kGap);
-        if (smallBtn("##fp_stop", [&](float cx, float cy) {
-            lucide::squareFilled(dl, cx, cy, kGlyphSize, kFgWhite);
-        })) m_timeline.stop();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
-
-        // ── Loop (Lucide repeat-2) ────────────────────────────────────────
-        ImGui::SameLine(0, kGap);
         bool looping = m_timeline.looping();
-        if (smallBtn("##fp_loop", [&](float cx, float cy) {
-            ImU32 c = looping ? IM_COL32(74, 174, 236, 245) : kFgWhite;
-            lucide::repeat(dl, cx, cy, kGlyphSize, c);
-        })) m_timeline.setLooping(!looping);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(looping ? "Loop on — click to disable" : "Loop");
 
-        // ── REC ──────────────────────────────────────────────────────────
-#ifdef HAS_FFMPEG
-        ImGui::SameLine(0, kGap);
-        {
-            bool recActive = m_recorder.isActive();
-            if (smallBtn("##fp_rec", [&](float cx, float cy) {
-                ImU32 col = recActive ? IM_COL32(255, 90, 90, 245)
-                                      : IM_COL32(255, 80, 80, 200);
-                lucide::circleDot(dl, cx, cy, kGlyphSize, col);
-            })) {
-                if (m_recorder.isActive()) {
-                    m_recorder.stop();
-                    m_timelineExporting = false;
-                } else {
-                    m_recorder.setAudioDevice(m_selectedAudioDevice);
-                    startTimelineExport();
-                }
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(recActive ? "Recording — click to stop" : "Record");
-        }
-
-        // ── STREAM ────────────────────────────────────────────────────────
-        ImGui::SameLine(0, kGap);
-        {
-            bool liveActive = m_rtmpOutput.isActive();
-            if (smallBtn("##fp_stream", [&](float cx, float cy) {
-                ImU32 c = liveActive ? IM_COL32(74, 230, 144, 245) : kFgWhite;
-                lucide::radio(dl, cx, cy, kGlyphSize, c);
-            })) {
-                if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
-                else                         ImGui::OpenPopup("##fp_stream_popup");
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(liveActive ? "Streaming — click to stop" : "Stream to RTMP");
-            if (ImGui::BeginPopup("##fp_stream_popup")) {
-                ImGui::TextDisabled("Stream to RTMP");
-                ImGui::Separator();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
-                ImGui::Text("YouTube Stream Key");
-                ImGui::PopStyleColor();
-                ImGui::SetNextItemWidth(260);
-                ImGui::InputText("##fp_streamkey", m_streamKeyBuf, sizeof(m_streamKeyBuf),
-                                 ImGuiInputTextFlags_Password);
-                ImGui::Separator();
-                bool hasKey = m_streamKeyBuf[0] != '\0';
-                ImGui::BeginDisabled(!hasKey);
-                if (ImGui::Button("Start streaming", ImVec2(-1, 0))) {
-                    auto& z = activeZone();
-                    m_rtmpOutput.start(m_streamKeyBuf, z.warpFBO.width(), z.warpFBO.height(),
-                                       16, 9, 30);
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndDisabled();
-                ImGui::EndPopup();
-            }
-        }
-#endif
-
-        divider();
-
-        // ── Timecode block: big "MM:SS" + small "DUR Xs" ──────────────────
-        {
-            double ph = m_timeline.playhead();
-            double dur = m_timeline.duration();
-            int pm = (int)ph / 60, ps = (int)ph % 60;
-            char tc[16], du[16];
-            snprintf(tc, sizeof(tc), "%02d:%02d", pm, ps);
-            snprintf(du, sizeof(du), "DUR  %ds", (int)(dur + 0.5));
-
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            float yMid = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f;
-            // Big "MM:SS" — manual scale via ImFont so it stands out like
-            // the reference's prominent timecode.
-            ImFont* font = ImGui::GetFont();
-            const float baseSize = ImGui::GetFontSize();
-            const float bigSize  = baseSize * 1.25f;
-            const float smSize   = baseSize * 0.78f;
-            ImVec2 tcSize = font->CalcTextSizeA(bigSize, FLT_MAX, 0.0f, tc);
-            ImVec2 duSize = font->CalcTextSizeA(smSize,  FLT_MAX, 0.0f, du);
-            float blockW  = std::max(tcSize.x, duSize.x);
-            // Top "MM:SS" — slightly lifted; "DUR ns" sits below it.
-            dl->AddText(font, bigSize,
-                        ImVec2(p.x + (blockW - tcSize.x) * 0.5f, yMid - tcSize.y - 1.0f),
-                        kFgWhite, tc);
-            dl->AddText(font, smSize,
-                        ImVec2(p.x + (blockW - duSize.x) * 0.5f, yMid + 3.0f),
-                        kFgDim, du);
-            // Click-to-edit on the DUR text block — opens an inline popup
-            // for typing a new total duration.
-            ImGui::SetCursorScreenPos(p);
-            if (ImGui::InvisibleButton("##fp_dur", ImVec2(blockW, btnSize))) {
-                ImGui::OpenPopup("##fp_dur_popup");
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "Playhead / duration\nClick to edit timeline length");
-            if (ImGui::BeginPopup("##fp_dur_popup")) {
-                ImGui::TextDisabled("Timeline duration");
-                ImGui::Separator();
-                static int s_mm = 0, s_ss = 0;
-                int dm = (int)dur / 60, ds = (int)dur % 60;
-                if (!ImGui::IsAnyItemActive()) { s_mm = dm; s_ss = ds; }
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##mm", &s_mm, 0); ImGui::SameLine();
-                ImGui::TextUnformatted("m"); ImGui::SameLine();
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##ss", &s_ss, 0); ImGui::SameLine();
-                ImGui::TextUnformatted("s");
-                if (ImGui::Button("Set", ImVec2(-1, 0))) {
-                    if (s_mm < 0) s_mm = 0; if (s_ss < 0) s_ss = 0;
-                    if (s_ss > 59) s_ss = 59;
-                    double d = s_mm * 60.0 + s_ss;
-                    if (d < 1.0) d = 1.0;
-                    m_timeline.setDuration(d);
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
-        }
-
-        divider();
-
-        // ── Mic — toggles continuous voice capture ────────────────────────
+        // ─── LEFT — Mic + Sound dropdown + audio meter, flush left ────────
+        // Mic comes first (far left), then Sound dropdown with the level
+        // meter immediately to its right.
 #ifdef __APPLE__
         if (smallBtn("##fp_mic", [&](float cx, float cy) {
-            // Lucide mic when on (continuous), Lucide mic-off when off.
-            // Listening adds a small pulsing red dot at top-right.
-            if (m_voiceContinuous) lucide::mic   (dl, cx, cy, kGlyphSize, kFgWhite);
-            else                   lucide::micOff(dl, cx, cy, kGlyphSize, kFgWhite);
-            if (m_voiceListening) {
-                float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 3.0f);
-                ImU32 dotCol = IM_COL32(255, 90, 90, (int)(180 + pulse * 75));
-                dl->AddCircleFilled(ImVec2(cx + 8.5f, cy - 8.5f), 3.0f, dotCol, 12);
-            }
+            ImU32 micCol = m_voiceContinuous ? kFgWhite : kFgDim;
+            if (m_voiceContinuous) lucide::mic   (dl, cx, cy, kGlyphSize, micCol);
+            else                   lucide::micOff(dl, cx, cy, kGlyphSize, micCol);
         })) {
-            // Toggle continuous mic mode. Continuous=on starts capture and
-            // auto-restarts after every final; off both stops + clears the
-            // restart flag so it stays off.
             m_voiceContinuous = !m_voiceContinuous;
             if (m_voiceContinuous) {
                 if (!m_voiceListening) startVoiceRecording();
@@ -5121,63 +5242,64 @@ void Application::renderFloatingTransportPill() {
                     ? "Mic off (no permission yet)"
                     : "Mic muted — click to start"));
         }
+        ImGui::SameLine(0, kGap);
 #endif
 
-        // ── System Audio — inline pill with chevron, opens device picker ──
-        ImGui::SameLine(0, kGap);
+        // Sound dropdown — leading volume-2 icon + (selected device name
+        // when picked, otherwise omitted) + chevron. Replaces the bare
+        // "Sound" text label so the affordance reads as an audio control
+        // at a glance.
         {
-            const char* label = "System Audio";
+            const char* audioLabel = nullptr;
 #ifdef HAS_FFMPEG
             if (m_selectedAudioDevice >= 0 &&
                 m_selectedAudioDevice < (int)m_audioDevices.size()) {
-                label = m_audioDevices[m_selectedAudioDevice].name.c_str();
+                audioLabel = m_audioDevices[m_selectedAudioDevice].name.c_str();
             }
 #endif
-            // Pill geometry — padX matches kGap so internal/external rhythm
-            // are consistent; chevron sits in the same 12px slot it occupies
-            // visually next to surrounding 36px circles.
-            const float chevW = 12.0f;
-            ImVec2 ts = ImGui::CalcTextSize(label);
-            float maxLabelW = 110.0f;
-            float labelW = std::min(ts.x, maxLabelW);
-            float padX = kGap + 2.0f, padY = 8.0f; (void)padY;
-            ImVec2 sz(labelW + chevW + padX * 2.0f, btnSize);
+            const float iconW   = 18.0f;
+            const float iconGap = (audioLabel && audioLabel[0]) ? 6.0f : 0.0f;
+            const float chevW   = 10.0f;
+            const float chevGap = 6.0f;
+            const float maxLW   = 130.0f;
+            ImVec2 ats = audioLabel ? ImGui::CalcTextSize(audioLabel) : ImVec2(0, 0);
+            float labelW = std::min(ats.x, maxLW);
+            ImVec2 sz(iconW + iconGap + labelW + chevGap + chevW, btnSize);
             ImVec2 cur = ImGui::GetCursorScreenPos();
-            bool clicked = ImGui::InvisibleButton("##fp_sysaudio", sz);
-            bool hov = ImGui::IsItemHovered();
-            ImU32 bg = hov ? IM_COL32(255, 255, 255, 22)
-                           : IM_COL32(255, 255, 255, 10);
-            dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
-                              bg, sz.y * 0.5f);
-            dl->AddRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
-                        kHair, sz.y * 0.5f, 0, 1.0f);
-            // Truncate label if too long
-            char shown[64];
-            if (ts.x > maxLabelW) {
-                int n = std::min((int)strlen(label), 12);
-                snprintf(shown, sizeof(shown), "%.*s…", n, label);
-            } else {
-                snprintf(shown, sizeof(shown), "%s", label);
+            bool clicked = ImGui::InvisibleButton("##fp_sound", sz);
+            bool hov     = ImGui::IsItemHovered();
+            float yMid = cur.y + sz.y * 0.5f;
+            ImU32 textCol = hov ? kFgWhite : kFgDim;
+            // Icon
+            lucide::volume2(dl, cur.x + iconW * 0.5f, yMid, iconW, textCol);
+            // Optional device label
+            if (audioLabel && audioLabel[0]) {
+                char shown[64];
+                if (ats.x > maxLW) {
+                    int n = std::min((int)strlen(audioLabel), 14);
+                    snprintf(shown, sizeof(shown), "%.*s…", n, audioLabel);
+                } else {
+                    snprintf(shown, sizeof(shown), "%s", audioLabel);
+                }
+                ImVec2 sts = ImGui::CalcTextSize(shown);
+                dl->AddText(ImVec2(cur.x + iconW + iconGap,
+                                   yMid - sts.y * 0.5f),
+                            textCol, shown);
             }
-            ImVec2 sts = ImGui::CalcTextSize(shown);
-            float yMid2 = cur.y + sz.y * 0.5f;
-            dl->AddText(ImVec2(cur.x + padX, yMid2 - sts.y * 0.5f),
-                        kFgWhite, shown);
-            // Chevron (Lucide chevron-down) — same visual language as the
-            // timeline-toggle chevron at the far right of the pill.
-            float cxv = cur.x + sz.x - padX - chevW * 0.5f;
-            lucide::chevronDown(dl, cxv, yMid2, chevW * 0.95f, kFgDim);
+            // Chevron
+            float cxv = cur.x + iconW + iconGap + labelW + chevGap + chevW * 0.5f;
+            lucide::chevronDown(dl, cxv, yMid, chevW, textCol);
             if (clicked) {
 #ifdef HAS_FFMPEG
                 m_audioDevices = VideoRecorder::enumerateAudioDevices();
 #endif
-                ImGui::OpenPopup("##fp_sysaudio_popup");
+                ImGui::OpenPopup("##fp_sound_popup");
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("System audio source");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sound source");
         }
 #ifdef HAS_FFMPEG
-        if (ImGui::BeginPopup("##fp_sysaudio_popup")) {
-            ImGui::TextDisabled("System audio capture");
+        if (ImGui::BeginPopup("##fp_sound_popup")) {
+            ImGui::TextDisabled("Sound capture");
             ImGui::Separator();
             if (ImGui::Selectable("System default", m_selectedAudioDevice == -1)) {
                 m_selectedAudioDevice = -1;
@@ -5195,53 +5317,276 @@ void Application::renderFloatingTransportPill() {
         }
 #endif
 
-        // ── Audio monitor — Lucide `audio-lines` (4 vertical EQ bars).
-        // Reads as "audio levels" much more directly than the prior
-        // speaker glyph, and groups visually with the level meter that
-        // sits immediately to its right.
-        ImGui::SameLine(0, kGap);
-        if (smallBtn("##fp_speaker", [&](float cx, float cy) {
-            lucide::audioLines(dl, cx, cy, kGlyphSize, kFgWhite);
-        })) {
-            // No-op: monitor toggle could land here later.
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Audio monitor");
-
-        // ── Compact level meter — single horizontal pill that fills with
-        // the smoothed RMS, sitting flush next to the speaker icon. The old
-        // 7-bar VU was reading as decorative noise next to the volume icon.
+        // Audio meter — sits immediately to the right of the Sound dropdown,
+        // next to the source that drives it.
         ImGui::SameLine(0, kGap);
         {
-            const float meterW = 56.0f, meterH = 5.0f;
+            const float meterW = 56.0f;
+            const float meterH = 5.0f;
             ImVec2 cur = ImGui::GetCursorScreenPos();
             ImGui::Dummy(ImVec2(meterW, btnSize));
             float yMidM = cur.y + btnSize * 0.5f;
             ImVec2 a(cur.x, yMidM - meterH * 0.5f);
             ImVec2 b(cur.x + meterW, yMidM + meterH * 0.5f);
-            dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 28), meterH * 0.5f);
+            dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 30), meterH * 0.5f);
             float lvl = std::min(1.0f, m_audioRMS * 4.0f);
             if (lvl > 0.01f) {
-                ImU32 fillCol = IM_COL32(74, 174, 236, 240);
+                ImU32 fillCol = IM_COL32(235, 240, 250, 235);
                 dl->AddRectFilled(a, ImVec2(cur.x + meterW * lvl, b.y),
                                   fillCol, meterH * 0.5f);
             }
         }
 
-        // Divider before the timeline-toggle chevron — it's its own group
-        // (window control), not part of the audio cluster on its left.
-        divider();
+        // (Duration popup is opened from the right-cluster timecode below;
+        //  body kept here so it lives in this function's scope.)
+        {
+            double dur = m_timeline.duration();
+            int dm = (int)dur / 60, ds = (int)dur % 60;
+            (void)dm; (void)ds;
+            if (ImGui::BeginPopup("##fp_dur_popup")) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8, 8));
 
-        // ── Timeline toggle — Lucide `film` glyph reads as "show me the
-        // tracks/strip" much better than a chevron. Tinted the active
-        // accent when the timeline is currently expanded so the on/off
-        // state reads at a glance.
-        if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
-            ImU32 c = m_timelineMinimized ? kFgWhite
-                                          : IM_COL32(74, 174, 236, 245);
-            lucide::film(dl, cx, cy, kGlyphSize, c);
-        })) m_timelineMinimized = !m_timelineMinimized;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(m_timelineMinimized ? "Show timeline" : "Hide timeline");
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
+                ImGui::TextUnformatted("Timeline duration");
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
+                ImGui::TextUnformatted("Quick presets");
+                ImGui::PopStyleColor();
+
+                static int s_mm = 0, s_ss = 0;
+                int dm = (int)dur / 60, ds = (int)dur % 60;
+                if (!ImGui::IsAnyItemActive()) { s_mm = dm; s_ss = ds; }
+
+                auto presetBtn = [&](const char* lbl, int totalSec) {
+                    bool match = (totalSec == s_mm * 60 + s_ss);
+                    if (match) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.96f, 0.97f, 1.0f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 1));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.07f, 0.09f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.06f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.93f, 1.0f));
+                    }
+                    if (ImGui::Button(lbl, ImVec2(54, 28))) {
+                        s_mm = totalSec / 60;
+                        s_ss = totalSec % 60;
+                        m_timeline.setDuration((double)totalSec);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::PopStyleColor(3);
+                };
+                presetBtn("15s",   15);  ImGui::SameLine();
+                presetBtn("30s",   30);  ImGui::SameLine();
+                presetBtn("1 min", 60);  ImGui::SameLine();
+                presetBtn("2 min", 120);
+                presetBtn("5 min", 300); ImGui::SameLine();
+                presetBtn("10 min",600); ImGui::SameLine();
+                presetBtn("30 min",1800);ImGui::SameLine();
+                presetBtn("1 hr",  3600);
+
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
+                ImGui::TextUnformatted("Custom");
+                ImGui::PopStyleColor();
+                ImGui::SetNextItemWidth(64);
+                ImGui::InputInt("##mm", &s_mm, 1, 5);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
+                ImGui::TextUnformatted("min");
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 14);
+                ImGui::SetNextItemWidth(64);
+                ImGui::InputInt("##ss", &s_ss, 1, 5);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
+                ImGui::TextUnformatted("sec");
+                ImGui::PopStyleColor();
+
+                ImGui::Spacing();
+                if (s_mm < 0) s_mm = 0;
+                if (s_ss < 0) s_ss = 0;
+                if (s_ss > 59) { s_mm += s_ss / 60; s_ss = s_ss % 60; }
+                int totalPreview = s_mm * 60 + s_ss;
+                if (totalPreview < 1) totalPreview = 1;
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.96f, 0.97f, 1.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 1));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.07f, 0.09f, 1.0f));
+                char setLabel[32];
+                snprintf(setLabel, sizeof(setLabel), "Set duration  (%d:%02d)",
+                         totalPreview / 60, totalPreview % 60);
+                bool enterPressed = ImGui::IsKeyPressed(ImGuiKey_Enter)
+                                  || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+                if (ImGui::Button(setLabel, ImVec2(-1, 32)) || enterPressed) {
+                    m_timeline.setDuration((double)totalPreview);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar(2);
+                ImGui::EndPopup();
+            }
+        }
+
+        // ─── CENTER — Loop, Play, Stop (Play at exact window midpoint) ────
+        {
+            float winW = ImGui::GetWindowSize().x;
+            float clusterW = btnSize * 3.0f + kGap * 2.0f;
+            float clusterStartX = (winW - clusterW) * 0.5f;
+            ImGui::SameLine(0, 0);
+            ImGui::SetCursorPosX(clusterStartX);
+
+            if (smallBtn("##fp_loop", [&](float cx, float cy) {
+                ImU32 c = looping ? kFgWhite : kFgDim;
+                lucide::infinity(dl, cx, cy, kGlyphSize, c);
+            })) m_timeline.setLooping(!looping);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(looping ? "Loop on — click to disable" : "Loop");
+
+            ImGui::SameLine(0, kGap);
+            // Play (anchor) — cyan ring instead of hairline.
+            {
+                ImVec2 cur = ImGui::GetCursorScreenPos();
+                ImVec2 sz(btnSize, btnSize);
+                bool clicked = ImGui::InvisibleButton("##fp_play", sz);
+                bool hov     = ImGui::IsItemHovered();
+                float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
+                // No background circle, no ring — Play is just the glyph.
+                // Slight scale boost on the glyph keeps it as the visual
+                // anchor in the row.
+                (void)hov;
+                float playGlyph = kGlyphSize * 1.18f;
+                if (playing) lucide::pause(dl, cx, cy, playGlyph, kFgWhite);
+                else         lucide::play (dl, cx, cy, playGlyph, kFgWhite);
+                if (clicked) m_timeline.togglePlay();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(playing ? "Pause" : "Play");
+            }
+
+            ImGui::SameLine(0, kGap);
+            if (smallBtn("##fp_stop", [&](float cx, float cy) {
+                lucide::squareFilled(dl, cx, cy, kGlyphSize, kFgWhite);
+            })) m_timeline.stop();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
+        }
+
+        // ─── RIGHT — Timeline-toggle + Timecode + REC + STREAM ───────────
+        // (Sound dropdown + audio meter live on the far left of this row;
+        // mic lives in the top nav next to the hamburger.)
+        {
+            // Timecode block width (precomputed so right-cluster anchoring
+            // can reserve exactly the space it needs).
+            double ph = m_timeline.playhead();
+            double dur = m_timeline.duration();
+            int pm = (int)ph / 60, ps = (int)ph % 60;
+            char tc[16], du[16];
+            snprintf(tc, sizeof(tc), "%02d:%02d", pm, ps);
+            snprintf(du, sizeof(du), "DUR  %ds", (int)(dur + 0.5));
+            ImFont* font = ImGui::GetFont();
+            const float baseSize = ImGui::GetFontSize();
+            const float bigSize  = baseSize * 1.18f;
+            const float smSize   = baseSize * 0.78f;
+            const float kInner   = 10.0f;
+            ImVec2 tcSize = font->CalcTextSizeA(bigSize, FLT_MAX, 0.0f, tc);
+            ImVec2 duSize = font->CalcTextSizeA(smSize,  FLT_MAX, 0.0f, du);
+            float tcBlockW = tcSize.x + kInner + duSize.x;
+
+            // Total: tcBlock + gap + tlBtn + gap + rec + gap + stream
+            float rightW = tcBlockW + kGap + btnSize + kGap + btnSize + kGap + btnSize;
+
+            float winW = ImGui::GetWindowSize().x;
+            float startX = winW - rightW - kInsetX;
+            ImGui::SameLine(0, 0);
+            ImGui::SetCursorPosX(startX);
+
+            // Timecode block (MM:SS  DUR Xs) — single-row layout, click to edit.
+            {
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float yMid = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y * 0.5f;
+                dl->AddText(font, bigSize,
+                            ImVec2(p.x, yMid - tcSize.y * 0.5f),
+                            kFgWhite, tc);
+                dl->AddText(font, smSize,
+                            ImVec2(p.x + tcSize.x + kInner, yMid - duSize.y * 0.5f),
+                            kFgDim, du);
+                ImGui::SetCursorScreenPos(p);
+                if (ImGui::InvisibleButton("##fp_dur", ImVec2(tcBlockW, btnSize))) {
+                    ImGui::OpenPopup("##fp_dur_popup");
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Playhead / duration\nClick to edit timeline length");
+            }
+
+            // Timeline toggle (film icon) — opens / collapses the docked timeline.
+            ImGui::SameLine(0, kGap);
+            if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
+                ImU32 c = m_timelineMinimized ? kFgDim : kFgWhite;
+                lucide::clapperboard(dl, cx, cy, kGlyphSize, c);
+            })) m_timelineMinimized = !m_timelineMinimized;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(m_timelineMinimized ? "Show timeline" : "Hide timeline");
+
+            // (Audio meter moved to the LEFT next to the Sound dropdown.)
+
+            // REC
+#ifdef HAS_FFMPEG
+            ImGui::SameLine(0, kGap);
+            {
+                bool recActive = m_recorder.isActive();
+                if (smallBtn("##fp_rec", [&](float cx, float cy) {
+                    ImU32 col = recActive ? IM_COL32(255, 90, 90, 245)
+                                          : IM_COL32(255, 80, 80, 200);
+                    lucide::circleDot(dl, cx, cy, kGlyphSize, col);
+                })) {
+                    if (m_recorder.isActive()) {
+                        m_recorder.stop();
+                        m_timelineExporting = false;
+                    } else {
+                        m_recorder.setAudioDevice(m_selectedAudioDevice);
+                        startTimelineExport();
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(recActive ? "Recording — click to stop" : "Record");
+            }
+
+            // STREAM
+            ImGui::SameLine(0, kGap);
+            {
+                bool liveActive = m_rtmpOutput.isActive();
+                if (smallBtn("##fp_stream", [&](float cx, float cy) {
+                    ImU32 c = liveActive ? IM_COL32(74, 230, 144, 245) : kFgWhite;
+                    lucide::radio(dl, cx, cy, kGlyphSize, c);
+                })) {
+                    if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
+                    else                         ImGui::OpenPopup("##fp_stream_popup");
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(liveActive ? "Streaming — click to stop" : "Stream to RTMP");
+                if (ImGui::BeginPopup("##fp_stream_popup")) {
+                    ImGui::TextDisabled("Stream to RTMP");
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                    ImGui::Text("YouTube Stream Key");
+                    ImGui::PopStyleColor();
+                    ImGui::SetNextItemWidth(260);
+                    ImGui::InputText("##fp_streamkey", m_streamKeyBuf, sizeof(m_streamKeyBuf),
+                                     ImGuiInputTextFlags_Password);
+                    ImGui::Separator();
+                    bool hasKey = m_streamKeyBuf[0] != '\0';
+                    ImGui::BeginDisabled(!hasKey);
+                    if (ImGui::Button("Start streaming", ImVec2(-1, 0))) {
+                        auto& z = activeZone();
+                        m_rtmpOutput.start(m_streamKeyBuf, z.warpFBO.width(), z.warpFBO.height(),
+                                           16, 9, 30);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::EndPopup();
+                }
+            }
+#endif
+        }
+        (void)divider;
 
         // (legacy pillBtn / mic / REC / STREAM / AUDIO blocks below this point
         //  have been removed — the new top-down layout above is the entire pill.)
@@ -5382,13 +5727,135 @@ void Application::renderFloatingTransportPill() {
                              28, 1.6f);
             }
             if (ImGui::InvisibleButton("##fp_mic", sz)) {
-                if (m_voiceListening) stopVoiceRecording();
-                else                  startVoiceRecording();
+                ImGui::OpenPopup("##VoicePopup");
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip(m_voiceListening
-                    ? "Listening — click to stop"
-                    : "Click to start voice transcription\n(words appear in shaders bound to cue.latest)");
+                    ? "Listening — click for voice settings"
+                    : "Voice settings (transcript / mic / device / decay)");
+            }
+
+            // Voice settings popup — replaces the old Sources › Voice tab.
+            // Hosts the live transcript, mic on/off, audio device picker
+            // and decay slider in a compact pop-over anchored above the
+            // mic button.
+            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Always);
+            if (ImGui::BeginPopup("##VoicePopup")) {
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 5));
+
+                // Live transcript display
+                std::string words = m_dataBus.get("cue.latest");
+                if (words.empty()) words = m_dataBus.get("etherea.latest");
+                ImVec2 fp = ImGui::GetCursorScreenPos();
+                float fw = ImGui::GetContentRegionAvail().x;
+                float fh = 56.0f;
+                ImDrawList* tdl = ImGui::GetWindowDrawList();
+                tdl->AddRectFilled(fp, ImVec2(fp.x + fw, fp.y + fh),
+                                   IM_COL32(20, 22, 28, 220), 8.0f);
+                tdl->AddRect(fp, ImVec2(fp.x + fw, fp.y + fh),
+                             IM_COL32(255, 255, 255, 28), 8.0f, 0, 1.0f);
+                const char* placeholder = "START TALKING..";
+                const char* shown = words.empty() ? placeholder : words.c_str();
+                ImU32 textCol = words.empty() ? IM_COL32(110, 118, 130, 220)
+                                              : IM_COL32(232, 238, 250, 240);
+                ImVec2 tts = ImGui::CalcTextSize(shown);
+                tdl->AddText(ImVec2(fp.x + 14.0f, fp.y + (fh - tts.y) * 0.5f),
+                             textCol, shown);
+                ImGui::Dummy(ImVec2(0, fh + 10.0f));
+
+#ifdef __APPLE__
+                // Mic level meter
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                    ImGui::Text("MIC LEVEL");
+                    ImGui::PopStyleColor();
+                    ImVec2 mp = ImGui::GetCursorScreenPos();
+                    float mw = ImGui::GetContentRegionAvail().x;
+                    float mh = 6.0f;
+                    tdl->AddRectFilled(mp, ImVec2(mp.x + mw, mp.y + mh),
+                                       IM_COL32(255, 255, 255, 22), mh * 0.5f);
+                    float lvl = std::min(1.0f, m_audioRMS * 4.0f);
+                    tdl->AddRectFilled(mp, ImVec2(mp.x + mw * lvl, mp.y + mh),
+                                       IM_COL32(255, 90, 110, 240), mh * 0.5f);
+                    ImGui::Dummy(ImVec2(0, mh + 10.0f));
+                }
+
+                // Mic toggle (continuous listening)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                    ImGui::Text("MIC");
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine();
+                    float w = ImGui::GetContentRegionAvail().x;
+                    float switchW = 44.0f, switchH = 22.0f;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - switchW));
+                    ImVec2 sp = ImGui::GetCursorScreenPos();
+                    bool clicked = ImGui::InvisibleButton("##miconoff_pop", ImVec2(switchW, switchH));
+                    ImU32 trackCol = m_voiceContinuous
+                        ? IM_COL32(255, 90, 110, 220)
+                        : IM_COL32(255, 255, 255, 28);
+                    tdl->AddRectFilled(sp, ImVec2(sp.x + switchW, sp.y + switchH),
+                                       trackCol, switchH * 0.5f);
+                    float knobR = switchH * 0.5f - 3.0f;
+                    float knobX = m_voiceContinuous ? sp.x + switchW - knobR - 3.0f : sp.x + knobR + 3.0f;
+                    tdl->AddCircleFilled(ImVec2(knobX, sp.y + switchH * 0.5f), knobR,
+                                         IM_COL32(240, 244, 250, 255));
+                    if (clicked) {
+                        m_voiceContinuous = !m_voiceContinuous;
+                        if (m_voiceContinuous) {
+                            if (!m_voiceListening) startVoiceRecording();
+                        } else {
+                            if (m_voiceListening) stopVoiceRecording();
+                            m_voiceRestartPending = false;
+                        }
+                    }
+                    ImGui::Dummy(ImVec2(0, 14));
+                }
+#endif
+
+#ifdef HAS_FFMPEG
+                // Audio device picker
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                    ImGui::Text("AUDIO DEVICE");
+                    ImGui::PopStyleColor();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    const char* preview = "Default";
+                    if (m_selectedAudioDevice >= 0 &&
+                        m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                        preview = m_audioDevices[m_selectedAudioDevice].name.c_str();
+                    }
+                    if (ImGui::BeginCombo("##voice_audio_pop", preview)) {
+                        if (ImGui::Selectable("Default", m_selectedAudioDevice == -1)) {
+                            m_selectedAudioDevice = -1;
+                            m_recorder.setAudioDevice(-1);
+                        }
+                        for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                            if (!m_audioDevices[i].isCapture) continue;
+                            if (ImGui::Selectable(m_audioDevices[i].name.c_str(),
+                                                  m_selectedAudioDevice == i)) {
+                                m_selectedAudioDevice = i;
+                                m_recorder.setAudioDevice(i);
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::Dummy(ImVec2(0, 10));
+                }
+#endif
+
+                // Decay slider
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.59f, 0.62f, 0.68f, 0.90f));
+                    ImGui::Text("DECAY");
+                    ImGui::PopStyleColor();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    ImGui::SliderFloat("##voice_decay_pop", &m_voiceDecayDuration,
+                                       0.5f, 10.0f, "%.1fs");
+                }
+
+                ImGui::PopStyleVar();
+                ImGui::EndPopup();
             }
         }
 #endif
@@ -5918,18 +6385,9 @@ void Application::renderTimelinePanel() {
             return clicked;
         };
 
-        // Transport sits flush-left against the window padding — same left edge
-        // as the REC / output-route buttons in the bottom transport bar.
-        // Minimize button moved out of this row — it lives at the top-left of
-        // the panel, visually adjacent to the "Timeline" tab header.
-        // Expand / collapse the panel. When minimized, the chevron points up
-        // (click to reveal tracks); when expanded, it points down (click to
-        // collapse to the transport-only strip). This is the only visible
-        // affordance for the minimize state — without it new users have no way
-        // to find their tracks since the timeline ships minimized.
-        if (iconBtn("##TimelineMinimize", m_timelineMinimized ? 7 : 6))
-            m_timelineMinimized = !m_timelineMinimized;
-        ImGui::SameLine();
+        // (Collapse chevron removed — toggle now lives only in the bottom
+        // transport bar's timeline-icon button. One source of truth for the
+        // minimize state, and the timeline header reads as content-only.)
 
         // De-duplication note: play/stop/loop + timecode now live in the
         // floating transport pill above this dock. Phase 5 made it the
@@ -5989,6 +6447,45 @@ void Application::renderTimelinePanel() {
         float dsec = (float)m_timeline.duration();
         if (ImGui::DragFloat("##Dur", &dsec, 1.0f, 1.0f, 3600.0f * 4.0f, "%.0fs")) {
             m_timeline.setDuration((double)dsec);
+        }
+
+        // Work Area sits right next to Dur — both are time-range controls
+        // for the timeline and read together as one cluster. Click opens
+        // the Start/End editor popup; same affordance as before, just
+        // grouped on the left instead of right-anchored.
+        {
+            double wa0i = m_timeline.workAreaStart();
+            double wa1i = m_timeline.workAreaEnd();
+            int wmi0 = (int)wa0i / 60, wsi0 = (int)wa0i % 60;
+            int wmi1 = (int)wa1i / 60, wsi1 = (int)wa1i % 60;
+            char waInline[48];
+            snprintf(waInline, sizeof(waInline), "%d:%02d-%d:%02d",
+                     wmi0, wsi0, wmi1, wsi1);
+            float waInlineW = ImGui::CalcTextSize(waInline).x;
+            ImGui::SameLine(0, 14);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("Work");
+            ImGui::SameLine();
+            float frH = ImGui::GetFrameHeight();
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton("##WAEditInline",
+                                                  ImVec2(waInlineW + 14.0f, frH));
+            bool hov = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImU32 bg = hov ? IM_COL32(255, 255, 255, 30)
+                           : IM_COL32(255, 255, 255, 12);
+            dl->AddRectFilled(cur,
+                              ImVec2(cur.x + waInlineW + 14.0f, cur.y + frH),
+                              bg, 5.0f);
+            ImVec2 ts = ImGui::CalcTextSize(waInline);
+            dl->AddText(ImVec2(cur.x + 7.0f, cur.y + (frH - ts.y) * 0.5f),
+                        hov ? IM_COL32(245, 247, 252, 245)
+                            : IM_COL32(200, 210, 225, 220),
+                        waInline);
+            if (hov) ParamRow::Tooltip(
+                "Work Area — the range REC will capture.\n"
+                "Click to edit start/end (or use I / O at playhead).");
+            if (clicked) ImGui::OpenPopup("##WAEditPopup");
         }
 
         // Zoom slider — replaces the old wheel-zoom. Logarithmic feel so the
@@ -6086,213 +6583,22 @@ void Application::renderTimelinePanel() {
         snprintf(waLbl, sizeof(waLbl), "%d:%02d-%d:%02d", wm0, ws0, wm1, ws1);
         float waW = ImGui::CalcTextSize(waLbl).x;
 
-        // Centered group: [Audio combo][Meter] — treated as one block so both
-        // sit in the middle of the transport row, with the meter reading next
-        // to the source that drives it.
-        const float kVoiceIconW = 24.0f;
-        float centerGroupW = kAudioComboW + kGap + kVoiceIconW + kGap + kMeterW;
-        std::string audioPreview = m_mixerEnabled ? "Mixer" : "System Audio";
-        if (!m_mixerEnabled && m_selectedAudioDevice >= 0 &&
-            m_selectedAudioDevice < (int)m_audioDevices.size()) {
-            audioPreview = m_audioDevices[m_selectedAudioDevice].name;
-            if (audioPreview.length() > 20) audioPreview = audioPreview.substr(0, 17) + "...";
-        }
+        // (Centered audio cluster removed — mic icon, System Audio combo,
+        // and stereo level meter all live in the bottom transport bar now.
+        // Keeping a second copy here was the duplicate the user flagged.)
         ImGui::SameLine(0, 0);
         float contentMaxX = ImGui::GetWindowContentRegionMax().x;
-        float contentMinX = ImGui::GetWindowContentRegionMin().x;
-        float centerX = (contentMinX + contentMaxX) * 0.5f - centerGroupW * 0.5f;
-        if (centerX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(centerX);
-        // VOICE icon — sits immediately left of the System Audio combo.
-        // Tap = open the voice popup (listen toggle, partial transcript, type
-        // input, recent log). Pulse-red while listening so the state is
-        // visible even when the popup is closed.
-        {
-            ImVec2 mp = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("##VoiceIcon", ImVec2(kVoiceIconW, frameH));
-            bool hov = ImGui::IsItemHovered();
-            bool clk = ImGui::IsItemClicked();
-            if (clk) ImGui::OpenPopup("##VoicePopup");
 
-            ImDrawList* d = ImGui::GetWindowDrawList();
-            ImVec2 c(mp.x + kVoiceIconW * 0.5f, mp.y + frameH * 0.5f);
-            float r = 5.0f;
-            ImU32 col;
-            if (m_voiceListening) {
-                float pulse = 0.55f + 0.45f * sinf((float)glfwGetTime() * 4.0f);
-                col = IM_COL32(255, 80, 80, (int)(pulse * 230 + 25));
-            } else {
-                col = IM_COL32(255, 255, 255, hov ? 220 : 130);
-            }
-            // Mic capsule
-            d->AddRectFilled(ImVec2(c.x - r * 0.55f, c.y - r),
-                             ImVec2(c.x + r * 0.55f, c.y + r * 0.45f),
-                             col, r * 0.55f);
-            // Stem
-            d->AddLine(ImVec2(c.x, c.y + r * 0.45f),
-                       ImVec2(c.x, c.y + r * 1.15f), col, 1.4f);
-            // Base
-            d->AddLine(ImVec2(c.x - r * 0.7f, c.y + r * 1.15f),
-                       ImVec2(c.x + r * 0.7f, c.y + r * 1.15f), col, 1.4f);
-
-            if (hov && !m_voiceListening) ImGui::SetTooltip("Voice — tap for options");
-
-            ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Always);
-            if (ImGui::BeginPopup("##VoicePopup")) {
-                // Big single toggle: listen on/off. Active = red.
-                if (m_voiceListening) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.95f, 0.30f, 0.30f, 0.85f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 0.40f, 0.40f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.85f, 0.20f, 0.20f, 1.00f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
-                    if (ImGui::Button("● Listening — tap to stop", ImVec2(-1, 32))) {
-                        stopVoiceRecording();
-                    }
-                    ImGui::PopStyleColor(4);
-                } else {
-                    if (ImGui::Button("Tap to listen", ImVec2(-1, 32))) {
-                        startVoiceRecording();
-                    }
-                }
-
-                // Streaming partial transcript (only meaningful while listening).
-                if (m_voiceListening) {
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                                          ImVec4(0.84f, 0.88f, 0.94f, 0.95f));
-                    if (m_voicePartial.empty())
-                        ImGui::TextWrapped("…");
-                    else
-                        ImGui::TextWrapped("%s", m_voicePartial.c_str());
-                    ImGui::PopStyleColor();
-                }
-
-                // Inline type-to-command — exists in case voice fails or for
-                // muted environments. Same parser, same dispatch.
-                ImGui::Dummy(ImVec2(0, 4));
-                ImGui::SetNextItemWidth(-60);
-                bool submit = ImGui::InputTextWithHint(
-                    "##VoiceTypedCmd", "or type a command…",
-                    m_voiceTextInput, sizeof(m_voiceTextInput),
-                    ImGuiInputTextFlags_EnterReturnsTrue);
-                ImGui::SameLine(0, 4);
-                if (ImGui::Button("Run", ImVec2(-FLT_MIN, 0)) || submit) {
-                    if (m_voiceTextInput[0] != '\0') {
-                        auto intent = easel::voice::parse(m_voiceTextInput);
-                        handleVoiceIntent(intent);
-                        m_voiceTextInput[0] = '\0';
-                    }
-                }
-
-                // Last echo (what was just dispatched).
-                if (!m_voiceLastEcho.empty()) {
-                    double age = glfwGetTime() - m_voiceLastEchoTime;
-                    if (age < 8.0) {
-                        float a = (float)std::max(0.0, 1.0 - (age - 5.0) / 3.0);
-                        ImGui::PushStyleColor(ImGuiCol_Text,
-                                              ImVec4(0.84f, 0.88f, 0.94f, a));
-                        ImGui::TextWrapped("%s", m_voiceLastEcho.c_str());
-                        ImGui::PopStyleColor();
-                    }
-                }
-
-                // Recent log (compact).
-                if (!m_voiceLog.empty()) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Recent");
-                    int n = (int)std::min((size_t)4, m_voiceLog.size());
-                    for (int i = 0; i < n; i++) {
-                        ImGui::TextDisabled("· %s", m_voiceLog[i].c_str());
-                    }
-                }
-
-                ImGui::Separator();
-                ImGui::TextDisabled("Try: \"play\", \"fade in fauvism over 3 seconds\"");
-
-                ImGui::EndPopup();
-            }
-        }
-
-        // System Audio combo — sits to the right of the mic icon.
-        ImGui::SameLine(0, kGap);
-        ImGui::SetNextItemWidth(kAudioComboW);
-        if (ImGui::BeginCombo("##AudioSrc", audioPreview.c_str())) {
-            if (ImGui::Selectable("System Audio", !m_mixerEnabled && m_selectedAudioDevice == -1 && m_audioAnalyzer.wantsSystemAudio())) {
-                if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
-                m_selectedAudioDevice = -1;
-                m_audioAnalyzer.setWantsSystemAudio(true);
-            }
-            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
-                ImGui::PushID(i);
-                if (ImGui::Selectable(m_audioDevices[i].name.c_str(), !m_mixerEnabled && m_selectedAudioDevice == i)) {
-                    if (m_mixerEnabled) { m_audioMixer.stop(); m_audioAnalyzer.setExternalFeed(false); m_mixerEnabled = false; }
-                    m_selectedAudioDevice = i;
-                    m_audioAnalyzer.setWantsSystemAudio(false);
-                }
-                ImGui::PopID();
-            }
-            ImGui::Separator();
-            if (ImGui::Selectable("Mixer", m_mixerEnabled)) {
-                if (!m_mixerEnabled) {
-                    m_mixerEnabled = true;
-                    m_audioAnalyzer.setExternalFeed(true);
-                    m_audioAnalyzer.setWantsSystemAudio(true);
-                    if (m_audioMixer.inputCount() == 0)
-                        m_audioMixer.addInput("", "System Audio", false);
-                    m_audioMixer.start();
-                }
-            }
-            ImGui::EndCombo();
-        }
-
-        // Stereo level meter — sits immediately to the right of the audio combo.
-        ImGui::SameLine(0, kGap);
-        {
-            ImVec2 mpos = ImGui::GetCursorScreenPos();
-            float meterH = 14.0f;
-            float meterY = mpos.y + (frameH - meterH) * 0.5f;
-            float gap = 2.0f, singleH = (meterH - gap) * 0.5f;
-            ImU32 trackBg = IM_COL32(20, 24, 35, 200);
-            ImDrawList* d = ImGui::GetWindowDrawList();
-            d->AddRectFilled(ImVec2(mpos.x, meterY),
-                             ImVec2(mpos.x + kMeterW, meterY + singleH), trackBg, 2.0f);
-            d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
-                             ImVec2(mpos.x + kMeterW, meterY + meterH), trackBg, 2.0f);
-            float fillL = m_audioLevelSmoothL * kMeterW;
-            float fillR = m_audioLevelSmoothR * kMeterW;
-            d->AddRectFilled(ImVec2(mpos.x, meterY),
-                             ImVec2(mpos.x + fillL, meterY + singleH), kAccentDim, 2.0f);
-            d->AddRectFilled(ImVec2(mpos.x, meterY + singleH + gap),
-                             ImVec2(mpos.x + fillR, meterY + meterH), kAccentDim, 2.0f);
-            ImGui::Dummy(ImVec2(kMeterW, frameH));
-        }
-
-        // Right-anchored cluster: [Work Area click-to-edit] [REC] [GO LIVE].
-        // REC sits next to the Work Area time so "this range → record it"
-        // reads as one continuous action; GO LIVE tails the cluster at the
-        // window's right edge.
-        const char* goLiveLbl = m_rtmpOutput.isActive() ? "END LIVE" : "GO LIVE";
-        float goLiveW = ImGui::CalcTextSize(goLiveLbl).x
-                      + ImGui::GetStyle().FramePadding.x * 2.0f;
+        // Right-anchored: REC only. (Work Area moved next to Dur on the
+        // left of this transport row so duration + work-area read as one
+        // grouped time control.)
         ImGui::SameLine(0, 0);
-        // Right-edge margin matches the timeline WindowPadding on the left
-        // (~12px) so REC / GO LIVE sit the same distance from the window edge
-        // as play/stop/loop sit from their left edge.
-        float rightAnchorX = contentMaxX - waW - kGap - kRecBtnW - kGap - goLiveW - 4.0f;
+        float rightAnchorX = contentMaxX - kRecBtnW - 4.0f;
         if (rightAnchorX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightAnchorX);
         {
-            ImVec2 wapos = ImGui::GetCursorScreenPos();
-            bool waClicked = ImGui::InvisibleButton("##WAEdit",
-                                                    ImVec2(waW, frameH));
-            bool waHov = ImGui::IsItemHovered();
-            ImGui::GetWindowDrawList()->AddText(
-                ImVec2(wapos.x, wapos.y + (frameH - ImGui::CalcTextSize(waLbl).y) * 0.5f),
-                waHov ? IM_COL32(255, 255, 255, 255)
-                      : IM_COL32(200, 210, 225, 200),
-                waLbl);
-            if (waHov) ParamRow::Tooltip(
-                "Work Area — the range REC will capture.\n"
-                "Click to edit start/end (or use I / O at playhead).");
-            if (waClicked) ImGui::OpenPopup("##WAEditPopup");
-
+            // Work Area popup — opened by the inline ##WAEditInline button
+            // up in the Dur cluster. Body kept here so it lives in the same
+            // function scope as the popup-open call.
             if (ImGui::BeginPopup("##WAEditPopup")) {
                 ImGui::TextDisabled("Work Area (record range)");
                 ImGui::Separator();
@@ -6339,37 +6645,15 @@ void Application::renderTimelinePanel() {
             }
         }
 
-        // (Voice pill removed — voice mic icon now sits next to System Audio
-        // and opens a popup on tap. See the VoiceIcon block in this function.)
-
-        // REC — red pill, anchored at the far right next to Work Area time.
-        ImGui::SameLine(0, kGap);
-        const char* recLabel = (recording || exporting) ? "STOP" : "REC";
-        if (pillBtn("##Rec", recLabel, kRecBtnW, kRedDim, kRed)) {
-            if (recording || exporting) {
-                if (exporting) { m_timeline.pause(); m_timelineExporting = false; }
-                if (recording) m_recorder.stop();
-            } else {
-                m_recorder.setAudioDevice(m_selectedAudioDevice);
-                startTimelineExport();
-            }
-        }
-        // GO LIVE sits immediately to the right of REC — both are "broadcast"
-        // actions, so they cluster together at the tail of the transport row.
-        ImGui::SameLine(0, kGap);
-        renderGoLiveButton();
-        if (ImGui::IsItemHovered()) ParamRow::Tooltip(
-            (recording || exporting)
-              ? "Click to stop recording."
-              : "Click to record the Work Area to MP4.");
-        if (recording) {
-            float pulse = 0.5f + 0.5f * sinf(timeNow * 4.0f);
-            ImVec2 itemMin = ImGui::GetItemRectMin();
-            ImVec2 itemMax = ImGui::GetItemRectMax();
-            ImDrawList* d = ImGui::GetWindowDrawList();
-            d->AddCircleFilled(ImVec2(itemMin.x + 8.0f, itemMin.y + (itemMax.y - itemMin.y) * 0.5f),
-                               3.0f, IM_COL32(255, 70, 70, (int)(pulse * 255)));
-        }
+        // (REC + GO LIVE removed from the timeline transport — both live in
+        // the bottom transport bar's right cluster. Single source of truth.)
+        (void)recording;
+        (void)exporting;
+        (void)timeNow;
+        (void)kRecBtnW;
+        (void)kRed;
+        (void)kRedDim;
+        (void)pillBtn;
 #else
         // Non-FFmpeg builds: Work Area right-anchored only.
         {
@@ -6457,13 +6741,18 @@ void Application::renderTimelinePanel() {
         if (x < rulerOrigin.x - 1 || x > rulerOrigin.x + trackAreaW + 1) continue;
         dl->AddLine(ImVec2(x, rulerOrigin.y + rulerH - 5),
                     ImVec2(x, rulerOrigin.y + rulerH),
-                    IM_COL32(255, 255, 255, 110));
+                    IM_COL32(255, 255, 255, 90));
         char lbl[16];
         if (majorInterval < 1.0) snprintf(lbl, sizeof(lbl), "%d:%05.2f", (int)t / 60, std::fmod(t, 60.0));
         else                      snprintf(lbl, sizeof(lbl), "%d:%02d", (int)t / 60, ((int)t) % 60);
+        // Nudge the very first label inward by 4px so 0:00 doesn't kiss the
+        // ruler's left edge, and clamp it inside the visible band so it
+        // never overlaps the gutter.
+        float lx = x + 6.0f;
+        if (lx < rulerOrigin.x + 6.0f) lx = rulerOrigin.x + 6.0f;
         dl->AddText(ImGui::GetFont(), 10.0f,
-                    ImVec2(x + 4, rulerOrigin.y + 4),
-                    IM_COL32(255, 255, 255, 150), lbl);
+                    ImVec2(lx, rulerOrigin.y + 4),
+                    IM_COL32(225, 230, 240, 170), lbl);
     }
     // ── Section bands — colored strips on the ruler for intro/drop/etc. ──
     {
@@ -6545,17 +6834,21 @@ void Application::renderTimelinePanel() {
     float  waX0    = rulerOrigin.x + timeToX(waStart);
     float  waX1    = rulerOrigin.x + timeToX(waEnd);
     if (waX1 - waX0 >= 2.0f) {
-        // Translucent indigo band spanning the ruler + some pixels below.
-        ImU32 waFill = IM_COL32(92, 104, 210, 40);
-        ImU32 waEdge = IM_COL32(128, 140, 240, 220);
+        // Subtle neutral band — the work-area indicator should whisper, not
+        // shout. The end brackets carry the affordance; the fill is only a
+        // light tone so the ruler ticks and labels still read clearly.
+        ImU32 waFill = IM_COL32(255, 255, 255, 12);
+        ImU32 waEdge = IM_COL32(170, 180, 210, 130);
         dl->AddRectFilled(ImVec2(waX0, rulerOrigin.y),
                           ImVec2(waX1, rulerOrigin.y + rulerH),
                           waFill, 4.0f);
-        // Bracket marks at each end.
-        dl->AddRectFilled(ImVec2(waX0, rulerOrigin.y),
-                          ImVec2(waX0 + 2, rulerOrigin.y + rulerH), waEdge);
-        dl->AddRectFilled(ImVec2(waX1 - 2, rulerOrigin.y),
-                          ImVec2(waX1, rulerOrigin.y + rulerH), waEdge);
+        // 1px hairline brackets at each end.
+        dl->AddLine(ImVec2(waX0 + 0.5f, rulerOrigin.y + 2),
+                    ImVec2(waX0 + 0.5f, rulerOrigin.y + rulerH - 2),
+                    waEdge, 1.0f);
+        dl->AddLine(ImVec2(waX1 - 0.5f, rulerOrigin.y + 2),
+                    ImVec2(waX1 - 0.5f, rulerOrigin.y + rulerH - 2),
+                    waEdge, 1.0f);
     }
 
     ImGui::SetCursorScreenPos(rulerOrigin);
@@ -8380,24 +8673,36 @@ void Application::renderMenuBar() {
 // this writes into whatever window is current (the viewport's docked
 // window) so the chrome reads as a single row.
 void Application::renderNavBarPrefix() {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // Hamburger / brand mark draws on the viewport FOREGROUND list so it
+    // shares the same z-priority as the rest of the nav-row chrome
+    // (band + workspace tabs + right cluster, all routed through fg in
+    // ViewportPanel::renderNavBar). Without this the band on fg would
+    // paint over a hamburger drawn into the Canvas window draw list.
+    ImDrawList* dl = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     const ImU32 kMark = IM_COL32(232, 238, 250, 235);
 
     const float kBtn   = 28.0f;   // matches the inner pill height in the row
     const float kGap   = 8.0f;
     const float kGlyph = 16.0f;
 
-    // Brand mark — clean Lucide-style stroke. Click is a no-op for now;
-    // future could open an "About" sheet or focus the workspace.
-    {
-        ImVec2 cur = ImGui::GetCursorScreenPos();
-        ImVec2 sz(kBtn, kBtn);
-        ImGui::InvisibleButton("##nav_brand", sz);
-        float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
-        lucide::easelMark(dl, cx, cy, kGlyph, kMark, 1.4f);
-    }
+    // (Brand mark removed per user request — the chrome row leads with the
+    //  settings gear, no separate brand glyph.)
+    (void)kMark;
 
-    ImGui::SameLine(0, kGap);
+#ifdef __APPLE__
+    // Reserve space on the left for the macOS traffic-light buttons (close /
+    // min / max). The native title bar has been merged into the content area
+    // so the lights now sit in the same row we draw into. In editor (F11
+    // borderless) OR native (green-button) fullscreen AppKit hides them, so
+    // the inset is skipped so the row doesn't get an awkward empty gap.
+    {
+        bool nativeFs = EaselMac_IsNativeFullScreen(m_window) != 0;
+        if (!m_editorFullscreen && !nativeFs) {
+            const float kTrafficLightInset = 70.0f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + kTrafficLightInset);
+        }
+    }
+#endif
 
     // Overflow ("···") menu — three Lucide dots, opens an ImGui popup with
     // Edit / File / Layer / Zone submenus.
@@ -8411,10 +8716,20 @@ void Application::renderNavBarPrefix() {
             dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
                                 IM_COL32(255, 255, 255, 18), 24);
         }
-        ImU32 dotsCol = hov ? kMark : IM_COL32(170, 178, 195, 220);
-        // Settings gear — clearer affordance than the previous "···"
-        // dots. Same popup contents (Edit / File / Layer / Zone).
-        lucide::settings(dl, cx, cy, kGlyph, dotsCol);
+        ImU32 menuCol = hov ? kMark : IM_COL32(170, 178, 195, 220);
+        // Hamburger menu — three short horizontal lines stacked. Reads
+        // unambiguously as "open menu" without the cog overtones the gear
+        // had (which suggested settings/preferences only).
+        {
+            float w  = kGlyph * 0.95f;
+            float th = 1.6f;
+            float gap = kGlyph * 0.32f;
+            float x0 = cx - w * 0.5f;
+            float x1 = cx + w * 0.5f;
+            dl->AddLine(ImVec2(x0, cy - gap), ImVec2(x1, cy - gap), menuCol, th);
+            dl->AddLine(ImVec2(x0, cy),       ImVec2(x1, cy),       menuCol, th);
+            dl->AddLine(ImVec2(x0, cy + gap), ImVec2(x1, cy + gap), menuCol, th);
+        }
         if (clicked) ImGui::OpenPopup("##nav_more_popup");
     }
     if (ImGui::BeginPopup("##nav_more_popup")) {
@@ -8525,6 +8840,7 @@ void Application::renderNavBarPrefix() {
         ImGui::EndPopup();
     }
 
+    // (Mic moved to the bottom transport bar next to the Sound dropdown.)
     ImGui::SameLine(0, kGap + 4.0f);
 }
 
@@ -9498,6 +9814,11 @@ void Application::loadProject(const std::string& path) {
     }
     m_selectedLayer = -1;
 
+    // Reset the editor viewport on every project load so the user always
+    // sees a centered, 1:1 canvas — never inherits a stale pan/zoom from
+    // a previous project that was navigated off-screen.
+    m_viewportPanel.resetZoom();
+
     // Helper to load warp state into a mapping profile from a JSON object
     auto loadMappingWarp = [](MappingProfile& m, const json& mj) {
         if (mj.contains("warpMode")) {
@@ -10032,20 +10353,29 @@ void Application::renderEdgeBlendInline(OutputZone& zone) {
     if (flatSection("Edge Blend")) {
         auto* ebm = mappingForZone(zone);
         if (ebm) {
-            ParamRow::BeginPair("LEFT / RIGHT");
-            ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f, (float)zone.width * 0.5f, "%.0fpx");
-            ImGui::SameLine(0, 6);
-            ImGui::SetNextItemWidth(ParamRow::PairSecondWidth());
-            ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f, (float)zone.width * 0.5f, "%.0fpx");
+            // One row per side. The previous BeginPair layout truncated
+            // "LEFT / RIGHT" and clipped the second control on narrow
+            // panel widths; one-row-per-control is wider and consistent
+            // with the rest of the Properties panel rhythm.
+            ParamRow::Begin("LEFT");
+            ImGui::DragFloat("##EBL", &ebm->edgeBlendLeft, 1.0f, 0.0f,
+                             (float)zone.width * 0.5f, "%.0fpx");
 
-            ParamRow::BeginPair("TOP / BTM");
-            ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f, (float)zone.height * 0.5f, "%.0fpx");
-            ImGui::SameLine(0, 6);
-            ImGui::SetNextItemWidth(ParamRow::PairSecondWidth());
-            ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f, (float)zone.height * 0.5f, "%.0fpx");
+            ParamRow::Begin("RIGHT");
+            ImGui::DragFloat("##EBR", &ebm->edgeBlendRight, 1.0f, 0.0f,
+                             (float)zone.width * 0.5f, "%.0fpx");
+
+            ParamRow::Begin("TOP");
+            ImGui::DragFloat("##EBT", &ebm->edgeBlendTop, 1.0f, 0.0f,
+                             (float)zone.height * 0.5f, "%.0fpx");
+
+            ParamRow::Begin("BOTTOM");
+            ImGui::DragFloat("##EBB", &ebm->edgeBlendBottom, 1.0f, 0.0f,
+                             (float)zone.height * 0.5f, "%.0fpx");
 
             ParamRow::Begin("GAMMA");
-            ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f, 4.0f, "%.2f");
+            ImGui::DragFloat("##EBGamma", &ebm->edgeBlendGamma, 0.05f, 0.5f,
+                             4.0f, "%.2f");
         }
     }
 }

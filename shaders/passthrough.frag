@@ -155,28 +155,25 @@ void main() {
         color.a *= smoothstep(0.0, uFeather, edgeDist);
     }
 
-    // Phase Q v3 — ACES tonemap. The composite chain is now 16F (Phase Q v1)
-    // and 2× supersampled (Q v2), so highlights have real headroom. Without
-    // this, hot pixels clip flat at 1.0 → "cheap" feel. ACES rolls them off
-    // with a filmic shoulder. Applied here, before opacity, so every shader
-    // gets it for free.
+    // Phase Q v3 (revised v4) — soft-knee HDR rolloff.
+    //
+    // The previous ACES tonemap (Stephen Hill's fitted curve) crushed
+    // 1.0-linear inputs to ~0.62 display gray — designed for scene-
+    // referred HDR (1.0 = diffuse, 16.0 = sun). Our shaders are
+    // display-referred: 1.0 IS the white the artist wants. ACES made
+    // every "pure white" look like off-white gray.
+    //
+    // New curve: identity in [0,1], Reinhard only above 1.0. Pure
+    // white stays pure white; HDR bloom highlights roll smoothly into
+    // the [0,1] range without clipping flat. No saturation shift.
     {
-        // Stephen Hill's fitted ACES (matrix mul + RRT/ODT polynomial).
-        const mat3 ACES_IN = mat3(
-            0.59719, 0.07600, 0.02840,
-            0.35458, 0.90834, 0.13383,
-            0.04823, 0.01566, 0.83777
-        );
-        const mat3 ACES_OUT = mat3(
-             1.60475, -0.10208, -0.00327,
-            -0.53108,  1.10813, -0.07276,
-            -0.07367, -0.00605,  1.07602
-        );
-        vec3 c = ACES_IN * color.rgb;
-        vec3 a = c * (c + 0.0245786) - 0.000090537;
-        vec3 b = c * (0.983729 * c + 0.4329510) + 0.238081;
-        c = a / b;
-        color.rgb = clamp(ACES_OUT * c, 0.0, 1.0);
+        vec3 c   = max(color.rgb, vec3(0.0));
+        vec3 lo  = min(c, vec3(1.0));            // identity below 1.0
+        vec3 hi  = max(c - vec3(1.0), vec3(0.0)); // overflow above 1.0
+        // Reinhard-style soft shoulder on the overflow only:
+        // 0 → 0, 1 → 0.5, ∞ → 1 . Re-anchored so that the total maps
+        // 1.0 → 1.0 exactly and remains monotonic.
+        color.rgb = clamp(lo + hi / (1.0 + hi), 0.0, 1.0);
     }
 
     color.a *= uOpacity;

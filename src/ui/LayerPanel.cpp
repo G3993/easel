@@ -382,7 +382,10 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                         std::vector<std::unique_ptr<OutputZone>>* zones,
                         int activeZone) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 150), ImVec2(FLT_MAX, FLT_MAX));
-    ImGui::Begin("Layers");
+    // 8-space pad + ###ID suffix matches Mapping/Properties/Audio/MIDI:
+    // the empty space gives drawInspectorTabIcons() room to paint the
+    // Layers icon over the tab (otherwise the text would show through).
+    ImGui::Begin("        ###Layers");
     // 1px outline only when floating — when docked, dock-node edges already
     // separate the panel from its neighbours and a window border just adds
     // a visual seam.

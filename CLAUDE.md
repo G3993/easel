@@ -57,6 +57,17 @@ Named key-value store for routing live data to shader text parameters. Writers (
 ### EthereaClient (`src/speech/EthereaClient`)
 Connects to Etherea server via WebSocket (real-time transcript) and SSE (hints/state). Pushes transcript text to DataBus for shader consumption. Replaces the older SSE-only EthereaTranscript.
 
+### Cue (`external/cue/`)
+Vendored TypeScript realtime cue harness (https://github.com/jameslbarnes/cue). Runs as a separate Node server, exposes `/sessions/:id/events` (passive event stream), `/sessions/:id/observations`, and `/sessions/:id/ws` (generic observation websocket). Same connection shape as Etherea; a future `CueClient` would mirror `EthereaClient`.
+
+Local secrets live in `easel/.env` (gitignored). Bot Coach demo:
+```bash
+cd external/cue
+pnpm install
+DEEPGRAM_API_KEY=... CEREBRAS_API_KEY=... pnpm run demo:but-coach   # serves on :8791
+```
+Easel reads `.env` at the repo root; the same keys are referenced by the Cue example configs (`DEEPGRAM_API_KEY`, `CEREBRAS_API_KEY`, `MOONDREAM_API_KEY`, `CUE_MOONDREAM_MODEL`).
+
 ### Compositing Pipeline
 Layers composited via ping-pong FBO with blend modes. `AudioState` struct carries frequency bands + beat info to composite/passthrough shaders. ShaderSource (ISF) receives audio state via `setAudioState()` for `audioLevel`, `audioBass`, `audioMid`, `audioHigh`, `audioFFT` uniforms.
 

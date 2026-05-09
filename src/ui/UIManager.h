@@ -91,6 +91,15 @@ public:
     // don't appear as floating windows. Names must match ImGui::Begin() titles.
     bool isPanelVisible(const char* title) const;
 
+    // Application reports the canvas image's screen-space vertical bounds
+    // each frame (after ViewportPanel renders). setupDockspace's NEXT
+    // frame uses these to align the right Control Panel float top/bottom
+    // with the canvas top/bottom — equal margins, vertically centered.
+    void setCanvasBoundsY(float topY, float bottomY) {
+        m_canvasTopY    = topY;
+        m_canvasBottomY = bottomY;
+    }
+
 private:
     void applyTheme(float dpiScale);
 
@@ -107,6 +116,18 @@ private:
     float m_workspaceBarHeight = 0.0f;
     const char* m_pendingFocus = nullptr;  // window name to focus next frame
     int m_pendingFocusFramesLeft = 0;
+    // Seed Begin/End calls in the desired tab order on the next rebuild frame.
+    // ImGui locks tab order to the FIRST Begin() call per docked window after
+    // a layout rebuild, so we run no-op Begin/End in our intended order before
+    // any panel renders. Without this, Application.cpp's Begin call order
+    // (Layers→Mapping→Properties→Sources) wins and breaks Layers→Sources→
+    // Mapping in the Control Panel header.
+    bool m_seedRightDockTabs = false;
+    // Canvas image vertical bounds in screen coords (set by Application
+    // after each ViewportPanel render). Used by setupDockspace next frame
+    // to align the right float panel with the canvas top/bottom.
+    float m_canvasTopY    = 0.0f;
+    float m_canvasBottomY = 0.0f;
 
     // Cached dock node ids + sizing used to keep the left/right floating
     // panel groups aligned with the current timeline height every frame.

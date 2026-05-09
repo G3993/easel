@@ -288,6 +288,7 @@ elseif(APPLE)
         "-framework VideoToolbox"
         "-framework Speech"           # SFSpeechRecognizer (push-to-talk)
         "-framework AVFoundation"     # AVAudioEngine for mic capture
+        "-framework Metal"            # Phase M.0+ Metal abstraction layer
     )
 endif()
 
@@ -424,6 +425,25 @@ endif()
 add_executable(test_databus tests/test_databus.cpp)
 target_include_directories(test_databus PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_databus PRIVATE Catch2::Catch2WithMain)
+
+# Phase M.0 RenderBackend abstraction smoke test.
+set(TEST_RENDER_BACKEND_SOURCES
+    tests/test_render_backend.cpp
+    src/render/RenderBackend_GL.cpp
+)
+if(APPLE)
+    list(APPEND TEST_RENDER_BACKEND_SOURCES src/render/RenderBackend_Metal.mm)
+endif()
+add_executable(test_render_backend ${TEST_RENDER_BACKEND_SOURCES})
+target_include_directories(test_render_backend PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_render_backend PRIVATE Catch2::Catch2WithMain glad OpenGL::GL)
+if(APPLE)
+    target_link_libraries(test_render_backend PRIVATE
+        "-framework Metal"
+        "-framework Foundation"
+        "-lobjc"
+    )
+endif()
 
 if(HAS_WHEP)
     set(TEST_WHEP_SOURCES

@@ -28,7 +28,8 @@ public:
                 bool ndiAvailable = false,
                 int editorMonitor = -1,
                 const std::vector<std::unique_ptr<MappingProfile>>* allMappings = nullptr,
-                std::function<void()> inlineSetupSection = nullptr);
+                std::function<void()> inlineSetupSection = nullptr,
+                std::function<void()> navPrefix = nullptr);
 
     // Shared secondary-nav row (CANVAS/STAGE pills on the left, zone tabs +
     // OUTPUT combo + composition chip + Fullscreen on the right). Rendered
@@ -41,6 +42,16 @@ public:
                       bool ndiAvailable,
                       int editorMonitor,
                       std::function<void()> prefixContent = nullptr);
+
+    // Floating secondary navigation pinned at the canvas top-left.
+    // Hosts the zone tabs ("Main" + add) and the OUTPUT destination
+    // combo. Decouples those controls from the main nav row so the
+    // nav row only carries workspace switching + display settings.
+    void renderZoneOutputDock(std::vector<std::unique_ptr<OutputZone>>* zones,
+                              int* activeZone,
+                              const std::vector<MonitorInfo>* monitors,
+                              bool ndiAvailable,
+                              int editorMonitor);
 
     // Layer transform overlay — drag to move, handles to resize
     void renderLayerOverlay(LayerStack& stack, int& selectedLayer, int canvasW = 1920, int canvasH = 1080);
@@ -75,6 +86,11 @@ public:
     glm::vec2 size() const { return m_size; }
     glm::vec2 imageOrigin() const { return m_imageOrigin; }
     glm::vec2 imageSize() const { return m_imageSize; }
+    // Base (zoom=1, pan=0) canvas bounds — stable across pan/zoom, so
+    // chrome that wants to align with the canvas (e.g. the right Control
+    // Panel float) doesn't grow or shift when the user zooms in/out.
+    glm::vec2 baseImageOrigin() const { return m_baseImageOrigin; }
+    glm::vec2 baseImageSize()   const { return m_baseImageSize; }
 
     // Canvas zoom
     float zoom() const { return m_zoom; }
@@ -164,6 +180,10 @@ private:
     // The image area within the panel
     glm::vec2 m_imageOrigin = {0, 0};
     glm::vec2 m_imageSize = {0, 0};
+    // Same bounds at zoom=1, pan=0 — useful for chrome that wants to
+    // align with the canvas without moving when the user zooms.
+    glm::vec2 m_baseImageOrigin = {0, 0};
+    glm::vec2 m_baseImageSize = {0, 0};
 
     // Viewport panel clip rect (screen-space) for clipping overlays
     glm::vec2 m_panelMin = {0, 0};

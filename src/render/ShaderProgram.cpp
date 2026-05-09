@@ -31,7 +31,7 @@ bool ShaderProgram::compile(GLuint shader, const std::string& source) {
         std::cerr << "Shader compile error:\n" << log << std::endl;
         // Also log to file for debugging
         {
-            FILE* f = fopen("etherea_debug.log", "a");
+            FILE* f = fopen("/tmp/etherea_debug.log", "a");
             if (f) { fprintf(f, "SHADER COMPILE ERROR:\n%s\n---\n", log); fclose(f); }
         }
         return false;

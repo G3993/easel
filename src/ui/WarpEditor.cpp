@@ -42,7 +42,15 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
                         int activeMappingIndex) {
     m_wantsLoadOBJ = false;
 
+    // Match the Properties panel's airy padding EXACTLY so the two
+    // right-column panels read as one rhythm. Properties uses (28, 22)
+    // window pad / (10, 6) item / (12, 9) frame — was (20, 18) / (8, 12)
+    // here, which gave Mapping a tighter, denser feel than Properties.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(10, 6));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(12, 9));
     ImGui::Begin("        ###Mapping");
+    ImGui::PopStyleVar(3);
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {
@@ -80,14 +88,20 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     // Mode selector — 3 buttons. No hairline dividers above/below; just
     // balanced vertical spacing so the row reads as a coherent segmented
     // control rather than two sections separated by lines.
+    // Use smaller FramePadding so each label fits cleanly inside its
+    // 1/3 share of the panel width, even at narrow zoom levels — the
+    // panel-wide FramePadding (12,9) is overkill for this segmented row
+    // and was forcing buttons to grow past their assigned thirdW.
     int modeInt = (int)mapping.warpMode;
     float thirdW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
 
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 7));
     modeButton("Corner Pin", 0, modeInt, thirdW);
     ImGui::SameLine();
     modeButton("Mesh Warp", 1, modeInt, thirdW);
     ImGui::SameLine();
     modeButton("OBJ Mesh", 2, modeInt, thirdW);
+    ImGui::PopStyleVar();
 
     mapping.warpMode = (ViewportPanel::WarpMode)modeInt;
 
@@ -96,10 +110,11 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     if (mapping.warpMode == ViewportPanel::WarpMode::CornerPin) {
         auto& corners = cornerPin.corners();
         const char* labels[] = {"BL", "BR", "TR", "TL"};
-        // Labels sit in a fixed-width column so the numeric fields line
-        // up vertically and there's a clear gap between each label and
-        // its value (previously 28px, now 56px).
-        const float kLabelColW = 56.0f;
+        // Tighter label column (56 → 32) so the numeric drag fields
+        // claim more of the row width — they were the primary control
+        // but were getting elbowed by an oversized BL/BR/TR/TL label
+        // gutter. The labels themselves are only ~16px wide.
+        const float kLabelColW = 32.0f;
         for (int i = 0; i < 4; i++) {
             ImGui::PushID(i);
             ImGui::AlignTextToFramePadding();
@@ -111,6 +126,8 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             ImGui::DragFloat2("##corner", &corners[i][0], 0.01f, -1.5f, 1.5f, "%.2f");
             ImGui::PopID();
         }
+        // Reset spans the same -1 width as the drag rows so the
+        // bottom of the corner block aligns flush with the rows above.
         if (accentButton("Reset", -1)) {
             corners = {{
                 {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}

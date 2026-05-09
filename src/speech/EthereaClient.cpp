@@ -44,7 +44,7 @@ static void etLog(const std::string& msg) {
         suppressCount = 0;
         lastMsg = msg;
     }
-    std::ofstream f("etherea_debug.log", std::ios::app);
+    std::ofstream f("/tmp/etherea_debug.log", std::ios::app);
     f << msg;
     if (suppressCount > 0) f << " (x" << suppressCount << ")";
     f << std::endl;
