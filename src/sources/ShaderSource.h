@@ -131,6 +131,13 @@ public:
     // Mouse state for interactive shaders (CFD paint, etc.)
     void setMouseState(float x, float y, bool down);
 
+    // Age (seconds) of the currently displayed `msg` text. Set by Application
+    // from the typewriter timer in the DataBus binding push. Drives spawn/
+    // exit lifecycle for shaders like text_clusters that animate around the
+    // utterance window. -1 = no active message; 0+ = seconds since the
+    // current utterance started typing.
+    void setMsgAge(float seconds) { m_msgAge = seconds; }
+
     // Bind an external texture to an ISF image input by name
     void bindImageInput(const std::string& name, GLuint texId, int w, int h, uint32_t sourceLayerId, bool flippedV = false);
     void unbindImageInput(const std::string& name);
@@ -163,6 +170,7 @@ private:
     float m_prevMouseX = 0.5f;
     float m_prevMouseY = 0.5f;
     float m_mouseDown = 0.0f;
+    float m_msgAge = -1.0f;       // -1 until first text bound; else seconds-since-utterance-start
     std::string m_path;
     bool m_initialized = false;
     int m_frameIndex = 0;

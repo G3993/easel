@@ -101,6 +101,7 @@ extern std::string openFileDialog_mac(const char* filter);
 // doesn't interfere with the link from this C++ TU.
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
 extern "C" int  EaselMac_IsNativeFullScreen(GLFWwindow*);
+extern "C" void EaselMac_ExitNativeFullScreen(GLFWwindow*);
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -480,10 +481,15 @@ void Application::run() {
             escWasPressed = escNow;
 
 #ifdef __APPLE__
-            // Skip Esc entirely when AppKit owns the fullscreen state —
-            // calling glfwSetWindowMonitor against a native-FS NSWindow
-            // races the AppKit transition and crashes.
+            // When AppKit owns the FS state, route Esc through AppKit's own
+            // toggleFullScreen — glfwSetWindowMonitor against a native-FS
+            // NSWindow races the AppKit transition and crashes.
             bool nativeFs = EaselMac_IsNativeFullScreen(m_window) != 0;
+            if (nativeFs && escEdge && !ImGui::GetIO().WantTextInput) {
+                EaselMac_ExitNativeFullScreen(m_window);
+                escEdge = false;
+                continue;
+            }
             if (nativeFs) escEdge = false;
 #endif
 
@@ -947,7 +953,52 @@ void Application::run() {
                 if (layer->id == layerId && layer->source && layer->source->isShader()) {
                     auto* shader = static_cast<ShaderSource*>(layer->source.get());
                     std::string val = m_dataBus.get(dataKey);
-                    if (val.empty()) break;
+                    if (val.empty()) {
+                        // No active message — reset age so shaders that
+                        // gate on `msgAge >= 0` know to render empty.
+                        if (paramName == "msg") shader->setMsgAge(-1.0f);
+                        break;
+                    }
+
+                    // Typewriter reveal for `msg` text inputs on shaders
+                    // that don't do their own reveal. New utterances type in
+                    // char-by-char; partial transcript updates that extend
+                    // the prior value continue the in-progress reveal
+                    // (no restart). text_typewriter.fs is skipped — it
+                    // animates the reveal in GLSL already.
+                    if (paramName == "msg") {
+                        std::string srcPath = shader->sourcePath();
+                        size_t slash2 = srcPath.find_last_of("/\\");
+                        std::string base = (slash2 != std::string::npos)
+                            ? srcPath.substr(slash2 + 1) : srcPath;
+                        // Per-dataKey typewriter state shared across shaders.
+                        static std::unordered_map<std::string,
+                            std::pair<std::string, double>> tw;
+                        auto& slot = tw[dataKey];
+                        const std::string& lastTarget = slot.first;
+                        bool isExtension =
+                            (val.size() >= lastTarget.size()) &&
+                            (val.compare(0, lastTarget.size(), lastTarget) == 0);
+                        if (!isExtension) {
+                            slot.second = glfwGetTime();
+                        }
+                        slot.first = val;
+
+                        // Push msgAge to every shader bound on `msg`, so
+                        // both typewriter and non-typewriter shaders can
+                        // animate around the utterance window.
+                        float age = (float)(glfwGetTime() - slot.second);
+                        shader->setMsgAge(age);
+
+                        if (base != "text_typewriter.fs") {
+                            const double cps = 28.0;
+                            size_t reveal = (size_t)((double)age * cps);
+                            if (reveal > val.size()) reveal = val.size();
+                            if (reveal == 0) break; // keep prior frame's msg
+                            val = val.substr(0, reveal);
+                        }
+                    }
+
                     for (auto& c : val) c = (char)toupper((unsigned char)c);
                     shader->setText(paramName, val);
                     break;
@@ -9367,10 +9418,12 @@ void Application::loadShader(const std::string& path) {
     }
 
     // Voice-native auto-binding: any TEXT shader (one whose ISF declares a
-    // `msg` text input) gets its message bound to the live transcript so
-    // what the user says appears on-shader by default. Non-text shaders
-    // (visual generators, effects) get NO transcript binding, so voice
-    // doesn't bleed into unrelated parameters.
+    // `msg` text input) gets its message bound to the live LAST WORDS so
+    // what the user just said appears on-shader by default. cue.latest is
+    // the most recent utterance (vs cue.transcript which is the full
+    // running transcript). Non-text shaders (visual generators, effects)
+    // get NO transcript binding, so voice doesn't bleed into unrelated
+    // parameters.
     if (source) {
         const auto& inputs = source->inputs();
         bool hasMsg = false;
@@ -9378,7 +9431,7 @@ void Application::loadShader(const std::string& path) {
             if (inp.type == "text" && inp.name == "msg") { hasMsg = true; break; }
         }
         if (hasMsg) {
-            m_dataBus.bind(layer->id, "msg", "cue.transcript");
+            m_dataBus.bind(layer->id, "msg", "cue.latest");
         }
     }
 }

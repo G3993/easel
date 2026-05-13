@@ -244,6 +244,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform vec2 mousePos;\n";
     out << "uniform vec2 mouseDelta;\n";
     out << "uniform float pinchHold;\n";
+    out << "uniform float msgAge;\n";
     out << "\n";
 
     // Mouse interaction (for painting shaders)
@@ -688,6 +689,7 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     m_shader.setVec2("mouseDelta", glm::vec2(dx, dy));
     m_shader.setFloat("mouseDown", m_mouseDown);
     m_shader.setFloat("pinchHold", 0.0f);
+    m_shader.setFloat("msgAge", m_msgAge);
 
     // Audio state (Shader-Claw naming convention)
     m_shader.setFloat("audioLevel", m_audioRMS);

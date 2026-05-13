@@ -1922,8 +1922,59 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
         }
 
+        // Per-layer "voice-control edit mode" flag — toggled from the
+        // options menu below. When on, every float param shows an inline
+        // voice/audio source combo so users can wire bindings without
+        // hunting for the right-click popover.
+        static std::unordered_set<uint32_t> s_paramEditMode;
+        bool paramEdit = s_paramEditMode.count(layer->id) > 0;
+        // Deferred layer-delete from the options menu — applied after
+        // we've finished rendering this frame so the layer isn't yanked
+        // out from under the rest of the panel.
+        int pendingDelete = -1;
+
         if (!inputs.empty()) {
             sectionBreak();
+
+            // ── Options menu (⋯): Delete shader / Edit voice control ──
+            // Sits at the top of the parameters section. Edit mode is
+            // per-layer so toggling it on one shader doesn't affect
+            // others.
+            {
+                float availW = ImGui::GetContentRegionAvail().x;
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availW - 28.0f);
+                if (ImGui::SmallButton(paramEdit ? "DONE##optsBtn" : "···##optsBtn")) {
+                    if (paramEdit) {
+                        s_paramEditMode.erase(layer->id);
+                    } else {
+                        ImGui::OpenPopup("##shaderOptsMenu");
+                    }
+                }
+                if (ImGui::BeginPopup("##shaderOptsMenu")) {
+                    if (ImGui::MenuItem("Edit voice control")) {
+                        s_paramEditMode.insert(layer->id);
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Delete shader")) {
+                        if (layerStack) {
+                            for (int li = 0; li < layerStack->count(); li++) {
+                                if ((*layerStack)[li]->id == layer->id) {
+                                    pendingDelete = li;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+
+            if (paramEdit) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.78f, 0.32f, 0.95f));
+                ImGui::TextWrapped("Voice-control edit mode — pick a source per parameter.");
+                ImGui::PopStyleColor();
+                ImGui::Dummy(ImVec2(0, 4));
+            }
 
             // "Parameters" header removed — shader inputs render directly
             // after the composition section. Each input has its own label
@@ -2026,6 +2077,31 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // (The bound/unbound bar below has been replaced by paramSlider
                     // above, which draws a unified pill track and tints its fill amber
                     // when a binding is active.)
+
+                    // Voice-control edit mode: inline source combo. Same
+                    // AudioBindings the right-click popup writes — just
+                    // discoverable without hidden gestures.
+                    if (paramEdit) {
+                        static const char* sigLabels[] = {
+                            "Manual", "Audio Level", "Bass", "Mid",
+                            "High", "Beat", "MIDI" };
+                        bool isNew = (bindings.find(input.name) == bindings.end());
+                        AudioBinding& ab = bindings[input.name];
+                        if (isNew) {
+                            ab.rangeMin = input.minVal;
+                            ab.rangeMax = input.maxVal;
+                        }
+                        int sigIdx = (int)ab.signal;
+                        ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+                        ImGui::Text("VOICE / AUDIO");
+                        ImGui::PopStyleColor();
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::Combo("##voicebind", &sigIdx,
+                                         sigLabels, IM_ARRAYSIZE(sigLabels))) {
+                            ab.signal = (AudioSignal)sigIdx;
+                        }
+                        ImGui::Dummy(ImVec2(0, 6));
+                    }
                 } else if (input.type == "color") {
                     glm::vec4 c = std::get<glm::vec4>(input.value);
                     std::string lblUp = upperLabel(input.name);
@@ -2397,6 +2473,14 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
             ImGui::TextWrapped("%s", shaderSrc->description().c_str());
             ImGui::PopStyleColor();
+        }
+
+        // Apply deferred delete from the options menu — done last so the
+        // layer pointer stays valid through the panel render. Edit-mode
+        // flag is cleared so a future layer reusing this id starts fresh.
+        if (pendingDelete >= 0 && layerStack) {
+            s_paramEditMode.erase(layer->id);
+            layerStack->removeLayer(pendingDelete);
         }
     }
 
