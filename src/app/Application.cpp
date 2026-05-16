@@ -976,10 +976,32 @@ void Application::run() {
                             std::pair<std::string, double>> tw;
                         auto& slot = tw[dataKey];
                         const std::string& lastTarget = slot.first;
-                        bool isExtension =
-                            (val.size() >= lastTarget.size()) &&
-                            (val.compare(0, lastTarget.size(), lastTarget) == 0);
-                        if (!isExtension) {
+                        // Decide whether `val` is the SAME utterance as the
+                        // last target (continue the in-progress reveal) or a
+                        // genuinely NEW utterance (restart the timer).
+                        //
+                        // Live speech doesn't only extend partials — it
+                        // *revises* the tail as recognition firms up
+                        // ("I think" -> "I thought" -> "I think we"). A
+                        // strict prefix test treats every revision as a new
+                        // utterance, so the timer (and msgAge) resets on
+                        // every partial and all text shaders strobe. Instead,
+                        // compare the longest common prefix: if only the tail
+                        // (last word or two) changed, it's the same utterance
+                        // being re-recognized — keep the original start time.
+                        // cue.latest *replaces* on a new utterance, so a real
+                        // new utterance diverges at/near the start.
+                        size_t cp = 0;
+                        size_t cmpN = std::min(val.size(), lastTarget.size());
+                        while (cp < cmpN && val[cp] == lastTarget[cp]) ++cp;
+                        // Max tail length (chars) we still treat as an
+                        // in-utterance revision rather than a new utterance
+                        // (~3-4 words of recognizer churn).
+                        constexpr size_t kTailReviseMax = 24;
+                        bool sameUtterance =
+                            !lastTarget.empty() && cp > 0 &&
+                            (lastTarget.size() - cp) <= kTailReviseMax;
+                        if (!sameUtterance) {
                             slot.second = glfwGetTime();
                         }
                         slot.first = val;
