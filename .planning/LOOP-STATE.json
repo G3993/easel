@@ -1,0 +1,28 @@
+{
+  "highest_pr": 291,
+  "stagnation_count": 0,
+  "stop_threshold": 3,
+  "last_check": "2026-05-05T21:13:00Z",
+  "trigger_id": "trig_01RbpSu8a47QVkvP935wZAKF",
+  "paused": true,
+  "paused_at": "2026-05-05T21:25:00Z",
+  "paused_reason": "User requested pause + push shaders + reset ratings + plan UI controls",
+  "history": [
+    {"time": "2026-05-05T09:57:19Z", "highest": 61, "fired": 6, "note": "loop resume — 6 runs fired"},
+    {"time": "2026-05-05T08:58:30Z", "highest": 83, "fired": 2, "note": "wakeup #1: +22 PRs since baseline; reset stagnation"},
+    {"time": "2026-05-05T09:24:00Z", "highest": 125, "fired": 2, "note": "wakeup #2: +42 PRs; reset stagnation"},
+    {"time": "2026-05-05T09:56:00Z", "highest": 132, "fired": 2, "note": "wakeup #3: +7 PRs; reset stagnation; restarted Easel"},
+    {"time": "2026-05-05T14:15:00Z", "highest": 143, "fired": 2, "note": "wakeup #4: +11 PRs; reset stagnation"},
+    {"time": "2026-05-05T14:41:00Z", "highest": 165, "fired": 2, "note": "wakeup #5: +22 PRs; reset stagnation"},
+    {"time": "2026-05-05T15:07:00Z", "highest": 195, "fired": 2, "note": "wakeup #6: +30 PRs; reset stagnation"},
+    {"time": "2026-05-05T15:33:00Z", "highest": 209, "fired": 2, "note": "wakeup #7: +14 PRs; reset stagnation; gh limit 200 now hitting cap"},
+    {"time": "2026-05-05T15:59:00Z", "highest": 220, "fired": 2, "note": "wakeup #8: +11 PRs; reset stagnation"},
+    {"time": "2026-05-05T16:25:00Z", "highest": 221, "fired": 2, "note": "wakeup #9: +1 PR; growth slowing; reset stagnation"},
+    {"time": "2026-05-05T16:51:00Z", "highest": 225, "fired": 2, "note": "wakeup #10: +4 PRs; reset stagnation"},
+    {"time": "2026-05-05T19:55:00Z", "highest": 234, "fired": 2, "note": "wakeup #11: +9 PRs; reset stagnation"},
+    {"time": "2026-05-05T20:21:00Z", "highest": 244, "fired": 2, "note": "wakeup #12: +10 PRs; reset stagnation"},
+    {"time": "2026-05-05T20:47:00Z", "highest": 269, "fired": 2, "note": "wakeup #13: +25 PRs; strong growth resumed"},
+    {"time": "2026-05-05T21:13:00Z", "highest": 291, "fired": 2, "note": "wakeup #14: +22 PRs; reset stagnation"},
+    {"time": "2026-05-05T21:25:00Z", "highest": 291, "fired": 0, "note": "PAUSED by user; pushed shaders + reset ratings"}
+  ]
+}

@@ -87,8 +87,13 @@ struct AudioBinding {
     AudioSignal signal = AudioSignal::None;
     float rangeMin = 0.0f;  // output min (maps to param min by default)
     float rangeMax = 1.0f;  // output max (maps to param max by default)
-    float smoothing = 0.3f; // 0 = instant, 1 = very slow
-    float smoothedValue = 0.0f; // internal state
+    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.55 is a
+    // deliberately gentler envelope than the legacy fixed attack-8 / release-3
+    // feel, which the user found too aggressive / strobey. See
+    // ShaderSource::applyAudioBindings for the dt-based time-constant math.
+    float smoothing = 0.55f;
+    float smoothedValue = 0.0f; // internal follower state
+    bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
     // MIDI fields (used when signal == MidiCC)
     int midiCC = -1;        // CC number 0-127, -1 = unassigned
     int midiChannel = -1;   // MIDI channel 0-15, -1 = any
@@ -148,7 +153,7 @@ public:
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
     void applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                            class MIDIManager* midi = nullptr);
+                            float dt, class MIDIManager* midi = nullptr);
 
     // Resolution (defaults to 1920x1080, can be changed)
     void setResolution(int w, int h);

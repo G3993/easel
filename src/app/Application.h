@@ -342,6 +342,25 @@ private:
     // the timeline tab or press T). Keeps the canvas area maximized on launch.
     bool   m_timelineMinimized = true;
 
+    // ── Single source of truth for the animated timeline geometry ──────────
+    // The timeline + bottom transport bar slide up/down as one unit. These
+    // are recomputed once per frame in updateTimelineAnim() (called at the
+    // top of renderUI, before any panel renders) so Fixes 1/2/3 all read the
+    // SAME numbers in the same frame:
+    //   m_timelineAnimT  : eased open factor [0..1] (0 = hidden, 1 = open)
+    //   m_timelineCurH   : current animated timeline height in px (0 when
+    //                      minimized). Bottom nav slides up by this much.
+    //   m_timelineTopY   : screen-space Y of the timeline's top edge — the
+    //                      hard bottom limit for the params panel + the
+    //                      left-rail layer thumbnails.
+    float  m_timelineAnimT = 0.0f;
+    float  m_timelineCurH  = 0.0f;
+    float  m_timelineTopY  = 0.0f;
+    // Target (fully-open) timeline content height, measured by
+    // renderTimelinePanel() and consumed next frame by updateTimelineAnim().
+    float  m_timelineTargetH = 220.0f;
+    void   updateTimelineAnim();
+
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;
     void* m_audioMeterDevice = nullptr;

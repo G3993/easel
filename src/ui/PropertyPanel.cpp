@@ -20,6 +20,9 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <cstdio>
+#include <cmath>
+#include <algorithm>
+#include <utility>
 #include <unordered_set>
 
 // Uppercase a string in place — used for the editorial ALL-CAPS shader
@@ -37,6 +40,34 @@ static const ImVec4 kMuted     = ImVec4(0.35f, 0.40f, 0.48f, 1.0f);
 static const ImVec4 kRowLabel  = ImVec4(0.59f, 0.62f, 0.68f, 0.90f);
 static const ImU32  kSepColor  = IM_COL32(255, 255, 255, 12);
 
+// --- Spacing scale ---------------------------------------------------------
+// ONE shared 4px-based rhythm for the whole inspector. Every control row,
+// every gap, every label gutter resolves to one of these constants — no
+// per-row magic numbers. This is what makes the panel read as a deliberate
+// grid instead of "child-developer" nudges. If a value here changes, the
+// entire panel re-flows consistently.
+//
+//   kStepY      base vertical unit (everything is a multiple of this)
+//   kRowGapY    breathing room ABOVE each control row (leading Dummy)
+//   kRowPadY    breathing room BELOW each control row (trailing Dummy)
+//   kLabelGapY  gap between a control's label and its track/widget
+//   kSectionGap gap between logical sub-groups inside a section
+//   kColGap     horizontal gap between the two columns of a value pair
+//   kLabelColW  fixed label-gutter width for "label : control" rows — the
+//               control column ALWAYS starts at GetCursorStartPos().x +
+//               kLabelColW so RESOLUTION / COLORMODE / blend etc. line up
+//   kInnerPad   inset between a label's text and the control that follows
+//   kFieldH     nominal control row height (label + gap + track)
+static constexpr float kStepY      = 4.0f;
+static constexpr float kRowGapY    = kStepY * 2.0f;   // 8  — above a row
+static constexpr float kRowPadY    = kStepY * 2.0f;   // 8  — below a row
+static constexpr float kLabelGapY  = kStepY * 2.5f;   // 10 — label→track
+static constexpr float kSectionGap = kStepY * 4.0f;   // 16 — sub-group gap
+static constexpr float kColGap     = kStepY * 3.0f;   // 12 — 2-col gutter
+static constexpr float kLabelColW  = 96.0f;           // label gutter width
+static constexpr float kInnerPad   = kStepY * 3.0f;   // 12 — text→control
+static constexpr float kFieldH     = 22.0f;           // nominal row height
+
 // Dim label + optional inline follow-up. Use `sameLine=false` when the
 // follow-up control lives on the next row; default keeps the legacy
 // label-then-widget flow.
@@ -45,6 +76,34 @@ static void dimLabel(const char* text, const ImVec4& col = kRowLabel, bool sameL
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
     if (sameLine) ImGui::SameLine();
+}
+
+// Label-then-control row primer. Draws `text` left-aligned, then parks the
+// next ImGui widget at a CONSISTENT control-column X so every "RESOLUTION /
+// COLORMODE / Normal-blend / Size" row lines its control up on the same
+// grid line. Uses GetCursorStartPos()-relative cursor math (window-relative
+// SetCursorPosX) — NOT SameLine(offset), which is window-raw and drifts when
+// the panel is scrolled or docked. Call immediately before the widget.
+//
+// Returns the control-column width so callers can size the widget (or split
+// it into a 2-col pair) against the same grid.
+static float labelGutter(const char* text,
+                         const ImVec4& col = kRowLabel) {
+    float startX = ImGui::GetCursorStartPos().x;     // window-relative origin
+    float rowW   = ImGui::GetContentRegionAvail().x;
+    // Gutter grows to fit a long label so e.g. "AUDIO SRC" never collides
+    // with its control, but never shrinks below the shared grid column.
+    float textW  = ImGui::CalcTextSize(text).x + kInnerPad;
+    float gutter = std::max(kLabelColW, textW);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, col);
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(startX + gutter);            // fixed control column
+    float ctrlW = rowW - gutter;
+    ImGui::SetNextItemWidth(ctrlW);
+    return ctrlW;
 }
 
 static void thinSep() {
@@ -73,13 +132,24 @@ static bool accentBtn(const char* label, float w = 0) {
 //    visually groups with its content, not the previous section.
 //  - Aesthetic-usability: chevron + label stay calm; hover brightens label.
 //  - Fitts: full-row hit target (InvisibleButton spans the panel width).
-static bool sectionHeader(const char* label, bool* open) {
+static bool sectionHeader(const char* label, bool* open,
+                          bool firstSection = false) {
     // Calm-editor section header. Inspired by the reference's grass.visu
     // panel: bold H2-scale label, NO underline (rhythm comes from
     // generous whitespace, not hairlines), and lots of breathing room
     // above + below so each section reads as its own quiet block.
+    //
+    // The 32px leading Dummy is the inter-section gap idiom — it separates
+    // one section from the previous one. The FIRST section has no previous
+    // section, so on it that 32px stacks on top of WindowPadding + the
+    // panel's leading Dummy(0,4) and reads as a large dead band above the
+    // title (the section reorder made Transform first, exposing this).
+    // Skip the leading gap for the first section; the header still keeps
+    // its identical headline + 20px bottom reservation, so the rhythm
+    // between sections is unchanged.
     (void)open;
-    ImGui::Dummy(ImVec2(0, 32));               // top breathing room (24 → 32)
+    if (!firstSection)
+        ImGui::Dummy(ImVec2(0, 32));           // top breathing room (24 → 32)
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float rowW  = ImGui::GetContentRegionAvail().x;
     float fontSize = ImGui::GetFontSize();
@@ -144,14 +214,14 @@ static int pillGroup(const char* id, const char* const* labels, int count, int c
 static bool pillSlider(const char* label, float* v, float lo, float hi,
                        const char* fmt = "%.2f") {
     ImGui::PushID(label);
-    // Top padding was 6 — tightened to 3 for a denser vertical rhythm.
-    ImGui::Dummy(ImVec2(0, 3));
+    // Shared rhythm: leading gap = kRowGapY (same as every other row helper).
+    ImGui::Dummy(ImVec2(0, kRowGapY));
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH = ImGui::GetFontSize();
     float trackH = 6.0f;
     float handleR = 8.0f;
-    float rowH = labelH + 14.0f; // was 16 — bring label/track a touch closer
+    float rowH = labelH + kLabelGapY; // label→track gap on the shared scale
 
     // Label + value row (drawn via drawlist so we control exact positions)
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -162,7 +232,7 @@ static bool pillSlider(const char* label, float* v, float lo, float hi,
                 IM_COL32(235, 240, 250, 245), valbuf);
 
     // Track interaction (invisible button under the track region)
-    float trackY = rowStart.y + labelH + 8.0f;
+    float trackY = rowStart.y + labelH + kLabelGapY;
     ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 6.0f));
     bool pressed = ImGui::InvisibleButton("##track", ImVec2(w, trackH + 12.0f));
     bool active  = ImGui::IsItemActive();
@@ -196,9 +266,9 @@ static bool pillSlider(const char* label, float* v, float lo, float hi,
 
     // Advance cursor past the row via Dummy (SetCursorScreenPos without a
     // follow-up item trips ImGui's bounds-check at window End). Trailing
-    // padding tightened from 8 → 5 for a denser rhythm.
+    // pad = kRowPadY — identical to every other row helper.
     ImVec2 curScreen = ImGui::GetCursorScreenPos();
-    float targetY = rowStart.y + rowH + 5.0f;
+    float targetY = rowStart.y + rowH + kRowPadY;
     float advanceY = targetY - curScreen.y;
     if (advanceY > 0.0f) ImGui::Dummy(ImVec2(w, advanceY));
     ImGui::PopID();
@@ -241,9 +311,9 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                                      const char* fmt = "%.2f") {
     ParamSliderResult r;
     ImGui::PushID(id);
-    // Tightened from 14 → 4 — the previous breathing room stacked with the
-    // window's ItemSpacing made every slider feel like its own paragraph.
-    ImGui::Dummy(ImVec2(0, 4));
+    // Shared rhythm: leading gap = kRowGapY (identical to pillSlider /
+    // color / toggle rows). Every slider sits on the same vertical grid.
+    ImGui::Dummy(ImVec2(0, kRowGapY));
 
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
@@ -253,7 +323,9 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     // thumb is a confident solid dot the eye latches onto.
     float trackH  = 10.0f;
     float handleR = 11.0f;
-    float rowH    = labelH + 18.0f;  // was +28 — tighter label-to-track gap
+    // Row height = label + shared label→track gap + the pill track itself,
+    // so the trailing kRowPadY lands the same distance below every slider.
+    float rowH    = labelH + kLabelGapY + trackH;
     float boltBox = 18.0f; // hit-target square around the bolt glyph
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -297,10 +369,10 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
                 IM_COL32(235, 240, 250, 245), valbuf);
 
-    // Right-click anywhere on the row also opens the bind menu. Label/track
-    // gap dropped 14 → 8 so each row reads as a unified control instead of
-    // a label floating above an unrelated slider.
-    float trackY = rowStart.y + labelH + 8.0f;
+    // Right-click anywhere on the row also opens the bind menu. Label→track
+    // gap = kLabelGapY (the shared scale) so every control's label sits the
+    // same distance above its track.
+    float trackY = rowStart.y + labelH + kLabelGapY;
     ImGui::SetCursorScreenPos(ImVec2(labelX, rowStart.y));
     ImGui::InvisibleButton("##row", ImVec2(w - (labelX - rowStart.x), labelH + 4));
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) r.openBindMenu = true;
@@ -355,9 +427,9 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                             IM_COL32(40, 44, 56, 220), 20);
     }
 
-    // Bottom breathing room — tightened 14 → 4 so successive sliders sit
-    // on a single visual rhythm with the rest of the panel.
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 4.0f));
+    // Bottom breathing room = kRowPadY — identical to every other row
+    // helper so successive controls share one vertical rhythm.
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
     ImGui::PopID();
     return r;
 }
@@ -367,12 +439,14 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
 // quiet layout (no cramped dropdown + tiny chip).
 static bool paramColorRow(const char* id, const char* label, glm::vec4* c) {
     ImGui::PushID(id);
-    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Dummy(ImVec2(0, kRowGapY));
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH = ImGui::GetFontSize();
     float swatchR = 10.0f;
-    float rowH = std::max(labelH, swatchR * 2.0f) + 8.0f;
+    // Single-line control: clamp to the shared field height so it matches
+    // toggle rows and reads on the same rhythm.
+    float rowH = std::max({labelH, swatchR * 2.0f, kFieldH});
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(rowStart.x, rowStart.y + (rowH - labelH) * 0.5f),
@@ -408,7 +482,7 @@ static bool paramColorRow(const char* id, const char* label, glm::vec4* c) {
         ImGui::EndPopup();
     }
 
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 6.0f));
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
     ImGui::PopID();
     return changed;
 }
@@ -416,12 +490,14 @@ static bool paramColorRow(const char* id, const char* label, glm::vec4* c) {
 // Toggle row — label on the left, pill-style switch on the right. One row per bool.
 static bool paramToggleRow(const char* id, const char* label, bool* b) {
     ImGui::PushID(id);
-    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::Dummy(ImVec2(0, kRowGapY));
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH = ImGui::GetFontSize();
     float switchW = 30.0f, switchH = 16.0f;
-    float rowH = std::max(labelH, switchH) + 4.0f;
+    // Single-line control row clamped to the shared field height so toggle
+    // rows, color rows and combo rows all share one row box.
+    float rowH = std::max({labelH, switchH, kFieldH});
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(rowStart.x, rowStart.y + (rowH - labelH) * 0.5f),
@@ -444,16 +520,16 @@ static bool paramToggleRow(const char* id, const char* label, bool* b) {
     float knobY = sy + switchH * 0.5f;
     dl->AddCircleFilled(ImVec2(knobX, knobY), knobR, IM_COL32(240, 244, 250, 255));
 
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + 2.0f));
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
     ImGui::PopID();
     return clicked;
 }
 
-// Small inter-section gap — use between logical groups of controls.
-// 10 px rhythm was chosen via UX pass: tight enough to group visually
-// (Proximity) but loose enough that headers don't blur into prior content.
+// Inter-group gap — use between logical groups of controls. Resolves to
+// the shared kSectionGap so every sub-group break in the panel is identical
+// (no "tight cluster next to huge empty gap").
 static void sectionBreak() {
-    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Dummy(ImVec2(0, kSectionGap));
 }
 
 // --- Two-column labeled drag helpers ---
@@ -470,11 +546,15 @@ static bool namedDrag(const char* id, const char* prefix, float* v, float speed,
 static bool dragPair(const char* idA, const char* labelA, float* a,
                      const char* idB, const char* labelB, float* b,
                      float speed, float lo, float hi, const char* fmt = "%.2f") {
-    float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    // Clean 2-col grid: equal column widths, fixed kColGap gutter. Using the
+    // same constant for the width math AND the SameLine spacing guarantees
+    // every paired row (X/Y, Size/Rot, W/H, Top/Btm, Left/Right) aligns to
+    // the identical two-column grid regardless of window ItemSpacing.
+    float w = (ImGui::GetContentRegionAvail().x - kColGap) * 0.5f;
     bool changed = false;
     ImGui::SetNextItemWidth(w);
     if (namedDrag(idA, labelA, a, speed, lo, hi, fmt)) changed = true;
-    ImGui::SameLine();
+    ImGui::SameLine(0, kColGap);
     ImGui::SetNextItemWidth(w);
     if (namedDrag(idB, labelB, b, speed, lo, hi, fmt)) changed = true;
     return changed;
@@ -486,16 +566,111 @@ struct DragCfg { float speed, lo, hi; const char* fmt; };
 struct DragPairResult { bool changedA, changedB, activated; };
 static DragPairResult dragPair2(const char* idA, const char* labelA, float* a, DragCfg ca,
                                 const char* idB, const char* labelB, float* b, DragCfg cb) {
-    float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    // Same 2-col grid as dragPair — equal widths, fixed kColGap gutter.
+    float w = (ImGui::GetContentRegionAvail().x - kColGap) * 0.5f;
     DragPairResult r{false, false, false};
     ImGui::SetNextItemWidth(w);
     r.changedA = namedDrag(idA, labelA, a, ca.speed, ca.lo, ca.hi, ca.fmt);
     if (ImGui::IsItemActivated()) r.activated = true;
-    ImGui::SameLine();
+    ImGui::SameLine(0, kColGap);
     ImGui::SetNextItemWidth(w);
     r.changedB = namedDrag(idB, labelB, b, cb.speed, cb.lo, cb.hi, cb.fmt);
     if (ImGui::IsItemActivated()) r.activated = true;
     return r;
+}
+
+// Dual-handle range slider — picks [*lo, *hi] inside the absolute [absLo,
+// absHi] domain. Same visual language as pillSlider/paramSlider (rounded
+// pill track, solid circular thumbs) and the same kRowGapY / kLabelGapY /
+// kRowPadY vertical rhythm so it drops into the panel without new spacing.
+// Returns true while either handle is being dragged.
+// `liveVal` (optional, nullptr to disable): a value in [absLo, absHi] that is
+// rendered as a thin bright vertical caret + triangle on the SAME track as the
+// Min/Max thumbs — used to show an audio binding's current driven value moving
+// in real time. Read-only; never mutated.
+static bool rangeSlider(const char* id, const char* label,
+                        float* lo, float* hi, float absLo, float absHi,
+                        const float* liveVal = nullptr) {
+    ImGui::PushID(id);
+    ImGui::Dummy(ImVec2(0, kRowGapY));
+    float w = ImGui::GetContentRegionAvail().x;
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+    float labelH = ImGui::GetFontSize();
+    float trackH = 10.0f, handleR = 9.0f;
+    float rowH   = labelH + kLabelGapY + trackH;
+    float span   = (absHi > absLo) ? (absHi - absLo) : 1.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Label (muted) + right-aligned "min – max" readout (bright).
+    char val[48];
+    snprintf(val, sizeof(val), "%.2f  -  %.2f", *lo, *hi);
+    ImVec2 vs = ImGui::CalcTextSize(val);
+    dl->AddText(ImVec2(rowStart.x, rowStart.y), IM_COL32(150, 158, 172, 230), label);
+    dl->AddText(ImVec2(rowStart.x + w - vs.x, rowStart.y),
+                IM_COL32(235, 240, 250, 245), val);
+
+    float trackY = rowStart.y + labelH + kLabelGapY;
+    auto toX = [&](float v) { return rowStart.x + (v - absLo) / span * w; };
+    auto toV = [&](float x) {
+        float t = (x - rowStart.x) / w;
+        if (t < 0) t = 0; if (t > 1) t = 1;
+        return absLo + t * span;
+    };
+
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 8.0f));
+    ImGui::InvisibleButton("##rng", ImVec2(w, trackH + 16.0f));
+    bool active = ImGui::IsItemActive();
+    bool changed = false;
+    if (active) {
+        float mx = ImGui::GetIO().MousePos.x;
+        // Grab whichever handle the press started nearest to.
+        static int grab = -1;
+        if (ImGui::IsItemActivated())
+            grab = (std::abs(mx - toX(*lo)) <= std::abs(mx - toX(*hi))) ? 0 : 1;
+        float nv = toV(mx);
+        if (grab == 0) { *lo = std::min(nv, *hi); } else { *hi = std::max(nv, *lo); }
+        changed = true;
+    }
+
+    // Track, selected span, then the two solid thumbs (pill idiom).
+    dl->AddRectFilled(ImVec2(rowStart.x, trackY),
+                      ImVec2(rowStart.x + w, trackY + trackH),
+                      IM_COL32(255, 255, 255, 28), trackH * 0.5f);
+    dl->AddRectFilled(ImVec2(toX(*lo), trackY), ImVec2(toX(*hi), trackY + trackH),
+                      IM_COL32(232, 150, 70, 200), trackH * 0.5f);
+    for (float hv : { *lo, *hi }) {
+        float hx = toX(hv), hy = trackY + trackH * 0.5f;
+        dl->AddCircleFilled(ImVec2(hx, hy + 1.5f), handleR + 1.5f, IM_COL32(0, 0, 0, 60), 20);
+        dl->AddCircleFilled(ImVec2(hx, hy), handleR, IM_COL32(232, 236, 244, 255), 20);
+    }
+
+    // Live driven-value marker — thin bright caret + triangle, on top of the
+    // round thumbs, using the same amber accent as the selected-span fill.
+    if (liveVal) {
+        float lv = *liveVal;
+        if (lv < absLo) lv = absLo; else if (lv > absHi) lv = absHi;
+        float lx = toX(lv);
+        dl->AddLine(ImVec2(lx, trackY - 3.0f), ImVec2(lx, trackY + trackH + 3.0f),
+                    IM_COL32(232, 150, 70, 255), 1.75f);
+        float ty = trackY - 3.0f;
+        dl->AddTriangleFilled(ImVec2(lx - 4.0f, ty - 5.0f), ImVec2(lx + 4.0f, ty - 5.0f),
+                              ImVec2(lx, ty), IM_COL32(232, 150, 70, 255));
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
+
+    // Tiny live numeric readout under the track (dim label + bright value),
+    // same text idiom / spacing as the rest of the panel.
+    if (liveVal) {
+        char lvbuf[48];
+        snprintf(lvbuf, sizeof(lvbuf), "live  %.3f", *liveVal);
+        ImVec2 lr = ImGui::GetCursorScreenPos();
+        dl->AddText(ImVec2(lr.x, lr.y), IM_COL32(150, 158, 172, 230), lvbuf);
+        ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() + kRowPadY));
+    }
+
+    ImGui::PopID();
+    return changed;
 }
 
 void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
@@ -521,11 +696,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // its own paragraph. Each row helper (paramSlider / paramToggleRow /
     // pillSlider) already adds its own internal breathing — stacking 16px
     // ItemSpacing on top of those caused the panel to read as half-empty.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(10, 6));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(12, 9));
+    // All derived from the shared spacing scale so the chrome breathes on
+    // the same rhythm as the content. ItemSpacing stays tight (kStepY) —
+    // each row helper already injects kRowGapY/kRowPadY, so a large
+    // ItemSpacing.y here would double the gaps and read as half-empty.
+    // Slightly more generous frame padding + consistent rounded fields give
+    // the pro-audio/video-inspector "premium" feel without wasting space.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kStepY * 7.0f, kStepY * 6.0f)); // 28,24
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(kColGap, kStepY));              // 12,4
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(kInnerPad, kStepY * 2.5f));     // 12,10
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding,  6.0f);
     ImGui::Begin("        ###Properties");
-    ImGui::PopStyleVar(3);
+    ImGui::PopStyleVar(5);
 
 #if 0
     // ── SOURCES tab strip ─────────────────────────────────────────────
@@ -876,16 +1059,22 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     //  the user could reach the shader parameters.)
     ImGui::Dummy(ImVec2(0, 4));
 
-    // --- Blend + Opacity --- one row, 50/50 split. pillSlider() can't be used
-    // here because its leading Dummy(0,3) breaks SameLine; we render an inline
-    // mini-slider in the right half that mirrors the same visual language.
+    // Section order (top→bottom): Transform → Blend+Opacity → shader
+    // Parameters → … → Tiling (last child). The Blend+Opacity row is a
+    // lambda so it can be emitted right after Transform without moving
+    // its internals; Tiling is likewise emitted as the panel's last child.
+    auto emitBlendOpacityRow = [&]() {
+    // --- Blend + Opacity --- previously crammed onto one 50/50 line with a
+    // tight 10px gutter (combo had no label, opacity label+track+value were
+    // all squeezed into one half). Now two clean rows, each aligned to the
+    // SAME shared control column as RESOLUTION / COLORMODE so the inspector
+    // reads as one consistent grid with real breathing room.
     {
-        float fullW = ImGui::GetContentRegionAvail().x;
-        const float gap = 10.0f;
-        float halfW = (fullW - gap) * 0.5f;
-
-        ImGui::SetNextItemWidth(halfW);
+        // Row 1 — BLEND combo at the shared control column.
+        ImGui::Dummy(ImVec2(0, kRowGapY));
+        float blendCtrlW = labelGutter("BLEND", kDimText);
         const char* currentBlend = blendModeName(layer->blendMode);
+        ImGui::SetNextItemWidth(blendCtrlW);
         if (ImGui::BeginCombo("##Blend", currentBlend)) {
             for (int i = 0; i < (int)BlendMode::COUNT; i++) {
                 BlendMode mode = (BlendMode)i;
@@ -898,25 +1087,26 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
             ImGui::EndCombo();
         }
-        ImGui::SameLine(0, gap);
 
-        // Inline opacity slider — horizontal layout: [Opacity] [track] [1.00]
-        // sized to fill the right half cleanly. Vertically centered to match
-        // the combo's frame height so the two halves baseline-align.
+        // Row 2 — OPACITY: inline track spanning the full control column,
+        // value right-aligned. Same gutter as BLEND so the two rows stack
+        // into a tidy two-row block instead of a cramped single line.
         {
+            ImGui::Dummy(ImVec2(0, kRowGapY));
             ImGui::PushID("##OpacityInline");
             float frameH = ImGui::GetFrameHeight();
+            float opCtrlW = labelGutter("OPACITY", kDimText);
+            // labelGutter() leaves the cursor at the control column; capture
+            // that as the row origin for the custom-drawn slider.
             ImVec2 rowStart = ImGui::GetCursorScreenPos();
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
             char valbuf[16]; snprintf(valbuf, sizeof(valbuf), "%.2f", layer->opacity);
             ImVec2 valSize = ImGui::CalcTextSize(valbuf);
-            ImVec2 lblSize = ImGui::CalcTextSize("Opacity");
 
-            const float lblPad = 8.0f;
-            const float valPad = 8.0f;
-            float trackX0 = rowStart.x + lblSize.x + lblPad;
-            float trackX1 = rowStart.x + halfW - valSize.x - valPad;
+            const float valPad = kInnerPad;
+            float trackX0 = rowStart.x;
+            float trackX1 = rowStart.x + opCtrlW - valSize.x - valPad;
             float trackW = trackX1 - trackX0;
             if (trackW < 24.0f) trackW = 24.0f;
             float rowMidY = rowStart.y + frameH * 0.5f;
@@ -940,9 +1130,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             float norm = layer->opacity;
             if (norm < 0) norm = 0; if (norm > 1) norm = 1;
 
-            // Label (left), vertically centered.
-            dl->AddText(ImVec2(rowStart.x, rowMidY - lblSize.y * 0.5f),
-                        IM_COL32(170, 175, 185, 220), "Opacity");
+            // (Label is drawn by labelGutter("OPACITY") above — no inline
+            // duplicate here.)
             // Track + fill.
             const float trackH = 6.0f;
             ImVec2 trackA(trackX0, rowMidY - trackH * 0.5f);
@@ -963,9 +1152,15 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             dl->AddCircleFilled(ImVec2(hx, rowMidY), 7.0f, handleCol);
             dl->AddCircle      (ImVec2(hx, rowMidY), 7.0f,
                                 IM_COL32(0, 0, 0, 110), 0, 1.2f);
+            // Advance the cursor past the row (the hit-zone InvisibleButton
+            // left it at the track origin). Land kRowPadY below the row on
+            // the shared rhythm so the next section spaces consistently.
+            ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y));
+            ImGui::Dummy(ImVec2(opCtrlW, frameH + kRowPadY));
             ImGui::PopID();
         }
     }
+    }; // end emitBlendOpacityRow
 
     // (Transition section moved to the BOTTOM of the Parameters panel —
     // see the matching block below the shader-inputs loop.)
@@ -974,7 +1169,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // under a header so the main event (shader parameters / video) isn't
     // buried under a wall of position/scale/rotation.
     static bool transformOpen = false;
-    if (sectionHeader("Transform", &transformOpen)) {
+    if (sectionHeader("Transform", &transformOpen, /*firstSection=*/true)) {
         // Phase 6 — circular xy-pad. Drag the dot to translate the layer
         // along X/Y in NDC (-1..1). Doubles as the visual anchor that
         // reference A leads with at the top of its Transform section.
@@ -1123,6 +1318,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             undoNeeded = true;
     }
 
+    // Blend Mode + Opacity — emitted directly under Transform so the user
+    // sees transform + blend + the shader effect params without scrolling.
+    emitBlendOpacityRow();
+
     // --- Effects ---
     // When no effects exist yet, show a single inline row: "Effects" label on
     // the left + "+ Add Effect" button on the right. Skips the wasteful
@@ -1261,7 +1460,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     } // end sectionHeader("Effects")
 
     // --- Mosaic + Feather (collapsible, default closed) ---
+    // Emitted as the panel's LAST child (see call below, just before
+    // ImGui::End()) so the bulky Tiling section never pushes Transform /
+    // Blend / shader Parameters below the fold.
     static bool tilingOpen = false;
+    auto emitTilingSection = [&]() {
     if (sectionHeader("Tiling", &tilingOpen)) {
     // --- Mosaic mode ---
     {
@@ -1449,6 +1652,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // --- Feather (inside Tiling collapsible) ---
     pillSlider("Feather", &layer->feather, 0.0f, 0.5f, "%.3f");
     } // end sectionHeader("Tiling")
+    }; // end emitTilingSection
 
     // --- Drop Shadow ---
     // Inline header row: label + Enable checkbox on the same line. If the
@@ -1746,7 +1950,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 currentLabel = customLabel;
             }
 
-            ParamRow::Begin("RESOLUTION");
+            // RESOLUTION used to butt straight against the Canvas dropdown
+            // (ParamRow::Begin's window-raw SameLine left ~0px gutter).
+            // labelGutter() parks the combo at the shared control column
+            // (GetCursorStartPos()+kLabelColW) with clear space before it.
+            labelGutter("RESOLUTION", kDimText);
             if (ImGui::BeginCombo("##ShaderRes", currentLabel)) {
                 for (auto& p : presets) {
                     bool sel = !customMode
@@ -1785,22 +1993,28 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     customH = layer->shaderHeight > 0 ? layer->shaderHeight : 1080;
                     lastLayer = layer.get();
                 }
-                ImGui::Dummy(ImVec2(0, 4));
-                ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-                ImGui::Text("Size");
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                float inputW = (ImGui::GetContentRegionAvail().x - 70.0f) * 0.5f;
-                if (inputW < 50.0f) inputW = 50.0f;
+                ImGui::Dummy(ImVec2(0, kRowGapY));
+                // "Size" label parks its W×H pair at the shared control
+                // column (same grid as RESOLUTION above). The two int
+                // fields form a clean 2-col grid with the kColGap gutter
+                // and an "x" glyph centred between them.
+                float sizeCtrlW = labelGutter("Size", kDimText);
+                float xGlyphW = ImGui::CalcTextSize("x").x;
+                float inputW  = (sizeCtrlW - kColGap * 2.0f - xGlyphW) * 0.5f;
+                if (inputW < 48.0f) inputW = 48.0f;
                 ImGui::SetNextItemWidth(inputW);
                 ImGui::InputInt("##cw", &customW, 0);
-                ImGui::SameLine();
+                ImGui::SameLine(0, kColGap);
+                ImGui::AlignTextToFramePadding();
                 ImGui::TextDisabled("x");
-                ImGui::SameLine();
+                ImGui::SameLine(0, kColGap);
                 ImGui::SetNextItemWidth(inputW);
                 ImGui::InputInt("##ch", &customH, 0);
-                ImGui::SameLine();
+                // Apply moves to its own row at the control column — it was
+                // crammed flush against the H field with zero breathing room.
                 bool changed = (customW != layer->shaderWidth || customH != layer->shaderHeight);
+                ImGui::Dummy(ImVec2(0, kRowPadY));
+                ImGui::SetCursorPosX(ImGui::GetCursorStartPos().x + kLabelColW);
                 if (!changed) ImGui::BeginDisabled();
                 if (ImGui::SmallButton("Apply")) {
                     if (customW >= 64 && customH >= 64
@@ -2062,14 +2276,39 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             }
                         }
                         if (ab.signal != AudioSignal::None) {
-                            ImGui::Text("Range");
-                            ImGui::SetNextItemWidth(55);
-                            ImGui::DragFloat("##rmin", &ab.rangeMin, 0.01f, input.minVal, input.maxVal, "%.2f");
-                            ImGui::SameLine();
-                            ImGui::SetNextItemWidth(55);
-                            ImGui::DragFloat("##rmax", &ab.rangeMax, 0.01f, input.minVal, input.maxVal, "%.2f");
-                            ImGui::SetNextItemWidth(120);
-                            ImGui::SliderFloat("Smooth", &ab.smoothing, 0.0f, 0.95f);
+                            // Give the audio-reactive controls room to use the
+                            // panel's row idioms (full-width pill tracks).
+                            ImGui::Dummy(ImVec2(220.0f, 0));
+
+                            // Output range — dual-handle slider + the two
+                            // scrubbable numeric fields share ab.rangeMin/Max
+                            // storage, so they stay in sync for free. Drag
+                            // speed scales with the param's own span.
+                            dimLabel("OUTPUT RANGE", kRowLabel, false);
+                            float dragSpd = (input.maxVal - input.minVal) * 0.005f;
+                            if (dragSpd <= 0.0f) dragSpd = 0.01f;
+                            // Live driven value = the same map applyAudioBindings
+                            // applies each frame: rangeMin + smoothed*(span).
+                            // ab is a reference into m_audioBindings, so this
+                            // reads the value the apply path just wrote.
+                            float liveDriven = ab.rangeMin +
+                                ab.smoothedValue * (ab.rangeMax - ab.rangeMin);
+                            rangeSlider("##arng", "Min / Max",
+                                        &ab.rangeMin, &ab.rangeMax,
+                                        input.minVal, input.maxVal,
+                                        &liveDriven);
+                            if (dragPair("##armin", "Min", &ab.rangeMin,
+                                         "##armax", "Max", &ab.rangeMax,
+                                         dragSpd, input.minVal, input.maxVal)) {
+                                // Keep min<=max regardless of which field moved.
+                                if (ab.rangeMin > ab.rangeMax)
+                                    std::swap(ab.rangeMin, ab.rangeMax);
+                            }
+
+                            // Smoothing — higher = gentler/slower follower.
+                            dimLabel("SMOOTHING", kRowLabel, false);
+                            pillSlider("Amount",
+                                       &ab.smoothing, 0.0f, 1.0f, "%.2f");
                         }
                         ImGui::EndPopup();
                     }
@@ -2137,7 +2376,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     float v = std::get<float>(input.value);
                     int iv = (int)v;
                     if (!input.longLabels.empty()) {
-                        ImGui::Dummy(ImVec2(0, 6));
+                        ImGui::Dummy(ImVec2(0, kRowGapY));
                         std::string lblUp = upperLabel(input.name);
 
                         int cur = iv;
@@ -2146,21 +2385,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             cur = (int)input.longLabels.size() - 1;
                         const char* preview = input.longLabels[cur].c_str();
                         ImGui::PushID(input.name.c_str());
-                        // Label left-aligned, dropdown pinned to the row's
-                        // right edge with a 60%-of-row width. ParamRow::Begin
-                        // was leaving a visible gap on the right because the
-                        // combo's internal padding ate its trailing pixels.
-                        ImGui::AlignTextToFramePadding();
-                        ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
-                        ImGui::TextUnformatted(lblUp.c_str());
-                        ImGui::PopStyleColor();
-                        ImGui::SameLine();
-                        float rowEndX = ImGui::GetWindowContentRegionMax().x;
-                        float rowStartX = ImGui::GetWindowContentRegionMin().x;
-                        float rowW = rowEndX - rowStartX;
-                        float comboW = std::max(140.0f, rowW * 0.60f);
-                        ImGui::SetCursorPosX(rowEndX - comboW);
-                        ImGui::SetNextItemWidth(comboW);
+                        // Enum combo (e.g. COLORMODE) parks at the SAME shared
+                        // control column as RESOLUTION via labelGutter() —
+                        // no more per-row right-edge math that left every
+                        // enum row's label-to-combo gap a different width.
+                        labelGutter(lblUp.c_str(), kDimText);
                         if (ImGui::BeginCombo("##longCombo", preview)) {
                             for (int i = 0; i < (int)input.longLabels.size(); i++) {
                                 bool sel = (i == cur);
@@ -2173,7 +2402,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             ImGui::EndCombo();
                         }
                         ImGui::PopID();
-                        ImGui::Dummy(ImVec2(0, 2));
+                        ImGui::Dummy(ImVec2(0, kRowPadY));
                     } else {
                         float fv = (float)iv;
                         std::string lblUp = upperLabel(input.name);
@@ -2483,6 +2712,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             layerStack->removeLayer(pendingDelete);
         }
     }
+
+    // Tiling — emitted as the panel's LAST child so the bulky Mosaic /
+    // Feather controls sit at the very bottom and never push Transform,
+    // Blend, or the shader Parameters below the fold.
+    emitTilingSection();
 
     ImGui::End();
 }

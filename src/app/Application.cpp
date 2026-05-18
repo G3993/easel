@@ -627,7 +627,10 @@ void Application::run() {
             lastTime = now;
 
             if (m_mixerEnabled && m_audioMixer.isRunning()) {
-                // Mixer mode: drain mixed mono from mixer thread → feed to analyzer
+                // Mixer mode: drain mixed mono from mixer thread → feed to analyzer.
+                // The mixer is the sample source here, so the analyzer must not
+                // also open its own ScreenCaptureKit/CoreAudio capture.
+                m_audioAnalyzer.setWantsSystemAudio(false);
                 float monoBuf[4096];
                 int count = m_audioMixer.drainMixedMono(monoBuf, 4096);
                 if (count > 0) {
@@ -640,13 +643,25 @@ void Application::run() {
                 // m_audioDevices is only populated when FFmpeg is available
                 // (see Application.h — lives in the HAS_FFMPEG block).
                 if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                    bool isCapture = m_audioDevices[m_selectedAudioDevice].isCapture;
                     m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
-                                                m_audioDevices[m_selectedAudioDevice].isCapture);
+                                                isCapture);
+                    // Explicit mic device → CoreAudio capture path. Any other
+                    // selection (loopback device) needs the ScreenCaptureKit
+                    // system-audio path on macOS.
+                    m_audioAnalyzer.setWantsSystemAudio(!isCapture);
                 } else {
+                    // "System Audio (loopback)" (-1, the default): there is no
+                    // explicit capture device, so opt the analyzer into the
+                    // ScreenCaptureKit system-audio path. Without this the macOS
+                    // capture silently bails (cleanupCapture) and every audio
+                    // uniform stays 0 — i.e. no audio reactivity at all.
                     m_audioAnalyzer.setDeviceId("", false);
+                    m_audioAnalyzer.setWantsSystemAudio(true);
                 }
 #else
                 m_audioAnalyzer.setDeviceId("", false);
+                m_audioAnalyzer.setWantsSystemAudio(true);
 #endif
             }
             m_audioAnalyzer.update(dt);
@@ -1081,6 +1096,14 @@ void Application::updateSources() {
     // Hot-reload any changed Shader-Claw shaders
     m_shaderClaw.update();
 
+    // Real frame dt for per-binding audio smoothing (frame-rate independent).
+    // Local static timer mirrors the audio-analyzer dt block in the run loop;
+    // updateSources() is called exactly once per frame.
+    static double s_lastBindTime = glfwGetTime();
+    double s_nowBindTime = glfwGetTime();
+    float audioBindDt = (float)(s_nowBindTime - s_lastBindTime);
+    s_lastBindTime = s_nowBindTime;
+
     // Get mouse state for interactive shaders (normalized 0-1)
     double mx, my;
     glfwGetCursorPos(m_window, &mx, &my);
@@ -1127,6 +1150,7 @@ void Application::updateSources() {
                     (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
+                    audioBindDt,
                     &m_midiManager
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
@@ -2207,7 +2231,72 @@ void Application::renderVoiceCommandBar() {
     ImGui::End();
 }
 
+// Single source of truth for the timeline ⇄ bottom-nav slide animation.
+// Called once per frame at the very top of renderUI() — BEFORE the dockspace
+// and any panel renders — so the params panel (Fix 1), the slide of the
+// timeline + bottom nav (Fix 2) and the left-rail thumbnails (Fix 3) all read
+// the exact same geometry within a single frame.
+void Application::updateTimelineAnim() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float kPillH = 56.0f;   // must match renderFloatingTransportPill pillH
+
+    // Eased open factor. m_timelineMinimized==true → collapse toward 0,
+    // else expand toward 1. ~200ms ease driven by frame DeltaTime.
+    float dt    = ImGui::GetIO().DeltaTime;
+    float speed = dt / 0.20f;                       // full travel in ~200ms
+    float target = m_timelineMinimized ? 0.0f : 1.0f;
+    if (m_timelineAnimT < target)
+        m_timelineAnimT = std::min(target, m_timelineAnimT + speed);
+    else if (m_timelineAnimT > target)
+        m_timelineAnimT = std::max(target, m_timelineAnimT - speed);
+
+    // smoothstep so the slide eases in and out instead of moving linearly.
+    float e = m_timelineAnimT;
+    float eased = e * e * (3.0f - 2.0f * e);
+
+    // Resolve the fully-open height. m_timelineTargetH is settled from the
+    // real measured content height once open (renderTimelinePanel), but on
+    // the very first open frame — before any content has been measured — it
+    // may still be the 220 default or a stale tiny value. Floor it at a sane
+    // 240px so the timeline always animates to a clearly VISIBLE height, then
+    // ceiling it so it can never exceed the viewport (leaving room for pill).
+    float fullH = m_timelineTargetH;
+    if (fullH < 240.0f)  fullH = 240.0f;                       // sane default
+    float maxH = vp->Size.y - kPillH - 80.0f;
+    if (maxH < 0.0f) maxH = 0.0f;       // degenerate viewport on the 1st frame
+    if (fullH > maxH)    fullH = maxH;
+
+    m_timelineCurH = eased * fullH;
+    // m_timelineTopY = the bottom-nav PILL's top edge (== timeline TOP edge),
+    // kept correct for the params panel / left-rail thumbnails that clamp to
+    // it. NOTE: renderTimelinePanel() does NOT use this for the timeline
+    // window's own position (that is derived directly from m_timelineCurH and
+    // pinned to the viewport bottom) — using m_timelineTopY there placed the
+    // timeline 56px too high, behind the pill, making it invisible.
+    m_timelineTopY = vp->Pos.y + vp->Size.y - kPillH - m_timelineCurH;
+
+    // Safety clamp — m_timelineTopY MUST always be an on-screen value so the
+    // bottom-nav transport pill (renderFloatingTransportPill, which reads this
+    // verbatim) is never placed at y≈0 / off-screen / behind the viewport.
+    // Fall back to the original "flush at the bottom" position whenever the
+    // computed value is non-positive or above the bottom-nav's valid band
+    // (e.g. stale 0 init, a frame that skipped updateTimelineAnim, or a
+    // degenerate viewport size before GLFW reports the framebuffer).
+    float bottomNavTopMin = vp->Pos.y;                       // never above viewport top
+    float bottomNavTopMax = vp->Pos.y + vp->Size.y - kPillH; // flush-at-bottom (timeline closed)
+    if (!(m_timelineTopY > bottomNavTopMin) || m_timelineTopY > bottomNavTopMax) {
+        m_timelineTopY = bottomNavTopMax;
+    }
+}
+
 void Application::renderUI() {
+    // Recompute the shared timeline/bottom-nav slide geometry first so every
+    // panel below reads consistent numbers (Fixes 1–3).
+    updateTimelineAnim();
+    // Hand the live timeline top edge to UIManager so the right params float
+    // (Fix 1) and the left-rail thumbnail column (Fix 3) clamp to it.
+    m_ui.setTimelineTopY(m_timelineTopY);
+
     // Escape key deselects current layer — but NOT while we're in mask edit mode,
     // where Esc belongs to the mask editor (see ViewportPanel::renderMaskOverlay).
     if (!m_maskEditMode && m_selectedLayer >= 0 &&
@@ -5060,12 +5149,11 @@ void Application::renderUI() {
     // Audio Mixer panel merged into Audio; transport controls now live inside
     // the Timeline panel's transport row (renderTransportBar() is a no-op).
 
-    // Timeline panel — driven by the film button on the floating
-    // transport pill. m_timelineMinimized=true → fully hidden (no docked
-    // strip, canvas reaches the bottom). m_timelineMinimized=false →
-    // renderTimelinePanel() draws the docked tracks / Work Area / audio
-    // lane the user has been asking for.
-    if (m_ui.isPanelVisible("Timeline") && !m_timelineMinimized) {
+    // Timeline panel — floating overlay that slides up from under the bottom
+    // nav (Fix 2). Keep rendering while the close animation is still playing
+    // (m_timelineAnimT > 0) so it slides DOWN smoothly instead of vanishing.
+    if (m_ui.isPanelVisible("Timeline") &&
+        (!m_timelineMinimized || m_timelineAnimT > 0.001f)) {
         renderTimelinePanel();
     }
     // Phase 5 — floating transport pill above the docked timeline. Renders
@@ -5201,12 +5289,28 @@ void Application::renderFloatingTransportPill() {
     const float kGap     = 10.0f;
     const float kDivPad  = 12.0f;
 
-    // Full-width bottom bar — docked to the very bottom of the window.
-    // Width spans the whole viewport, no horizontal margin. The dockspace
-    // is sized in setupDockspace() to leave (pillH) of room here.
+    // Full-width bottom bar. Fix 2: the bottom nav slides UP by the current
+    // animated timeline height so the timeline pops out from underneath it —
+    // the two move as one rigid unit. m_timelineTopY (the single source of
+    // truth) is exactly the bottom-nav's top edge, so the pill sits right
+    // below it.
+    // Fix 1: the pill computes its Y from its OWN always-valid expression and
+    // never reads m_timelineTopY (a shared member that is 0 on the first
+    // frames / when updateTimelineAnim was skipped). yFlush is the original
+    // flush-at-bottom position; subtract only the animated timeline height
+    // (m_timelineCurH starts at a valid 0 and only grows as the timeline
+    // opens). Result: the pill is correct even if every other timeline
+    // member is uninitialised.
     float x = vp->Pos.x;
-    float y = vp->Pos.y + vp->Size.y - pillH;
+    float yFlush = vp->Pos.y + vp->Size.y - pillH;
+    float y = yFlush - m_timelineCurH;
     float pillW = vp->Size.x;
+
+    // Defensive belt-and-braces: m_timelineCurH should never exceed the
+    // viewport, but if a degenerate frame made it huge/negative, snap the
+    // pill back to flush-at-bottom so it can never leave the screen.
+    if (!(y > vp->Pos.y) || y > yFlush) y = yFlush;
+    if (pillW < 1.0f) pillW = vp->Size.x;   // never a zero-width window
 
     ImGui::SetNextWindowPos (ImVec2(x, y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(pillW, pillH), ImGuiCond_Always);
@@ -5502,6 +5606,58 @@ void Application::renderFloatingTransportPill() {
             }
         }
 
+        // Work Area editor — opened by the ##fp_wa pill in the right cluster.
+        // Body lives here (same window as the OpenPopup call) so it works
+        // even when the timeline overlay is closed (Fix 4).
+        {
+            double wa0 = m_timeline.workAreaStart();
+            double wa1 = m_timeline.workAreaEnd();
+            if (ImGui::BeginPopup("##WAEditPopup")) {
+                ImGui::TextDisabled("Work Area (record range)");
+                ImGui::Separator();
+                static int s_sM = 0, s_sS = 0, s_eM = 0, s_eS = 0;
+                if (ImGui::IsWindowAppearing()) {
+                    s_sM = (int)wa0 / 60; s_sS = (int)wa0 % 60;
+                    s_eM = (int)wa1 / 60; s_eS = (int)wa1 % 60;
+                }
+                ImGui::TextUnformatted("Start");
+                ImGui::SameLine(70);
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##sM", &s_sM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##sS", &s_sS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
+
+                ImGui::TextUnformatted("End");
+                ImGui::SameLine(70);
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##eM", &s_eM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(50);
+                ImGui::InputInt("##eS", &s_eS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
+
+                ImGui::Separator();
+                if (ImGui::Button("Set", ImVec2(120, 0))) {
+                    if (s_sM < 0) s_sM = 0; if (s_sS < 0) s_sS = 0; if (s_sS > 59) s_sS = 59;
+                    if (s_eM < 0) s_eM = 0; if (s_eS < 0) s_eS = 0; if (s_eS > 59) s_eS = 59;
+                    double start = s_sM * 60.0 + s_sS;
+                    double end   = s_eM * 60.0 + s_eS;
+                    double tldur = m_timeline.duration();
+                    if (start < 0) start = 0;
+                    if (end > tldur) end = tldur;
+                    if (end < start + 0.1) end = start + 0.1;
+                    m_timeline.setWorkArea(start, end);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reset", ImVec2(-1, 0))) {
+                    m_timeline.resetWorkArea();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
+
         // ─── CENTER — Loop, Play, Stop (Play at exact window midpoint) ────
         {
             float winW = ImGui::GetWindowSize().x;
@@ -5563,8 +5719,21 @@ void Application::renderFloatingTransportPill() {
             ImVec2 duSize = font->CalcTextSizeA(smSize,  FLT_MAX, 0.0f, du);
             float tcBlockW = tcSize.x + kInner + duSize.x;
 
-            // Total: tcBlock + gap + tlBtn + gap + rec + gap + stream
-            float rightW = tcBlockW + kGap + btnSize + kGap + btnSize + kGap + btnSize;
+            // Fix 4: Work Area control now lives here (single source of
+            // truth — removed from the timeline). Compact pill matching the
+            // row rhythm; opens the existing ##WAEditPopup editor.
+            double wa0b = m_timeline.workAreaStart();
+            double wa1b = m_timeline.workAreaEnd();
+            char waBtn[48];
+            snprintf(waBtn, sizeof(waBtn), "%d:%02d-%d:%02d",
+                     (int)wa0b / 60, (int)wa0b % 60,
+                     (int)wa1b / 60, (int)wa1b % 60);
+            float waPad   = 10.0f;
+            float waBlockW = ImGui::CalcTextSize(waBtn).x + waPad * 2.0f;
+
+            // Total: tcBlock + gap + waBlock + gap + tlBtn + gap + rec + gap + stream
+            float rightW = tcBlockW + kGap + waBlockW
+                         + kGap + btnSize + kGap + btnSize + kGap + btnSize;
 
             float winW = ImGui::GetWindowSize().x;
             float startX = winW - rightW - kInsetX;
@@ -5589,7 +5758,31 @@ void Application::renderFloatingTransportPill() {
                     "Playhead / duration\nClick to edit timeline length");
             }
 
-            // Timeline toggle (film icon) — opens / collapses the docked timeline.
+            // Work Area pill — same kGap rhythm as every other gap in this
+            // row. Click opens the Start/End editor (##WAEditPopup, body in
+            // renderTimelinePanel). Kept visually quiet to match the bar.
+            ImGui::SameLine(0, kGap);
+            {
+                ImVec2 wcur = ImGui::GetCursorScreenPos();
+                ImVec2 wsz(waBlockW, btnSize);
+                bool wclk = ImGui::InvisibleButton("##fp_wa", wsz);
+                bool whov = ImGui::IsItemHovered();
+                ImU32 wbg = whov ? IM_COL32(255, 255, 255, 22)
+                                 : IM_COL32(255, 255, 255, 10);
+                dl->AddRectFilled(wcur,
+                                  ImVec2(wcur.x + wsz.x, wcur.y + wsz.y),
+                                  wbg, 6.0f);
+                ImVec2 wts = ImGui::CalcTextSize(waBtn);
+                dl->AddText(ImVec2(wcur.x + (wsz.x - wts.x) * 0.5f,
+                                   wcur.y + (wsz.y - wts.y) * 0.5f),
+                            whov ? kFgWhite : kFgDim, waBtn);
+                if (wclk) ImGui::OpenPopup("##WAEditPopup");
+                if (whov) ImGui::SetTooltip(
+                    "Work Area — the range REC will capture.\n"
+                    "Click to edit start/end (or I / O at playhead).");
+            }
+
+            // Timeline toggle (film icon) — opens / collapses the timeline.
             ImGui::SameLine(0, kGap);
             if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
                 ImU32 c = m_timelineMinimized ? kFgDim : kFgWhite;
@@ -6107,6 +6300,18 @@ void Application::renderFloatingTransportPill() {
     ImGui::End();
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(3);
+
+    // Keep the bottom-nav pill ABOVE the Timeline without re-introducing
+    // NoBringToFrontOnFocus on the Timeline (that flag pushed the whole
+    // Timeline window — opaque background and all — BEHIND the docked
+    // Canvas/shader, which is the see-through bug). BringWindowToDisplayFront
+    // is a pure z-order reorder (moves the pill to the end of g.Windows so it
+    // paints last/on-top); unlike SetWindowFocus it does NOT steal keyboard/
+    // mouse focus, so clicking timeline widgets still works and never hides
+    // the nav. Re-asserted every frame so a click that raises the Timeline
+    // can't get stuck above the pill.
+    if (ImGuiWindow* pw = ImGui::FindWindowByName("##TransportPill"))
+        ImGui::BringWindowToDisplayFront(pw);
 }
 
 void Application::renderFloatingActionPills() {
@@ -6209,15 +6414,105 @@ void Application::renderFloatingActionPills() {
 }
 
 void Application::renderTimelinePanel() {
+    // Fix 2: the timeline is a FLOATING overlay (not docked) so it can slide
+    // smoothly. Its rect is fully derived from the single source of truth:
+    //   top    = m_timelineTopY  (also the bottom-nav's top edge)
+    //   bottom = viewport bottom − bottom-nav height
+    //   width  = full viewport width (responsive — no left/right clipping)
+    // The bottom nav (renderFloatingTransportPill) sits directly below, so
+    // the two read as one rigid unit popping out from under the nav.
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float kPillH = 56.0f;   // must match renderFloatingTransportPill
+    // SINGLE SOURCE OF TRUTH = m_timelineCurH (animated current height in px,
+    // 0 = closed, grows to full height when open). The timeline window is the
+    // full viewport width, m_timelineCurH tall, pinned to the BOTTOM of the
+    // viewport. It is deliberately NOT positioned from m_timelineTopY (that
+    // member is the bottom-nav pill's top edge and would place the timeline
+    // 56px too high — behind the pill, which is exactly the invisible-timeline
+    // regression). The pill sits directly on top at
+    // (vp_bottom - pillH - m_timelineCurH); pill bottom edge == timeline top
+    // edge, so the two ride together as m_timelineCurH animates.
+    float tlX = vp->Pos.x;
+    float tlW = vp->Size.x;
+    float tlH = m_timelineCurH;
+    if (tlH < 1.0f) tlH = 1.0f;
+    float tlY = vp->Pos.y + vp->Size.y - tlH;   // pinned to viewport bottom
+
+    // Truly fully closed: minimised AND the open animation has fully drained.
+    // Only then do we suppress the panel background (so a 1px residual rect
+    // can't tint pixels). While OPEN or ANIMATING (either direction) the
+    // timeline IS submitted, HAS its background, and is the correct height.
+    const bool tlEffectivelyClosed =
+        (m_timelineMinimized && m_timelineAnimT <= 0.001f);
+
+    ImGui::SetNextWindowPos (ImVec2(tlX, tlY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(tlW, tlH), ImGuiCond_Always);
+    // Fix 3: allow the window to be smaller than the global 32px min so the
+    // closing slide can shrink all the way to 0 without a min-size panel
+    // covering the pill. (max = +FLT_MAX → unconstrained on the high side.)
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+                                        ImVec2(FLT_MAX, FLT_MAX));
+
     // Tight edge margins — left 12px matches the Canvas/Stage nav indent,
     // vertical 16px keeps the transport row centred inside the minimised
-    // height (FrameHeight + 32). Previously 20px left caused play/stop to
-    // float ~40px from the window edge while REC hugged the right.
+    // height (FrameHeight + 32).
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 16));
-    // NoCollapse disables ImGui's default title-bar chevron — we render our
-    // own minimize button at the far right of the transport row instead.
-    ImGui::Begin("Timeline", nullptr, ImGuiWindowFlags_NoCollapse);
-    ImGui::PopStyleVar();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    // Z-ORDER (the real fix for the see-through timeline):
+    // Everything in editor mode is an ImGui window. The shader/canvas is the
+    // docked "Canvas" window, which lives inside the "DockSpace" host window.
+    // That host carries ImGuiWindowFlags_NoBringToFrontOnFocus, so ImGui
+    // created it via g.Windows.push_front() (imgui.cpp CreateNewWindow) —
+    // i.e. at the BACK of the z-stack... but still a real window that paints
+    // the shader image. If the Timeline ALSO has NoBringToFrontOnFocus it is
+    // likewise push_front()'d; whichever of {DockSpace, Timeline} was created
+    // first ends up BEHIND the other. DockSpace is created on frame 1 (top of
+    // renderUI) and the Timeline only when first opened, so push_front puts
+    // the Timeline at index 0 — BEHIND the Canvas/shader. Its opaque
+    // AddRectFilled is then composited under the shader Image() and the
+    // canvas shows straight through. Dropping NoBringToFrontOnFocus makes the
+    // Timeline a normal push_back() window, so it is created/drawn IN FRONT
+    // of the DockSpace+Canvas and the opaque fill is finally visible. The
+    // pill is kept above the timeline explicitly via BringWindowToDisplayFront
+    // every frame (see renderFloatingTransportPill) — a z-only reorder that
+    // does NOT steal focus, so clicking timeline widgets no longer hides the
+    // bottom nav (the original reason NoBringToFrontOnFocus was added).
+    ImGuiWindowFlags tlFlags =
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize   | ImGuiWindowFlags_NoMove      |
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings;
+    // When the timeline is effectively closed, paint NOTHING for its panel so
+    // a residual rect (or the very last animation frame) can never tint the
+    // pixels the pill occupies.
+    if (tlEffectivelyClosed)
+        tlFlags |= ImGuiWindowFlags_NoBackground;
+    ImGui::Begin("Timeline", nullptr, tlFlags);
+    ImGui::PopStyleVar(2);
+
+    // Clip everything to the visible (animated) window so the content is
+    // revealed as it slides instead of spilling over the canvas/nav.
+    ImGui::PushClipRect(ImVec2(tlX, tlY), ImVec2(tlX + tlW, tlY + tlH), true);
+
+    // GUARANTEED opaque panel fill. The timeline is a FLOATING window whose
+    // body content (ruler/tracks) is painted with near-zero-alpha fills that
+    // rely on an opaque surface behind them. ImGui's own WindowBg only covers
+    // the (animated, often shorter-than-content) window rect, so during the
+    // slide — and whenever clamped content overflows the window — the track
+    // area had nothing behind it and the shader/canvas showed straight
+    // through. Draw the panel background ourselves over the FULL clipped
+    // timeline rect, BEFORE any content, in the app's canonical panel color
+    // (UIManager bgPanel = ImVec4(0.020,0.022,0.026,1) → IM_COL32(5,6,7,255)).
+    // Alpha tracks the slide (m_timelineAnimT) so it fades with the animation
+    // but is fully opaque whenever the timeline is open; only the truly-closed
+    // state (tlEffectivelyClosed) skips it so the pill's pixels stay clean.
+    if (!tlEffectivelyClosed) {
+        float bgA = m_timelineAnimT;
+        if (bgA > 1.0f) bgA = 1.0f;
+        if (bgA < 0.0f) bgA = 0.0f;
+        ImU32 panelBg = IM_COL32(5, 6, 7, (int)(255.0f * bgA));
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            ImVec2(tlX, tlY), ImVec2(tlX + tlW, tlY + tlH), panelBg);
+    }
 
     // 1px hairline along the timeline window's top edge — explicit because
     // WindowBorderSize is 0 globally. This is the only outline the bottom
@@ -6231,67 +6526,9 @@ void Application::renderTimelinePanel() {
                     IM_COL32(255, 255, 255, 25), 1.0f);
     }
 
-    // Auto-resize the dock node when the minimize flag toggles. Docked windows
-    // don't obey SetNextWindowSize, so we reach into the dock builder and
-    // resize the containing node directly. Previous expanded height is saved
-    // so "expand" restores whatever height the user had dragged to.
-    //
-    // Expanded-height auto-fit: if the user never dragged the splitter, we
-    // size the node to fit the current content (transport + ruler + tracks +
-    // audio lane) so empty space below the audio waveform doesn't render as
-    // a dead black strip. Once they drag, that override wins until the next
-    // minimize cycle.
-    // File-scope static lives at the bottom of the function too (measured
-    // there). Forward-declared here so both ends share the same storage.
+    // Measured fully-open content height — written near the function bottom,
+    // consumed next frame by updateTimelineAnim() via m_timelineTargetH.
     static float s_tlMeasuredContentH = 0.0f;
-    {
-        static bool   s_prevMinimized = false;
-        static ImVec2 s_savedExpanded(0, 0);
-        // Tab bar is hidden via NoTabBar, so we don't reserve space for it.
-        // Minimised height = one transport row + 16px even top/bottom
-        // padding (matches the WindowPadding push above — no dead strip).
-        const float tabBarH = ImGui::GetFrameHeight() + 4.0f;
-        const float minH = ImGui::GetFrameHeight() + 32.0f; // transport-only
-        const float fitH = (s_tlMeasuredContentH > 0.0f)
-                           ? s_tlMeasuredContentH + tabBarH
-                           : 160.0f;
-        if (m_timelineMinimized != s_prevMinimized) {
-            ImGuiID dockId = ImGui::GetWindowDockID();
-            if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId)) {
-                if (m_timelineMinimized) {
-                    // Only save a meaningful expanded height — if the panel
-                    // was already tiny for some reason (no tracks on launch
-                    // etc.), falling back to fitH on next expand is better
-                    // than restoring to a useless 50px sliver.
-                    if (node->Size.y > minH + 40.0f) s_savedExpanded = node->Size;
-                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, minH));
-                } else {
-                    // Expand: pick the largest of (last-dragged, fit-to-
-                    // content, a sensible default) so the panel always pops
-                    // up visibly even if the saved height was stale.
-                    float restoreH = s_savedExpanded.y;
-                    if (fitH     > restoreH) restoreH = fitH;
-                    if (220.0f   > restoreH) restoreH = 220.0f;
-                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, restoreH));
-                }
-            }
-            s_prevMinimized = m_timelineMinimized;
-        } else {
-            // Every frame: if we have a measured content height and the node
-            // is close to our last-known target, snap it to the fresh measure.
-            // This kills the dead black strip below the audio lane AND follows
-            // layer add/remove without dragging.
-            ImGuiID dockId = ImGui::GetWindowDockID();
-            if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockId)) {
-                static float s_lastFitH = 0.0f;
-                float targetH = m_timelineMinimized ? minH : fitH;
-                if (s_lastFitH > 0.0f && std::abs(node->Size.y - s_lastFitH) < 8.0f) {
-                    ImGui::DockBuilderSetNodeSize(dockId, ImVec2(node->Size.x, targetH));
-                }
-                s_lastFitH = fitH;
-            }
-        }
-    }
 
     static bool s_tlCollapsed = false;
 
@@ -6462,108 +6699,17 @@ void Application::renderTimelinePanel() {
         // transport bar's timeline-icon button. One source of truth for the
         // minimize state, and the timeline header reads as content-only.)
 
-        // De-duplication note: play/stop/loop + timecode now live in the
-        // floating transport pill above this dock. Phase 5 made it the
-        // primary affordance — keeping a second copy here would defeat the
-        // "single source of truth" the user explicitly flagged. Dur and
-        // the zoom slider stay because the pill doesn't own those.
+        // Fix 4: duration + Work Area controls were DUPLICATED here. They now
+        // live ONLY in the bottom transport bar (##fp_dur_popup / ##fp_wa
+        // → ##WAEditPopup). Removing the inline ##TCEdit / ##DurEdit / Dur
+        // DragFloat / Work button kills the duplicate; the ##WAEditPopup body
+        // is kept (further down) since the bottom-nav Work button opens it.
         double dur = m_timeline.duration();
-        int dm = (int)dur / 60, ds = (int)dur % 60;
-        // Timecode hit-area kept for double-click → duration popup so the
-        // dock-only flow still has its existing affordance, just without
-        // the visible duplicate text. Width is FrameHeight×3 (≈ original
-        // "00:00 / 00:00" footprint).
-        {
-            float tcFrameH   = ImGui::GetFrameHeight();
-            bool tcClicked = ImGui::InvisibleButton("##TCEdit",
-                                                    ImVec2(tcFrameH * 3.0f, tcFrameH));
-            bool tcDouble  = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
-            (void)tcClicked;
-            if (ImGui::IsItemHovered()) ParamRow::Tooltip(
-                "Double-click to edit timeline duration.");
-            if (tcDouble) ImGui::OpenPopup("##DurEdit");
-        }
-
-        // Inline duration editor — opens beneath the timecode on double-click.
-        if (ImGui::BeginPopup("##DurEdit")) {
-            ImGui::TextDisabled("Timeline duration");
-            ImGui::Separator();
-            static int s_mm = 0, s_ss = 0;
-            // Seed from the live duration each time the popup opens fresh.
-            if (!ImGui::IsItemVisible() && !ImGui::IsAnyItemFocused()) {
-                s_mm = dm; s_ss = ds;
-            }
-            ImGui::SetNextItemWidth(50);
-            ImGui::InputInt("##MM", &s_mm, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(50);
-            ImGui::InputInt("##SS", &s_ss, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
-            if (ImGui::Button("Set", ImVec2(-1, 0))) {
-                if (s_mm < 0) s_mm = 0; if (s_ss < 0) s_ss = 0;
-                if (s_ss > 59) s_ss = 59;
-                double d = s_mm * 60.0 + s_ss;
-                if (d < 1.0) d = 1.0;
-                m_timeline.setDuration(d);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        // `Dur 60s` numeric field stays as a secondary way to adjust duration.
-        // With ConfigDragClickToInputText=true, a click on it becomes a text
-        // edit, so users can also type here without touching the timecode.
-        ImGui::SameLine(0, 16);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("Dur");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(72);
-        float dsec = (float)m_timeline.duration();
-        if (ImGui::DragFloat("##Dur", &dsec, 1.0f, 1.0f, 3600.0f * 4.0f, "%.0fs")) {
-            m_timeline.setDuration((double)dsec);
-        }
-
-        // Work Area sits right next to Dur — both are time-range controls
-        // for the timeline and read together as one cluster. Click opens
-        // the Start/End editor popup; same affordance as before, just
-        // grouped on the left instead of right-anchored.
-        {
-            double wa0i = m_timeline.workAreaStart();
-            double wa1i = m_timeline.workAreaEnd();
-            int wmi0 = (int)wa0i / 60, wsi0 = (int)wa0i % 60;
-            int wmi1 = (int)wa1i / 60, wsi1 = (int)wa1i % 60;
-            char waInline[48];
-            snprintf(waInline, sizeof(waInline), "%d:%02d-%d:%02d",
-                     wmi0, wsi0, wmi1, wsi1);
-            float waInlineW = ImGui::CalcTextSize(waInline).x;
-            ImGui::SameLine(0, 14);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Work");
-            ImGui::SameLine();
-            float frH = ImGui::GetFrameHeight();
-            ImVec2 cur = ImGui::GetCursorScreenPos();
-            bool clicked = ImGui::InvisibleButton("##WAEditInline",
-                                                  ImVec2(waInlineW + 14.0f, frH));
-            bool hov = ImGui::IsItemHovered();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImU32 bg = hov ? IM_COL32(255, 255, 255, 30)
-                           : IM_COL32(255, 255, 255, 12);
-            dl->AddRectFilled(cur,
-                              ImVec2(cur.x + waInlineW + 14.0f, cur.y + frH),
-                              bg, 5.0f);
-            ImVec2 ts = ImGui::CalcTextSize(waInline);
-            dl->AddText(ImVec2(cur.x + 7.0f, cur.y + (frH - ts.y) * 0.5f),
-                        hov ? IM_COL32(245, 247, 252, 245)
-                            : IM_COL32(200, 210, 225, 220),
-                        waInline);
-            if (hov) ParamRow::Tooltip(
-                "Work Area — the range REC will capture.\n"
-                "Click to edit start/end (or use I / O at playhead).");
-            if (clicked) ImGui::OpenPopup("##WAEditPopup");
-        }
+        (void)dur;
 
         // Zoom slider — replaces the old wheel-zoom. Logarithmic feel so the
         // whole 1x→64x range fits a short slider without low-zoom being cramped.
-        ImGui::SameLine(0, 14);
+        // (No SameLine — it's now the first item on this row.)
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("Zoom");
         ImGui::SameLine();
@@ -6647,14 +6793,8 @@ void Application::renderTimelinePanel() {
             }
         }
 
-        // Work Area label (pre-compute so right-anchored width is known).
-        double wa0 = m_timeline.workAreaStart();
-        double wa1 = m_timeline.workAreaEnd();
-        int wm0 = (int)wa0 / 60, ws0 = (int)wa0 % 60;
-        int wm1 = (int)wa1 / 60, ws1 = (int)wa1 % 60;
-        char waLbl[48];
-        snprintf(waLbl, sizeof(waLbl), "%d:%02d-%d:%02d", wm0, ws0, wm1, ws1);
-        float waW = ImGui::CalcTextSize(waLbl).x;
+        // (Work Area label/editor removed from the timeline — it's a single
+        // source of truth in the bottom transport bar now. See Fix 4.)
 
         // (Centered audio cluster removed — mic icon, System Audio combo,
         // and stereo level meter all live in the bottom transport bar now.
@@ -6669,53 +6809,9 @@ void Application::renderTimelinePanel() {
         float rightAnchorX = contentMaxX - kRecBtnW - 4.0f;
         if (rightAnchorX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(rightAnchorX);
         {
-            // Work Area popup — opened by the inline ##WAEditInline button
-            // up in the Dur cluster. Body kept here so it lives in the same
-            // function scope as the popup-open call.
-            if (ImGui::BeginPopup("##WAEditPopup")) {
-                ImGui::TextDisabled("Work Area (record range)");
-                ImGui::Separator();
-                static int s_sM = 0, s_sS = 0, s_eM = 0, s_eS = 0;
-                if (ImGui::IsWindowAppearing()) {
-                    s_sM = (int)wa0 / 60; s_sS = (int)wa0 % 60;
-                    s_eM = (int)wa1 / 60; s_eS = (int)wa1 % 60;
-                }
-                ImGui::TextUnformatted("Start");
-                ImGui::SameLine(70);
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##sM", &s_sM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##sS", &s_sS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
-
-                ImGui::TextUnformatted("End");
-                ImGui::SameLine(70);
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##eM", &s_eM, 0); ImGui::SameLine(); ImGui::TextUnformatted("m");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(50);
-                ImGui::InputInt("##eS", &s_eS, 0); ImGui::SameLine(); ImGui::TextUnformatted("s");
-
-                ImGui::Separator();
-                if (ImGui::Button("Set", ImVec2(120, 0))) {
-                    if (s_sM < 0) s_sM = 0; if (s_sS < 0) s_sS = 0; if (s_sS > 59) s_sS = 59;
-                    if (s_eM < 0) s_eM = 0; if (s_eS < 0) s_eS = 0; if (s_eS > 59) s_eS = 59;
-                    double start = s_sM * 60.0 + s_sS;
-                    double end   = s_eM * 60.0 + s_eS;
-                    double dur   = m_timeline.duration();
-                    if (start < 0) start = 0;
-                    if (end > dur) end = dur;
-                    if (end < start + 0.1) end = start + 0.1;
-                    m_timeline.setWorkArea(start, end);
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Reset", ImVec2(-1, 0))) {
-                    m_timeline.resetWorkArea();
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
+            // Fix 4: Work Area editor body MOVED to renderFloatingTransportPill
+            // (same window as its OpenPopup call) so it works even when the
+            // timeline is closed. Nothing to render here anymore.
         }
 
         // (REC + GO LIVE removed from the timeline transport — both live in
@@ -6746,12 +6842,11 @@ void Application::renderTimelinePanel() {
 #endif
     }
 
-    // Minimized — stop after the transport row. Panel stays docked so users
-    // can drag the splitter to shrink it to just this strip.
-    if (m_timelineMinimized) {
-        ImGui::End();
-        return;
-    }
+    // Fix 2: render the FULL content (ruler/tracks/audio) whenever the window
+    // is on screen — even while sliding closed — so the panel visibly slides
+    // DOWN behind the clip rect instead of snapping to a transport-only strip.
+    // The window only renders at all while m_timelineAnimT > 0 (see caller),
+    // so a fully-minimized timeline costs nothing.
 
     ImGui::Dummy(ImVec2(0, 4));
 
@@ -8365,23 +8460,56 @@ void Application::renderTimelinePanel() {
         float phX = rulerOrigin.x + timeToX(playhead);
         float phY0 = rulerOrigin.y;
         float phY1 = ImGui::GetCursorScreenPos().y + 4.0f;
+        // "Live edge" blink — pulses the playhead opacity so it reads like a
+        // recording indicator (the playhead position IS live; see advance()).
+        // Smooth eased sine of real ImGui time, ~1.75 Hz, mapped to the
+        // [kPhBlinkMinA, 1.0] alpha band. Only animates while the timeline is
+        // actually on screen (this whole block only runs when open/animating).
+        const float kPhBlinkHz   = 1.75f;  // pulses per second
+        const float kPhBlinkMinA = 0.35f;  // dimmest the playhead ever gets
+        float phPhase = sinf((float)ImGui::GetTime() * kPhBlinkHz * 6.2831853f);
+        // sin → [0,1] then ease (smoothstep) so the pulse breathes rather than
+        // ticking linearly through the midpoint.
+        float phT = 0.5f + 0.5f * phPhase;
+        phT = phT * phT * (3.0f - 2.0f * phT);
+        float phAlpha = kPhBlinkMinA + (1.0f - kPhBlinkMinA) * phT;
+        ImU32 phLineCol = IM_COL32(255, 200, 60, (int)(230.0f * phAlpha));
+        ImU32 phHandleCol = IM_COL32(255, 200, 60, (int)(255.0f * phAlpha));
+        // Soft glow behind the line at the peak of the pulse — fades out as the
+        // playhead dims so it never competes with the ruler ticks.
+        float phGlowA = (phT - 0.5f) * 2.0f;
+        if (phGlowA > 0.0f) {
+            dl->AddLine(ImVec2(phX, phY0), ImVec2(phX, phY1),
+                        IM_COL32(255, 200, 60, (int)(70.0f * phGlowA)), 6.0f);
+        }
         dl->AddLine(ImVec2(phX, phY0), ImVec2(phX, phY1),
-                    IM_COL32(255, 200, 60, 230), 2.0f);
+                    phLineCol, 2.0f);
         // Playhead triangle handle on ruler
         dl->AddTriangleFilled(ImVec2(phX - 6, phY0),
                               ImVec2(phX + 6, phY0),
                               ImVec2(phX, phY0 + 10),
-                              IM_COL32(255, 200, 60, 255));
+                              phHandleCol);
         // Timecode readout is already shown in the transport row above — no
         // second label here. (Drawing it over the ruler collided with tick labels.)
     }
 
   } // end of if (!s_tlCollapsed)
 
-    // Measure actual content height for next frame's auto-fit. CursorPosY is
-    // window-local; add a bit of bottom padding to match the window style.
+    // Measure actual content height for next frame's slide target. CursorPosY
+    // is window-local; add a bit of bottom padding to match the window style.
+    // Only update the shared target while fully open so the measurement isn't
+    // taken from a clipped/partway-slid frame.
     s_tlMeasuredContentH = ImGui::GetCursorPosY() + 14.0f;
+    // Settle the shared slide target to the real measured content height once
+    // the panel is (essentially) fully open. Guard against a degenerate tiny
+    // measurement (e.g. a clipped/first frame reporting ~1px) so the timeline
+    // never animates toward a 1px height — updateTimelineAnim() additionally
+    // floors fullH at a sane default.
+    if (m_timelineAnimT > 0.98f && s_tlMeasuredContentH > 80.0f) {
+        m_timelineTargetH = s_tlMeasuredContentH;
+    }
 
+    ImGui::PopClipRect();
     ImGui::End();
 }
 
@@ -10207,7 +10335,9 @@ void Application::loadProject(const std::string& path) {
                             ab.signal = (AudioSignal)abj.value("signal", 0);
                             ab.rangeMin = abj.value("rangeMin", 0.0f);
                             ab.rangeMax = abj.value("rangeMax", 1.0f);
-                            ab.smoothing = abj.value("smoothing", 0.3f);
+                            // Missing in pre-smoothing-upgrade projects → use
+                            // the new gentler default (struct default 0.55).
+                            ab.smoothing = abj.value("smoothing", 0.55f);
                             ab.midiCC = abj.value("midiCC", -1);
                             ab.midiChannel = abj.value("midiChannel", -1);
                             src->audioBindings()[abj.value("param", "")] = ab;

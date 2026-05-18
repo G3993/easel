@@ -20,6 +20,16 @@ extern "C" int EaselMac_IsNativeFullScreen(GLFWwindow* window) {
     return (ns.styleMask & NSWindowStyleMaskFullScreen) ? 1 : 0;
 }
 
+extern "C" void EaselMac_ExitNativeFullScreen(GLFWwindow* window) {
+    if (!window) return;
+    NSWindow* ns = glfwGetCocoaWindow(window);
+    if (!ns) return;
+    if (!(ns.styleMask & NSWindowStyleMaskFullScreen)) return;
+    // Use AppKit's own transition so the FS state stays consistent —
+    // glfwSetWindowMonitor against a native-FS NSWindow crashes.
+    [ns toggleFullScreen:nil];
+}
+
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     if (!window) return;
     NSWindow* ns = glfwGetCocoaWindow(window);

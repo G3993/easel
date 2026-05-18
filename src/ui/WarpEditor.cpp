@@ -85,23 +85,15 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     auto& meshWarp = mapping.meshWarp;
     auto& objMeshWarp = mapping.objMeshWarp;
 
-    // Mode selector — 3 buttons. No hairline dividers above/below; just
-    // balanced vertical spacing so the row reads as a coherent segmented
-    // control rather than two sections separated by lines.
-    // Use smaller FramePadding so each label fits cleanly inside its
-    // 1/3 share of the panel width, even at narrow zoom levels — the
-    // panel-wide FramePadding (12,9) is overkill for this segmented row
-    // and was forcing buttons to grow past their assigned thirdW.
+    // Mode selector — compact dropdown. Replaces the old 3-button segmented
+    // row to reclaim vertical space; selecting an item switches mode
+    // identically to the buttons. Full-width control matches the other
+    // dropdowns/inputs in this panel (SetNextItemWidth(-1) idiom).
     int modeInt = (int)mapping.warpMode;
-    float thirdW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3.0f;
+    static const char* kModeNames[] = { "Corner Pin", "Mesh Warp", "OBJ Mesh" };
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 7));
-    modeButton("Corner Pin", 0, modeInt, thirdW);
-    ImGui::SameLine();
-    modeButton("Mesh Warp", 1, modeInt, thirdW);
-    ImGui::SameLine();
-    modeButton("OBJ Mesh", 2, modeInt, thirdW);
-    ImGui::PopStyleVar();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::Combo("##WarpMode", &modeInt, kModeNames, IM_ARRAYSIZE(kModeNames));
 
     mapping.warpMode = (ViewportPanel::WarpMode)modeInt;
 
@@ -110,18 +102,23 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     if (mapping.warpMode == ViewportPanel::WarpMode::CornerPin) {
         auto& corners = cornerPin.corners();
         const char* labels[] = {"BL", "BR", "TR", "TL"};
-        // Tighter label column (56 → 32) so the numeric drag fields
-        // claim more of the row width — they were the primary control
-        // but were getting elbowed by an oversized BL/BR/TR/TL label
-        // gutter. The labels themselves are only ~16px wide.
-        const float kLabelColW = 32.0f;
+        // Label gutter width. NOTE: ImGui::SameLine(offset) measures the
+        // offset from window->Pos.x, NOT from the padded content start.
+        // The label Text() is drawn at CursorStartPos.x (= window pos +
+        // WindowPadding.x, which is 28 here). A bare SameLine(32) therefore
+        // landed the drag field at pos+32 — only 4px past the label's start
+        // — so the full-width DragFloat2 painted on top of the BL/BR/TR/TL
+        // labels, clipping them to a sliver at the panel's left edge.
+        // Anchor the gutter to the real content start instead.
+        const float kLabelColW    = 56.0f;  // label (~16px) + clear gap
+        const float kLabelGutterX = ImGui::GetCursorStartPos().x + kLabelColW;
         for (int i = 0; i < 4; i++) {
             ImGui::PushID(i);
             ImGui::AlignTextToFramePadding();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.7f));
             ImGui::Text("%s", labels[i]);
             ImGui::PopStyleColor();
-            ImGui::SameLine(kLabelColW);
+            ImGui::SameLine(kLabelGutterX);
             ImGui::SetNextItemWidth(-1);
             ImGui::DragFloat2("##corner", &corners[i][0], 0.01f, -1.5f, 1.5f, "%.2f");
             ImGui::PopID();

@@ -6,6 +6,8 @@
 #include <sstream>
 #include <iostream>
 #include <regex>
+#include <cmath>
+#include <algorithm>
 #include <GLFW/glfw3.h>
 
 using json = nlohmann::json;
@@ -841,7 +843,14 @@ void ShaderSource::unbindImageInput(const std::string& name) {
 }
 
 void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                                      MIDIManager* midi) {
+                                      float dt, MIDIManager* midi) {
+    // Clamp dt so a stall / first frame can't blow the exponential up. The
+    // smoother is time-constant based (frame-rate independent): alpha is
+    // derived from a per-second rate and the real frame dt, identical in
+    // spirit to AudioAnalyzer::expSmooth.
+    if (!(dt > 0.0f)) dt = 1.0f / 60.0f;
+    if (dt > 0.1f)    dt = 0.1f;
+
     for (auto& [paramName, binding] : m_audioBindings) {
         if (binding.signal == AudioSignal::None) continue;
 
@@ -868,13 +877,35 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         }
         if (!haveRaw) continue;
 
-        // Asymmetric smoothing: fast attack, slow release
-        float attackAlpha = 1.0f - binding.smoothing * 0.8f;
-        float releaseAlpha = 1.0f - binding.smoothing * 0.95f;
-        float alpha = (raw > binding.smoothedValue) ? attackAlpha : releaseAlpha;
+        // First sample: latch (no slow ramp-up from 0).
+        if (!binding.hasSmoothed) {
+            binding.smoothedValue = raw;
+            binding.hasSmoothed = true;
+        }
+
+        // --- Frame-rate-independent asymmetric follower ---
+        // `smoothing` (0..1) selects a time constant. We keep the legacy
+        // asymmetric feel (punchy attack, softer release) but scale BOTH
+        // rates by the slider so the user can soften the whole envelope.
+        //  s=0   -> very fast (kAttackFast / kReleaseFast)  ~ legacy-snappy
+        //  s=1   -> very slow (kAttackSlow / kReleaseSlow)  ~ heavy glide
+        // Rates are in 1/seconds; alpha = 1 - exp(-rate*dt) is dt-exact, so
+        // behaviour is identical at 30 / 60 / 144 fps.
+        constexpr float kAttackFast  = 28.0f, kAttackSlow  = 2.0f;
+        constexpr float kReleaseFast = 14.0f, kReleaseSlow = 0.9f;
+        float s = binding.smoothing;
+        if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
+        float attackRate  = kAttackFast  + (kAttackSlow  - kAttackFast)  * s;
+        float releaseRate = kReleaseFast + (kReleaseSlow - kReleaseFast) * s;
+        float rate  = (raw > binding.smoothedValue) ? attackRate : releaseRate;
+        float alpha = 1.0f - std::exp(-rate * dt);
         binding.smoothedValue += (raw - binding.smoothedValue) * alpha;
 
-        // Map to parameter range
+        // Map the smoothed 0..1 follower onto the per-binding output range.
+        // [rangeMin, rangeMax] IS the effective depth/strength control for a
+        // shader-param binding (there is no separate per-binding strength;
+        // the legacy default rangeMin=paramMin, rangeMax=paramMax preserves
+        // the original 1:1 mapping for existing projects).
         float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
 
         // Find the input and set its value

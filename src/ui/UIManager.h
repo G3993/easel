@@ -100,6 +100,13 @@ public:
         m_canvasBottomY = bottomY;
     }
 
+    // Application reports the live (animated) timeline top edge in screen
+    // space each frame, BEFORE setupDockspace/renderLeftRail. The right
+    // params float and the left-rail thumbnail column both clamp their
+    // bottom to this Y so the timeline never covers them (Fix 1 + Fix 3).
+    // 0 = not set this frame (treat as "no timeline").
+    void setTimelineTopY(float y) { m_timelineTopY = y; }
+
 private:
     void applyTheme(float dpiScale);
 
@@ -128,6 +135,9 @@ private:
     // to align the right float panel with the canvas top/bottom.
     float m_canvasTopY    = 0.0f;
     float m_canvasBottomY = 0.0f;
+    // Live animated timeline top edge (screen Y). Set every frame by
+    // Application::renderUI via setTimelineTopY before setupDockspace.
+    float m_timelineTopY  = 0.0f;
 
     // Cached dock node ids + sizing used to keep the left/right floating
     // panel groups aligned with the current timeline height every frame.

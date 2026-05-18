@@ -950,12 +950,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // every frame via DockBuilderSetNodePos in the per-frame reflow
         // block below — that's required because standalone floating dock
         // roots don't otherwise persist their position.
-        ImGuiID mainId, timelineDockId;
-        float timelineSplit = (dockSize.y > 0) ? (60.0f / dockSize.y) : 0.05f;
-        if (timelineSplit < 0.03f) timelineSplit = 0.03f;
-        if (timelineSplit > 0.20f) timelineSplit = 0.20f;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, timelineSplit,
-                                    &timelineDockId, &mainId);
+        // Canvas/Stage/Show fill the WHOLE dockspace now. The timeline used
+        // to claim a Down split here; it's a floating overlay since the
+        // slide animation needs per-frame manual positioning.
+        ImGuiID mainId          = dockspaceId;
+        ImGuiID timelineDockId  = 0;
 
         auto dockAlways = [](const char* name, ImGuiID node) {
             ImGui::DockBuilderDockWindow(name, node);
@@ -969,11 +968,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             mn->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar
                             | ImGuiDockNodeFlags_NoWindowMenuButton;
         }
-        dockAlways("Timeline", timelineDockId);
-        if (ImGuiDockNode* tln = ImGui::DockBuilderGetNode(timelineDockId)) {
-            tln->LocalFlags |= ImGuiDockNodeFlags_NoWindowMenuButton
-                             | ImGuiDockNodeFlags_NoTabBar;
-        }
+        // Timeline is NO LONGER docked. It now renders as a manually
+        // positioned floating overlay (renderTimelinePanel) so it can
+        // smoothly slide up/down together with the bottom transport bar —
+        // ImGui docking can't animate a node's size. The split node is kept
+        // but left empty so the central canvas reclaims the full height.
+        (void)timelineDockId;
 
         // Floating overlay panels — docked into TWO host windows
         // rendered below in renderFloatPanelHosts() with positions
@@ -1026,12 +1026,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
 
         ImGui::DockBuilderFinish(dockspaceId);
 
-        m_timelineDockId = timelineDockId;
+        m_timelineDockId = timelineDockId;  // 0 — timeline is floating now
         m_leftFloatId    = leftFloatId;
         m_rightFloatId   = rightFloatId;
         m_leftFloatW     = 320.0f;
         m_rightFloatW    = 320.0f;
-        m_lastTimelineH  = dockSize.y * timelineSplit;
+        m_lastTimelineH  = 0.0f;  // floating overlay — no docked strip
 
         // Two deferred focus passes: Canvas in the big left slot, Layers as
         // the active tab in the top-right. SetWindowFocus is called every
@@ -1090,6 +1090,17 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         float vpH = viewport->WorkSize.y;
         float floatY = viewport->WorkPos.y + headerReserve;
         float floatH = std::max(120.0f, vpH - headerReserve - bottomReserve);
+        // Fix 1: when the timeline is open it floats ABOVE the bottom nav and
+        // would otherwise crop the params panel. Shrink the panel so its
+        // bottom edge ends exactly at the timeline's top edge (minus the
+        // standard gap). m_timelineTopY is the single source of truth fed in
+        // every frame by Application before this runs.
+        if (m_timelineTopY > 0.0f) {
+            float panelBottomLimit = m_timelineTopY - kPanelGap;
+            float maxH = panelBottomLimit - floatY;
+            if (maxH < 120.0f) maxH = 120.0f;
+            if (maxH < floatH) floatH = maxH;
+        }
         (void)m_canvasTopY; (void)m_canvasBottomY;
 
         // Bumped 360 → 420 so the inner controls (3-pill segmented
@@ -1300,8 +1311,16 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
     // rather than poking into it (was causing the Layers icon to overlap
     // the top nav).
     float topReserve = m_workspaceBarHeight + ImGui::GetFrameHeight() + 56.0f;
-    float bottomReserve = m_lastTimelineH > 0.0f ? m_lastTimelineH + 24.0f : 24.0f;
-    float h = vp->WorkSize.y - topReserve - bottomReserve;
+    // Fix 3: clamp the rail's BOTTOM to the live (animated) timeline top so
+    // the floating layer thumbnails stay within the visible canvas and never
+    // get covered by — or jump because of — the timeline. m_timelineTopY is
+    // the single source of truth fed by Application every frame. Fall back
+    // to the old 24px bottom margin when it hasn't been reported yet.
+    float railTop = vp->WorkPos.y + topReserve;
+    float railBottom = (m_timelineTopY > 0.0f)
+                     ? (m_timelineTopY - 12.0f)
+                     : (vp->WorkPos.y + vp->WorkSize.y - 24.0f);
+    float h = railBottom - railTop;
     if (h < 80.0f) h = 80.0f;
     // Inset the rail from the screen edge so it floats as its own column
     // instead of jamming against the window's left wall.

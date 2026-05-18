@@ -10,13 +10,21 @@ namespace ParamRow {
 // the widget call (e.g. ImGui::DragFloat("##xyz", ...)). Label width
 // auto-grows to fit the actual text so longer labels (TRANSITION,
 // RESETFIELD, SPLATTERDENSITY) don't get clipped by the trailing widget.
+// kRowLabelColW mirrors PropertyPanel's kLabelColW so every "label : control"
+// row across the inspector parks its control at the SAME grid column. The
+// control X is set via GetCursorStartPos()-relative SetCursorPosX (reliable
+// when scrolled/docked) instead of the window-raw SameLine(offset) form,
+// which used to leave RESOLUTION-style labels colliding with their control.
+inline constexpr float kRowLabelColW = 96.0f;
 inline void Begin(const char* label, float labelFrac = 0.34f) {
-    float rowW = ImGui::GetContentRegionAvail().x;
-    float textW = ImGui::CalcTextSize(label).x + 12.0f; // 12px gutter
-    float lblW = std::max({70.0f, rowW * labelFrac, textW});
+    float startX = ImGui::GetCursorStartPos().x;
+    float rowW   = ImGui::GetContentRegionAvail().x;
+    float textW  = ImGui::CalcTextSize(label).x + 12.0f; // 12px inner pad
+    float lblW   = std::max({kRowLabelColW, rowW * labelFrac, textW});
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(lblW);
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(startX + lblW);
     ImGui::SetNextItemWidth(rowW - lblW);
 }
 
