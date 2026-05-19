@@ -1277,7 +1277,6 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Sources"))    return true;
         if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
-        if (eq("Timecode"))   return true;
         if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;

@@ -3408,27 +3408,6 @@ void Application::renderUI() {
                 float colW   = std::max(52.0f,
                     (deckW - kNameColW - kCellGap - kCellGap * (kDeckCols - 1)) / (float)kDeckCols);
 
-                // Column headers
-                ImGui::Dummy(ImVec2(kNameColW, kHdrH));
-                ImGui::SameLine(0, kCellGap);
-                for (int c = 0; c < kDeckCols; c++) {
-                    bool active = (c < (int)m_zones.size() && c == m_activeZone);
-                    ImVec4 bg = active ? ImVec4(0.20f, 0.68f, 0.46f, 0.95f)
-                                       : ImVec4(0.14f, 0.16f, 0.20f, 1.0f);
-                    ImGui::PushStyleColor(ImGuiCol_Button,
-                                          bg);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                          ImVec4(bg.x+0.06f, bg.y+0.06f, bg.z+0.06f, 1.0f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-                    char colLbl[32];
-                    snprintf(colLbl, sizeof(colLbl), "Column %d##ch%d", c + 1, c);
-                    if (ImGui::Button(colLbl, ImVec2(colW, kHdrH)) && c < (int)m_zones.size())
-                        m_activeZone = c;
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(2);
-                    if (c < kDeckCols - 1) ImGui::SameLine(0, kCellGap);
-                }
-                ImGui::Separator();
 
                 // Layer rows — top of stack first
                 int N = m_layerStack.count();
@@ -5495,10 +5474,12 @@ void Application::renderUI() {
     ImGui::End();
     }  // end MIDI visibility guard
 
-    // ── Timecode panel ────────────────────────────────────────────────────────
-    if (m_ui.isPanelVisible("Timecode")) {
-        ImGui::Begin("        ###Timecode");
+    // ── Timecode window — Show mode only, toggled via Windows menu ───────────
+    if (UIManager::sMode == UIManager::WorkspaceMode::Show && m_showTimecodeWindow) {
         m_prodjlink.poll();
+        ImGui::SetNextWindowSize(ImVec2(340, 600), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Timecode##win", &m_showTimecodeWindow,
+                     ImGuiWindowFlags_NoCollapse);
         m_timecodePanel.render(glfwGetTime(), &m_prodjlink);
         ImGui::End();
     }
@@ -9913,6 +9894,12 @@ void Application::renderNavBarPrefix() {
                 removeZone(m_activeZone);
             }
             ImGui::EndMenu();
+        }
+        if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
+            if (ImGui::BeginMenu("Windows")) {
+                ImGui::MenuItem("Timecode Window", nullptr, &m_showTimecodeWindow);
+                ImGui::EndMenu();
+            }
         }
         ImGui::EndPopup();
     }

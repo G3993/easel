@@ -188,6 +188,7 @@ private:
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
     bool m_maskEditMode = false;
+    bool m_showTimecodeWindow = false; // Show-mode: Timecode window visible
 
     // Show-workspace preview zoom. Multiplier applied to the centered
     // live-output preview's height (then width follows aspect). 1.0 = fit
