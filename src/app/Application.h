@@ -78,6 +78,8 @@
 #include <GLFW/glfw3.h>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 class Application {
 public:
@@ -191,12 +193,28 @@ private:
 
     // Editor fullscreen toggle (F11)
     bool m_editorFullscreen = false;
-    // Set to true when Esc is pressed in fullscreen — actual exit runs
-    // at the TOP of the next frame so AppKit has time to settle the
-    // window-style transition without racing the GL/ImGui dock setup.
     bool m_pendingExitFullscreen = false;
+    // Async close — blocking cleanup runs on a background thread while
+    // the main thread renders a spinner so the window stays responsive.
+    std::atomic<bool> m_closing{false};
+    std::atomic<bool> m_closingDone{false};
+    std::atomic<int>  m_closingStep{0};
+    std::thread       m_closingThread;
     int m_savedWindowX = 0, m_savedWindowY = 0;
     int m_savedWindowW = 1280, m_savedWindowH = 720;
+
+    // Splash screen shown immediately on launch
+    bool   m_showSplash = true;
+    double m_splashStartTime = 0.0;
+    void   renderSplash();
+
+    // Landing page shown after splash dismisses
+    bool m_showLanding = false;
+    int  m_landingSubView = 0; // 0=main 1=templates 2=recent
+    std::vector<std::string> m_recentProjects;
+    void renderLandingPage();
+    void loadRecentProjectsList();
+    void addRecentProject(const std::string& path);
 
     void updateSources();
     void compositeAndWarp();
@@ -304,43 +322,17 @@ private:
 
     int m_selectedAudioDevice = -1; // -1 = default loopback
 
-#ifdef HAS_FFMPEG
-    RTMPOutput m_rtmpOutput;
-    char m_streamKeyBuf[128] = {};
-    int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
-    VideoRecorder m_recorder;
-    std::vector<RecAudioDevice> m_audioDevices;
-    std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
-    void renderTransportBar();
+    // Timeline state — always present so the render loop and UI code can
+    // reference these unconditionally regardless of FFmpeg availability.
     void renderTimelinePanel();
-    // Phase 5 — floating transport pill at viewport bottom-center. Draws
-    // play/stop/loop + timecode in a single rounded pill that overlays the
-    // canvas, matching reference B's minimal control surface. Independent
-    // of the docked timeline panel which still hosts tracks/audio lane.
     void renderFloatingTransportPill();
-    // Floating REC + LIVE pills at viewport bottom-right — two separate
-    // rounded surfaces matching the reference's split record/broadcast
-    // affordances. Independent of the docked timeline.
     void renderFloatingActionPills();
-
-    // Timeline export flow — when true, render loop auto-stops the recorder
-    // and pauses playback when the playhead crosses the Work Area end.
+    void startTimelineExport();
     bool   m_timelineExporting = false;
     double m_timelineExportEnd = 0.0;
     std::string m_timelineExportPath;
-    void   startTimelineExport();
-
-    // Timeline panel visibility. Toggled via the T key or the transport-bar
-    // show/hide button. Defaults to visible so the panel is discoverable.
     bool   m_timelineOpen = true;
-
-    // When true, the timeline renders only its transport row and hides the
-    // ruler / tracks / audio lane / clip inspector. The panel itself remains
-    // docked — drag the dock splitter to shrink to just the transport.
-    // Default: minimized. The transport row is enough for a quick show of
-    // hands during setup, and the tracks pop up on demand (click the "+" on
-    // the timeline tab or press T). Keeps the canvas area maximized on launch.
-    bool   m_timelineMinimized = true;
+    bool   m_timelineMinimized = false;
 
     // ── Single source of truth for the animated timeline geometry ──────────
     // The timeline + bottom transport bar slide up/down as one unit. These
@@ -353,13 +345,22 @@ private:
     //   m_timelineTopY   : screen-space Y of the timeline's top edge — the
     //                      hard bottom limit for the params panel + the
     //                      left-rail layer thumbnails.
-    float  m_timelineAnimT = 0.0f;
+    float  m_timelineAnimT = 1.0f;
     float  m_timelineCurH  = 0.0f;
     float  m_timelineTopY  = 0.0f;
     // Target (fully-open) timeline content height, measured by
     // renderTimelinePanel() and consumed next frame by updateTimelineAnim().
     float  m_timelineTargetH = 220.0f;
     void   updateTimelineAnim();
+
+#ifdef HAS_FFMPEG
+    RTMPOutput m_rtmpOutput;
+    char m_streamKeyBuf[128] = {};
+    int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
+    VideoRecorder m_recorder;
+    std::vector<RecAudioDevice> m_audioDevices;
+    std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
+    void renderTransportBar();
 
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;
@@ -370,8 +371,6 @@ private:
     float m_audioLevelSmooth = 0.0f, m_audioLevelSmoothL = 0.0f, m_audioLevelSmoothR = 0.0f;
     void updateAudioMeter();
     void cleanupAudioMeter();
-
-    // Old mosaic meter removed — replaced by AudioAnalyzer
 #endif
 
     // File drop handling

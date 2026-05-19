@@ -948,5 +948,15 @@ void ShaderSource::setResolution(int w, int h) {
             }
         }
         m_frameIndex = 0; // reset so shader re-seeds
+    } else if (w > 0 && h > 0 && m_shader.id() != 0) {
+        // Shader compiled but FBO creation failed at load time (0×0 dimensions).
+        // Attempt late initialization now that we have valid dimensions.
+        if (m_fbo.create(w, h)) {
+            m_quad.createQuad();
+            m_initialized = true;
+            if (!m_passBuffers.empty()) {
+                createPassFBOs();
+            }
+        }
     }
 }

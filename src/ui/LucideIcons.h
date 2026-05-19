@@ -567,6 +567,69 @@ inline void film(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
                 ImVec2(cx + w - sw - 3.0f, cy), col, stroke);
 }
 
+// Film strip with play triangle — timeline toggle button icon.
+inline void filmPlay(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                     float stroke = 1.6f) {
+    float w   = size * 0.44f;
+    float h   = size * 0.36f;
+    // Outer frame
+    dl->AddRect(ImVec2(cx - w, cy - h), ImVec2(cx + w, cy + h), col, 1.5f, 0, stroke);
+    // Top header band
+    float hdrH = h * 0.30f;
+    dl->AddLine(ImVec2(cx - w, cy - h + hdrH), ImVec2(cx + w, cy - h + hdrH), col, stroke);
+    // Left / right sprocket column dividers
+    float colW = w * 0.22f;
+    dl->AddLine(ImVec2(cx - w + colW, cy - h + hdrH), ImVec2(cx - w + colW, cy + h), col, stroke * 0.7f);
+    dl->AddLine(ImVec2(cx + w - colW, cy - h + hdrH), ImVec2(cx + w - colW, cy + h), col, stroke * 0.7f);
+    // Sprocket holes — 5 small filled rects per side in the body area
+    float bodyT = cy - h + hdrH;
+    float bodyH = (cy + h) - bodyT;
+    float sw = colW * 0.50f, sh = bodyH * 0.10f;
+    for (int i = 0; i < 5; i++) {
+        float yc  = bodyT + bodyH * (i + 0.5f) / 5.0f;
+        float lxc = cx - w + colW * 0.5f;
+        float rxc = cx + w - colW * 0.5f;
+        dl->AddRectFilled(ImVec2(lxc - sw, yc - sh), ImVec2(lxc + sw, yc + sh), col, 1.0f);
+        dl->AddRectFilled(ImVec2(rxc - sw, yc - sh), ImVec2(rxc + sw, yc + sh), col, 1.0f);
+    }
+    // Play triangle (filled) centred in screen area
+    float scrL = cx - w + colW + 1.5f;
+    float scrR = cx + w - colW - 1.5f;
+    float scrCX = (scrL + scrR) * 0.5f;
+    float scrCY = (bodyT + cy + h) * 0.5f;
+    float triH  = bodyH * 0.60f;
+    float triW  = triH * 0.85f;
+    dl->AddTriangleFilled(
+        ImVec2(scrCX - triW * 0.42f, scrCY - triH * 0.5f),
+        ImVec2(scrCX - triW * 0.42f, scrCY + triH * 0.5f),
+        ImVec2(scrCX + triW * 0.58f, scrCY),
+        col);
+}
+
+// VHS cassette — Media tab icon.
+inline void vhs(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                float stroke = 1.6f) {
+    float w = size * 0.44f;
+    float h = size * 0.30f;
+    // Cassette body
+    dl->AddRect(ImVec2(cx - w, cy - h), ImVec2(cx + w, cy + h), col, 2.0f, 0, stroke);
+    // Tape window (recessed rect at the bottom half)
+    float winW = w * 0.68f;
+    float winT = cy;
+    float winB = cy + h - h * 0.18f;
+    dl->AddRect(ImVec2(cx - winW, winT), ImVec2(cx + winW, winB), col, 1.0f, 0, stroke * 0.75f);
+    // Two reel circles inside the window
+    float winH  = winB - winT;
+    float reelR = winH * 0.36f;
+    float reelY = winT + winH * 0.5f;
+    float reelX = winW * 0.52f;
+    dl->AddCircle(ImVec2(cx - reelX, reelY), reelR, col, 12, stroke * 0.75f);
+    dl->AddCircle(ImVec2(cx + reelX, reelY), reelR, col, 12, stroke * 0.75f);
+    // Top label line
+    dl->AddLine(ImVec2(cx - w * 0.55f, cy - h * 0.50f),
+                ImVec2(cx + w * 0.55f, cy - h * 0.50f), col, stroke * 0.65f);
+}
+
 // Lucide `sliders-horizontal` — three horizontal lines, each with a knob
 // at a different position. Reads as "controls / properties / settings".
 inline void sliders(ImDrawList* dl, float cx, float cy, float size, ImU32 col,

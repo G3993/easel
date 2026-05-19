@@ -330,8 +330,8 @@ static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
     else if (std::strstr(tabName, "###Mapping"))    { kind = Kind::Tex; texIdx = 1; }
     else if (std::strstr(tabName, "###Audio"))      { kind = Kind::Tex; texIdx = 2; }
     else if (std::strstr(tabName, "###MIDI"))       { kind = Kind::Tex; texIdx = 3; }
+    else if (std::strstr(tabName, "###Media"))      { kind = Kind::Tex; texIdx = 4; }
     if (kind == Kind::None) return;
-    if (kind == Kind::Tex && (texIdx < 0 || iconTex[texIdx] == 0)) return;
 
     float tabX0 = tabBar->BarRect.Min.x + tab.Offset;
     float tabX1 = tabX0 + tab.Width;
@@ -378,6 +378,7 @@ static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
         else if (texIdx == 1) lucide::vectorSquare(fg, lcx2, lcy2, lsz2, tint);
         else if (texIdx == 2) lucide::audioLines  (fg, lcx2, lcy2, lsz2, tint);
         else if (texIdx == 3) lucide::music       (fg, lcx2, lcy2, lsz2, tint);
+        else if (texIdx == 4) lucide::vhs         (fg, lcx2, lcy2, lsz2, tint);
     }
 }
 
@@ -961,9 +962,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         };
 
         // Center peer tabs — one submits Begin() per frame (gated by sMode).
-        dockAlways("Canvas", mainId);
-        dockAlways("Stage",  mainId);
-        dockAlways("Show",   mainId);
+        dockAlways("Canvas",   mainId);
+        dockAlways("Stage",    mainId);
+        dockAlways("Show",     mainId);
         if (ImGuiDockNode* mn = ImGui::DockBuilderGetNode(mainId)) {
             mn->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar
                             | ImGuiDockNodeFlags_NoWindowMenuButton;
@@ -1007,6 +1008,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockAlways("        ###Mapping",    rightFloatId);
         dockAlways("        ###Audio",      rightFloatId);
         dockAlways("        ###MIDI",       rightFloatId);
+        dockAlways("        ###Media",      rightFloatId);
         ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
 
         // Right-float dock chrome polish: hide the per-window menu
@@ -1162,25 +1164,24 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::PopStyleVar();
         }
 
-        // Right host — 20px inset from the window's right edge so the
-        // control panel reads as a floating card with breathing room.
-        // (The 56-px right tool rail comment that lived here was stale —
-        // renderRightToolRail() is defined but never invoked, so we
-        // don't need to reserve space for it.)
-        const float kRightInset = 20.0f;
+        // Right sidebar — flush against the right edge, full viewport height
+        // (top to bottom). Timeline and transport pill render on top of it.
+        const float kRightInset = 0.0f;
+        float rightX = viewport->WorkPos.x + dockSize.x - rightW - kRightInset;
+        // Full-height minus any preview panel reserved at the top.
+        float rightY = viewport->WorkPos.y + m_rightPanelTopOffset;
+        float rightH = viewport->WorkSize.y - m_rightPanelTopOffset;
+        // Expose left edge so timeline + pill can clamp their width.
+        m_rightFloatLeft = rightHasContent ? rightX : (viewport->WorkPos.x + dockSize.x);
         if (rightHasContent) {
-            ImGui::SetNextWindowPos (
-                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kRightInset,
-                       floatY),
-                ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(rightW, floatH), ImGuiCond_Always);
+            ImGui::SetNextWindowPos (ImVec2(rightX, rightY), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(rightW, rightH), ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            // Black background for the host AND every internal surface
-            // ImGui paints behind the dock-tab strip (TitleBg* and the
-            // unselected/dimmed Tab fills). Without this the global theme
-            // shows a charcoal grey strip behind the 4 dock tab icons —
-            // visibly distinct from the black panel body below.
-            const ImU32 K = IM_COL32(0, 0, 0, 255);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+            // Thin light-grey left border so the sidebar reads as a distinct column.
+            const ImU32 K      = IM_COL32(0, 0, 0, 255);
+            const ImU32 kBorder = IM_COL32(180, 185, 200, 55);
+            ImGui::PushStyleColor(ImGuiCol_Border,              kBorder);
             ImGui::PushStyleColor(ImGuiCol_WindowBg,            K);
             ImGui::PushStyleColor(ImGuiCol_ChildBg,             K);
             ImGui::PushStyleColor(ImGuiCol_TitleBg,             K);
@@ -1197,8 +1198,8 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                                  ImGuiDockNodeFlags_NoUndocking);
             }
             ImGui::End();
-            ImGui::PopStyleColor(10);
-            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(11);
+            ImGui::PopStyleVar(2);
         }
     }
 
@@ -1275,6 +1276,7 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Sources"))    return true;
         if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
+        if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;
         return false;
@@ -1294,8 +1296,10 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Show"))       return true;
         if (eq("MIDI"))       return true;
         if (eq("Audio"))      return true;
+        if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         return false;
+
     }
     return true;
 }
@@ -1354,7 +1358,6 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // Sources / Mapping tabs); the rail no longer hosts a Layers
         // toggle. The floating layer thumbnail strip below is kept so
         // the user can scrub layers visually without opening the panel.
-        const Item items[] = {};
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float kBtn   = 36.0f;        // circular hit + visual diameter — matches transport pill
         const float kGlyph = 16.0f;        // smaller glyph, generous margin
@@ -1363,7 +1366,9 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // cursor down by half of the leftover space so the three icons sit
         // visually centered within the rail's available height.
         const float kThumbReserve = 110.0f;  // approximate space the layer thumbnail callback uses
-        const int  kRailItems = (int)(sizeof(items) / sizeof(items[0]));
+        // Rail is empty — all items moved to right-side Control Panel.
+        const Item* items = nullptr;
+        const int  kRailItems = 0;
         float stackH = (float)kRailItems * kBtn + (float)(kRailItems - 1) * kIconGap;
         float availH = h - kThumbReserve - 24.0f;  // 24 = window padding (12 top + 12 bottom)
         float topSpacer = std::max(0.0f, (availH - stackH) * 0.5f);

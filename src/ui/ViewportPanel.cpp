@@ -119,7 +119,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     static bool s_firstRender = true;
     if (s_firstRender) {
         s_firstRender = false;
-        m_zoom = 1.0f;
+        m_zoom = 0.75f;  // start with visible margin so canvas isn't edge-to-edge
         m_pan = {0, 0};
     }
     // Unpack mapping for warp overlay
@@ -673,20 +673,31 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     ImGui::SetCursorScreenPos(availOrigin);
 
     if (texture && avail.x > 1 && avail.y > 1) {
-        // Base image size (fit to panel)
-        float panelAspect = avail.x / avail.y;
+        // Effective width for fit calculation: use the visible content width
+        // (excluding left rail + right sidebar overlay) when provided, so the
+        // canvas image fits within the actually-visible viewport area rather
+        // than the full panel area that includes regions hidden under chrome.
+        float fitW = (m_visibleContentWidth  > 10.0f) ? m_visibleContentWidth  : avail.x;
+        float fitH = (m_visibleContentHeight > 10.0f) ? m_visibleContentHeight : avail.y;
+
+        // Base image size (fit to visible panel area, accounting for chrome overlays)
+        float panelAspect = fitW / fitH;
         float baseW, baseH;
         if (projectorAspect > panelAspect) {
-            baseW = avail.x; baseH = avail.x / projectorAspect;
+            baseW = fitW; baseH = fitW / projectorAspect;
         } else {
-            baseH = avail.y; baseW = avail.y * projectorAspect;
+            baseH = fitH; baseW = fitH * projectorAspect;
         }
 
         // Apply zoom
         float imgW = baseW * m_zoom;
         float imgH = baseH * m_zoom;
-        float offsetX = (avail.x - imgW) * 0.5f + m_pan.x;
-        float offsetY = (avail.y - imgH) * 0.5f + m_pan.y;
+        // Center within the VISIBLE region so canvas never hides behind chrome.
+        float visCenterX = (m_visibleContentWidth  > 10.0f)
+            ? (m_visibleLeft + m_visibleContentWidth  * 0.5f) : (avail.x * 0.5f);
+        float visCenterY = avail.y * 0.5f; // vertical: center in full avail (timeline excluded via fitH)
+        float offsetX = visCenterX - imgW * 0.5f + m_pan.x;
+        float offsetY = visCenterY - imgH * 0.5f + m_pan.y;
 
         // Clip the canvas image to the panel's content rect — without
         // this, zoom > 1 spills the image over the workspace nav above
@@ -1546,6 +1557,10 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         draw->AddText(ImVec2(saveBtnMin.x + (saveBtnW - sts.x) * 0.5f,
                              saveBtnMin.y + (saveBtnH - sts.y) * 0.5f), btnTx, saveLbl);
         if (saveHov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (mask.count() >= 3 && !mask.closed()) {
+                mask.setClosed(true);
+                mask.markDirty();
+            }
             m_wantsExitMaskMode = true;
         }
     }

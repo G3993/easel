@@ -66,9 +66,10 @@ private:
     std::function<void(const CueAction&)>                              m_actionCb;
     std::function<void(const std::string&, bool)>                      m_promptCb;
 
-    std::atomic<bool> m_running{false};
-    std::atomic<bool> m_wsConnected{false};
-    std::thread m_wsThread;
+    std::atomic<bool>     m_running{false};
+    std::atomic<bool>     m_wsConnected{false};
+    std::thread           m_wsThread;
+    std::atomic<uintptr_t> m_wsSock{(uintptr_t)~0}; // INVALID_SOCKET sentinel
 
     std::string m_baseUrl;
     std::string m_sessionId;
