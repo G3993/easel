@@ -1145,7 +1145,8 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         bool rightHasContent = isPanelVisible("Layers")
                             || isPanelVisible("Properties") || isPanelVisible("Mapping")
                             || isPanelVisible("Sources")
-                            || isPanelVisible("Audio")      || isPanelVisible("MIDI");
+                            || isPanelVisible("Audio")      || isPanelVisible("MIDI")
+                            || isPanelVisible("Timecode");
 
         // Left host — shifted right of the activity rail. The +12 matches the
         // kLeftRailInset used by renderLeftRail() so the layer-panel doesn't
@@ -1276,6 +1277,7 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Sources"))    return true;
         if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
+        if (eq("Timecode"))   return true;
         if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;
@@ -1291,11 +1293,12 @@ bool UIManager::isPanelVisible(const char* title) const {
         return false;
 
     case WorkspaceMode::Show:
-        // Live performance: MIDI + Audio on the right, Timeline at the
-        // bottom. No layer editing surfaces.
+        // Live performance: MIDI + Audio + Timecode on the right, Timeline
+        // at the bottom. No layer editing surfaces.
         if (eq("Show"))       return true;
         if (eq("MIDI"))       return true;
         if (eq("Audio"))      return true;
+        if (eq("Timecode"))   return true;
         if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         return false;

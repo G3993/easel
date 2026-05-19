@@ -56,6 +56,8 @@
 #include "app/MIDIManager.h"
 #include "app/DataBus.h"
 #include "stage/StageView.h"
+#include "app/ProDJLink.h"
+#include "ui/TimecodePanel.h"
 
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
@@ -179,6 +181,8 @@ private:
     // Latest normalized MIDI CC values, indexed [channel][cc]. Updated each frame from polled events.
     float m_midiCCValues[16][128] = {};
     StageView m_stageView;
+    ProDJLink m_prodjlink;
+    TimecodePanel m_timecodePanel;
     float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;

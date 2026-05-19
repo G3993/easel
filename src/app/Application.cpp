@@ -441,6 +441,9 @@ bool Application::init() {
     m_oscManager.startReceiver(9000);
     m_oscManager.setSendTarget("127.0.0.1", 9001);
 
+    // Pro DJ Link — discover Pioneer CDJs on the local network
+    m_prodjlink.start();
+
     loadRecentProjectsList();
 
     return true;
@@ -1235,6 +1238,7 @@ void Application::run() {
 void Application::shutdown() {
     // GL/GLFW teardown — must run on the main thread after the render loop.
     // All blocking cleanup already completed in the closing animation in run().
+    m_prodjlink.stop();
     for (auto& [idx, proj] : m_projectors) proj->destroy();
     m_projectors.clear();
     m_ui.shutdown();
@@ -5490,6 +5494,14 @@ void Application::renderUI() {
     }
     ImGui::End();
     }  // end MIDI visibility guard
+
+    // ── Timecode panel ────────────────────────────────────────────────────────
+    if (m_ui.isPanelVisible("Timecode")) {
+        ImGui::Begin("        ###Timecode");
+        m_prodjlink.poll();
+        m_timecodePanel.render(glfwGetTime(), &m_prodjlink);
+        ImGui::End();
+    }
 
     // Media panel — categorised browser: Video / Image / Shader / Sources
     if (m_ui.isPanelVisible("Media")) {
