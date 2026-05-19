@@ -3392,71 +3392,6 @@ void Application::renderUI() {
             ImGui::SameLine(0, 0);
             drawMonitor("##ShowPrev", "Preview",  showPrvTex);
 
-            // ── Clip deck ──────────────────────────────────────────────────
-            ImGui::Dummy(ImVec2(0, 4));
-            const int   kDeckCols  = 8;
-            const float kNameColW  = 80.0f;
-            const float kCellH     = 38.0f;
-            const float kHdrH      = 26.0f;
-            const float kCellGap   = 3.0f;
-
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-            if (ImGui::BeginChild("##ShowDeck", ImVec2(0, 0), false,
-                                  ImGuiWindowFlags_HorizontalScrollbar)) {
-                ImGui::PopStyleVar();
-                float deckW  = ImGui::GetContentRegionAvail().x;
-                float colW   = std::max(52.0f,
-                    (deckW - kNameColW - kCellGap - kCellGap * (kDeckCols - 1)) / (float)kDeckCols);
-
-
-                // Layer rows — top of stack first
-                int N = m_layerStack.count();
-                for (int li = N - 1; li >= 0; li--) {
-                    auto& layer  = *m_layerStack[li];
-                    bool  selRow = (li == m_selectedLayer);
-
-                    // Name button
-                    ImVec4 nameBg = selRow ? ImVec4(0.22f, 0.26f, 0.32f, 1.0f)
-                                           : ImVec4(0.12f, 0.14f, 0.17f, 1.0f);
-                    ImGui::PushStyleColor(ImGuiCol_Button,        nameBg);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                        selRow ? ImVec4(1.f,1.f,1.f,1.f) : ImVec4(0.65f,0.65f,0.70f,1.f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
-                    char nameId[64];
-                    snprintf(nameId, sizeof(nameId), "%.10s##ln%d", layer.name.c_str(), li);
-                    if (ImGui::Button(nameId, ImVec2(kNameColW, kCellH)))
-                        m_selectedLayer = li;
-                    ImGui::PopStyleVar();
-                    ImGui::PopStyleColor(3);
-                    ImGui::SameLine(0, kCellGap);
-
-                    // Clip cells
-                    for (int c = 0; c < kDeckCols; c++) {
-                        bool hasClip = (c == 0 && layer.source != nullptr);
-                        bool isLive  = hasClip && !layer.userHidden && layer.visible && !layer.muted;
-                        ImVec4 cc = hasClip
-                            ? (isLive ? ImVec4(0.18f, 0.68f, 0.44f, 0.95f)
-                                      : ImVec4(0.14f, 0.30f, 0.22f, 0.90f))
-                            : ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
-                        ImGui::PushStyleColor(ImGuiCol_Button,        cc);
-                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                            ImVec4(cc.x+0.06f, cc.y+0.06f, cc.z+0.06f, 1.0f));
-                        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
-                        char cellId[32];
-                        snprintf(cellId, sizeof(cellId), "##cl%d_%d", li, c);
-                        if (ImGui::Button(cellId, ImVec2(colW, kCellH)) && hasClip) {
-                            m_selectedLayer    = li;
-                            layer.userHidden   = !layer.userHidden;
-                        }
-                        ImGui::PopStyleVar();
-                        ImGui::PopStyleColor(2);
-                        if (c < kDeckCols - 1) ImGui::SameLine(0, kCellGap);
-                    }
-                }
-            } else { ImGui::PopStyleVar(); }
-            ImGui::EndChild();
-
             ImGui::End();
         }
 
@@ -4220,8 +4155,29 @@ void Application::renderUI() {
                     }
                 }
 
-                // Double-click: add shader as a new layer.
-                if (clicked) loadShader(shader.fullPath);
+                // Double-click: in Show mode swap top layer source live;
+                // in Canvas mode add a new layer as before.
+                if (clicked) {
+                    if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
+                        // Find the top visible layer and hot-swap its source
+                        auto* target = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count())
+                            ? m_layerStack[m_selectedLayer].get() : nullptr;
+                        if (!target && m_layerStack.count() > 0)
+                            target = m_layerStack[m_layerStack.count()-1].get();
+                        if (target) {
+                            auto src = std::make_shared<ShaderSource>();
+                            if (src->loadFromFile(shader.fullPath)) {
+                                target->source = src;
+                                target->visible = true;
+                                target->userHidden = false;
+                            }
+                        } else {
+                            loadShader(shader.fullPath);
+                        }
+                    } else {
+                        loadShader(shader.fullPath);
+                    }
+                }
 
                 ImGui::PopID();
             }
