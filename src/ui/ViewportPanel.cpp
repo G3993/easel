@@ -73,6 +73,25 @@ static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 255);
 static const ImU32 kLHandleStroke = IM_COL32(74, 140, 255, 255);
 static const ImU32 kLHandleActive = IM_COL32(74, 140, 255, 255);
 
+static std::string fitNavText(std::string text, float maxWidth) {
+    if (maxWidth <= 0.0f || ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
+        return text;
+    }
+
+    const char* suffix = "...";
+    float suffixW = ImGui::CalcTextSize(suffix).x;
+    if (suffixW >= maxWidth) return suffix;
+
+    while (!text.empty()) {
+        text.pop_back();
+        std::string candidate = text + suffix;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+            return candidate;
+        }
+    }
+    return suffix;
+}
+
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
     return glm::vec2(
         (screen.x - m_imageOrigin.x) / m_imageSize.x,
@@ -1961,7 +1980,8 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
             std::string zNameUpper = z.name;
             for (char& ch : zNameUpper) ch = (char)std::toupper((unsigned char)ch);
-            ImVec2 lblSz = ImGui::CalcTextSize(zNameUpper.c_str());
+            std::string zNameShown = fitNavText(zNameUpper, 88.0f);
+            ImVec2 lblSz = ImGui::CalcTextSize(zNameShown.c_str());
 
             ImVec2 cur = ImGui::GetCursorScreenPos();
             // Hit area = label width + 6px breathing room on each side; row
@@ -1977,7 +1997,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
                        : IM_COL32(150, 158, 175, 200));
             float yMid = cur.y + fsBtnSize * 0.5f;
             tabDraw->AddText(ImVec2(cur.x + 6.0f, yMid - lblSz.y * 0.5f),
-                             fg, zNameUpper.c_str());
+                             fg, zNameShown.c_str());
 
             // Routing indicator — small dot to the left of the label when
             // this zone is sending output to a destination.
@@ -1987,6 +2007,9 @@ void ViewportPanel::renderNavBar(bool stageActive,
             }
 
             if (clicked) *activeZone = zi;
+            if (hov && zNameShown != zNameUpper) {
+                ImGui::SetTooltip("%s", zNameUpper.c_str());
+            }
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                 m_renaming = true;
                 m_renameIndex = zi;
@@ -2091,7 +2114,8 @@ void ViewportPanel::renderNavBar(bool stageActive,
             // icon to its right.
             ImVec2 outChipBR;  // bottom-right of trigger — anchors popup
             {
-                ImVec2 lblSz = ImGui::CalcTextSize(destLabel);
+                std::string destShown = fitNavText(destLabel, 150.0f);
+                ImVec2 lblSz = ImGui::CalcTextSize(destShown.c_str());
                 const float chevW   = 7.0f;
                 const float chevGap = 4.0f;
                 float chipW = lblSz.x + chevGap + chevW;
@@ -2112,7 +2136,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
                 float yMid = cur.y + chipH * 0.5f;
                 dOut->AddText(ImVec2(cur.x, yMid - lblSz.y * 0.5f),
-                              textCol, destLabel);
+                              textCol, destShown.c_str());
                 // tiny chevron-down — three lines forming a triangle
                 float cxv = cur.x + lblSz.x + chevGap + chevW * 0.5f;
                 float chevY = yMid - 0.5f;
@@ -2124,6 +2148,9 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
                 outChipBR = ImVec2(cur.x + chipW, cur.y + chipH);
                 if (clicked) ImGui::OpenPopup("##NavOutputPopup");
+                if (hov && destShown != destLabel) {
+                    ImGui::SetTooltip("%s", destLabel);
+                }
             }
             // Anchor the popup's TOP-RIGHT to the trigger's bottom-right
             // corner (pivot 1,0) so it grows LEFTWARD — keeps the popup

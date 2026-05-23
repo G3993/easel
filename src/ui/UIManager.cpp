@@ -1031,8 +1031,8 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_timelineDockId = timelineDockId;  // 0 — timeline is floating now
         m_leftFloatId    = leftFloatId;
         m_rightFloatId   = rightFloatId;
-        m_leftFloatW     = 320.0f;
-        m_rightFloatW    = 320.0f;
+        if (m_leftFloatW <= 0.0f) m_leftFloatW = 320.0f;
+        if (m_rightFloatW <= 0.0f) m_rightFloatW = 0.0f;
         m_lastTimelineH  = 0.0f;  // floating overlay — no docked strip
 
         // Two deferred focus passes: Canvas in the big left slot, Layers as
@@ -1111,12 +1111,17 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // window sizes. 22% of the window for the typical 1920-wide
         // editor is 420px — close to the previous 360 clamp but with
         // breathing room for full-width labels inside.
-        float leftW  = std::min(420.0f, dockSize.x * 0.24f);
-        float rightW = leftW;
-        // Persist for other UI code that needs to reserve space (e.g. Stage
-        // panel reserves the right column out of its central content width).
-        m_rightFloatW = rightW;
-        m_leftFloatW  = leftW;
+        auto clampRightWidth = [&](float w) {
+            float maxW = std::min(720.0f, std::max(360.0f, dockSize.x - kLeftRailW - 360.0f));
+            float minW = std::min(360.0f, std::max(280.0f, maxW));
+            return std::clamp(w, minW, maxW);
+        };
+        float defaultRightW = std::clamp(dockSize.x * 0.22f, 380.0f, 500.0f);
+        if (m_rightFloatW <= 0.0f) m_rightFloatW = defaultRightW;
+        m_rightFloatW = clampRightWidth(m_rightFloatW);
+        float rightW = m_rightFloatW;
+        float leftW  = std::clamp(dockSize.x * 0.20f, 320.0f, 440.0f);
+        m_leftFloatW = leftW;
 
         ImGuiWindowFlags hostFlags =
             ImGuiWindowFlags_NoTitleBar |
@@ -1169,9 +1174,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // (top to bottom). Timeline and transport pill render on top of it.
         const float kRightInset = 0.0f;
         float rightX = viewport->WorkPos.x + dockSize.x - rightW - kRightInset;
-        // Full-height minus any preview panel reserved at the top.
-        float rightY = viewport->WorkPos.y + m_rightPanelTopOffset;
-        float rightH = viewport->WorkSize.y - m_rightPanelTopOffset;
+        const float kRightTopReserve = 28.0f;
+        float rightY = viewport->WorkPos.y + kRightTopReserve + m_rightPanelTopOffset;
+        float rightH = std::max(120.0f, viewport->WorkSize.y - kRightTopReserve - m_rightPanelTopOffset);
         // Expose left edge so timeline + pill can clamp their width.
         m_rightFloatLeft = rightHasContent ? rightX : (viewport->WorkPos.x + dockSize.x);
         if (rightHasContent) {
@@ -1201,6 +1206,43 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::End();
             ImGui::PopStyleColor(11);
             ImGui::PopStyleVar(2);
+
+            const float handleW = 10.0f;
+            ImGui::SetNextWindowPos(ImVec2(rightX - handleW * 0.5f, rightY), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(handleW, rightH), ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+            ImGuiWindowFlags resizeFlags =
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoNavFocus;
+            if (ImGui::Begin("##RightFloatResizeHandle", nullptr, resizeFlags)) {
+                ImGui::InvisibleButton("##dragRightFloat", ImVec2(handleW, rightH));
+                bool hovered = ImGui::IsItemHovered();
+                bool active = ImGui::IsItemActive();
+                if (hovered || active) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                }
+                if (active) {
+                    float desired = viewport->WorkPos.x + dockSize.x - ImGui::GetIO().MousePos.x - kRightInset;
+                    m_rightFloatW = clampRightWidth(desired);
+                }
+                if (hovered || active) {
+                    ImU32 lineCol = active ? IM_COL32(255, 255, 255, 120)
+                                           : IM_COL32(255, 255, 255, 70);
+                    ImGui::GetForegroundDrawList()->AddLine(
+                        ImVec2(rightX, rightY),
+                        ImVec2(rightX, rightY + rightH),
+                        lineCol, active ? 2.0f : 1.0f);
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(3);
         }
     }
 

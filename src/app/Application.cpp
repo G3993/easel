@@ -5662,7 +5662,8 @@ void Application::renderUI() {
             auto* vp = ImGui::GetMainViewport();
             float rpLeft = m_ui.getRightPanelLeft();
             float rpW    = (vp->Pos.x + vp->Size.x) - rpLeft;
-            float rpY    = vp->WorkPos.y;
+            const float kTopNavH = 28.0f;
+            float rpY    = vp->WorkPos.y + kTopNavH;
 
             ImGui::SetNextWindowPos (ImVec2(rpLeft, rpY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(rpW, kPreviewH), ImGuiCond_Always);
