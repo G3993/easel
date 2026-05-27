@@ -3,6 +3,7 @@
 
 #include "sources/NDIRuntime.h"
 #include <glad/glad.h>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ private:
     std::vector<uint8_t> m_pixelBuffer[1];
     int m_lastW = 0, m_lastH = 0;
     std::string m_publishedName;
+    std::chrono::steady_clock::time_point m_lastSendAt{};
 };
 
 #endif // HAS_NDI

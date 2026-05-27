@@ -2,6 +2,12 @@
 #include "app/NDIOutput.h"
 #include <iostream>
 #include <cstring>
+#include <chrono>
+
+namespace {
+constexpr double kTargetNdiFps = 60.0;
+constexpr double kTargetNdiFrameSeconds = 1.0 / kTargetNdiFps;
+}
 
 NDIOutput::~NDIOutput() {
     destroy();
@@ -51,6 +57,7 @@ void NDIOutput::destroy() {
     m_pixelBuffer[0].clear();
     m_lastW = 0;
     m_lastH = 0;
+    m_lastSendAt = {};
 }
 
 bool NDIOutput::hasReceivers() const {
@@ -65,6 +72,13 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     // Skip frames when no receivers are connected (avoid expensive readback)
     auto& rt = NDIRuntime::instance();
     if (rt.api()->send_get_no_connections(m_send, 0) == 0) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (m_lastSendAt.time_since_epoch().count() > 0) {
+        const double elapsed = std::chrono::duration<double>(now - m_lastSendAt).count();
+        if (elapsed < kTargetNdiFrameSeconds) return;
+    }
+    m_lastSendAt = now;
 
     size_t bytes = (size_t)w * h * 4;
 
@@ -83,13 +97,13 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, m_pixelBuffer[0].data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Send synchronously so every frame reaches the receiver
+    // Send synchronously, but pace NDI to 60 FPS instead of the monitor refresh rate.
     NDIlib_video_frame_v2_t frame = {};
     frame.xres = w;
     frame.yres = h;
     frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-    frame.frame_rate_N = 120000;
-    frame.frame_rate_D = 1001;
+    frame.frame_rate_N = 60000;
+    frame.frame_rate_D = 1000;
     frame.picture_aspect_ratio = (float)w / (float)h;
     frame.frame_format_type = NDIlib_frame_format_type_progressive;
     frame.p_data = m_pixelBuffer[0].data();
