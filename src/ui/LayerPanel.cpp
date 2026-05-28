@@ -1,4 +1,5 @@
 #include "ui/LayerPanel.h"
+#include "ui/UIManager.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -386,6 +387,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     // the empty space gives drawInspectorTabIcons() room to paint the
     // Layers icon over the tab (otherwise the text would show through).
     ImGui::Begin("        ###Layers");
+    // 6-pill nav is rendered at the right-dock host level (one bar total).
     // 1px outline only when floating — when docked, dock-node edges already
     // separate the panel from its neighbours and a window border just adds
     // a visual seam.
@@ -455,6 +457,21 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     ImVec2 mousePos = ImGui::GetMousePos();
     ImVec2 listStart = ImGui::GetCursorScreenPos();
     bool windowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    // TEMP DIAG: print on ANY left double-click while the LayerPanel
+    // render fn is alive, regardless of gates. If this never fires while
+    // you double-click a layer thumb, the event is being eaten upstream
+    // — likely by InvisibleButton items in drawLayerRow (eye/lock/op-scrub)
+    // consuming the press, so ImGui flags it as "owned" and IsMouseDouble-
+    // Clicked never reports it at the panel scope.
+    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        fprintf(stderr, "[LayerPanel] L double-click DETECTED  "
+                        "mouse=(%.0f,%.0f) listStart=(%.0f,%.0f) "
+                        "winHov=%d wantCap=%d anyActive=%d activeID=%u\n",
+                mousePos.x, mousePos.y, listStart.x, listStart.y,
+                (int)windowHovered, (int)ImGui::GetIO().WantCaptureMouse,
+                (int)ImGui::IsAnyItemActive(),
+                (unsigned)ImGui::GetActiveID());
+    }
 
     // Reserve space for all rows so scrolling works
     ImGui::Dummy(ImVec2(panelWidth, rowHeight * layerCount));
@@ -475,23 +492,20 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         if (displayIdx >= 0 && displayIdx < layerCount && relY >= 0) {
             int stackIdx = layerCount - 1 - displayIdx;
 
-            // Hit zones: thumbnail toggles visibility, everything else =
-            // select + potential reorder. Opacity scrub is handled by the
+            // A single left click anywhere on the row — INCLUDING the
+            // thumbnail — selects the layer and arms a potential reorder
+            // drag. Visibility toggling moved entirely to (a) the dedicated
+            // eye icon and (b) the double-click handler above, because the
+            // old "single-click thumb = toggle visibility" path was
+            // silently fighting the double-click: click-1 hid, click-2
+            // showed again, net = no change, and double-click "didn't
+            // work." Opacity scrub is still handled by its own
             // InvisibleButton below, not here.
-            float relX = mousePos.x - listStart.x;
-            float thumbLo = LP::kCardPadX - 4;
-            float thumbHi = LP::kCardPadX + LP::kThumbW + 4;
-            if (relX >= thumbLo && relX < thumbHi) {
-                auto& L = stack[stackIdx];
-                L->userHidden = !L->userHidden;
-                L->visible = !L->userHidden;
-            } else {
-                selectedLayer = stackIdx;
-                m_dragIndex = stackIdx;
-                m_dragStartY = mousePos.y;
-                m_dragOffsetY = mousePos.y - (listStart.y + displayIdx * rowHeight);
-                m_dragActive = false; // not yet — need to move first
-            }
+            selectedLayer = stackIdx;
+            m_dragIndex   = stackIdx;
+            m_dragStartY  = mousePos.y;
+            m_dragOffsetY = mousePos.y - (listStart.y + displayIdx * rowHeight);
+            m_dragActive  = false; // not yet — need to move first
         } else {
             // Clicked outside any layer row — deselect
             selectedLayer = -1;
@@ -550,17 +564,40 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         m_insertIndex = -1;
     }
 
-    // Double-click to rename
+    // Double-click ANYWHERE on a layer row → toggle visibility. Previous
+    // version had an `x >= listStart.x + 26` gate (intended to skip an
+    // "icon column" on the left), but the eye icon actually lives on the
+    // RIGHT side of the row (see eyeX = pctX - kEyeGap - kEyeW, computed
+    // in drawLayerRow). The gate was protecting nothing and silently
+    // blocked the LEFT half of the 48px thumbnail — which is exactly
+    // where most users aim. Now the whole row body is hot.
+    //
+    // Eye-button overlap: clicking on the eye fires its own toggle via
+    // IsItemActivated on the InvisibleButton. A *double*-click on the
+    // eye therefore toggles twice via the eye + once via this handler =
+    // an odd number of flips = visible state changes by one — same as
+    // a single click. So no inconsistency.
     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && windowHovered && !m_dragActive) {
         float relY = mousePos.y - listStart.y;
         int displayIdx = (int)(relY / rowHeight);
-        if (displayIdx >= 0 && displayIdx < layerCount && mousePos.x >= listStart.x + 26) {
+        // TEMP DIAG (remove once confirmed working): tells us whether the
+        // event is even reaching this handler. If you double-click and
+        // see nothing in /tmp/easel_audio.log, the event is being eaten
+        // upstream — possibly by another window or an InvisibleButton.
+        fprintf(stderr, "[LayerDblClick] mouseX=%.0f mouseY=%.0f listStartX=%.0f "
+                        "relY=%.0f rowHeight=%.0f displayIdx=%d layerCount=%d "
+                        "windowHovered=%d dragActive=%d\n",
+                mousePos.x, mousePos.y, listStart.x, relY, rowHeight,
+                displayIdx, layerCount, (int)windowHovered, (int)m_dragActive);
+        if (displayIdx >= 0 && displayIdx < layerCount) {
             int stackIdx = layerCount - 1 - displayIdx;
-            m_renaming = true;
-            m_renameJustStarted = true;
-            m_renameIndex = stackIdx;
-            strncpy(m_renameBuf, stack[stackIdx]->name.c_str(), sizeof(m_renameBuf) - 1);
-            m_renameBuf[sizeof(m_renameBuf) - 1] = '\0';
+            auto& L = stack[stackIdx];
+            L->userHidden = !L->userHidden;
+            L->visible    = !L->userHidden;
+            fprintf(stderr, "[LayerDblClick]   → toggled layer %d (\"%s\") to "
+                            "userHidden=%d visible=%d\n",
+                    stackIdx, L->name.c_str(),
+                    (int)L->userHidden, (int)L->visible);
         }
     }
 
@@ -949,6 +986,14 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                     }
                     ImGui::EndMenu();
                 }
+            }
+            ImGui::Separator();
+            // Voice-control edit mode — toggles the Property panel's inline
+            // per-parameter voice/audio source pickers for this layer.
+            // (Was the PropertyPanel "···" overflow item; consolidated here.)
+            if (ImGui::MenuItem("Edit voice control", nullptr,
+                                stack[ci]->voiceControlEdit)) {
+                stack[ci]->voiceControlEdit = !stack[ci]->voiceControlEdit;
             }
             ImGui::Separator();
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));

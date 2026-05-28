@@ -181,6 +181,23 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
     GLuint currentTex = srcTex;
     int pingpong = 0;
 
+    // Per-effect mic modulation: an effect's primary param pulses with the
+    // chosen audio band (modulated = base + audioAmount * band). Same m_audio
+    // the layer audioBindings read, so it follows the active mic/loopback.
+    auto audioBand = [&](int s) -> float {
+        switch (s) {
+            case 0: return m_audio.bass;
+            case 1: return (m_audio.lowMid + m_audio.highMid) * 0.5f;
+            case 2: return m_audio.treble;
+            case 3: return m_audio.beatDecay;
+            default: return 0.0f;
+        }
+    };
+    auto fxAudioMod = [&](const LayerEffect& f) -> float {
+        if (f.audioSignal < 0 || f.audioAmount <= 0.0f) return 0.0f;
+        return f.audioAmount * audioBand(f.audioSignal);
+    };
+
     for (auto& fx : layer->effects) {
         if (!fx.enabled) continue;
 
@@ -345,6 +362,26 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
             m_quad.draw();
             currentTex = m_effectFBO[pingpong].textureId();
             pingpong = 1 - pingpong;
+        } else if (fx.type == EffectType::Sharpen) {
+            // Unsharp mask. Amount can pulse with the mic via fxAudioMod
+            // (audioAmount adds on top of the base when a band is selected).
+            float amount = fx.sharpenAmount + fxAudioMod(fx) * 3.0f;
+            if (amount <= 0.001f) continue;  // nothing to do this frame
+            m_effectFBO[pingpong].bind();
+            glViewport(0, 0, m_width, m_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_effectShader.use();
+            m_effectShader.setInt("uEffectType", 7);
+            m_effectShader.setFloat("uSharpenAmount", amount);
+            m_effectShader.setFloat("uSharpenRadius", fx.sharpenRadius);
+            m_effectShader.setVec2("uResolution", glm::vec2(m_width, m_height));
+            m_effectShader.setInt("uTexture", 0);
+            m_effectShader.setMat3("uTransform", glm::mat3(1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, currentTex);
+            m_quad.draw();
+            currentTex = m_effectFBO[pingpong].textureId();
+            pingpong = 1 - pingpong;
         }
     }
 
@@ -368,6 +405,11 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     bool firstLayer = true;
     for (int i = 0; i < (int)layers.size(); i++) {
         const auto& layer = layers[i];
+
+        // Hard skip — double-click on a floating thumbnail toggles visible.
+        // Don't render the layer at all when hidden, so transitions and
+        // shader transition paths can't sneak it back on canvas either.
+        if (layer && !layer->visible) continue;
 
         // Update transition state (opacity-based fade)
         if (layer->transitionActive && layer->transitionDuration > 0.0f) {
@@ -411,7 +453,10 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         }
 
         // Compute effective opacity (skip for A→B transitions — A+B are fully visible in the blend)
-        float effectiveOpacity = layer->opacity;
+        // layer->visible is the iPad-style hide toggle from the floating
+        // thumbnails (double-click). false -> fully transparent, preserving
+        // the user's opacity slider value for when they toggle back on.
+        float effectiveOpacity = layer->visible ? layer->opacity : 0.0f;
         if (layer->transitionDuration > 0.0f
             && !layer->shaderTransitionActive
             && !layer->glTransitionActive) {

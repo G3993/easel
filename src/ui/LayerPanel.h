@@ -5,6 +5,8 @@
 #include <vector>
 #include <memory>
 
+class FluidSource;
+
 class LayerPanel {
 public:
     void render(LayerStack& stack, int& selectedLayer,
@@ -15,6 +17,13 @@ public:
     bool wantsAddImage = false;
     bool wantsAddVideo = false;
     bool wantsAddShader = false;
+
+    // Post-create binder for the Fluid image-inject quick-add buttons.
+    // When set alongside wantsAddImage/Video/Shader, Application binds the
+    // newly-created layer's id to this Fluid's image source (and clears).
+    // Lets the Fluid PropertyPanel offer inline "+ Add Image / Video /
+    // Shader" actions that create AND auto-bind in one click.
+    FluidSource* postCreateBindFluidImage = nullptr;
 
     // Layer IDs removed during the last render() call — Application consumes these
     // to notify the Timeline (so orphaned tracks can be cleaned up).

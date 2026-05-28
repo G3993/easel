@@ -198,9 +198,18 @@ if(APPLE)
     set_source_files_properties("${EASEL_DEFAULT_PRESET}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
 
+    # 3D model assets (e.g. the F-117 used by the "Moving Company" source).
+    # Bundled read-only into Resources/assets/models — the source loads them
+    # relative to the chdir'd Resources dir (main_mac.mm).
+    file(GLOB EASEL_MODELS "${CMAKE_SOURCE_DIR}/assets/models/*.glb")
+    foreach(m ${EASEL_MODELS})
+        set_source_files_properties("${m}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/assets/models")
+    endforeach()
+
     add_executable(${PROJECT_NAME} MACOSX_BUNDLE
         ${SOURCES} ${KISS_FFT_SRC}
-        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} "${EASEL_DEFAULT_PRESET}")
+        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} ${EASEL_MODELS} "${EASEL_DEFAULT_PRESET}")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Easel"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.etherealmachine.easel"
@@ -265,7 +274,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL
+    glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL z
 )
 
 if(WIN32)
@@ -289,6 +298,7 @@ elseif(APPLE)
         "-framework Speech"           # SFSpeechRecognizer (push-to-talk)
         "-framework AVFoundation"     # AVAudioEngine for mic capture
         "-framework Metal"            # Phase M.0+ Metal abstraction layer
+        "-framework Vision"           # VisionTracker — hand/face/pose ML
     )
 endif()
 

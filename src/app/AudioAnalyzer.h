@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <algorithm>
 
 #ifdef _WIN32
 // Forward declare WASAPI types to avoid Windows.h in header
@@ -17,6 +18,77 @@ struct AudioBands {
     float highMid = 0;
     float treble = 0;
 };
+
+// Per-band response curve — reshapes the raw 0..1 band energy into the value
+// shaders actually react to. The chain (in order) is:
+//   1. Floor/Ceil — remap [floor,ceil] → [0,1] (a smooth, soft noise gate +
+//      headroom limiter; replaces needing a hard gate per band).
+//   2. Curve      — pow(x, exponent). >1 = ease-in (suppress quiet, punchier
+//      peaks); <1 = ease-out (lift quiet, more constantly active).
+//   3. Contrast   — blend toward a smoothstep S-curve for soft toes/shoulders.
+// Defaults are identity, so an untouched curve is a no-op.
+struct AudioCurve {
+    float floor    = 0.0f;   // input below this → 0
+    float ceil     = 1.0f;   // input at/above this → 1
+    float exponent = 1.0f;   // gamma; 1 = linear
+    float contrast = 0.0f;   // 0 = off, 1 = full smoothstep S-curve
+};
+
+// Single source of truth for the transfer function — used by the analyzer to
+// shape the live signal AND by the Audio panel to draw the curve graph, so the
+// graph is always exactly what you hear.
+inline float applyAudioCurve(float x, const AudioCurve& c) {
+    float d = std::max(1e-4f, c.ceil - c.floor);
+    float y = std::min(std::max((x - c.floor) / d, 0.0f), 1.0f);
+    y = std::pow(y, std::max(0.01f, c.exponent));
+    if (c.contrast > 0.0f) {
+        float s = y * y * (3.0f - 2.0f * y);   // smoothstep
+        y += (s - y) * std::min(c.contrast, 1.0f);
+    }
+    return y;
+}
+
+// One-click easing presets for the Response curve. Each preset bundles a full
+// AudioCurve (floor/ceil/exponent/contrast) plus the GLOBAL temporal smoothing
+// rates so "smoother" presets actually soften the envelope too. Smoothing is
+// global (shared by all bands), not per-band — see smoothAttack()/smoothRelease().
+// attack <= 0 means "leave the current smoothing untouched".
+struct AudioCurvePreset {
+    const char* name;
+    const char* desc;     // one-line tooltip describing the feel
+    AudioCurve  curve;    // floor / ceil / exponent / contrast
+    float       attack;   // global smoothing to apply, 1/s (<=0 = leave unchanged)
+    float       release;
+};
+
+// Curated table. Values are tuned so each entry FEELS distinct and musical.
+// Order: neutral first, then progressively smoother → snappier → specialty.
+// AudioCurve fields are {floor, ceil, exponent, contrast}.
+static const AudioCurvePreset kAudioCurvePresets[] = {
+    { "Linear",      "Neutral 1:1 — the raw signal, no shaping.",
+      { 0.00f, 1.00f, 1.00f, 0.00f },  8.0f,  3.0f },
+    { "Smooth",      "Gentle S-curve + slow release — syrupy, never strobes.",
+      { 0.00f, 1.00f, 1.10f, 0.50f },  5.0f,  1.5f },
+    { "Ambient",     "Very slow, floaty glide that lifts quiet detail.",
+      { 0.00f, 1.00f, 0.85f, 0.20f },  3.0f,  0.8f },
+    { "Punchy",      "Ease-in with a fast attack — peaks pop, noise cut.",
+      { 0.05f, 1.00f, 2.00f, 0.10f }, 16.0f,  4.0f },
+    { "Snappy",      "Fast and tight — highly reactive, minimal glide.",
+      { 0.02f, 1.00f, 1.30f, 0.00f }, 22.0f, 12.0f },
+    { "Gentle",      "Lifts quiet detail with light smoothing — sensitive.",
+      { 0.00f, 1.00f, 0.60f, 0.15f },  7.0f,  3.0f },
+    { "Gate",        "High floor + steep — only strong hits register.",
+      { 0.25f, 1.00f, 1.80f, 0.00f }, 18.0f,  6.0f },
+    { "Ease In-Out", "Classic full smoothstep S — soft toe and shoulder.",
+      { 0.00f, 1.00f, 1.00f, 1.00f },  8.0f,  3.0f },
+    { "Exponential", "Very peaky — suppresses all but the loudest moments.",
+      { 0.00f, 1.00f, 3.00f, 0.00f }, 12.0f,  4.0f },
+};
+static constexpr int kAudioCurvePresetCount =
+    (int)(sizeof(kAudioCurvePresets) / sizeof(kAudioCurvePresets[0]));
+
+// Curve targets: a global Master curve applied on top of each of the 4 bands.
+enum CurveBand { CurveMaster = 0, CurveBass, CurveLowMid, CurveHighMid, CurveTreble, CurveCount };
 
 class AudioAnalyzer {
 public:
@@ -95,6 +167,14 @@ public:
     float& smoothAttack()  { return m_smoothAttackRate; }
     float& smoothRelease() { return m_smoothReleaseRate; }
 
+    // Response curves — index with CurveBand (0=Master, 1..4 = bands).
+    AudioCurve& curve(int band) { return m_curves[band]; }
+    const AudioCurve& curve(int band) const { return m_curves[band]; }
+    // Current pre-curve input level feeding a given CurveBand this frame, so
+    // the UI can draw a live dot on the transfer graph. Master uses the
+    // loudest band as its proxy.
+    float curveInput(int band) const { return m_curveInput[band]; }
+
 private:
 #ifdef _WIN32
     // WASAPI capture
@@ -139,6 +219,11 @@ private:
     float m_highMidGain = 1.0f;
     float m_trebleGain = 1.0f;
     float m_noiseGate = 0.0f;   // values below this threshold are squashed to 0
+
+    // Response curves [CurveMaster, Bass, LowMid, HighMid, Treble] and the
+    // captured pre-curve input per target (for the live graph dot).
+    AudioCurve m_curves[CurveCount];
+    float      m_curveInput[CurveCount] = {0, 0, 0, 0, 0};
 
     // Default smoothing rates — chosen so a typical reactive shader gets
     // a punchy attack but a soft release that doesn't strobe on every

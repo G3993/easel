@@ -28,6 +28,10 @@ uniform float uFeedbackZoom = 1.01;
 uniform float uGlowThreshold = 0.6;
 uniform float uGlowIntensity = 1.0;
 
+// Sharpen (unsharp mask)
+uniform float uSharpenAmount = 1.0;
+uniform float uSharpenRadius = 1.5;
+
 vec3 rgb2hsv(vec3 c) {
     vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
     vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
@@ -107,5 +111,25 @@ void main() {
         vec4 original = texture(uTexture, vTexCoord);
         vec4 glow = texture(uFeedback, vTexCoord); // reusing uFeedback sampler for glow tex
         FragColor = vec4(original.rgb + glow.rgb * uGlowIntensity, original.a);
+
+    } else if (uEffectType == 7) {
+        // Sharpen (unsharp mask): blur a small 3x3 gaussian neighborhood,
+        // then add the high-pass residual (center - blur) back in. Restores
+        // crisp edges on fuzzy / up-scaled content. Radius widens the soft
+        // reference so the boost works at a slightly larger scale than 1px.
+        vec2 texel = vec2(uSharpenRadius) / uResolution;
+        vec4 c = texture(uTexture, vTexCoord);
+        vec4 blur = vec4(0.0);
+        blur += texture(uTexture, vTexCoord + texel * vec2(-1.0, -1.0)) * 0.0625;
+        blur += texture(uTexture, vTexCoord + texel * vec2( 0.0, -1.0)) * 0.125;
+        blur += texture(uTexture, vTexCoord + texel * vec2( 1.0, -1.0)) * 0.0625;
+        blur += texture(uTexture, vTexCoord + texel * vec2(-1.0,  0.0)) * 0.125;
+        blur += c * 0.25;
+        blur += texture(uTexture, vTexCoord + texel * vec2( 1.0,  0.0)) * 0.125;
+        blur += texture(uTexture, vTexCoord + texel * vec2(-1.0,  1.0)) * 0.0625;
+        blur += texture(uTexture, vTexCoord + texel * vec2( 0.0,  1.0)) * 0.125;
+        blur += texture(uTexture, vTexCoord + texel * vec2( 1.0,  1.0)) * 0.0625;
+        vec3 sharp = c.rgb + (c.rgb - blur.rgb) * uSharpenAmount;
+        FragColor = vec4(clamp(sharp, 0.0, 1.0), c.a);
     }
 }

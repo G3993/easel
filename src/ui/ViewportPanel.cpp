@@ -72,6 +72,12 @@ static const ImU32 kBBoxDim       = IM_COL32(255, 255, 255, 30);
 static const ImU32 kLHandleFill   = IM_COL32(255, 255, 255, 255);
 static const ImU32 kLHandleStroke = IM_COL32(74, 140, 255, 255);
 static const ImU32 kLHandleActive = IM_COL32(74, 140, 255, 255);
+// Mask-edit handle vocabulary: a single clear gold reused from the mask
+// banner / layer-mask gold (255,200,60) so the whole handle set reads
+// consistently while editing a mask. Only used in mask-edit mode — normal
+// (transform/warp) handles keep their zone/blue colors unchanged.
+static const ImU32 kMaskEditFill  = IM_COL32(255, 200, 60, 255);   // handle fill
+static const ImU32 kMaskEditRing  = IM_COL32(150, 110, 25, 255);   // darker same-hue outline
 
 glm::vec2 ViewportPanel::screenToUV(glm::vec2 screen) const {
     return glm::vec2(
@@ -757,7 +763,12 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         if (m_layerDragging) { m_layerDragging = false; m_handleDrag = HandleType::None; }
         if (m_warpDragging)  { m_warpDragging = false;  m_warpDragIndex = -1; }
         if (m_orbitDragging) m_orbitDragging = false;
+        // Clear BOTH the mask-point drag and the proximity flag so toggling
+        // edit mode / mask-edit on or off can never leave a stuck mask drag
+        // nor a stale "mask under cursor" reading that would wrongly suppress
+        // warp-corner drags on the next frame.
         if (m_maskDragType > 0) { m_maskDragType = 0; m_maskDragIndex = -1; }
+        m_maskHitUnderCursor = false;
     }
 
     // --- Canvas zoom (scroll wheel) and pan (middle-mouse drag) ---
@@ -827,8 +838,26 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
         m_pan = {0, 0};
     }
 
-    // --- Draw warp handles (always visible, not in mask mode) ---
-    if (m_editMode != EditMode::Mask && m_imageSize.x > 0 && m_imageSize.y > 0) {
+    // --- Draw warp handles ---
+    // During MASK edit the white alignment grid is shown so the user can
+    // line the mapping up to it — which means the corner-pin / mesh-warp
+    // handles MUST stay visible and draggable on top of the grid (they
+    // used to vanish entirely in mask mode). The mask point/curve gizmos
+    // render on the FOREGROUND draw list (renderMaskOverlay) so they still
+    // sit above these window-draw-list warp handles. ObjMesh orbit is a
+    // camera, not a gizmo to align, so it stays gated out of mask mode.
+    const bool inMaskMode = (m_editMode == EditMode::Mask);
+    // UNSELECTED STATE: with nothing selected and no edit/mask context the
+    // viewport must be clean — no corner-pin / mesh-warp handles drawn, and
+    // nothing invisible to grab. Handles return when a layer/zone mapping
+    // surface is selected (m_layerSelected, fed from m_selectedLayer in
+    // Application) OR mask-edit mode is active (canvas mask mode deselects
+    // the layer but keeps inMaskMode true, so it still shows the gold
+    // handles). Gating the whole block also suppresses hit-test/drag.
+    const bool warpEditContext = m_layerSelected || inMaskMode;
+    const bool warpDrawOK = warpEditContext &&
+                            (!inMaskMode || warpMode != WarpMode::ObjMesh);
+    if (warpDrawOK && m_imageSize.x > 0 && m_imageSize.y > 0) {
         if (warpMode == WarpMode::ObjMesh && objMeshWarp) {
             // --- Orbit camera interaction ---
             auto& cam = objMeshWarp->camera();
@@ -872,8 +901,27 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             ImVec2 mousePos = ImGui::GetMousePos();
             glm::vec2 mouseNDC = screenToNDC({mousePos.x, mousePos.y});
 
-            // Warp handles get priority over layer handles (smaller hit targets)
-            if (cornerPinPtr && meshWarpPtr && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered) {
+            // Warp handles get priority over layer handles (smaller hit
+            // targets). In mask mode the corner-pin / mesh-warp handles are
+            // ALSO draggable so the mapping can be aligned to the white grid
+            // — but a click must never ambiguously move both a mask point and
+            // a mapping corner. DISAMBIGUATION by cursor proximity (no hidden
+            // modifier): renderMaskOverlay ran last frame and set
+            // m_maskHitUnderCursor when a mask point / bezier handle /
+            // closeable first-point sits under the cursor (using the SAME
+            // hitTestPoint(0.03) / hitTestHandle*(0.025) radii it drags
+            // with). If a mask point is under the cursor, the mask-point drag
+            // wins and we skip starting a warp drag entirely; the mask pass
+            // (which runs after this one) then begins the mask-point gesture.
+            // Otherwise the warp-corner drag starts here. Whichever drag
+            // starts OWNS the gesture until mouse-up — m_warpDragging /
+            // m_maskDragType are sticky and never reassigned mid-drag. The
+            // 1-frame staleness of m_maskHitUnderCursor is negligible: at
+            // frame rate the cursor barely moves between the mask pass and
+            // the next frame's drag-start. ObjMesh orbit stays gated out of
+            // mask mode (camera, not an alignment gizmo) via warpDrawOK.
+            bool warpStartAllowed = !inMaskMode || !m_maskHitUnderCursor;
+            if (warpStartAllowed && cornerPinPtr && meshWarpPtr && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered) {
                 int hit = -1;
                 if (warpMode == WarpMode::CornerPin) {
                     hit = cornerPinPtr->hitTest(mouseNDC);
@@ -921,9 +969,15 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 for (int i = 0; i < 4; i++) {
                     ImVec2 p = ndc2scr(corners[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
+                    // Mask-edit mode: gold handles so the warp corners read
+                    // consistently with the mask point/handle gizmos. Normal
+                    // mode keeps the zone accent colors unchanged.
+                    ImU32 cpFill = inMaskMode ? kMaskEditFill
+                                              : (active ? zAccent(zi) : zAccentDim(zi));
+                    ImU32 cpRing = inMaskMode ? kMaskEditRing : kHandleOuter;
                     draw->AddCircleFilled(p, active ? 14.0f : 10.0f, zAccentGlow(zi), 32);
-                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, active ? zAccent(zi) : zAccentDim(zi), 32);
-                    draw->AddCircle(p, active ? 8.0f : 6.0f, kHandleOuter, 32, 1.5f);
+                    draw->AddCircleFilled(p, active ? 8.0f : 6.0f, cpFill, 32);
+                    draw->AddCircle(p, active ? 8.0f : 6.0f, cpRing, 32, 1.5f);
                 }
             } else if (meshWarpPtr) {
                 const auto& points = meshWarpPtr->points();
@@ -937,8 +991,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 for (int i = 0; i < (int)points.size(); i++) {
                     ImVec2 p = ndc2scr(points[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
-                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, active ? zAccent(zi) : zPointFill(zi), 32);
-                    draw->AddCircle(p, active ? 6.0f : 4.0f, kPointRing, 32, 1.2f);
+                    // Mask-edit mode: gold to match the mask gizmos; normal
+                    // mode keeps the zone accent colors unchanged.
+                    ImU32 mwFill = inMaskMode ? kMaskEditFill
+                                              : (active ? zAccent(zi) : zPointFill(zi));
+                    ImU32 mwRing = inMaskMode ? kMaskEditRing : kPointRing;
+                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, mwFill, 32);
+                    draw->AddCircle(p, active ? 6.0f : 4.0f, mwRing, 32, 1.2f);
                 }
             }
             draw->PopClipRect();  // matches the PushClipRect at the start
@@ -1370,6 +1429,19 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         return false;
     };
 
+    // Disambiguation source-of-truth: is a mask point / bezier handle under
+    // the cursor RIGHT NOW? render() (which runs before this pass) reads this
+    // on the next frame to decide whether a warp-corner drag may start —
+    // mask points win on overlap. Uses the EXACT same hit radii the
+    // mask-point drag-start below uses (0.025 handles, 0.03 points) so the
+    // priority decision and the actual drag agree. Cleared when the cursor
+    // is over the Save banner so a banner click can't block warp handles.
+    m_maskHitUnderCursor =
+        m_hovered && !mouseOverBanner &&
+        (mask.hitTestHandleIn(mouseUV, 0.025f) >= 0 ||
+         mask.hitTestHandleOut(mouseUV, 0.025f) >= 0 ||
+         mask.hitTestPoint(mouseUV, 0.03f) >= 0);
+
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_hovered && !mouseOverBanner) {
         int hi = mask.hitTestHandleIn(mouseUV, 0.025f);
         int ho = mask.hitTestHandleOut(mouseUV, 0.025f);
@@ -1502,10 +1574,12 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         kMCurveGlow  = IM_COL32(c.r, c.g, c.b, 55);
         kMCurve      = IM_COL32(c.r, c.g, c.b, 230);
         kMHandleLine = IM_COL32(c.r, c.g, c.b, 110);
-        kMHandleDot  = IM_COL32(std::min(c.r+40,255), std::min(c.g+40,255), std::min(c.b+40,255), 220);
-        kMHandleRing = IM_COL32(std::min(c.r+60,255), std::min(c.g+60,255), std::min(c.b+60,255), 255);
-        kMPointFill  = IM_COL32(c.r, c.g, c.b, 255);
-        kMPointRing  = IM_COL32(std::min(c.r+80,255), std::min(c.g+80,255), std::min(c.b+80,255), 220);
+        // Handle/point dots themselves are gold in mask-edit mode so the
+        // whole handle set reads consistently (curve/glow stay zone-colored).
+        kMHandleDot  = kMaskEditFill;
+        kMHandleRing = kMaskEditRing;
+        kMPointFill  = kMaskEditFill;
+        kMPointRing  = kMaskEditRing;
         kMSelFill    = IM_COL32(std::min(c.r+40,255), std::min(c.g+40,255), std::min(c.b+40,255), 255);
         kMSelRing    = IM_COL32(255, 255, 255, 255);
         kMSelGlow    = IM_COL32(c.r, c.g, c.b, 60);
@@ -1514,10 +1588,10 @@ void ViewportPanel::renderMaskOverlay(MaskPath& mask, const glm::mat3& layerTran
         kMCurveGlow  = IM_COL32(255, 200, 60, 55);
         kMCurve      = IM_COL32(255, 210, 90, 230);
         kMHandleLine = IM_COL32(255, 200, 60, 110);
-        kMHandleDot  = IM_COL32(255, 220, 120, 220);
-        kMHandleRing = IM_COL32(255, 230, 160, 255);
-        kMPointFill  = IM_COL32(255, 200, 60, 255);
-        kMPointRing  = IM_COL32(255, 240, 200, 220);
+        kMHandleDot  = kMaskEditFill;
+        kMHandleRing = kMaskEditRing;
+        kMPointFill  = kMaskEditFill;
+        kMPointRing  = kMaskEditRing;
         kMSelFill    = IM_COL32(255, 240, 120, 255);
         kMSelRing    = IM_COL32(255, 255, 255, 255);
         kMSelGlow    = IM_COL32(255, 200, 60, 60);
@@ -1737,7 +1811,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
         const float kPillH       = 28.0f;
         const float kSegGap      = 26.0f;   // breathing room between segments
-        const char* labels[3] = {"CANVAS", "STAGE", "SHOW"};
+        const char* labels[3] = {"CANVAS", "STAGE", "PLAY"};
         Mode      modes[3]    = {Mode::Canvas, Mode::Stage, Mode::Show};
 
         // Each segment = label width. Icons removed — the workspace tabs

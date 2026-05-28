@@ -1,4 +1,5 @@
 #include "ui/WarpEditor.h"
+#include "ui/UIManager.h"
 #include "app/MappingProfile.h"
 #include <imgui.h>
 #include <filesystem>
@@ -51,6 +52,8 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(12, 9));
     ImGui::Begin("        ###Mapping");
     ImGui::PopStyleVar(3);
+
+    // 6-pill nav is rendered at the right-dock host level (one bar total).
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {

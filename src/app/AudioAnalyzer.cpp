@@ -353,6 +353,21 @@ void AudioAnalyzer::computeBands() {
         m_rawHighMid = gate(m_rawHighMid);
         m_rawTreble  = gate(m_rawTreble);
     }
+
+    // Response curves: capture the pre-curve input (for the live graph), then
+    // shape each band by its own curve followed by the global master curve.
+    // Defaults are identity, so this is a no-op until the user dials a curve.
+    m_curveInput[CurveBass]    = m_rawBass;
+    m_curveInput[CurveLowMid]  = m_rawLowMid;
+    m_curveInput[CurveHighMid] = m_rawHighMid;
+    m_curveInput[CurveTreble]  = m_rawTreble;
+    m_curveInput[CurveMaster]  = std::max(std::max(m_rawBass, m_rawLowMid),
+                                          std::max(m_rawHighMid, m_rawTreble));
+
+    m_rawBass    = applyAudioCurve(applyAudioCurve(m_rawBass,    m_curves[CurveBass]),    m_curves[CurveMaster]);
+    m_rawLowMid  = applyAudioCurve(applyAudioCurve(m_rawLowMid,  m_curves[CurveLowMid]),  m_curves[CurveMaster]);
+    m_rawHighMid = applyAudioCurve(applyAudioCurve(m_rawHighMid, m_curves[CurveHighMid]), m_curves[CurveMaster]);
+    m_rawTreble  = applyAudioCurve(applyAudioCurve(m_rawTreble,  m_curves[CurveTreble]),  m_curves[CurveMaster]);
 }
 
 // --- Beat detection ---

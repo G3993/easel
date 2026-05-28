@@ -5,6 +5,7 @@
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -169,9 +170,24 @@ void ShaderClawBridge::unwatchSource(const std::string& path) {
 void ShaderClawBridge::update() {
     if (!m_connected) return;
 
-    // Check if directory has changed
+    // Decide whether to scan this frame. On Windows, pollFileChanges uses
+    // ReadDirectoryChangesW for a near-free notification. On macOS/Linux
+    // it's a stub (returns ""), so without a fallback hot-reload silently
+    // never fires — which is why every previous "live edit and watch
+    // Easel pick it up" attempt looked broken on Mac. Cheap mtime poll
+    // throttled to ~4 Hz (250 ms) here: a handful of stat() calls per
+    // tick costs nothing at any frame-rate and picks up edits within
+    // human-perception latency.
+#ifdef _WIN32
     std::string change = pollFileChanges();
     if (change.empty()) return;
+#else
+    using clk = std::chrono::steady_clock;
+    static clk::time_point sLastPoll{};
+    auto now = clk::now();
+    if (now - sLastPoll < std::chrono::milliseconds(250)) return;
+    sLastPoll = now;
+#endif
 
     // Check each watched file for modification
     for (auto& w : m_watched) {

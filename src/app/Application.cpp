@@ -310,6 +310,39 @@ bool Application::init() {
         m_testPattern.updateData(pixels.data(), tw, th);
     }
 
+    // Generate white alignment grid texture. Shown INSTEAD of the test
+    // pattern while a mask (canvas or layer) is being added/edited so the
+    // user can see crisp alignment lines while mapping the masked surface.
+    // Same 512x512 footprint as the test pattern so it stretches 1:1 onto
+    // the mapped surface using the exact same convention.
+    {
+        const int gw = 512, gh = 512;       // matches m_testPattern footprint
+        const int kGridCellPx = 32;         // cell size; matches test-pattern checker scale (16 cells)
+        const int kGridLinePx = 1;          // thin ~1px white lines
+        std::vector<uint8_t> pixels(gw * gh * 4);
+        for (int y = 0; y < gh; y++) {
+            for (int x = 0; x < gw; x++) {
+                int idx = (y * gw + x) * 4;
+                bool onLine = (x % kGridCellPx < kGridLinePx) ||
+                              (y % kGridCellPx < kGridLinePx) ||
+                              (x >= gw - kGridLinePx) ||
+                              (y >= gh - kGridLinePx); // outer border lines
+                if (onLine) {
+                    pixels[idx + 0] = 255;
+                    pixels[idx + 1] = 255;
+                    pixels[idx + 2] = 255;
+                } else {
+                    pixels[idx + 0] = 12;
+                    pixels[idx + 1] = 12;
+                    pixels[idx + 2] = 16;
+                }
+                pixels[idx + 3] = 255;
+            }
+        }
+        m_maskGrid.createEmpty(gw, gh);
+        m_maskGrid.updateData(pixels.data(), gw, gh);
+    }
+
     // Etherea client — WebSocket for real-time transcript, SSE for hints
     m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
         // Update data bus with latest transcript segment
@@ -382,7 +415,7 @@ bool Application::init() {
         m_ndiFinder.create();
         m_ndiSources = m_ndiFinder.sources();
         // Auto-start composition output
-        m_ndiOutput.create("Easel");
+        m_ndiOutput.create("Lu");
     }
 #endif
 
@@ -416,6 +449,7 @@ bool Application::init() {
     m_shaderRatings.load();
     std::cout << "[ShaderRatings] " << m_shaderRatings.needsImprovementCount()
               << " shaders rated < 5 (improvement candidates)" << std::endl;
+    m_shaderPresets.load();
         }
     }
 
@@ -437,6 +471,14 @@ bool Application::init() {
     // sMode == Stage.
     m_propertyPanel.setStageView(&m_stageView);
     m_propertyPanel.setTimeline(&m_timeline);  // Phase C: enables keyframe diamonds
+    // Surfaces LAYERS / + Add New Layer / current-layer nav at the top of
+    // the parameters panel — reuses the LayerPanel signal flags + the
+    // shared selected-layer index (no duplicated layer logic).
+    m_propertyPanel.setLayerNav(&m_layerPanel, &m_selectedLayer);
+    // Sticky source-quick-bar at the top of the Properties panel — needs
+    // the UIManager pointer so its 4 icons (Shader / Mic / Cam / Win) can
+    // switch the Sources dock tab via focusSourcesTab().
+    m_propertyPanel.setUIManager(&m_ui);
 
     // Auto-start OSC receiver on port 9000
     m_oscManager.startReceiver(9000);
@@ -640,6 +682,24 @@ void Application::run() {
                 // Legacy single-device mode
                 m_audioAnalyzer.setDevice(m_selectedAudioDevice);
 #ifdef HAS_FFMPEG
+                // Mic input is far quieter than system-audio loopback (which is
+                // the full digital signal), so the band scaling tuned for
+                // loopback leaves a mic barely registering at 1.0× gain — the
+                // audio-reactivity presets then look dead. On a *transition* to
+                // a capture device, seed a sensible mic input gain so reactivity
+                // "just works" like system audio; on a transition back to
+                // loopback, restore unity. Only fires on device change, so it
+                // never fights the user's manual Gain slider afterwards.
+                {
+                    static int sGainAppliedFor = -999;
+                    if (m_selectedAudioDevice != sGainAppliedFor) {
+                        bool toMic = (m_selectedAudioDevice >= 0 &&
+                                      m_selectedAudioDevice < (int)m_audioDevices.size() &&
+                                      m_audioDevices[m_selectedAudioDevice].isCapture);
+                        m_audioAnalyzer.inputGain() = toMic ? 4.0f : 1.0f;
+                        sGainAppliedFor = m_selectedAudioDevice;
+                    }
+                }
                 // m_audioDevices is only populated when FFmpeg is available
                 // (see Application.h — lives in the HAS_FFMPEG block).
                 if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
@@ -1137,13 +1197,15 @@ void Application::updateSources() {
                     if (sw == 0 || sh == 0) { sw = activeZone().width; sh = activeZone().height; }
                 }
                 shaderSrc->setResolution(sw, sh);
-                shaderSrc->setAudioState(
-                    m_audioAnalyzer.smoothedRMS(),
-                    m_audioAnalyzer.bass(),
-                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
-                    m_audioAnalyzer.treble(),
-                    m_audioAnalyzer.fftTexture()
-                );
+                // Baked-in audio reactivity removed: shaders no longer receive
+                // live audio in their GLSL uniforms (audioBass/Mid/High/Level/
+                // FFT). Audio reactivity is now ONLY the explicit, editable
+                // parameter-binding system below (per-param sparkle bindings +
+                // the "Audio Reactivity On" quick-bind button), which reads the
+                // analyzer directly and animates param VALUES. Feeding zeros
+                // neutralizes every `audioReact`-style shader globally without
+                // editing the shader files; they fall back to base visuals.
+                shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0);
                 shaderSrc->applyAudioBindings(
                     m_audioAnalyzer.smoothedRMS(),
                     m_audioAnalyzer.bass(),
@@ -1187,6 +1249,61 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay()
                 );
+            }
+
+            // Audio/MIDI-reactive fluid params — same per-parameter binding
+            // model as ShaderSource, applied to FluidSource's public config.
+            if (layer->source->typeName() == "Fluid") {
+                auto* fsrc = static_cast<FluidSource*>(layer->source.get());
+                fsrc->applyAudioBindings(
+                    m_audioAnalyzer.smoothedRMS(),
+                    m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.beatDecay(),
+                    audioBindDt,
+                    &m_midiManager
+                );
+                // Refresh the optional image-inject source from its bound
+                // layer (mirrors the ShaderSource imageBindings refresh
+                // above — texture IDs can change frame-to-frame for video
+                // / NDI / shader sources). Clear if the bound layer
+                // vanished or hasn't initialized a texture yet.
+                auto& img = fsrc->imageSource();
+                if (img.sourceLayerId != 0) {
+                    bool found = false;
+                    for (int j = 0; j < m_layerStack.count(); j++) {
+                        auto& srcLayer = m_layerStack[j];
+                        if (srcLayer->id == img.sourceLayerId && srcLayer->source) {
+                            GLuint t = srcLayer->source->textureId();
+                            if (t != 0) {
+                                img.textureId = t;
+                                img.width     = srcLayer->source->width();
+                                img.height    = srcLayer->source->height();
+                                img.flippedV  = srcLayer->source->isFlippedV();
+                                found = true;
+                            }
+                            break;
+                        }
+                    }
+                    if (!found) { img.textureId = 0; img.width = img.height = 0; }
+                } else if (img.textureId != 0) {
+                    img.textureId = 0; img.width = img.height = 0;
+                }
+            }
+
+            // Hologram-model layer — feed audio (drives the glitch) and honor
+            // a "change model" request from its Properties panel.
+            if (layer->source->typeName() == "Hologram Model") {
+                auto* hm = static_cast<HologramModelSource*>(layer->source.get());
+                float midAvg = (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f;
+                hm->setAudioState(m_audioAnalyzer.bass(), midAvg, m_audioAnalyzer.treble());
+                if (hm->m_requestModelDialog) {
+                    hm->m_requestModelDialog = false;
+                    std::string path = openFileDialog(
+                        "3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
+                    if (!path.empty()) hm->loadModel(path);
+                }
             }
 
             layer->source->update();
@@ -1279,6 +1396,27 @@ void Application::updateSources() {
         m_scanner.update(m_webcam);
     }
 #endif
+
+#ifdef __APPLE__
+    // MediaPipe-style body tracking → DataBus. Apple Vision runs on its
+    // own capture session/queue; here we just pull the latest snapshot
+    // and publish into the same numeric keys shaders bind to (see
+    // DataBus::availableNumericKeys / vision.*).
+    if (m_visionTracker.isRunning()) {
+        auto vs = m_visionTracker.signals();
+        m_dataBus.setNum("vision.hand.count",      vs.handCount);
+        m_dataBus.setNum("vision.hand.left.x",     vs.leftHandX);
+        m_dataBus.setNum("vision.hand.left.y",     vs.leftHandY);
+        m_dataBus.setNum("vision.hand.right.x",    vs.rightHandX);
+        m_dataBus.setNum("vision.hand.right.y",    vs.rightHandY);
+        m_dataBus.setNum("vision.hand.pinch",      vs.pinch);
+        m_dataBus.setNum("vision.pose.confidence", vs.poseConfidence);
+        m_dataBus.setNum("vision.pose.head.x",     vs.headX);
+        m_dataBus.setNum("vision.pose.head.y",     vs.headY);
+        m_dataBus.setNum("vision.face.detected",   vs.faceDetected);
+        m_dataBus.setNum("vision.face.smile",      vs.smile);
+    }
+#endif
 }
 
 void Application::compositeAndWarp() {
@@ -1369,6 +1507,14 @@ void Application::compositeZone(OutputZone& zone) {
     GLuint sourceTex = zone.compositor.resultTexture();
     if (layers.empty()) {
         sourceTex = m_testPattern.id();
+    }
+    // While a mask (canvas or layer) is being added/edited, swap the
+    // displayed surface for a white alignment grid so the user can line up
+    // the mapping. Reverts automatically the moment mask edit mode exits
+    // (m_maskEditMode is cleared together with the active mask index).
+    // Pure visual aid — masking math/mapping/persistence are untouched.
+    if (m_maskEditMode) {
+        sourceTex = m_maskGrid.id();
     }
 
     // Per-layer masks are applied during compositing (CompositeEngine).
@@ -2129,7 +2275,15 @@ void Application::startVoiceRecording() {
         // Mirrors CueClient::setTranscriptCallback's path so the bubbles
         // light up whether the words come from local speech or a remote
         // Cue session.
-        m_dataBus.set("cue.latest", s);
+        //
+        // Empty partials (recognizer producing nothing during silence)
+        // are ignored — same guard as the /cue/latest OSC handler. This
+        // stops the mic from blanking a bridge-driven cue mid-show, and
+        // stops it from racing test writes during the M7 unicode case.
+        if (s.empty()) return;
+        if (glfwGetTime() >= m_cueLatestSuppressUntil) {
+            m_dataBus.set("cue.latest", s);
+        }
     };
     m_voiceRecognizer.onFinal = [this](const std::string& s) {
         m_voicePartial.clear();
@@ -2290,6 +2444,16 @@ void Application::updateTimelineAnim() {
 }
 
 void Application::renderUI() {
+    // Workspace-mode entry hooks. Fires once per transition (not every frame).
+    // Entering PLAY pops the timeline open so the artist sees the whole show
+    // the instant the workspace lights up — no second click required.
+    if (UIManager::sMode != m_prevWorkspaceMode) {
+        if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
+            m_timelineMinimized = false;
+        }
+        m_prevWorkspaceMode = UIManager::sMode;
+    }
+
     // Recompute the shared timeline/bottom-nav slide geometry first so every
     // panel below reads consistent numbers (Fixes 1–3).
     updateTimelineAnim();
@@ -2372,6 +2536,20 @@ void Application::renderUI() {
         }
     }
 
+    // M3 — Live re-publish tick. Every ~300ms, build the Play wire
+    // payload and ship it ONLY if its content changed. Catches every UI
+    // mutation (layer add via menu/drag, clip edits in the timeline panel,
+    // BPM tap, marker add) without needing to instrument each mutation
+    // site individually. Manual PUBLISH button + OSC trigger keep their
+    // unconditional-send semantics.
+    {
+        double now = glfwGetTime();
+        if (now >= m_nextPublishCheckAt) {
+            m_nextPublishCheckAt = now + 0.30;
+            publishPlayIfChanged();
+        }
+    }
+
     // Process OSC messages
     {
         auto msgs = m_oscManager.pollMessages();
@@ -2389,11 +2567,191 @@ void Application::renderUI() {
                 m_bpmSync.setBPM(msg.floats[0]);
             } else if (msg.address == "/easel/tap") {
                 m_bpmSync.tap();
+            } else if (msg.address == "/easel/play/publish") {
+                // Headless trigger for "publish Play to mobile" — same action
+                // as the File > Publish to Mobile menu item.
+                publishPlayToAgent();
+            } else if (msg.address == "/easel/ndi/refresh") {
+                // M5 — Re-poll the NDI finder for active senders. The
+                // finder accumulates passively in the background; explicit
+                // refresh ensures the next publish carries fresh state.
+#ifdef HAS_NDI
+                if (NDIRuntime::instance().isAvailable()) {
+                    m_ndiSources = m_ndiFinder.sources();
+                }
+#endif
+            } else if (msg.address == "/easel/workspace" && !msg.strings.empty()) {
+                // Programmatic workspace switch — used by the bridge test
+                // harness AND by the mobile control surface (M2). Accepts
+                // case-insensitive "canvas" / "stage" / "play".
+                std::string w = msg.strings[0];
+                for (auto& c : w) c = (char)tolower((unsigned char)c);
+                if (w == "canvas") UIManager::setMode(UIManager::WorkspaceMode::Canvas);
+                else if (w == "stage") UIManager::setMode(UIManager::WorkspaceMode::Stage);
+                else if (w == "play" || w == "show")
+                    UIManager::setMode(UIManager::WorkspaceMode::Show);
+            } else if (msg.address == "/easel/layer/add" && !msg.strings.empty()) {
+                // Programmatic layer add — used by the bridge test harness
+                // and by the mobile control surface (M2). Path resolution
+                // follows the same dispatch loadShader/loadImage/loadVideo
+                // use: extension picks the loader.
+                const std::string& path = msg.strings[0];
+                if (path == "__fluid__") {
+                    addFluid();
+                    // (early-out — special generator token, not a file)
+                }
+                // Hologram model token: "__hologram__" opens the picker;
+                // "__hologram__:/abs/model.glb" loads that model directly.
+                bool isHolo = (path.rfind("__hologram__", 0) == 0);
+                if (isHolo) {
+                    std::string mp;
+                    size_t c = path.find(':');
+                    if (c != std::string::npos) mp = path.substr(c + 1);
+                    addHologramModel(mp);
+                }
+                size_t dot = path.rfind('.');
+                std::string ext = (dot == std::string::npos)
+                    ? std::string{} : path.substr(dot);
+                for (auto& c : ext) c = (char)tolower((unsigned char)c);
+                if (path == "__fluid__" || isHolo) {
+                    // handled above
+                } else if (ext == ".fs" || ext == ".frag" || ext == ".glsl") {
+                    loadShader(path);
+                } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg"
+                           || ext == ".bmp" || ext == ".tga") {
+                    loadImage(path);
+                } else if (ext == ".mp4" || ext == ".avi" || ext == ".mkv"
+                           || ext == ".mov" || ext == ".webm") {
+                    loadVideo(path);
+                } else {
+                    std::cerr << "[OSC] /easel/layer/add: unknown ext "
+                              << ext << " for path " << path << std::endl;
+                }
+            } else if (msg.address == "/easel/layer/remove" && !msg.ints.empty()) {
+                int idx = msg.ints[0];
+                if (idx >= 0 && idx < m_layerStack.count()) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    uint32_t rid = m_layerStack[idx] ? m_layerStack[idx]->id : 0;
+                    m_layerStack.removeLayer(idx);
+                    if (rid) m_timeline.removeTrackForLayer(rid);
+                    if (m_selectedLayer >= m_layerStack.count())
+                        m_selectedLayer = m_layerStack.count() - 1;
+                }
+            } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
+                int zi = msg.ints[0];
+                if (zi >= 0 && zi < (int)m_zones.size()) {
+                    m_activeZone = zi;
+                }
+            } else if (msg.address == "/easel/zone/showAll"
+                       && msg.ints.size() >= 2) {
+                int zi = msg.ints[0];
+                bool flag = msg.ints[1] != 0;
+                if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi]) {
+                    m_zones[zi]->showAllLayers = flag;
+                }
+            } else if (msg.address == "/easel/zone/layerVisibility"
+                       && msg.ints.size() >= 3) {
+                // /easel/zone/layerVisibility <zoneIndex> <layerIndex> <0|1>
+                int zi  = msg.ints[0];
+                int li  = msg.ints[1];
+                bool on = msg.ints[2] != 0;
+                if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi]
+                    && li >= 0 && li < m_layerStack.count()
+                    && m_layerStack[li]) {
+                    uint32_t lid = m_layerStack[li]->id;
+                    if (on) m_zones[zi]->visibleLayerIds.insert(lid);
+                    else    m_zones[zi]->visibleLayerIds.erase(lid);
+                }
+            } else if (msg.address == "/easel/clip/remove"
+                       && msg.ints.size() >= 2) {
+                // /easel/clip/remove <layerIndex> <clipId>
+                int layerIdx = msg.ints[0];
+                uint32_t clipId = (uint32_t)msg.ints[1];
+                if (layerIdx >= 0 && layerIdx < m_layerStack.count()
+                    && m_layerStack[layerIdx]) {
+                    uint32_t lid = m_layerStack[layerIdx]->id;
+                    m_timeline.removeClip(lid, clipId);
+                }
+            } else if (msg.address == "/easel/layer/move" && msg.ints.size() >= 2) {
+                int from = msg.ints[0];
+                int to   = msg.ints[1];
+                if (from >= 0 && from < m_layerStack.count()
+                    && to   >= 0 && to   < m_layerStack.count()
+                    && from != to) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+                    m_layerStack.moveLayer(from, to);
+                    if (m_selectedLayer == from) m_selectedLayer = to;
+                }
+            } else if (msg.address == "/easel/transport/play") {
+                m_timeline.play();
+            } else if (msg.address == "/easel/transport/pause") {
+                m_timeline.pause();
+            } else if (msg.address == "/easel/transport/stop") {
+                m_timeline.stop();
+            } else if (msg.address == "/easel/transport/toggle") {
+                m_timeline.togglePlay();
+            } else if (msg.address == "/easel/transport/seek" && !msg.floats.empty()) {
+                m_timeline.seek((double)msg.floats[0]);
+            } else if (msg.address.rfind("/easel/marker/", 0) == 0) {
+                // /easel/marker/<id> — jump playhead to marker time and
+                // recall its bound scene (if any). Mobile fires this when
+                // the operator taps a marker dot on the timeline strip.
+                uint32_t mid = (uint32_t)atoi(msg.address.c_str() + 14);
+                if (auto* mk = m_timeline.findMarker(mid)) {
+                    m_timeline.seek(mk->time);
+                    if (!mk->sceneName.empty()) {
+                        // SceneManager addresses by index — look up by name
+                        // inline. Markers store the user-facing label of
+                        // the scene to recall.
+                        const auto& scenes = m_sceneManager.scenes();
+                        for (int si = 0; si < (int)scenes.size(); si++) {
+                            if (scenes[si].name == mk->sceneName) {
+                                m_sceneManager.recallScene(si, m_layerStack);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else if (msg.address == "/cue/latest" && !msg.strings.empty()) {
+                // Mobile -> agent (cue.observe) -> Easel via /cue/latest <s>.
+                // Updates the cue.latest DataBus slot; the per-frame binding
+                // loop (around line 990) restarts msgAge automatically when
+                // the value diverges from the last utterance, so voice-native
+                // shaders (text_clusters.fs and friends bound on `msg`)
+                // typewriter-reveal the new cue on the desktop projection.
+                //
+                // M4 edge-case guards:
+                //  - Empty payloads are ignored so an end-of-utterance event
+                //    can't blank a non-empty shader mid-show. To explicitly
+                //    clear, use the dedicated /cue/clear OSC below.
+                //  - Cap the payload at 4 KB so a stuck recognizer or pasted
+                //    novel doesn't bloat the per-frame binding loop or thrash
+                //    the typewriter timer cache.
+                //  - Extend the mic-suppress window so a hot room mic can't
+                //    instantly clobber a bridge-driven cue (M7 unicode/control
+                //    char cases). 1.5s window — long enough for the slow
+                //    desktop SFSpeechRecognizer cadence, short enough that
+                //    "talk to control" still feels live after a manual cue.
+                std::string s = msg.strings[0];
+                if (!s.empty()) {
+                    if (s.size() > 4096) s.resize(4096);
+                    m_dataBus.set("cue.latest", s);
+                    m_cueLatestSuppressUntil = glfwGetTime() + 1.5;
+                }
+            } else if (msg.address == "/cue/clear") {
+                // Explicit reset — the only path that blanks cue.latest from
+                // the bridge. Use this when the show explicitly wants to
+                // hide voice-driven text (intermission, scene change).
+                // Suppress background writers (mic recognizer, cue WS) for
+                // ~500ms so an intentional blank doesn't get instantly
+                // overwritten by stray room audio.
+                m_dataBus.set("cue.latest", "");
+                m_cueLatestSuppressUntil = glfwGetTime() + 0.5;
             } else if (msg.address.rfind("/easel/scene/", 0) == 0) {
                 int idx = atoi(msg.address.c_str() + 13);
                 m_sceneManager.recallScene(idx, m_layerStack);
             } else if (msg.address.rfind("/easel/layer/", 0) == 0) {
-                // Parse /easel/layer/N/property
+                // Parse /easel/layer/N/property OR /easel/layer/N/param/<name>
                 const char* rest = msg.address.c_str() + 13;
                 int layerIdx = atoi(rest);
                 const char* slash = strchr(rest, '/');
@@ -2412,6 +2770,65 @@ void Application::renderUI() {
                         layer->scale = glm::vec2(msg.floats[0]);
                     else if (prop == "rotation" && !msg.floats.empty())
                         layer->rotation = msg.floats[0];
+                    else if (prop.rfind("param/", 0) == 0) {
+                        // M2 — live shader parameter writes from mobile.
+                        // /easel/layer/N/param/<name> <float|int|string>
+                        // Dispatches by ISFInput type so floats land in
+                        // setFloat, strings in setText, ints (0/1) in setBool.
+                        std::string paramName = prop.substr(6);
+                        if (layer->source && layer->source->isShader()
+                            && !paramName.empty()) {
+                            auto* shader =
+                                static_cast<ShaderSource*>(layer->source.get());
+                            if (!msg.floats.empty()) {
+                                shader->setFloat(paramName, msg.floats[0]);
+                            } else if (!msg.strings.empty()) {
+                                shader->setText(paramName, msg.strings[0]);
+                            } else if (!msg.ints.empty()) {
+                                shader->setBool(paramName, msg.ints[0] != 0);
+                            }
+                        }
+                    }
+                    else if (prop == "effect/add" && !msg.strings.empty()) {
+                        // /easel/layer/N/effect/add <typeName>  (e.g. "Sharpen")
+                        // Appends a default-configured effect to the chain.
+                        const std::string& want = msg.strings[0];
+                        for (int t = 0; t < (int)EffectType::COUNT; t++) {
+                            if (want == effectTypeName((EffectType)t)) {
+                                LayerEffect fx;
+                                fx.type = (EffectType)t;
+                                layer->effects.push_back(fx);
+                                break;
+                            }
+                        }
+                    }
+                    else if (prop == "effect/clear") {
+                        layer->effects.clear();
+                    }
+                    else if (prop.rfind("effect/", 0) == 0) {
+                        // /easel/layer/N/effect/<idx>/<field> <float|int> —
+                        // live-tune a param on an existing effect in the chain.
+                        std::string r = prop.substr(7);
+                        size_t sp = r.find('/');
+                        if (sp != std::string::npos) {
+                            int eIdx = atoi(r.substr(0, sp).c_str());
+                            std::string field = r.substr(sp + 1);
+                            if (eIdx >= 0 && eIdx < (int)layer->effects.size()) {
+                                auto& fx = layer->effects[eIdx];
+                                float fv = !msg.floats.empty() ? msg.floats[0]
+                                         : (!msg.ints.empty() ? (float)msg.ints[0] : 0.0f);
+                                int   iv = !msg.ints.empty() ? msg.ints[0] : (int)fv;
+                                if      (field == "enabled")       fx.enabled = iv != 0;
+                                else if (field == "blurRadius")    fx.blurRadius = fv;
+                                else if (field == "pixelSize")     fx.pixelSize = fv;
+                                else if (field == "glowIntensity") fx.glowIntensity = fv;
+                                else if (field == "sharpenAmount") fx.sharpenAmount = fv;
+                                else if (field == "sharpenRadius") fx.sharpenRadius = fv;
+                                else if (field == "audioSignal")   fx.audioSignal = iv;
+                                else if (field == "audioAmount")   fx.audioAmount = fv;
+                            }
+                        }
+                    }
                 }
             }
             // Forward to DataBus
@@ -2475,16 +2892,16 @@ void Application::renderUI() {
                 }
             }
         }
-        // Viewport preview: show the warped output so users on a single display
-        // (common on Mac) can see corner-pin/mesh-warp changes live. Fall back to
-        // the flat composite when in mask edit mode (masks are drawn in pre-warp space).
-        GLuint previewTex = 0;
-        if (m_maskEditMode) {
-            previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
-        } else {
-            previewTex = z.warpFBO.textureId();
-            if (!previewTex) previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
-        }
+        // Viewport preview: always show the warped output so users on a single
+        // display (common on Mac) can see corner-pin/mesh-warp changes live.
+        // In mask edit mode the warp source is the white alignment grid
+        // (sourceTex = m_maskGrid above), so warpFBO already holds the grid
+        // deformed by the SAME corner-pin/mesh-warp transform — showing it
+        // lets users align grid lines to physical geometry while dragging
+        // the mapping handles. Mask points/mapping handles are screen-space
+        // ImGui overlays drawn on top regardless of the preview texture.
+        GLuint previewTex = z.warpFBO.textureId();
+        if (!previewTex) previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
         if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
@@ -2500,6 +2917,65 @@ void Application::renderUI() {
             glm::vec2 isz = m_viewportPanel.baseImageSize();
             if (isz.y > 0) {
                 m_ui.setCanvasBoundsY(io.y, io.y + isz.y);
+            }
+        }
+
+        // ── Interactive fluid splatting (mouse drag + vision hand) ────────
+        // Paint directly into Fluid layers. Left-drag over the canvas in
+        // Normal edit mode (Pavel's pointer-driven splat), and/or a pinch
+        // from hand tracking. Splats are QUEUED on the source and applied
+        // inside FluidSource::update() so this never touches live GL state.
+        {
+            static glm::vec2 s_prevMouseUV(0.5f, 0.5f); static bool s_mouseSplat = false;
+            static glm::vec2 s_prevHandUV(0.5f, 0.5f);  static bool s_handSplat = false;
+            const float kSplatForce = 6000.0f;
+
+            std::vector<FluidSource*> fluids;
+            for (int i = 0; i < m_layerStack.count(); i++) {
+                auto& L = m_layerStack[i];
+                if (L->source && L->source->typeName() == "Fluid")
+                    fluids.push_back(static_cast<FluidSource*>(L->source.get()));
+            }
+
+            glm::vec2 vio = m_viewportPanel.imageOrigin();
+            glm::vec2 vsz = m_viewportPanel.imageSize();
+            if (!fluids.empty() && vsz.x > 0.0f && vsz.y > 0.0f) {
+                // 1) Mouse pointer — left-drag over the canvas in Normal mode.
+                bool normalMode = (m_viewportPanel.editMode() == ViewportPanel::EditMode::Normal);
+                bool spaceHeld  = ImGui::IsKeyDown(ImGuiKey_Space);
+                ImVec2 mp = ImGui::GetMousePos();
+                float u = (mp.x - vio.x) / vsz.x;
+                float v = (mp.y - vio.y) / vsz.y;
+                bool over = (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f);
+                glm::vec2 uv(u, 1.0f - v);   // GL uv: origin bottom-left
+                bool painting = normalMode && !spaceHeld && over &&
+                                m_viewportPanel.isHovered() &&
+                                ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                                !ImGui::GetIO().WantTextInput;
+                if (painting) {
+                    if (!s_mouseSplat) { s_prevMouseUV = uv; s_mouseSplat = true; }
+                    glm::vec2 d = uv - s_prevMouseUV;
+                    for (auto* f : fluids)
+                        f->queuePointerSplat(uv.x, uv.y, d.x * kSplatForce, d.y * kSplatForce);
+                    s_prevMouseUV = uv;
+                } else {
+                    s_mouseSplat = false;
+                }
+
+                // 2) Vision hand — a pinch drives a splat at the hand position.
+                float pinch = m_dataBus.getNum("vision.hand.pinch", 0.0f);
+                if (pinch > 0.5f) {
+                    float hx = m_dataBus.getNum("vision.hand.left.x", 0.5f);
+                    float hy = m_dataBus.getNum("vision.hand.left.y", 0.5f);
+                    glm::vec2 huv(hx, 1.0f - hy);  // flip to GL origin
+                    if (!s_handSplat) { s_prevHandUV = huv; s_handSplat = true; }
+                    glm::vec2 d = huv - s_prevHandUV;
+                    for (auto* f : fluids)
+                        f->queuePointerSplat(huv.x, huv.y, d.x * kSplatForce, d.y * kSplatForce);
+                    s_prevHandUV = huv;
+                } else {
+                    s_handSplat = false;
+                }
             }
         }
         // Floating zone + OUTPUT dock — visible only in Canvas mode.
@@ -2550,17 +3026,36 @@ void Application::renderUI() {
     }
 
     // Handle "+" button signals from layer panel
-    if (m_layerPanel.wantsAddImage) {
-        std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
-        if (!path.empty()) loadImage(path);
-    }
-    if (m_layerPanel.wantsAddVideo) {
-        std::string path = openFileDialog("Videos\0*.mp4;*.avi;*.mkv;*.mov;*.webm\0All Files\0*.*\0");
-        if (!path.empty()) loadVideo(path);
-    }
-    if (m_layerPanel.wantsAddShader) {
-        std::string path = openFileDialog("ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
-        if (!path.empty()) loadShader(path);
+    {
+        // Snapshot count before so we can detect a successful add and (when
+        // requested) auto-bind the new layer to a Fluid's image source.
+        const int prevCount = m_layerStack.count();
+        auto bindNewLayerToFluid = [&]() {
+            if (!m_layerPanel.postCreateBindFluidImage) return;
+            if (m_layerStack.count() <= prevCount) {
+                m_layerPanel.postCreateBindFluidImage = nullptr;
+                return;
+            }
+            uint32_t newId = m_layerStack[m_layerStack.count() - 1]->id;
+            m_layerPanel.postCreateBindFluidImage->imageSource().sourceLayerId = newId;
+            m_layerPanel.postCreateBindFluidImage->m_imageEnabled = true;
+            m_layerPanel.postCreateBindFluidImage = nullptr;
+        };
+        if (m_layerPanel.wantsAddImage) {
+            std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
+            if (!path.empty()) loadImage(path);
+            bindNewLayerToFluid();
+        }
+        if (m_layerPanel.wantsAddVideo) {
+            std::string path = openFileDialog("Videos\0*.mp4;*.avi;*.mkv;*.mov;*.webm\0All Files\0*.*\0");
+            if (!path.empty()) loadVideo(path);
+            bindNewLayerToFluid();
+        }
+        if (m_layerPanel.wantsAddShader) {
+            std::string path = openFileDialog("ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
+            if (!path.empty()) loadShader(path);
+            bindNewLayerToFluid();
+        }
     }
 
     // Warp editor renders FIRST so the mapping parameters (corner pin / mesh
@@ -3096,7 +3591,7 @@ void Application::renderUI() {
         // a centered live-output preview so the operator can see what's
         // currently going to the projector while they drive Timeline +
         // MIDI + Audio from the right rail.
-        if (m_ui.isPanelVisible("Show") && UIManager::sMode == UIManager::WorkspaceMode::Show) {
+        if (m_ui.isPanelVisible("Play") && UIManager::sMode == UIManager::WorkspaceMode::Show) {
             // Cmd/Ctrl + = / - / 0 zoom shortcuts for the Show preview.
             // Mirrors the canvas mouse-wheel zoom logic (1.1x per step,
             // clamped to [0.05, 20]). Use io.KeySuper on macOS, Ctrl
@@ -3121,7 +3616,7 @@ void Application::renderUI() {
             }
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::Begin("Show", nullptr,
+            ImGui::Begin("Play", nullptr,
                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::PopStyleVar();
 
@@ -3154,15 +3649,25 @@ void Application::renderUI() {
                 }
             }
 
-            // Zoom toolbar — `−` / `+` / `Fit`. Mirrors the simple wheel
-            // zoom Canvas uses (ViewportPanel::m_zoom) but lives here as
-            // explicit clickable affordances since the Show preview is a
-            // single Image() and there's no scroll-wheel hookup yet. The
-            // labels stay text-only (no icon font dependency) so they
-            // render the same on every platform.
+            // PLAY workspace top toolbar — zoom + PUBLISH split across
+            // two rows. PUBLISH gets its OWN row, left-aligned, so it
+            // doesn't collide with the floating right-cluster (audio/
+            // OUTPUT panels) that overlays the top-right corner of the
+            // workspace area.
+            const float kPad = 14.0f;
+
+            // Single toolbar row — zoom controls on the left, a quiet
+            // "Publish" affordance on the right. The publish action used
+            // to be a loud green pill that fought the chrome; it now reads
+            // as part of the toolbar (ghost background, muted text, accent
+            // only on hover / brief confirmation flash).
             {
                 ImGui::Dummy(ImVec2(0, 4));
-                ImGui::Indent(10.0f);
+                float rowTopY = ImGui::GetCursorPosY();
+                float contentRightX = ImGui::GetCursorPosX()
+                                    + ImGui::GetContentRegionAvail().x;
+
+                ImGui::Indent(kPad);
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
                 if (ImGui::SmallButton("-##showzoomout")) {
                     m_showZoom = std::max(0.05f, m_showZoom / 1.1f);
@@ -3177,8 +3682,44 @@ void Application::renderUI() {
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("%.0f%%", m_showZoom * 100.0f);
-                ImGui::PopStyleVar();
-                ImGui::Unindent(10.0f);
+
+                // Quiet publish affordance — left-aligned right after the
+                // zoom controls so it reads as one toolbar cluster and
+                // never collides with the floating audio/OUTPUT panel on
+                // the right. Ghost background, muted text, faint green
+                // accent only on hover / during the post-publish flash.
+                (void)rowTopY; (void)contentRightX;
+                ImGui::SameLine(0, 22);
+                bool flashing = glfwGetTime() < m_publishFlashUntil;
+                const char* pubLabel = flashing
+                    ? "\xe2\x9c\x93 Published"           // ✓ Published
+                    : "\xe2\x86\x91 Publish to Mobile";  // ↑ Publish to Mobile
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                                       IM_COL32(255, 255, 255, 10));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                       IM_COL32(0x6E, 0xE7, 0x55, 38));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                                       IM_COL32(0x6E, 0xE7, 0x55, 60));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    flashing ? IM_COL32(0x6E, 0xE7, 0x55, 235)
+                             : IM_COL32(150, 156, 168, 235));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+                // SmallButton inherits the zoom row's FramePadding so it
+                // sits flush on the same baseline as - / + / Fit.
+                if (ImGui::SmallButton(pubLabel)) {
+                    publishPlayToAgent();
+                    m_publishFlashUntil = glfwGetTime() + 1.6;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Push this Show (layers + timeline + "
+                                       "markers + bpm)\n"
+                                       "to paired iPhones via the agent.");
+                }
+                ImGui::PopStyleVar();      // FrameRounding
+                ImGui::PopStyleColor(4);
+
+                ImGui::PopStyleVar();      // FramePadding (zoom row)
+                ImGui::Unindent(kPad);
             }
 
             // Live output preview — shows the active zone's composited
@@ -3228,6 +3769,7 @@ void Application::renderUI() {
     // Icon-pad + ###ID — empty label space gives drawInspectorTabIcons()
     // room to paint the Sources icon over the tab.
     bool sourcesOpen = sourcesVisible && ImGui::Begin("        ###Sources");
+    // 6-pill nav is rendered at the right-dock host level (one bar total).
     // Tab bar — pinned at uniform icon-only width. Reorderable was the
     // culprit behind the "first tab wide / rest clustered" spacing
     // bug: combined with ImGui's tab-cache it preserved a stretched
@@ -3235,40 +3777,19 @@ void Application::renderUI() {
     // wanted them all the same size. Disabling Reorderable + forcing
     // ItemSpacing.x to 0 nails the tabs to a tight, uniform horizontal
     // rhythm.
-    ImGuiTabBarFlags sourcesTabFlags = ImGuiTabBarFlags_FittingPolicyResizeDown
-                                     | ImGuiTabBarFlags_NoTabListScrollingButtons;
-    // Per-tab width = panelWidth / N so the 4 round pills sit on a
-    // uniform horizontal grid spanning the entire Sources panel header.
-    // ImGui sizes each tab as label_width + 2*FramePadding.x; with
-    // ItemSpacing.x = 0 the row total is N*(label + 2*pad). Solve for
-    // pad given the available content width.
-    float kTabCount = 4.0f;  // Shaders / Etherea / Camera / Display
-    float kPanelW   = ImGui::GetContentRegionAvail().x;
-    float kLabelW   = ImGui::CalcTextSize("           ").x;
-    float kTabPadX  = std::max(4.0f,
-                               (kPanelW - kTabCount * kLabelW) / (2.0f * kTabCount));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(kTabPadX, 4.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(0.0f, 4.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0.0f, 0.0f));
-    // Suppress ImGui's default rounded-rect tab chrome AND the selected
-    // overline — drawSourcesTabIcons paints a circular pill behind each
-    // icon instead. ImGui defers tab-strip rendering until EndTabBar(),
-    // so the colours must remain pushed across all the BeginTabItem
-    // blocks; the matching PopStyleColor sits next to EndTabBar below.
-    // Gated on sourcesVisible so the push/pop pair stays balanced when
-    // the Sources panel is hidden (e.g. Stage/Show modes) — otherwise
-    // we'd push without the pop and ImGui asserts on a stack imbalance.
-    if (sourcesVisible) {
-        ImGui::PushStyleColor(ImGuiCol_Tab,                       IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabHovered,                IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabSelected,               IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline,       IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabDimmed,                 IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected,         IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, IM_COL32(0, 0, 0, 0));
-    }
-    bool sourcesTabsOpen = sourcesOpen && ImGui::BeginTabBar("##SourcesTabs", sourcesTabFlags);
-    ImGui::PopStyleVar(3);
+    // The inner Sources tab strip used to live here as an ImGui TabBar
+    // wrapping each Shaders / Etherea / Camera / Display section. The
+    // 6-pill pinned nav at the top of every right-dock panel
+    // (UIManager::renderRightDockNavBar) is now the single source of
+    // truth for which source sub-panel is visible, so the strip is gone
+    // — it had been rendering as a stranded row of empty "..." ellipsis
+    // stubs once its icon overlay was removed. `sourcesTabsOpen` stays
+    // as a simple alias of sourcesOpen so the per-section branches keep
+    // the same shape and selection now reads from m_ui.activeSourcesTab().
+    bool sourcesTabsOpen = sourcesOpen;
+    (void)sourcesTabsOpen;
+    using ST = UIManager::SourceTab;
+    ST sourcesActiveSub = m_ui.activeSourcesTab();
 
     // ── VOICE tab ──────────────────────────────────────────────────────
     // Mic toggle, audio device picker, decay slider, live transcript.
@@ -3396,7 +3917,7 @@ void Application::renderUI() {
     }
 
     // ShaderClaw tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Shaders")) {
+    if (sourcesTabsOpen && sourcesActiveSub == ST::Shader) {
     {
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -3612,7 +4133,8 @@ void Application::renderUI() {
                             manifest.push_back(entry);
 
                             std::ofstream out(manifestPath);
-                            out << manifest.dump(2);
+                            out << manifest.dump(2, ' ', false,
+                                    nlohmann::json::error_handler_t::replace);
                             out.close();
 
                             m_shaderClaw.refreshManifest();
@@ -3742,6 +4264,83 @@ void Application::renderUI() {
 
                 if (hov) ParamRow::Tooltip("Particles\n\nGPU particle system layer");
                 if (clicked) addParticles();
+
+                ImGui::PopID();
+                gridPos++;
+            }
+
+            // Fluid tile — VFX-only, sits beside the Particles card. Adds the
+            // native GPU fluid-simulation generator (same as the File-menu
+            // "Add Fluid Simulation" / OSC __fluid__), so it's pickable here.
+            if (s_scSubTab == 0) {
+                if (gridPos % cols != 0) ImGui::SameLine(0, cellPad);
+                ImGui::PushID("fluid-card");
+                ImVec2 cellPos = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##ftile", ImVec2(thumbSize, cellH));
+                bool hov = ImGui::IsItemHovered();
+                ImDrawList* d = ImGui::GetWindowDrawList();
+
+                ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+                d->AddRectFilled(cellPos,
+                                 ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                                 tileBg, 6.0f);
+                d->AddRect(cellPos,
+                           ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                           tileEdge, 6.0f, 0, 1.0f);
+
+                ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
+                ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
+                d->AddRectFilled(thumbMin, thumbMax, IM_COL32(8, 12, 24, 255), 4.0f);
+
+                // Flowing wavy bands — reads as a live fluid preview.
+                d->PushClipRect(thumbMin, thumbMax, true);
+                float t  = (float)ImGui::GetTime();
+                float tw = thumbMax.x - thumbMin.x;
+                float th = thumbMax.y - thumbMin.y;
+                const ImU32 band[3] = { IM_COL32( 90, 200, 255, 200),
+                                        IM_COL32(255,  90, 200, 200),
+                                        IM_COL32(150, 255, 180, 200) };
+                for (int b = 0; b < 3; b++) {
+                    float baseY = thumbMin.y + th * (0.32f + 0.18f * b);
+                    ImVec2 prev(0, 0);
+                    for (int s = 0; s <= 24; s++) {
+                        float fx = s / 24.0f;
+                        float y = baseY + sinf(fx * 6.2831f * 1.5f +
+                                               t * (1.0f + 0.3f * b) + b) * th * 0.12f;
+                        ImVec2 p(thumbMin.x + fx * tw, y);
+                        if (s > 0) d->AddLine(prev, p, band[b], 2.0f);
+                        prev = p;
+                    }
+                }
+                d->PopClipRect();
+
+                // "+" sigil so the card reads as "create".
+                {
+                    ImVec2 c((thumbMin.x + thumbMax.x) * 0.5f,
+                             (thumbMin.y + thumbMax.y) * 0.5f);
+                    float arm = tw * 0.18f;
+                    float thk = std::max(2.0f, arm * 0.22f);
+                    ImU32 plus = hov ? IM_COL32(255, 255, 255, 240)
+                                     : IM_COL32(235, 240, 255, 200);
+                    d->AddRectFilled(ImVec2(c.x - arm,       c.y - thk * 0.5f),
+                                     ImVec2(c.x + arm,       c.y + thk * 0.5f),
+                                     plus, thk * 0.5f);
+                    d->AddRectFilled(ImVec2(c.x - thk * 0.5f, c.y - arm),
+                                     ImVec2(c.x + thk * 0.5f, c.y + arm),
+                                     plus, thk * 0.5f);
+                }
+
+                const char* title = "Fluid";
+                ImVec2 ts = ImGui::CalcTextSize(title);
+                d->AddText(ImVec2(cellPos.x + (thumbSize - ts.x) * 0.5f,
+                                  cellPos.y + thumbSize - 2),
+                           hov ? IM_COL32(255, 255, 255, 255)
+                               : IM_COL32(220, 226, 235, 220),
+                           title);
+
+                if (hov) ParamRow::Tooltip("Fluid\n\nGPU fluid-simulation layer");
+                if (clicked) addFluid();
 
                 ImGui::PopID();
                 gridPos++;
@@ -3887,6 +4486,136 @@ void Application::renderUI() {
                         ParamRow::Tooltip(shader.title.c_str());
                     }
                 }
+
+                // ── Overflow ⋯ button (top-right of thumb). Manual hit-test
+                //    so it doesn't advance the grid cursor. Opens a popup
+                //    with Improve / Save Params / Combine / Delete.
+                bool menuClick = false;
+                ImVec2 menuMin, menuMax;
+                {
+                    const float btnSz = 22.0f;
+                    menuMax = ImVec2(thumbMax.x - 2.0f, thumbMin.y + btnSz + 2.0f);
+                    menuMin = ImVec2(menuMax.x - btnSz, menuMax.y - btnSz);
+                    ImVec2 mp = ImGui::GetMousePos();
+                    bool hoverMenu = (mp.x >= menuMin.x && mp.x <= menuMax.x &&
+                                      mp.y >= menuMin.y && mp.y <= menuMax.y);
+                    bool show = hov || hoverMenu;
+                    if (show) {
+                        ImU32 bg = hoverMenu ? IM_COL32(0, 0, 0, 200)
+                                             : IM_COL32(0, 0, 0, 130);
+                        d->AddRectFilled(menuMin, menuMax, bg, 4.0f);
+                        d->AddRect(menuMin, menuMax,
+                                   IM_COL32(255, 255, 255, hoverMenu ? 200 : 90),
+                                   4.0f, 0, 1.0f);
+                        // Three white dots
+                        float cy = (menuMin.y + menuMax.y) * 0.5f;
+                        float cx = (menuMin.x + menuMax.x) * 0.5f;
+                        float dotR = 1.6f;
+                        float dotGap = 4.0f;
+                        ImU32 dotC = IM_COL32(255, 255, 255, hoverMenu ? 255 : 200);
+                        d->AddCircleFilled(ImVec2(cx - dotGap, cy), dotR, dotC, 6);
+                        d->AddCircleFilled(ImVec2(cx,           cy), dotR, dotC, 6);
+                        d->AddCircleFilled(ImVec2(cx + dotGap, cy), dotR, dotC, 6);
+                    }
+                    if (hoverMenu && ImGui::IsMouseClicked(0)) {
+                        menuClick = true;
+                    }
+                }
+
+                // Manual hit-test for the menu also has to suppress the
+                // surrounding InvisibleButton's click — otherwise we'd
+                // both open the menu AND load the shader.
+                if (menuClick) {
+                    clicked = false;
+                    ImGui::OpenPopup("##shaderMenu");
+                }
+
+                if (ImGui::BeginPopup("##shaderMenu")) {
+                    // Save Params — only enabled if this shader is the
+                    // active source on the selected layer (so we have
+                    // current values to capture).
+                    bool canSave = false;
+                    std::shared_ptr<ShaderSource> activeShader;
+                    if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+                        auto& sel = m_layerStack[m_selectedLayer];
+                        if (sel && sel->source) {
+                            auto s = std::dynamic_pointer_cast<ShaderSource>(sel->source);
+                            if (s && sel->name == shader.file) {
+                                activeShader = s;
+                                canSave = true;
+                            }
+                        }
+                    }
+
+                    if (ImGui::MenuItem("Save Params", nullptr, false, canSave)) {
+                        if (activeShader) {
+                            int n = m_shaderPresets.capture(shader.file, *activeShader);
+                            std::cout << "[ShaderPresets] Saved " << n
+                                      << " params for " << shader.file << "\n";
+                        }
+                    }
+                    if (m_shaderPresets.has(shader.file)) {
+                        if (ImGui::MenuItem("Clear Saved Params")) {
+                            m_shaderPresets.clear(shader.file);
+                        }
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Improve (Moondream)", nullptr, false, false)) {
+                        // TODO: hook into Moondream auto-improve loop.
+                    }
+                    if (ImGui::MenuItem("Combine With…", nullptr, false, false)) {
+                        // TODO: open shader-picker for A/B merge.
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Delete")) {
+                        // Move .fs into ~/.easel/trash/ and drop from manifest.
+                        namespace fs = std::filesystem;
+                        try {
+                            const char* home = std::getenv("HOME");
+                            fs::path trashDir = fs::path(home ? home : ".")
+                                              / ".easel" / "trash";
+                            std::error_code ec;
+                            fs::create_directories(trashDir, ec);
+                            fs::path src(shader.fullPath);
+                            fs::path dst = trashDir / src.filename();
+                            int suffix = 1;
+                            while (fs::exists(dst)) {
+                                dst = trashDir / (src.stem().string() + "_" +
+                                                  std::to_string(suffix++) +
+                                                  src.extension().string());
+                            }
+                            fs::rename(src, dst, ec);
+
+                            // Drop entry from manifest.
+                            fs::path manifestPath =
+                                fs::path(m_shaderClaw.shadersDir()) / "manifest.json";
+                            if (fs::exists(manifestPath)) {
+                                nlohmann::json manifest = nlohmann::json::array();
+                                std::ifstream mf(manifestPath);
+                                if (mf) mf >> manifest;
+                                mf.close();
+                                if (manifest.is_array()) {
+                                    nlohmann::json kept = nlohmann::json::array();
+                                    for (auto& e : manifest) {
+                                        if (e.value("file", std::string()) != shader.file)
+                                            kept.push_back(e);
+                                    }
+                                    std::ofstream out(manifestPath);
+                                    out << kept.dump(2, ' ', false,
+                                            nlohmann::json::error_handler_t::replace);
+                                }
+                            }
+                            m_shaderClaw.refreshManifest();
+                            m_shaderPresets.clear(shader.file);
+                            std::cout << "[ShaderClaw] Trashed " << shader.file
+                                      << " → " << dst.string() << "\n";
+                        } catch (const std::exception& e) {
+                            std::cerr << "[ShaderClaw] Delete failed: " << e.what() << "\n";
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+
                 if (clicked) loadShader(shader.fullPath);
 
                 ImGui::PopID();
@@ -3898,8 +4627,7 @@ void Application::renderUI() {
             (void)hoveredPath;
         }
     }
-    ImGui::EndTabItem();
-    }  // end ShaderClaw tab
+    }  // end ShaderClaw section (was a BeginTabItem block before the inner Sources TabBar was retired)
     // NDI tab (moved from position 4 to 1)
 #ifdef HAS_NDI
     // NDI tab folded into "Display" — gated false so the body stays in
@@ -3919,7 +4647,7 @@ void Application::renderUI() {
                     }
                     if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
                         if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Easel");
+                            m_ndiOutput.create("Lu");
                         } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
                             m_ndiOutput.destroy();
                         }
@@ -4127,7 +4855,7 @@ void Application::renderUI() {
 
 
     // Etherea tab
-    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Etherea")) {
+    if (sourcesTabsOpen && sourcesActiveSub == ST::Mic) {
     {
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
@@ -4390,15 +5118,14 @@ void Application::renderUI() {
         }
 #endif
     }
-    ImGui::EndTabItem();
-    }  // end Etherea tab
+    }  // end Etherea section
 
     // Particles tab REMOVED — particle creation is exposed inside the
     // ShaderClaw tab as a "+ Particle System" entry above the shader
     // browser, since particles are conceptually another generator source.
 
 #ifdef HAS_OPENCV
-    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Camera")) {
+    if (sourcesTabsOpen && sourcesActiveSub == ST::Cam) {
         ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
 
@@ -4422,13 +5149,96 @@ void Application::renderUI() {
         ImGui::TextWrapped("Camera 0 is typically the built-in webcam. If a camera is already in use by the scene scanner it cannot be opened a second time.");
         ImGui::PopStyleColor();
 
-        ImGui::EndTabItem();
+#ifdef __APPLE__
+        // ── Body Tracking (MediaPipe-style, via Apple Vision) ──────────
+        // Mirrors ShaderClaw3's "Body Tracking" toggle + Hand/Face/Pose
+        // mode buttons + Live Signals readout. Runs its own camera
+        // session, so it works whether or not a webcam layer is added.
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextUnformatted("Body Tracking");
+        ImGui::SameLine();
+        {
+            bool running = m_visionTracker.isRunning();
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                running ? ImVec4(0.43f, 0.91f, 0.34f, 0.55f)
+                        : ImVec4(1, 1, 1, 0.12f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                running ? ImVec4(0.43f, 0.91f, 0.34f, 0.75f)
+                        : ImVec4(1, 1, 1, 0.22f));
+            if (ImGui::Button(running ? "ON ##bt" : "OFF##bt", ImVec2(64, 0))) {
+                if (running) m_visionTracker.stop();
+                else         m_visionTracker.start();
+            }
+            ImGui::PopStyleColor(2);
+        }
+
+        if (m_visionTracker.isRunning()) {
+            // Mode buttons — Hand / Face / Pose. Each is an independent
+            // toggle (ShaderClaw3 allows multiple modes at once).
+            ImGui::Dummy(ImVec2(0, 4));
+            auto modeBtn = [&](const char* label, bool on,
+                               std::function<void(bool)> setter) {
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                    on ? ImVec4(0.30f, 0.55f, 0.95f, 0.60f)
+                       : ImVec4(1, 1, 1, 0.10f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                    on ? ImVec4(0.30f, 0.55f, 0.95f, 0.80f)
+                       : ImVec4(1, 1, 1, 0.20f));
+                if (ImGui::Button(label, ImVec2(72, 0))) setter(!on);
+                ImGui::PopStyleColor(2);
+            };
+            modeBtn("Hand", m_visionTracker.handEnabled(),
+                    [&](bool v){ m_visionTracker.setHandEnabled(v); });
+            ImGui::SameLine();
+            modeBtn("Face", m_visionTracker.faceEnabled(),
+                    [&](bool v){ m_visionTracker.setFaceEnabled(v); });
+            ImGui::SameLine();
+            modeBtn("Pose", m_visionTracker.poseEnabled(),
+                    [&](bool v){ m_visionTracker.setPoseEnabled(v); });
+
+            // Live Signals readout — the values being pushed to DataBus.
+            ImGui::Dummy(ImVec2(0, 8));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.65f, 0.72f, 1));
+            ImGui::TextUnformatted("Live Signals");
+            ImGui::PopStyleColor();
+            auto vs = m_visionTracker.signals();
+            auto sigBar = [&](const char* label, float v) {
+                ImGui::Text("%-14s", label);
+                ImGui::SameLine(140);
+                ImGui::ProgressBar(std::max(0.0f, std::min(1.0f, v)),
+                                   ImVec2(-1, 14));
+            };
+            if (m_visionTracker.handEnabled()) {
+                ImGui::Text("hands: %.0f", vs.handCount);
+                sigBar("pinch",      vs.pinch);
+                sigBar("hand1.x",    vs.leftHandX);
+                sigBar("hand1.y",    vs.leftHandY);
+            }
+            if (m_visionTracker.poseEnabled()) {
+                sigBar("pose.conf",  vs.poseConfidence);
+                sigBar("head.x",     vs.headX);
+                sigBar("head.y",     vs.headY);
+            }
+            if (m_visionTracker.faceEnabled()) {
+                sigBar("face",       vs.faceDetected);
+                sigBar("smile",      vs.smile);
+            }
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.62f, 1));
+            ImGui::TextWrapped("Bind these in a shader's text/number input "
+                               "(vision.hand.pinch, vision.pose.head.x, ...).");
+            ImGui::PopStyleColor();
+        }
+#endif
+
     }
 #endif
 
     // Display tab (was "Capture") — hosts both screen capture and the
     // NDI source list so all "incoming display feed" routes live together.
-    if (sourcesTabsOpen && ImGui::BeginTabItem("           ###Display")) {
+    if (sourcesTabsOpen && sourcesActiveSub == ST::Win) {
     {
 #if defined(_WIN32) || defined(__APPLE__)
         if (flatSection("Screen Capture")) {
@@ -4559,7 +5369,7 @@ void Application::renderUI() {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
                     if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
                         if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Easel");
+                            m_ndiOutput.create("Lu");
                         } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
                             m_ndiOutput.destroy();
                         }
@@ -4596,11 +5406,13 @@ void Application::renderUI() {
         }
 #endif // HAS_NDI
     }
-    ImGui::EndTabItem();
-    }  // end Capture tab
+    }  // end Capture (Win/Display) section
 
 #ifdef HAS_SPOUT
-    if (sourcesTabsOpen && ImGui::BeginTabItem("Spout")) {
+    // Spout retained behind `false &&` (Windows-only) since the new pinned
+    // 4-icon source nav (Shader / Mic / Cam / Win) has no Spout entry. Re-
+    // expose by adding a SourceTab::Spout when needed.
+    if (false && sourcesTabsOpen && ImGui::BeginTabItem("Spout")) {
     {
         bool spoutOn = m_spoutOutputEnabled && m_spoutOutput.isActive();
         if (spoutOn) {
@@ -4628,13 +5440,10 @@ void Application::renderUI() {
     }  // end Spout tab
 #endif
 
-    // Close the Sources tab bar + window (opened before the Capture tab).
-    // Match the conditional Begin() above — only End() if we Begin'd.
-    if (sourcesTabsOpen) ImGui::EndTabBar();
-    // Pop the 7 transparent tab-chrome colours pushed before BeginTabBar.
-    // EndTabBar is where the deferred tab-strip render happens, so the
-    // colours have to stay live until *after* this point.
-    if (sourcesVisible) ImGui::PopStyleColor(7);
+    // The inner Sources TabBar + its 7 transparent-chrome PushStyleColor
+    // calls were retired with the strip itself — see the matching comment
+    // near where `sourcesTabsOpen` is initialised. Only End() the Sources
+    // window itself if we Begin'd it.
     if (sourcesVisible) ImGui::End();
 
 // (Stream panel removed — stream key + aspect now live in the GO LIVE
@@ -4805,6 +5614,127 @@ void Application::renderUI() {
         gainRow("Attack",  "##audAttack",  &m_audioAnalyzer.smoothAttack(),  0.5f, 30.0f, "%.1f /s");
         gainRow("Release", "##audRelease", &m_audioAnalyzer.smoothRelease(), 0.5f, 30.0f, "%.1f /s");
 
+        // ── Response curve ────────────────────────────────────────────────
+        // Smooth transfer curve from raw band energy → the value shaders react
+        // to. Pick a band (Master applies on top of all), then shape it:
+        // Curve = ease-in/out gamma, Floor/Ceil = soft gate + headroom, S-Curve
+        // = smoothstep contrast. The graph is the exact function, with a live
+        // green dot showing where the current signal lands on it.
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::SeparatorText("Response");
+
+        static int curveBand = CurveBass;
+
+        // ── Preset picker ─────────────────────────────────────────────────
+        // One-click easing curves (table lives in AudioAnalyzer.h). Picking a
+        // preset writes its AudioCurve into the active band (or all bands if the
+        // checkbox is set) and, when the preset specifies one, sets the GLOBAL
+        // attack/release smoothing too — so "smoother" presets actually soften
+        // the temporal envelope, not just the transfer shape. Smoothing is
+        // shared by every band; only the curve is per-band.
+        {
+            static int presetSel = -1;          // -1 = "Custom" (none applied yet)
+            static bool applyAllBands = false;   // off = only the selected band
+            const char* preview = (presetSel >= 0 && presetSel < kAudioCurvePresetCount)
+                                      ? kAudioCurvePresets[presetSel].name
+                                      : "Custom…";
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.63f, 0.70f, 1.0f));
+            ImGui::Text("Preset");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(64);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##audCurvePreset", preview)) {
+                for (int p = 0; p < kAudioCurvePresetCount; p++) {
+                    const AudioCurvePreset& pr = kAudioCurvePresets[p];
+                    if (ImGui::Selectable(pr.name, presetSel == p)) {
+                        presetSel = p;
+                        // Apply curve to the active band — or all bands if asked.
+                        if (applyAllBands) {
+                            for (int b = 0; b < CurveCount; b++)
+                                m_audioAnalyzer.curve(b) = pr.curve;
+                        } else {
+                            m_audioAnalyzer.curve(curveBand) = pr.curve;
+                        }
+                        // Apply global smoothing only if the preset defines it.
+                        if (pr.attack > 0.0f) {
+                            m_audioAnalyzer.smoothAttack()  = pr.attack;
+                            m_audioAnalyzer.smoothRelease() = pr.release;
+                        }
+                    }
+                    if (ImGui::IsItemHovered() && pr.desc)
+                        ImGui::SetTooltip("%s", pr.desc);
+                }
+                ImGui::EndCombo();
+            }
+            // Tooltip on the closed combo too, so the feel is discoverable.
+            if (presetSel >= 0 && ImGui::IsItemHovered() && kAudioCurvePresets[presetSel].desc)
+                ImGui::SetTooltip("%s", kAudioCurvePresets[presetSel].desc);
+
+            ImGui::Dummy(ImVec2(0, 2));
+            ImGui::Checkbox("Apply to all bands", &applyAllBands);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("On: preset writes every band (Master + Bass/Low/High/Treble).\n"
+                                  "Off: preset only shapes the band selected below.");
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+
+        const char* bandNames[CurveCount] = {"Master", "Bass", "Low", "High", "Treble"};
+        for (int b = 0; b < CurveCount; b++) {
+            if (b) ImGui::SameLine();
+            bool on = (curveBand == b);
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.29f, 0.55f, 1.0f, 0.90f));
+            if (ImGui::SmallButton(bandNames[b])) curveBand = b;
+            if (on) ImGui::PopStyleColor();
+        }
+
+        AudioCurve& cv = m_audioAnalyzer.curve(curveBand);
+
+        // Transfer-curve graph.
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 gp = ImGui::GetCursorScreenPos();
+            float gw = ImGui::GetContentRegionAvail().x;
+            float gh = 92.0f;
+            ImVec2 gmax(gp.x + gw, gp.y + gh);
+            dl->AddRectFilled(gp, gmax, IM_COL32(12, 14, 20, 255), 6.0f);
+            dl->AddRect(gp, gmax, IM_COL32(255, 255, 255, 30), 6.0f);
+            // identity reference (faint diagonal) + mid gridlines
+            dl->AddLine(ImVec2(gp.x, gmax.y), ImVec2(gmax.x, gp.y), IM_COL32(255, 255, 255, 22));
+            dl->AddLine(ImVec2(gp.x + gw * 0.5f, gp.y), ImVec2(gp.x + gw * 0.5f, gmax.y), IM_COL32(255, 255, 255, 12));
+            dl->AddLine(ImVec2(gp.x, gp.y + gh * 0.5f), ImVec2(gmax.x, gp.y + gh * 0.5f), IM_COL32(255, 255, 255, 12));
+            // the curve
+            const int STEPS = 56;
+            ImVec2 prev;
+            for (int i = 0; i <= STEPS; i++) {
+                float x = (float)i / STEPS;
+                float y = applyAudioCurve(x, cv);
+                ImVec2 p(gp.x + x * gw, gp.y + (1.0f - y) * gh);
+                if (i > 0) dl->AddLine(prev, p, IM_COL32(120, 180, 255, 235), 2.0f);
+                prev = p;
+            }
+            // live signal dot + drop line
+            float lx = std::min(std::max(m_audioAnalyzer.curveInput(curveBand), 0.0f), 1.0f);
+            float ly = applyAudioCurve(lx, cv);
+            ImVec2 dot(gp.x + lx * gw, gp.y + (1.0f - ly) * gh);
+            dl->AddLine(ImVec2(dot.x, gmax.y), dot, IM_COL32(120, 255, 180, 120), 1.0f);
+            dl->AddCircleFilled(dot, 4.0f, IM_COL32(120, 255, 180, 255));
+            ImGui::Dummy(ImVec2(gw, gh + 4));
+        }
+
+        gainRow("Curve",   "##cvExp",   &cv.exponent, 0.20f, 4.0f, "%.2f");
+        gainRow("Floor",   "##cvFloor", &cv.floor,    0.00f, 0.9f, "%.2f");
+        gainRow("Ceil",    "##cvCeil",  &cv.ceil,     0.10f, 1.0f, "%.2f");
+        gainRow("S-Curve", "##cvCon",   &cv.contrast, 0.00f, 1.0f, "%.2f");
+        // Keep floor strictly below ceil so the remap never inverts.
+        if (cv.floor > cv.ceil - 0.02f) cv.floor = cv.ceil - 0.02f;
+
+        if (ImGui::SmallButton("Reset Curve")) {
+            cv = AudioCurve{};
+        }
+        ImGui::SameLine();
         if (ImGui::SmallButton("Reset Gains")) {
             m_audioAnalyzer.inputGain() = 1.0f;
             m_audioAnalyzer.bassGain() = 1.0f;
@@ -4814,6 +5744,7 @@ void Application::renderUI() {
             m_audioAnalyzer.noiseGate() = 0.0f;
             m_audioAnalyzer.smoothAttack()  = 8.0f;
             m_audioAnalyzer.smoothRelease() = 3.0f;
+            for (int b = 0; b < CurveCount; b++) m_audioAnalyzer.curve(b) = AudioCurve{};
         }
 
 #ifdef HAS_FFMPEG
@@ -5166,44 +6097,65 @@ void Application::renderUI() {
     // panels have rendered so the icon painting lands on top of ImGui's
     // native tab bar text.
     m_ui.drawInspectorTabIcons();
-    // Sources panel internal-tab icons (ShaderClaw / Etherea / Camera /
-    // Capture). NDI + Spout retain plain text — no leading-space pad, no
-    // entry in the renderer.
-    m_ui.drawSourcesTabIcons();
+    // (drawSourcesTabIcons removed — the Shader/Mic/Cam/Win quick-switcher
+    // now lives pinned at the top of the Properties panel and drives the
+    // same Sources tab bar via UIManager::focusSourcesTab. The Sources
+    // panel's own tabs still work programmatically; we just no longer
+    // paint their decorative icons there.)
     // Activity rail — rendered LAST so its window draws on top of the
     // dockspace + all panels. Earlier render order put it behind. Rail
     // icons toggle which panel (Layers / Sources / Mapping) is active.
     m_ui.renderLeftRail([&](float innerW) {
-        // Phase 2 — per-layer thumbnails. We re-use Layer::textureId() (the
-        // raw source texture) rather than allocating a separate thumb FBO
-        // — pixel-perfect at any scale, zero per-frame GPU cost beyond the
-        // ImGui sampler. Selection is bidirectional with the Layer panel.
-        const float kThumbSz = 56.0f;
-        const float kThumbR  = 10.0f;
-        const float xPad     = (innerW - kThumbSz) * 0.5f;
+        // Floating per-layer thumbnails — re-use Layer::textureId() (no extra
+        // thumb FBO, pixel-perfect at any scale). Click selects; double-click
+        // toggles visibility (iPad-style); drag-drop reorders the stack.
+        const float kThumbSz  = 56.0f;
+        const float kThumbR   = 10.0f;
+        const float kThumbGap = 6.0f;
+        const float xPad      = (innerW - kThumbSz) * 0.5f;
+        const int   n         = m_layerStack.count();
+
+        // Vertical centering: pad top so the thumbnail stack sits centered
+        // in the rail's remaining content region.
+        if (n > 0) {
+            float stackH = (float)n * kThumbSz + (float)(n - 1) * kThumbGap;
+            float availH = ImGui::GetContentRegionAvail().y;
+            float topPad = (availH - stackH) * 0.5f;
+            if (topPad > 0.0f) ImGui::Dummy(ImVec2(0, topPad));
+        }
+
+        // Deferred reorder — apply after the loop so we don't mutate the
+        // stack mid-iteration.
+        int pendingMoveFrom = -1, pendingMoveTo = -1;
+
         for (int i = m_layerStack.count() - 1; i >= 0; --i) {
             auto layer = m_layerStack[i];
             if (!layer) continue;
+            const bool hidden = !layer->visible;
             ImGui::PushID(20000 + i);
-            // Center the thumbnail horizontally within the rail's inner width.
             float curX = ImGui::GetCursorPosX();
             ImGui::SetCursorPosX(curX + xPad);
             ImVec2 cur = ImGui::GetCursorScreenPos();
             ImVec2 sz(kThumbSz, kThumbSz);
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            // Background card — subtle so empty-source layers still read.
+
+            // Background card.
             dl->AddRectFilled(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
                               IM_COL32(28, 32, 40, 255), kThumbR);
-            // Thumbnail image (clipped to rounded rect via push/pop clip).
+
+            // Thumbnail image (dim to ~30% alpha when hidden, iPad style).
             GLuint tex = layer->textureId();
             if (tex) {
+                ImU32 tint = hidden ? IM_COL32(255, 255, 255, 80)
+                                    : IM_COL32(255, 255, 255, 255);
                 dl->PushClipRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y), true);
                 dl->AddImageRounded((ImTextureID)(intptr_t)tex,
                                     cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
                                     ImVec2(0, 1), ImVec2(1, 0),  // V-flip GL
-                                    IM_COL32(255, 255, 255, 255), kThumbR);
+                                    tint, kThumbR);
                 dl->PopClipRect();
             }
+
             // Active border — bright when selected; thin gray otherwise.
             bool active = (i == m_selectedLayer);
             ImU32 borderCol = active ? IM_COL32(247, 248, 248, 255)
@@ -5211,12 +6163,71 @@ void Application::renderUI() {
             float borderW = active ? 2.0f : 1.0f;
             dl->AddRect(cur, ImVec2(cur.x + sz.x, cur.y + sz.y),
                         borderCol, kThumbR, 0, borderW);
-            // Click → select.
-            if (ImGui::InvisibleButton("##thumb", sz)) {
-                m_selectedLayer = i;
+
+            // Hidden indicator — diagonal slash so the state is obvious.
+            if (hidden) {
+                ImVec2 a(cur.x + 8.0f, cur.y + sz.y - 8.0f);
+                ImVec2 b(cur.x + sz.x - 8.0f, cur.y + 8.0f);
+                dl->AddLine(a, b, IM_COL32(255, 80, 80, 230), 2.5f);
             }
-            ImGui::Dummy(ImVec2(0, 6));
+
+            // Hit area. Use the per-item activation event + ImGui's own
+            // click-count tracker — both anchored to this specific item, so
+            // the drag-drop source we attach after it can't interfere with
+            // double-click detection. IsItemActivated fires once per click
+            // press; MouseClickedCount tells us 1 (single) vs 2+ (double+).
+            ImGui::InvisibleButton("##thumb", sz);
+            if (ImGui::IsItemActivated()) {
+                int n = ImGui::GetIO().MouseClickedCount[0];
+                if (n >= 2) {
+                    // userHidden is the CANONICAL "user wants this hidden"
+                    // flag. Toggling only `visible` looked correct for one
+                    // frame, then Timeline.cpp:588 forced visible=true the
+                    // next frame (`if (!layer->userHidden) layer->visible
+                    // = true;`) — which is why double-click "didn't work."
+                    // Same two-line pattern the eye button uses.
+                    layer->userHidden = !layer->userHidden;
+                    layer->visible    = !layer->userHidden;
+                    std::cerr << "[LayerThumb] DOUBLE-CLICK layer " << i
+                              << " -> " << (layer->visible ? "SHOW" : "HIDE")
+                              << std::endl;
+                } else {
+                    m_selectedLayer = i;
+                    std::cerr << "[LayerThumb] single-click select layer "
+                              << i << std::endl;
+                }
+            }
+
+            // Drag source — picking up a thumbnail to reorder.
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                ImGui::SetDragDropPayload("LAYER_THUMB_IDX", &i, sizeof(int));
+                ImGui::Text("Move layer #%d", i);
+                ImGui::EndDragDropSource();
+            }
+            // Drop target — drop on this thumbnail to move the source layer
+            // to this position. Action is queued and applied after the loop.
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* p =
+                        ImGui::AcceptDragDropPayload("LAYER_THUMB_IDX")) {
+                    int from = *(const int*)p->Data;
+                    if (from != i) {
+                        pendingMoveFrom = from;
+                        pendingMoveTo   = i;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            ImGui::Dummy(ImVec2(0, kThumbGap));
             ImGui::PopID();
+        }
+
+        // Apply the queued reorder after the loop completes — safe now that
+        // we're done iterating.
+        if (pendingMoveFrom >= 0 && pendingMoveTo >= 0) {
+            m_layerStack.moveLayer(pendingMoveFrom, pendingMoveTo);
+            if      (m_selectedLayer == pendingMoveFrom) m_selectedLayer = pendingMoveTo;
+            else if (m_selectedLayer == pendingMoveTo)   m_selectedLayer = pendingMoveFrom;
         }
     });
     // Right tool rail removed — the move/rotate/scale/flip/center
@@ -5466,6 +6477,11 @@ void Application::renderFloatingTransportPill() {
             // Chevron
             float cxv = cur.x + iconW + iconGap + labelW + chevGap + chevW * 0.5f;
             lucide::chevronDown(dl, cxv, yMid, chevW, textCol);
+            // Remember the button's top edge so the popup can open UPWARD
+            // (this pill is flush to the viewport bottom; a downward popup
+            // would be clipped behind the pill / off-screen).
+            m_fpSoundBtnTopX = cur.x;
+            m_fpSoundBtnTopY = cur.y;
             if (clicked) {
 #ifdef HAS_FFMPEG
                 m_audioDevices = VideoRecorder::enumerateAudioDevices();
@@ -5475,22 +6491,34 @@ void Application::renderFloatingTransportPill() {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sound source");
         }
 #ifdef HAS_FFMPEG
-        if (ImGui::BeginPopup("##fp_sound_popup")) {
-            ImGui::TextDisabled("Sound capture");
-            ImGui::Separator();
-            if (ImGui::Selectable("System default", m_selectedAudioDevice == -1)) {
-                m_selectedAudioDevice = -1;
-                m_recorder.setAudioDevice(-1);
-            }
-            for (int i = 0; i < (int)m_audioDevices.size(); i++) {
-                const auto& dv = m_audioDevices[i];
-                if (!dv.isCapture) continue;
-                if (ImGui::Selectable(dv.name.c_str(), m_selectedAudioDevice == i)) {
-                    m_selectedAudioDevice = i;
-                    m_recorder.setAudioDevice(i);
+        {
+            // Anchor the popup just above the mic button with a bottom-left
+            // pivot so it grows UPWARD, and cap its height so a long input
+            // list scrolls internally instead of overflowing under the pill.
+            ImGuiViewport* svp = ImGui::GetMainViewport();
+            float maxH = std::min(360.0f, (m_fpSoundBtnTopY - svp->Pos.y) - 12.0f);
+            if (maxH < 120.0f) maxH = 120.0f;
+            ImGui::SetNextWindowPos(ImVec2(m_fpSoundBtnTopX, m_fpSoundBtnTopY - 6.0f),
+                                    ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+            ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 0.0f),
+                                                ImVec2(FLT_MAX, maxH));
+            if (ImGui::BeginPopup("##fp_sound_popup")) {
+                ImGui::TextDisabled("Sound capture");
+                ImGui::Separator();
+                if (ImGui::Selectable("System default", m_selectedAudioDevice == -1)) {
+                    m_selectedAudioDevice = -1;
+                    m_recorder.setAudioDevice(-1);
                 }
+                for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                    const auto& dv = m_audioDevices[i];
+                    if (!dv.isCapture) continue;
+                    if (ImGui::Selectable(dv.name.c_str(), m_selectedAudioDevice == i)) {
+                        m_selectedAudioDevice = i;
+                        m_recorder.setAudioDevice(i);
+                    }
+                }
+                ImGui::EndPopup();
             }
-            ImGui::EndPopup();
         }
 #endif
 
@@ -6312,6 +7340,13 @@ void Application::renderFloatingTransportPill() {
     // can't get stuck above the pill.
     if (ImGuiWindow* pw = ImGui::FindWindowByName("##TransportPill"))
         ImGui::BringWindowToDisplayFront(pw);
+
+    // The pill's own dropdowns are top-level popup windows, not children of
+    // ##TransportPill, so the reorder above can paint the pill OVER them.
+    // Re-raise the open sound-source popup last so its (possibly long,
+    // scrollable) device list sits on top of the pill instead of behind it.
+    if (ImGuiWindow* sp = ImGui::FindWindowByName("##fp_sound_popup"))
+        if (sp->Active) ImGui::BringWindowToDisplayFront(sp);
 }
 
 void Application::renderFloatingActionPills() {
@@ -6412,6 +7447,18 @@ void Application::renderFloatingActionPills() {
 #endif
          });
 }
+
+// ── Lane UI gate ─────────────────────────────────────────────────────────
+// The timeline "lane" affordances (+ Lane button, the Automation/MIDI/
+// Audio-Reactive sub-rows and their gizmos) are a confusing half-built stub
+// and the legacy render loop was memory-unsafe (held a `TimelineLane&` into
+// m_timeline.lanes() across calls that could reallocate that vector). We hide
+// the entire user-facing lane UI but KEEP the data model, serialization and
+// the working Automation→opacity runtime (Timeline::sampleAnimatedParams,
+// applyToLayers) fully intact: existing .easel projects with lanes still load,
+// round-trip and still drive opacity at runtime. Flip this to re-enable the UI
+// once the lane editor is finished and the render loop is made realloc-safe.
+static constexpr bool kLanesUiEnabled = false;
 
 void Application::renderTimelinePanel() {
     // Fix 2: the timeline is a FLOATING overlay (not docked) so it can slide
@@ -7596,13 +8643,30 @@ void Application::renderTimelinePanel() {
                 visible ? "Layer visible — click to hide"
                         : "Layer hidden — click to show");
 
-            // Kind swatch — small rounded square tinted by ClipKind.
+            // Kind colour — by ClipKind. Used as the thumbnail's identity ring
+            // (and as the full swatch fill when the layer has no texture yet).
             ImU32 swatch = (swatchKind == ClipKind::Video)  ? IM_COL32(130, 156, 255, 220)
                          : (swatchKind == ClipKind::Shader) ? IM_COL32(190, 130, 250, 220)
                                                              : IM_COL32(180, 188, 198, 220);
-            dl->AddRectFilled(ImVec2(rowOrigin.x + 28, rowY + trackH * 0.5f - 5),
-                              ImVec2(rowOrigin.x + 38, rowY + trackH * 0.5f + 5),
-                              swatch, 2.5f);
+            // Layer thumbnail — reuse Layer::textureId() (the same raw source
+            // texture the left-rail thumbnails draw, see renderLeftRail) so it
+            // stays consistent and free. Same 10x10 footprint as the old
+            // swatch; kind colour becomes a thin identity ring. Falls back to
+            // the solid swatch when the layer has no renderable texture.
+            ImVec2 swA(rowOrigin.x + 28, rowY + trackH * 0.5f - 5);
+            ImVec2 swB(rowOrigin.x + 38, rowY + trackH * 0.5f + 5);
+            GLuint rowTex = layerForRow ? layerForRow->textureId() : 0;
+            if (rowTex) {
+                dl->AddRectFilled(swA, swB, IM_COL32(28, 32, 40, 255), 2.5f);
+                dl->PushClipRect(swA, swB, true);
+                dl->AddImageRounded((ImTextureID)(intptr_t)rowTex, swA, swB,
+                                    ImVec2(0, 1), ImVec2(1, 0),  // V-flip GL
+                                    IM_COL32(255, 255, 255, 255), 2.5f);
+                dl->PopClipRect();
+                dl->AddRect(swA, swB, swatch, 2.5f, 0, 1.0f);
+            } else {
+                dl->AddRectFilled(swA, swB, swatch, 2.5f);
+            }
 
             // Layer name — truncated to fit the gutter.
             dl->PushClipRect(ImVec2(rowOrigin.x + 44, rowY),
@@ -7642,9 +8706,29 @@ void Application::renderTimelinePanel() {
         // histogram for audio-reactive bindings — none of these drive runtime
         // yet (data-model stubs), but the row lets users plant points and
         // structure their show.
-        {
+        //
+        // Hidden behind kLanesUiEnabled: the data model still exists and still
+        // serialises/round-trips; only this UI is suppressed. When suppressed
+        // we emit NOTHING (no Dummy/separator) so track rows lay out with the
+        // exact same rhythm as if lanes never existed visually.
+        //
+        // Crash fix: this loop iterates m_timeline.lanes() by reference
+        // (`auto& ln`) while its body can trigger m_lanes growth (a brand-new
+        // lane added the same frame via the opacity-keyframe runtime), which
+        // reallocates the vector and leaves `ln` — and the remaining loop
+        // iterations — dangling (heap-use-after-free reading ln.layerId /
+        // ln.kind / ln.points). We snapshot the matching lane ids up front and
+        // resolve each via findLane() per iteration so no reference is ever
+        // held across a potential reallocation.
+        if (kLanesUiEnabled) {
             uint32_t toRemoveLane = 0;
-            for (auto& ln : m_timeline.lanes()) {
+            std::vector<uint32_t> laneIds;
+            for (const auto& l0 : m_timeline.lanes())
+                if (l0.layerId == track.layerId) laneIds.push_back(l0.id);
+            for (uint32_t lnId : laneIds) {
+                TimelineLane* lnp = m_timeline.findLane(lnId);
+                if (!lnp) continue;          // removed mid-frame — skip safely
+                TimelineLane& ln = *lnp;
                 if (ln.layerId != track.layerId) continue;
                 const float lnH = 18.0f;
                 ImVec2 lnO = ImGui::GetCursorScreenPos();
@@ -7741,7 +8825,10 @@ void Application::renderTimelinePanel() {
         }
 
         // ── "+ Lane" row — one-shot button that offers the three lane kinds.
-        {
+        // Hidden behind kLanesUiEnabled (see note above). When disabled we emit
+        // nothing — no Dummy/button — so the next track follows immediately
+        // with the normal trackSpacing rhythm and no layout gap is introduced.
+        if (kLanesUiEnabled) {
             ImGui::PushID((int)(track.layerId + 0x60000000));
             ImVec2 rO = ImGui::GetCursorScreenPos();
             ImGui::Dummy(ImVec2(gutterW, 14));
@@ -7784,6 +8871,13 @@ void Application::renderTimelinePanel() {
             auto& nextTrack = allTracks[thisIdx + 1];
             uint32_t aId = track.layerId;      // upper row
             uint32_t bId = nextTrack.layerId;  // lower row
+
+            // Scope all per-pair widgets (the "##addtr" "+" button, and any
+            // future per-transition widgets) under a unique ID for this
+            // (aId, bId) pair. Without this, every visible transition lane
+            // emits "##addtr" at the same ID and ImGui flags a collision.
+            // Hash mixes both ids so it stays unique even if layer ids reuse.
+            ImGui::PushID((int)((aId * 2654435761u) ^ (bId + 0x9E3779B9u)));
 
             const float laneH = 16.0f;
             ImVec2 laneOrigin = ImGui::GetCursorScreenPos();
@@ -7915,6 +9009,8 @@ void Application::renderTimelinePanel() {
                     }
                 }
             }
+
+            ImGui::PopID(); // per-pair scope opened at the top of `if (hasNext)`
         }
     }
 
@@ -8986,10 +10082,22 @@ void Application::renderNavBarPrefix() {
             if (ImGui::MenuItem("Add Particle System")) {
                 addParticles();
             }
+            if (ImGui::MenuItem("Add Fluid Simulation")) {
+                addFluid();
+            }
+            if (ImGui::MenuItem("Add Hologram Model...")) {
+                addHologramModel();
+            }
+            if (ImGui::MenuItem("Add Moving Company (F-117)")) {
+                addMovingCompany();
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Save Project...")) {
                 std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
                 if (!path.empty()) saveProject(path);
+            }
+            if (ImGui::MenuItem("Publish to Mobile")) {
+                publishPlayToAgent();
             }
             if (ImGui::MenuItem("Load Project...")) {
                 std::string path = openFileDialog("Easel Project\0*.easel\0All Files\0*.*\0");
@@ -9156,6 +10264,15 @@ void Application::renderMenuBar_legacy() {
             if (ImGui::MenuItem("Add Particle System")) {
                 addParticles();
             }
+            if (ImGui::MenuItem("Add Fluid Simulation")) {
+                addFluid();
+            }
+            if (ImGui::MenuItem("Add Hologram Model...")) {
+                addHologramModel();
+            }
+            if (ImGui::MenuItem("Add Moving Company (F-117)")) {
+                addMovingCompany();
+            }
 #ifdef HAS_NDI
             if (NDIRuntime::instance().isAvailable() && ImGui::BeginMenu("Add NDI Source")) {
                 if (ImGui::MenuItem("Refresh")) {
@@ -9184,6 +10301,9 @@ void Application::renderMenuBar_legacy() {
             if (ImGui::MenuItem("Save Project...")) {
                 std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
                 if (!path.empty()) saveProject(path);
+            }
+            if (ImGui::MenuItem("Publish to Mobile")) {
+                publishPlayToAgent();
             }
             if (ImGui::MenuItem("Load Project...")) {
                 std::string path = openFileDialog("Easel Project\0*.easel\0All Files\0*.*\0");
@@ -9367,10 +10487,17 @@ void Application::renderGoLiveButton() {
 }
 #endif
 
+#ifdef __APPLE__
+// Defined in PlatformMac.mm — auto-hide/restore the menu bar + Dock so the
+// borderless editor fullscreen looks truly full-screen.
+extern "C" void macSetFullscreenPresentation(bool on);
+#endif
+
 void Application::toggleEditorFullscreen() {
     if (!m_editorFullscreen) {
         glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
         glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
+        // Pick the monitor the window currently sits on.
         int monCount = 0;
         GLFWmonitor** monitors = glfwGetMonitors(&monCount);
         GLFWmonitor* best = glfwGetPrimaryMonitor();
@@ -9379,21 +10506,38 @@ void Application::toggleEditorFullscreen() {
         for (int mi = 0; mi < monCount; mi++) {
             int mx, my;
             glfwGetMonitorPos(monitors[mi], &mx, &my);
-            const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
-            if (wx >= mx && wx < mx + mode->width &&
-                wy >= my && wy < my + mode->height) {
+            const GLFWvidmode* m = glfwGetVideoMode(monitors[mi]);
+            if (wx >= mx && wx < mx + m->width &&
+                wy >= my && wy < my + m->height) {
                 best = monitors[mi];
                 break;
             }
         }
+        int mx = 0, my = 0;
+        glfwGetMonitorPos(best, &mx, &my);
         const GLFWvidmode* mode = glfwGetVideoMode(best);
-        glfwSetWindowMonitor(m_window, best, 0, 0,
-                             mode->width, mode->height, mode->refreshRate);
+        // BORDERLESS WINDOWED FULLSCREEN — cover the monitor by repositioning +
+        // resizing a *decorationless* window (monitor = nullptr). The previous
+        // path passed the monitor handle + refreshRate, which is TRUE
+        // fullscreen: on macOS that captures the display and does a video-mode
+        // set, stalling the app ~0.5-1s ("freezes up a bit") on every toggle
+        // plus a black flash. Borderless covers the same pixels with no display
+        // capture and no mode switch — just a one-frame window resize.
+        glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_FALSE);
+        glfwSetWindowMonitor(m_window, nullptr, mx, my,
+                             mode->width, mode->height, 0);
+#ifdef __APPLE__
+        macSetFullscreenPresentation(true);  // auto-hide menu bar + Dock
+#endif
         m_editorFullscreen = true;
     } else {
         glfwSetWindowMonitor(m_window, nullptr,
                              m_savedWindowX, m_savedWindowY,
                              m_savedWindowW, m_savedWindowH, 0);
+        glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_TRUE);
+#ifdef __APPLE__
+        macSetFullscreenPresentation(false); // restore menu bar + Dock
+#endif
         m_editorFullscreen = false;
     }
 }
@@ -9487,6 +10631,79 @@ void Application::addParticles() {
     registerLayerWithZones(layer->id);
 }
 
+void Application::addFluid() {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<FluidSource>();
+    // Match the active zone's resolution so the sim aspect is correct.
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    if (!src->init(w, h)) {
+        std::cerr << "Failed to init FluidSource" << std::endl;
+        return;
+    }
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "Fluid Simulation";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
+void Application::addHologramModel(const std::string& pathArg) {
+    // Pick the model first so the layer is born with content. An explicit
+    // pathArg (OSC/scripted) skips the native picker.
+    std::string path = pathArg;
+    if (path.empty()) {
+        path = openFileDialog(
+            "3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0"
+            "glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
+    }
+    if (path.empty()) return;   // user cancelled
+
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<HologramModelSource>();
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    if (!src->init(w, h)) {
+        std::cerr << "Failed to init HologramModelSource" << std::endl;
+        return;
+    }
+    src->loadModel(path);
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "Hologram Model";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
+void Application::addMovingCompany() {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<MovingCompanySource>();
+    if (!src->init()) {
+        std::cerr << "Failed to init MovingCompanySource" << std::endl;
+        return;
+    }
+
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "Moving Company";
+
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
 #ifdef HAS_OPENCV
 void Application::addWebcam(int cameraIndex) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
@@ -9557,6 +10774,14 @@ void Application::loadShader(const std::string& path) {
     layer->source = source;
     size_t slash = path.find_last_of("/\\");
     layer->name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+
+    // Restore saved param preset for this shader file, if any. Keyed by the
+    // bare filename (matches manifest's `file` field used elsewhere).
+    {
+        size_t s = path.find_last_of("/\\");
+        std::string fileKey = (s != std::string::npos) ? path.substr(s + 1) : path;
+        m_shaderPresets.apply(fileKey, *source);
+    }
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
@@ -9714,6 +10939,407 @@ void Application::handleDroppedFiles() {
 }
 
 // --- Save/Load ---
+
+// ---------------------------------------------------------------------
+// gzip + base64 helpers for the Play wire payload. macOS caps UDP send
+// datagrams at net.inet.udp.maxdgram (9216 bytes by default) — the M1
+// publish (shader params + transitions + lanes + ndi) easily exceeds
+// that, so raw JSON gets silently dropped by the kernel. We compress
+// (gzip ~25% of source for repetitive JSON) and base64-encode so the
+// result fits a single OSC string arg AND stays well under the cap.
+// The agent + tests recognize a "z:" prefix and decompress; raw JSON
+// (no prefix) stays parseable for smaller payloads / legacy listeners.
+// ---------------------------------------------------------------------
+#include <zlib.h>
+static std::string gzipCompress(const std::string& src) {
+    z_stream zs{};
+    if (deflateInit2(&zs, Z_BEST_SPEED, Z_DEFLATED,
+                      15 | 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        return {};
+    zs.next_in = (Bytef*)src.data();
+    zs.avail_in = (uInt)src.size();
+    std::string out;
+    out.reserve(src.size() / 3);
+    char chunk[16384];
+    int rc;
+    do {
+        zs.next_out = (Bytef*)chunk;
+        zs.avail_out = sizeof(chunk);
+        rc = deflate(&zs, Z_FINISH);
+        out.append(chunk, sizeof(chunk) - zs.avail_out);
+    } while (rc == Z_OK);
+    deflateEnd(&zs);
+    if (rc != Z_STREAM_END) return {};
+    return out;
+}
+static std::string b64Encode(const std::string& src) {
+    static const char* kAlpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((src.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < src.size(); i += 3) {
+        uint32_t triple = (uint8_t)src[i] << 16;
+        bool h2 = (i + 1 < src.size()), h3 = (i + 2 < src.size());
+        if (h2) triple |= (uint8_t)src[i + 1] << 8;
+        if (h3) triple |= (uint8_t)src[i + 2];
+        out += kAlpha[(triple >> 18) & 0x3F];
+        out += kAlpha[(triple >> 12) & 0x3F];
+        out += h2 ? kAlpha[(triple >> 6) & 0x3F] : '=';
+        out += h3 ? kAlpha[ triple       & 0x3F] : '=';
+    }
+    return out;
+}
+
+std::string Application::buildPlayJson() {
+    // Wire shape mirrors EaselMobile/EaselMobile/Models/Play.swift exactly
+    // (camelCase, layerIndex / kind / tone / clips with startSec+durationSec,
+    // markers with time+name). Mobile decodes this from
+    // SystemSnapshot.play via state.snapshot. See agent.py: action
+    // "play.publish" — the OSC bridge below mirrors that action so Easel
+    // never needs to speak the relay protocol directly.
+
+    static const char* kTones[] = { "lime", "amber", "cyan", "magenta", "sky" };
+    auto toneFor = [](int idx) {
+        return kTones[(idx % 5 + 5) % 5];
+    };
+
+    auto kindForLayer = [](const std::shared_ptr<Layer>& l) -> std::string {
+        // Lowercase the name once for cheap substring checks.
+        std::string n = l ? l->name : std::string{};
+        for (auto& c : n) c = (char)tolower((unsigned char)c);
+        if (n.find("text") != std::string::npos)  return "TEXT";
+        if (n.find("theme") != std::string::npos) return "THEME";
+        if (l && l->source && l->source->isShader()) return "SHADER";
+        return "FX";
+    };
+
+    // Stable per-process show id. Allocated once on first publish so the
+    // M3 dirty-check (byte-compare JSON) doesn't trip on a moving id and
+    // re-publish every frame. Mobile uses id only for identity; content
+    // changes flow through everything else.
+    if (m_showIdStr.empty()) {
+        m_showIdStr = std::string("easel.show.")
+                    + std::to_string((long)glfwGetTime());
+    }
+    json play;
+    play["id"] = m_showIdStr;
+    play["name"] = "Easel Show";
+    play["bpm"] = (double)m_bpmSync.bpm();
+    play["playhead"] = (double)m_timeline.playhead();
+    play["duration"] = (double)m_timeline.duration();
+    // M4 — surface the live cue text so mobile (and the test harness)
+    // can mirror what voice-native shaders are rendering on the desktop
+    // canvas. Additive on the wire — older mobile decoders ignore it.
+    play["cueLatest"] = m_dataBus.get("cue.latest");
+
+    // Helper: extract the file basename from a shader path so the wire
+    // payload stays portable across machines (no /Users/lu/... prefixes).
+    auto basename = [](const std::string& p) -> std::string {
+        size_t slash = p.find_last_of("/\\");
+        return (slash == std::string::npos) ? p : p.substr(slash + 1);
+    };
+
+    json layersJson = json::array();
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& lp = m_layerStack[i];
+        if (!lp) continue;
+        json layerJson;
+        layerJson["id"] = std::to_string(lp->id);
+        layerJson["layerIndex"] = i;
+        layerJson["name"] = lp->name;
+        layerJson["kind"] = kindForLayer(lp);
+        layerJson["visible"] = lp->visible && !lp->userHidden;
+        layerJson["tone"] = toneFor(i);
+
+        // M1 — shader path (basename only — mobile resolves via its
+        // own ShaderCatalog/bundle; the desktop path is per-machine).
+        layerJson["shaderPath"] = "";
+        if (lp->source && lp->source->isShader()) {
+            auto* shader = static_cast<ShaderSource*>(lp->source.get());
+            layerJson["shaderPath"] = basename(shader->sourcePath());
+        }
+
+        // M1 — opacity (separate from visible: lets mobile crossfade).
+        layerJson["opacity"] = (double)lp->opacity;
+
+        // M1 — blendMode by name so mobile can render it without
+        // mapping numeric enums across language boundaries.
+        layerJson["blendMode"] = std::string(blendModeName(lp->blendMode));
+
+        // M1 — transform (pos, scale, rotation in degrees).
+        json transform;
+        transform["position"] = { (double)lp->position.x, (double)lp->position.y };
+        transform["scale"]    = { (double)lp->scale.x,    (double)lp->scale.y    };
+        transform["rotation"] = (double)lp->rotation;
+        layerJson["transform"] = transform;
+
+        // M1 — shader parameter snapshot. Only currently-set values
+        // (skipping defaults would lose live state). Floats / bools /
+        // points (as 2-array) / text (as string). Colors collapse to a
+        // 4-array. Image inputs are omitted — they're texture pointers,
+        // not portable values.
+        json paramsJson = json::object();
+        if (lp->source && lp->source->isShader()) {
+            auto* shader = static_cast<ShaderSource*>(lp->source.get());
+            for (const auto& inp : shader->inputs()) {
+                if (inp.type == "float") {
+                    paramsJson[inp.name] = (double)std::get<float>(inp.value);
+                } else if (inp.type == "bool") {
+                    paramsJson[inp.name] = std::get<bool>(inp.value);
+                } else if (inp.type == "text") {
+                    paramsJson[inp.name] = std::get<std::string>(inp.value);
+                } else if (inp.type == "point2D") {
+                    const auto& v = std::get<glm::vec2>(inp.value);
+                    paramsJson[inp.name] = { (double)v.x, (double)v.y };
+                } else if (inp.type == "color") {
+                    const auto& c = std::get<glm::vec4>(inp.value);
+                    paramsJson[inp.name] = { (double)c.r, (double)c.g,
+                                             (double)c.b, (double)c.a };
+                }
+                // image inputs intentionally skipped (texture handle).
+            }
+        }
+        layerJson["parameters"] = paramsJson;
+
+        // Clips: pull from the matching Timeline track if present, else
+        // synthesize a single full-duration clip so the mobile timeline
+        // has something to display while the artist hasn't authored clips.
+        json clipsJson = json::array();
+        const TimelineTrack* track = nullptr;
+        for (const auto& t : m_timeline.tracks()) {
+            if (t.layerId == lp->id) { track = &t; break; }
+        }
+        if (track && !track->clips.empty()) {
+            for (const auto& c : track->clips) {
+                json cj;
+                cj["id"] = std::to_string(c.id);
+                cj["name"] = c.name.empty() ? lp->name : c.name;
+                cj["startSec"] = c.startTime;
+                cj["durationSec"] = c.duration;
+                // M1 — clip-level transition / playback metadata.
+                cj["sourcePath"]            = basename(c.sourcePath);
+                cj["transitionInName"]      = c.transitionInName;
+                cj["transitionInShaderPath"] = basename(c.transitionInShaderPath);
+                cj["transitionInDuration"]  = c.transitionInDuration;
+                cj["playbackMode"]          = std::string(clipPlaybackModeName(c.playbackMode));
+                clipsJson.push_back(cj);
+            }
+        } else {
+            json cj;
+            cj["id"] = std::string("auto.") + std::to_string(lp->id);
+            cj["name"] = lp->name;
+            cj["startSec"] = 0.0;
+            cj["durationSec"] = m_timeline.duration();
+            // Defaults for the synthetic clip so the field set matches
+            // authored clips and mobile decoders don't need null-checks.
+            cj["sourcePath"]            = "";
+            cj["transitionInName"]      = "";
+            cj["transitionInShaderPath"] = "";
+            cj["transitionInDuration"]  = 0.0;
+            cj["playbackMode"]          = std::string("Forward");
+            clipsJson.push_back(cj);
+        }
+        layerJson["clips"] = clipsJson;
+        layersJson.push_back(layerJson);
+    }
+    play["layers"] = layersJson;
+
+    // M1 — between-layer transitions (crossfades).
+    json transitionsJson = json::array();
+    for (const auto& tr : m_timeline.transitions()) {
+        json tj;
+        tj["id"]           = std::to_string(tr.id);
+        tj["fromLayerId"]  = std::to_string(tr.fromLayerId);
+        tj["toLayerId"]    = std::to_string(tr.toLayerId);
+        tj["startSec"]     = tr.startTime;
+        tj["durationSec"]  = tr.duration;
+        tj["name"]         = tr.name;
+        tj["shaderPath"]   = basename(tr.shaderPath);
+        transitionsJson.push_back(tj);
+    }
+    play["transitions"] = transitionsJson;
+
+    // M1 — named sections (verse / chorus / drop).
+    json sectionsJson = json::array();
+    for (const auto& s : m_timeline.sections()) {
+        json sj;
+        sj["id"]        = std::to_string(s.id);
+        sj["name"]      = s.name;
+        sj["startSec"]  = s.startTime;
+        sj["endSec"]    = s.endTime;
+        sectionsJson.push_back(sj);
+    }
+    play["sections"] = sectionsJson;
+
+    // M1 — automation / MIDI / audio-reactive lanes. Keyframe data
+    // travels along so mobile can scrub animated params correctly.
+    json lanesJson = json::array();
+    for (const auto& ln : m_timeline.lanes()) {
+        json lj;
+        lj["id"]           = std::to_string(ln.id);
+        lj["layerId"]      = std::to_string(ln.layerId);
+        lj["kind"]         = std::string(timelineLaneKindName(ln.kind));
+        lj["paramName"]    = ln.paramName;
+        lj["midiChannel"]  = ln.midiChannel;
+        lj["audioSignal"]  = ln.audioSignal;
+        lj["audioStrength"] = (double)ln.audioStrength;
+        json pointsJson = json::array();
+        for (const auto& p : ln.points) {
+            json pj;
+            pj["time"]      = p.time;
+            pj["value"]     = (double)p.value;
+            pj["noteOrCC"]  = p.noteOrCC;
+            pointsJson.push_back(pj);
+        }
+        lj["points"] = pointsJson;
+        lanesJson.push_back(lj);
+    }
+    play["lanes"] = lanesJson;
+
+    // Easel's actual output zones — what the user configured in the
+    // desktop's Zones picker. Mobile shows these in the Zones section
+    // of the ParameterSheet so the iPhone reflects the show's true
+    // output destinations (vs the agent's hard-coded ZONES constant).
+    json easelZonesJson = json::array();
+    for (size_t zi = 0; zi < m_zones.size(); zi++) {
+        auto& zp = m_zones[zi];
+        if (!zp) continue;
+        json zj;
+        zj["index"] = (int)zi;
+        zj["name"]  = zp->name;
+        zj["width"] = zp->width;
+        zj["height"] = zp->height;
+        zj["showAllLayers"] = zp->showAllLayers;
+        // List of layer IDs visible in this zone (when showAllLayers
+        // is false). Mobile toggles `zone.visibility` for finer control.
+        json visIds = json::array();
+        for (uint32_t lid : zp->visibleLayerIds) {
+            visIds.push_back(std::to_string(lid));
+        }
+        zj["visibleLayerIds"] = visIds;
+        // Output destination string — mobile shows a badge.
+        switch (zp->outputDest) {
+            case OutputDest::None:       zj["outputDest"] = "None";       break;
+            case OutputDest::Fullscreen: zj["outputDest"] = "Fullscreen"; break;
+            case OutputDest::NDI:        zj["outputDest"] = "NDI";        break;
+            case OutputDest::Spout:      zj["outputDest"] = "Spout";      break;
+        }
+        zj["isActive"] = ((int)zi == m_activeZone);
+        easelZonesJson.push_back(zj);
+    }
+    play["easelZones"] = easelZonesJson;
+
+    // M5 — NDI discovery state. Mobile reads this to surface live NDI
+    // senders (incl. an iPhone running an NDI sender app like NDI HX
+    // Camera) and offer them as ingest options. When HAS_NDI is undefined
+    // at build time, runtimeAvailable=false and sources stays empty —
+    // mobile then knows NDI isn't an option on this Easel build.
+    json ndi = json::object();
+#ifdef HAS_NDI
+    ndi["runtimeAvailable"] = NDIRuntime::instance().isAvailable();
+    json ndiSrcs = json::array();
+    for (const auto& s : m_ndiSources) {
+        json sj;
+        sj["name"] = s.name;
+        sj["url"]  = s.url;
+        // Heuristic: NDI senders coming from iOS NDI apps tend to label
+        // the device name in the sender string. Mobile uses this hint to
+        // badge "iPhone" entries in the discovery picker.
+        std::string lname = s.name;
+        for (auto& c : lname) c = (char)tolower((unsigned char)c);
+        sj["isIphone"] = (lname.find("iphone") != std::string::npos
+                       || lname.find("ios") != std::string::npos);
+        ndiSrcs.push_back(sj);
+    }
+    ndi["discoveredSources"] = ndiSrcs;
+#else
+    ndi["runtimeAvailable"]  = false;
+    ndi["discoveredSources"] = json::array();
+#endif
+    play["ndi"] = ndi;
+
+    json markersJson = json::array();
+    for (const auto& m : m_timeline.markers()) {
+        json mj;
+        mj["id"] = std::to_string(m.id);
+        mj["time"] = m.time;
+        mj["name"] = m.name;
+        markersJson.push_back(mj);
+    }
+    play["markers"] = markersJson;
+
+    // Use the `replace` error handler — invalid UTF-8 bytes that find
+    // their way in via speech recognizer text, OS-level filenames, or
+    // arbitrary user input get substituted with U+FFFD instead of
+    // throwing std::invalid_argument. Throwing here aborts the whole
+    // process because publishPlayIfChanged runs from the main render
+    // loop with no enclosing try/catch (verified by crash logs:
+    // nlohmann::serializer::dump_escaped → __cxa_throw → abort).
+    return play.dump(-1, ' ', false,
+                      nlohmann::json::error_handler_t::replace);
+}
+
+// Helper — package a JSON string for the wire. Always emits a "z:" +
+// base64(gzip(payload)) string so we never run afoul of macOS's
+// net.inet.udp.maxdgram cap. Agent + tests decode by stripping the
+// "z:" prefix.
+static std::string toWirePayload(const std::string& json) {
+    std::string z = gzipCompress(json);
+    if (z.empty()) return json;  // gzip failure — fall back to raw
+    return std::string("z:") + b64Encode(z);
+}
+
+void Application::publishPlayToAgent() {
+    // Always sends — used by the UI PUBLISH button, File menu, and the
+    // /easel/play/publish OSC trigger. The dirty-check loop calls
+    // publishPlayIfChanged() instead.
+    try {
+        std::string payload = buildPlayJson();
+        std::string wire = toWirePayload(payload);
+        m_oscManager.sendString("/agent/play/publish", wire);
+        m_lastPublishedJson = payload;
+        std::cout << "[Easel] Published Play (" << m_layerStack.count()
+                  << " layers, " << m_timeline.markers().size()
+                  << " markers, " << payload.size() << " bytes JSON / "
+                  << wire.size() << " on wire)" << std::endl;
+    } catch (const std::exception& exc) {
+        std::cerr << "[Easel] publishPlayToAgent exception: "
+                  << exc.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Easel] publishPlayToAgent unknown exception"
+                  << std::endl;
+    }
+}
+
+void Application::publishPlayIfChanged() {
+    // M3 — Live re-publish: built once every ~300ms and only sent over
+    // OSC when the produced JSON differs from the last send. Mobile thus
+    // mirrors any edit (layer add/remove, opacity slider, clip move, bpm
+    // change, marker add, transport advancing) within ~500ms with no
+    // manual PUBLISH click.
+    //
+    // Playhead participates in the diff so mobile's scrub indicator
+    // mirrors live during desktop playback. At 300ms cadence + ~3KB JSON
+    // gzipped to ~1KB on the wire, that's a sub-4KB/s loopback stream
+    // when the timeline's actually running.
+    //
+    // Defensive belt: the publish path is called from the render loop,
+    // so any exception (nlohmann::json::dump on invalid UTF-8, std::bad_alloc
+    // on a runaway payload, OSC sendto failure) would terminate the app.
+    // Catch + log + skip this tick — we'll try again in 300ms.
+    try {
+        std::string payload = buildPlayJson();
+        if (payload == m_lastPublishedJson) return;
+        m_oscManager.sendString("/agent/play/publish",
+                                  toWirePayload(payload));
+        m_lastPublishedJson = payload;
+    } catch (const std::exception& exc) {
+        std::cerr << "[Easel] publishPlayIfChanged exception: "
+                  << exc.what() << " — skipping tick" << std::endl;
+    } catch (...) {
+        std::cerr << "[Easel] publishPlayIfChanged unknown exception"
+                  << " — skipping tick" << std::endl;
+    }
+}
 
 void Application::saveProject(const std::string& path) {
     json j;
@@ -9930,6 +11556,74 @@ void Application::saveProject(const std::string& path) {
                         layerJson["imageBindings"] = bindingsJson;
                     }
                 }
+            } else if (layer->source->typeName() == "Fluid") {
+                // Persist the fluid config + audio bindings (same JSON shape
+                // as shader audioBindings). Fluid layers are recreated from
+                // scratch on load, so without this they'd revert to defaults.
+                auto* f = static_cast<FluidSource*>(layer->source.get());
+                json fc;
+                fc["curl"]                = f->m_curlAmount;
+                fc["densityDissipation"]  = f->m_densityDissipation;
+                fc["velocityDissipation"] = f->m_velocityDissipation;
+                fc["pressure"]            = f->m_pressureValue;
+                fc["pressureIters"]       = f->m_pressureIters;
+                fc["splatRadius"]         = f->m_splatRadius;
+                fc["splatIntensity"]      = f->m_splatIntensity;
+                fc["autoRate"]            = f->m_autoRate;
+                fc["autoMovement"]        = f->m_autoMovement;
+                fc["autoPattern"]         = f->m_autoPattern;
+                fc["autoSpeed"]           = f->m_autoSpeed;
+                fc["autoScale"]           = f->m_autoScale;
+                fc["shading"]             = f->m_shading;
+                fc["hdrDye"]              = f->m_hdrDye;
+                fc["bloom"]               = f->m_bloom;
+                fc["bloomIntensity"]      = f->m_bloomIntensity;
+                fc["bloomThreshold"]      = f->m_bloomThreshold;
+                fc["bloomSoftKnee"]       = f->m_bloomSoftKnee;
+                fc["sunrays"]             = f->m_sunrays;
+                fc["sunraysWeight"]       = f->m_sunraysWeight;
+                // Image inject — toggle, strength, and the layer-id the
+                // user picked. Resolved back to a live texture each frame
+                // by the Fluid branch in the main loop.
+                fc["imageEnabled"]        = f->m_imageEnabled;
+                fc["imageIntensity"]      = f->m_imageIntensity;
+                fc["imageSourceLayerId"]  = f->imageSource().sourceLayerId;
+                layerJson["fluidConfig"] = fc;
+
+                const auto& audioBinds = f->audioBindings();
+                if (!audioBinds.empty()) {
+                    json abJson = json::array();
+                    for (const auto& [name, ab] : audioBinds) {
+                        if (ab.signal == AudioSignal::None) continue;
+                        json abj;
+                        abj["param"]     = name;
+                        abj["signal"]    = (int)ab.signal;
+                        abj["rangeMin"]  = ab.rangeMin;
+                        abj["rangeMax"]  = ab.rangeMax;
+                        abj["smoothing"] = ab.smoothing;
+                        if (ab.signal == AudioSignal::MidiCC) {
+                            abj["midiCC"]      = ab.midiCC;
+                            abj["midiChannel"] = ab.midiChannel;
+                        }
+                        abJson.push_back(abj);
+                    }
+                    if (!abJson.empty()) layerJson["audioBindings"] = abJson;
+                }
+            } else if (layer->source->typeName() == "Hologram Model") {
+                // sourcePath already holds the model file; persist the look.
+                auto* hm = static_cast<HologramModelSource*>(layer->source.get());
+                const auto& P = hm->params();
+                json hc;
+                hc["rotateSpeed"]  = P.rotateSpeed;
+                hc["modelScale"]   = P.modelScale;
+                hc["wireBright"]   = P.wireBright;
+                hc["surfaceFill"]  = P.surfaceFill;
+                hc["scanSpeed"]    = P.scanSpeed;
+                hc["interference"] = P.interference;
+                hc["chromaShift"]  = P.chromaShift;
+                hc["beamHaze"]     = P.beamHaze;
+                hc["audioReact"]   = P.audioReact;
+                layerJson["hologramConfig"] = hc;
             }
         }
 
@@ -9955,6 +11649,35 @@ void Application::saveProject(const std::string& path) {
                 masksJson.push_back(mkj);
             }
             layerJson["masks"] = masksJson;
+        }
+
+        // Save per-layer effects chain (all params; reader fills any missing
+        // field from the LayerEffect struct defaults, so this is forward/back
+        // compatible as new effect types are added).
+        if (!layer->effects.empty()) {
+            json fxArr = json::array();
+            for (const auto& fx : layer->effects) {
+                json fj;
+                fj["type"]          = (int)fx.type;
+                fj["enabled"]       = fx.enabled;
+                fj["blurRadius"]    = fx.blurRadius;
+                fj["brightness"]    = fx.brightness;
+                fj["contrast"]      = fx.contrast;
+                fj["saturation"]    = fx.saturation;
+                fj["hueShift"]      = fx.hueShift;
+                fj["pixelSize"]     = fx.pixelSize;
+                fj["feedbackMix"]   = fx.feedbackMix;
+                fj["feedbackZoom"]  = fx.feedbackZoom;
+                fj["glowThreshold"] = fx.glowThreshold;
+                fj["glowRadius"]    = fx.glowRadius;
+                fj["glowIntensity"] = fx.glowIntensity;
+                fj["sharpenAmount"] = fx.sharpenAmount;
+                fj["sharpenRadius"] = fx.sharpenRadius;
+                fj["audioSignal"]   = fx.audioSignal;
+                fj["audioAmount"]   = fx.audioAmount;
+                fxArr.push_back(fj);
+            }
+            layerJson["effects"] = fxArr;
         }
 
         // Transition fields (opacity fade + shader-based A→B swap)
@@ -9987,7 +11710,9 @@ void Application::saveProject(const std::string& path) {
     // Write to file
     std::ofstream file(path);
     if (file.is_open()) {
-        file << j.dump(2);
+        // error_handler_t::replace — never abort the app on a stray
+        // non-UTF-8 byte in a layer name / msg / path; substitute U+FFFD.
+        file << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         std::cout << "Project saved: " << path << std::endl;
     } else {
         std::cerr << "Failed to save project: " << path << std::endl;
@@ -10263,6 +11988,31 @@ void Application::loadProject(const std::string& path) {
                 layer->dropShadowColorG = ds.value("colorG", 0.0f);
                 layer->dropShadowColorB = ds.value("colorB", 0.0f);
             }
+            // Restore per-layer effects chain (each field defaults to the
+            // LayerEffect struct value when absent in older saves).
+            if (layerJson.contains("effects")) {
+                for (const auto& fj : layerJson["effects"]) {
+                    LayerEffect fx;
+                    fx.type          = (EffectType)fj.value("type", 0);
+                    fx.enabled       = fj.value("enabled", fx.enabled);
+                    fx.blurRadius    = fj.value("blurRadius", fx.blurRadius);
+                    fx.brightness    = fj.value("brightness", fx.brightness);
+                    fx.contrast      = fj.value("contrast", fx.contrast);
+                    fx.saturation    = fj.value("saturation", fx.saturation);
+                    fx.hueShift      = fj.value("hueShift", fx.hueShift);
+                    fx.pixelSize     = fj.value("pixelSize", fx.pixelSize);
+                    fx.feedbackMix   = fj.value("feedbackMix", fx.feedbackMix);
+                    fx.feedbackZoom  = fj.value("feedbackZoom", fx.feedbackZoom);
+                    fx.glowThreshold = fj.value("glowThreshold", fx.glowThreshold);
+                    fx.glowRadius    = fj.value("glowRadius", fx.glowRadius);
+                    fx.glowIntensity = fj.value("glowIntensity", fx.glowIntensity);
+                    fx.sharpenAmount = fj.value("sharpenAmount", fx.sharpenAmount);
+                    fx.sharpenRadius = fj.value("sharpenRadius", fx.sharpenRadius);
+                    fx.audioSignal   = fj.value("audioSignal", fx.audioSignal);
+                    fx.audioAmount   = fj.value("audioAmount", fx.audioAmount);
+                    layer->effects.push_back(fx);
+                }
+            }
             layer->shaderWidth = layerJson.value("shaderWidth", 0);
             layer->shaderHeight = layerJson.value("shaderHeight", 0);
             layer->groupId = layerJson.value("groupId", (uint32_t)0);
@@ -10345,6 +12095,88 @@ void Application::loadProject(const std::string& path) {
                     }
                     layer->source = src;
                 }
+            } else if (sourceType == "Fluid") {
+                // Rebuild the native fluid sim and restore its config + audio
+                // bindings. Config is applied BEFORE init() so init-time
+                // choices (m_hdrDye → dye buffer format) honor the saved value.
+                auto src = std::make_shared<FluidSource>();
+                if (layerJson.contains("fluidConfig")) {
+                    const auto& fc = layerJson["fluidConfig"];
+                    src->m_curlAmount          = fc.value("curl", src->m_curlAmount);
+                    src->m_densityDissipation  = fc.value("densityDissipation", src->m_densityDissipation);
+                    src->m_velocityDissipation = fc.value("velocityDissipation", src->m_velocityDissipation);
+                    src->m_pressureValue       = fc.value("pressure", src->m_pressureValue);
+                    src->m_pressureIters       = fc.value("pressureIters", src->m_pressureIters);
+                    src->m_splatRadius         = fc.value("splatRadius", src->m_splatRadius);
+                    src->m_splatIntensity      = fc.value("splatIntensity", src->m_splatIntensity);
+                    src->m_autoRate            = fc.value("autoRate", src->m_autoRate);
+                    src->m_autoMovement        = fc.value("autoMovement", src->m_autoMovement);
+                    src->m_autoPattern         = fc.value("autoPattern", src->m_autoPattern);
+                    src->m_autoSpeed           = fc.value("autoSpeed", src->m_autoSpeed);
+                    src->m_autoScale           = fc.value("autoScale", src->m_autoScale);
+                    src->m_shading             = fc.value("shading", src->m_shading);
+                    src->m_hdrDye              = fc.value("hdrDye", src->m_hdrDye);
+                    src->m_bloom               = fc.value("bloom", src->m_bloom);
+                    src->m_bloomIntensity      = fc.value("bloomIntensity", src->m_bloomIntensity);
+                    src->m_bloomThreshold      = fc.value("bloomThreshold", src->m_bloomThreshold);
+                    src->m_bloomSoftKnee       = fc.value("bloomSoftKnee", src->m_bloomSoftKnee);
+                    src->m_sunrays             = fc.value("sunrays", src->m_sunrays);
+                    src->m_sunraysWeight       = fc.value("sunraysWeight", src->m_sunraysWeight);
+                    // Image inject — restore enable + strength + bound
+                    // layer id (texture is rebound each frame from the
+                    // layer id by the Fluid branch in the main loop).
+                    src->m_imageEnabled        = fc.value("imageEnabled",   src->m_imageEnabled);
+                    src->m_imageIntensity      = fc.value("imageIntensity", src->m_imageIntensity);
+                    src->imageSource().sourceLayerId =
+                        fc.value("imageSourceLayerId",
+                                 (uint32_t)src->imageSource().sourceLayerId);
+                }
+                int fw = 1280, fh = 720;
+                if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() &&
+                    m_zones[m_activeZone]) {
+                    fw = m_zones[m_activeZone]->width;
+                    fh = m_zones[m_activeZone]->height;
+                }
+                if (src->init(fw, fh)) {
+                    if (layerJson.contains("audioBindings")) {
+                        for (const auto& abj : layerJson["audioBindings"]) {
+                            AudioBinding ab;
+                            ab.signal = (AudioSignal)abj.value("signal", 0);
+                            ab.rangeMin = abj.value("rangeMin", 0.0f);
+                            ab.rangeMax = abj.value("rangeMax", 1.0f);
+                            ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.midiCC = abj.value("midiCC", -1);
+                            ab.midiChannel = abj.value("midiChannel", -1);
+                            src->audioBindings()[abj.value("param", "")] = ab;
+                        }
+                    }
+                    layer->source = src;
+                }
+            } else if (sourceType == "Hologram Model") {
+                auto src = std::make_shared<HologramModelSource>();
+                int hw = 1280, hh = 720;
+                if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() &&
+                    m_zones[m_activeZone]) {
+                    hw = m_zones[m_activeZone]->width;
+                    hh = m_zones[m_activeZone]->height;
+                }
+                if (src->init(hw, hh)) {
+                    if (layerJson.contains("hologramConfig")) {
+                        const auto& hc = layerJson["hologramConfig"];
+                        auto& P = src->params();
+                        P.rotateSpeed  = hc.value("rotateSpeed", P.rotateSpeed);
+                        P.modelScale   = hc.value("modelScale", P.modelScale);
+                        P.wireBright   = hc.value("wireBright", P.wireBright);
+                        P.surfaceFill  = hc.value("surfaceFill", P.surfaceFill);
+                        P.scanSpeed    = hc.value("scanSpeed", P.scanSpeed);
+                        P.interference = hc.value("interference", P.interference);
+                        P.chromaShift  = hc.value("chromaShift", P.chromaShift);
+                        P.beamHaze     = hc.value("beamHaze", P.beamHaze);
+                        P.audioReact   = hc.value("audioReact", P.audioReact);
+                    }
+                    if (!sourcePath.empty()) src->loadModel(sourcePath);
+                    layer->source = src;
+                }
 #ifdef HAS_NDI
             } else if (sourceType == "NDI" && !sourcePath.empty()) {
                 auto src = std::make_shared<NDISource>();
@@ -10399,6 +12231,27 @@ void Application::loadProject(const std::string& path) {
     for (int i = 0; i < m_layerStack.count(); i++) {
         if (m_layerStack[i]->id == 0) {
             m_layerStack[i]->id = m_nextLayerId++;
+        }
+    }
+
+    // Voice-native auto-binding (must come AFTER layer IDs are assigned so
+    // the binding key uses the final layer->id). loadShader() wires this up
+    // for shaders added live, but project load builds ShaderSources directly
+    // and never calls loadShader — so without this pass a restored text
+    // shader has no `msg` -> `cue.latest` binding and the live transcript
+    // never reaches it. Easel auto-loads the default project on startup, so
+    // this is the common path. Mirrors loadShader()'s detection exactly.
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& layer = m_layerStack[i];
+        if (!layer->source || !layer->source->isShader()) continue;
+        auto* shaderSrc = static_cast<ShaderSource*>(layer->source.get());
+        const auto& inputs = shaderSrc->inputs();
+        bool hasMsg = false;
+        for (const auto& inp : inputs) {
+            if (inp.type == "text" && inp.name == "msg") { hasMsg = true; break; }
+        }
+        if (hasMsg) {
+            m_dataBus.bind(layer->id, "msg", "cue.latest");
         }
     }
 

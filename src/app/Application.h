@@ -33,7 +33,14 @@
 #include "sources/ShaderSource.h"
 #include "sources/ShaderClawBridge.h"
 #include "sources/ShaderRatings.h"
+#include "sources/ShaderPresets.h"
 #include "sources/ParticleSource.h"
+#include "sources/MovingCompanySource.h"
+#include "sources/FluidSource.h"
+#include "sources/HologramModelSource.h"
+#ifdef __APPLE__
+#include "sources/VisionTracker.h"
+#endif
 
 #ifdef HAS_OPENCV
 #include "scanning/SceneScanner.h"
@@ -127,6 +134,25 @@ private:
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
     int m_prevActiveZone = 0;
+    // Last workspace mode observed in renderUI. Used to detect transitions
+    // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
+    // reset show-specific UI state without polling every frame.
+    UIManager::WorkspaceMode m_prevWorkspaceMode = UIManager::WorkspaceMode::Canvas;
+    // glfwGetTime() instant until which the PLAY workspace's PUBLISH
+    // button shows the "Published" confirmation caption. 0 = no flash.
+    double m_publishFlashUntil = 0.0;
+    // M3 — live re-publish. Stable per-process show id (so byte-comparison
+    // of consecutive publishes detects actual content changes, not just a
+    // bumped timestamp). Cached last-sent JSON for the dirty check, and
+    // the next time the dirty check should run.
+    std::string m_showIdStr;
+    std::string m_lastPublishedJson;
+    double      m_nextPublishCheckAt = 0.0;
+    // M7-11 — After an explicit /cue/clear, suppress any background writes
+    // (mic recognizer, cue WS client) to cue.latest for a brief window so
+    // an intentional blank doesn't get clobbered by stray room audio.
+    // 0 = no active suppression.
+    double      m_cueLatestSuppressUntil = 0.0;
     uint32_t m_nextLayerId = 1;
     OutputZone& activeZone() {
         if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
@@ -145,6 +171,7 @@ private:
     Framebuffer m_edgeBlendFBO;
     Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
     Texture m_testPattern;
+    Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
 
     // Phase Q v4 — bloom pipeline. Half-res FBOs ping-pong for the
     // separable Gaussian; uCompositeFBO holds the screen-blended
@@ -177,6 +204,11 @@ private:
     // Latest normalized MIDI CC values, indexed [channel][cc]. Updated each frame from polled events.
     float m_midiCCValues[16][128] = {};
     StageView m_stageView;
+#ifdef __APPLE__
+    // MediaPipe-style body/hand/face tracking via Apple Vision. Toggled
+    // from the Camera tab; feeds the DataBus vision.* keys each frame.
+    VisionTracker m_visionTracker;
+#endif
     float m_audioRMS = 0; // backward compat: smoothed audio level
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
@@ -228,6 +260,9 @@ private:
     void addScreenCapture(int monitorIndex);
 #endif
     void addParticles();
+    void addFluid();
+    void addHologramModel(const std::string& path = ""); // upload 3D model → glitchy hologram; empty path opens the picker
+    void addMovingCompany();   // F-117 flying through space (mesh source)
 #ifdef HAS_OPENCV
     void addWebcam(int cameraIndex);
 #endif
@@ -244,6 +279,7 @@ private:
 #endif
     ShaderClawBridge m_shaderClaw;
     ShaderRatings    m_shaderRatings;
+    ShaderPresets    m_shaderPresets;
 
     // ShaderClaw thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;
@@ -303,6 +339,12 @@ private:
 #endif
 
     int m_selectedAudioDevice = -1; // -1 = default loopback
+
+    // Top-edge screen pos of the transport-pill mic button, captured each
+    // frame so ##fp_sound_popup can anchor itself ABOVE the pill (the pill
+    // is flush to the viewport bottom; a downward popup would be clipped).
+    float m_fpSoundBtnTopX = 0.0f;
+    float m_fpSoundBtnTopY = 0.0f;
 
 #ifdef HAS_FFMPEG
     RTMPOutput m_rtmpOutput;
@@ -382,6 +424,19 @@ private:
     // JSON save/load
     void saveProject(const std::string& path);
     void loadProject(const std::string& path);
+
+    // Publish the current Show (layers + timeline + markers + BPM) to the
+    // etherea-agent over OSC at /agent/play/publish. The agent caches it and
+    // includes it in every state.snapshot, so paired iPhones mirror the
+    // timeline. Triggered by the File > Publish to Mobile menu item and by
+    // an inbound /easel/play/publish OSC message.
+    void publishPlayToAgent();
+
+    // M3 — Internal helpers for the live re-publish loop. buildPlayJson()
+    // produces the wire payload as a string (no side effects); the per-frame
+    // dirty check sends it only when it differs from the last send.
+    std::string buildPlayJson();
+    void        publishPlayIfChanged();
 
     // Screenshot
     void captureScreenshot(const std::string& path);

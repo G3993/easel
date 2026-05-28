@@ -110,6 +110,13 @@ public:
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;
 
+    // Voice-control edit mode (ephemeral — not serialized). When true, the
+    // Property panel's shader Parameters section shows an inline voice/audio
+    // source combo per float param. Toggled from the Layer panel's
+    // right-click context menu ("Edit voice control") and the in-panel
+    // "DONE" button.
+    bool voiceControlEdit = false;
+
     // Drop shadow
     bool dropShadowEnabled = false;
     float dropShadowOffsetX = 0.05f;   // NDC offset (positive = right)

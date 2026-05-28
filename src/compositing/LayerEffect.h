@@ -8,6 +8,7 @@ enum class EffectType {
     Pixelate,
     Feedback,      // trails / echo
     Glow,          // threshold + blur + additive blend
+    Sharpen,       // unsharp mask — restores crispness / fixes fuzzy text
     COUNT
 };
 
@@ -19,8 +20,17 @@ inline const char* effectTypeName(EffectType t) {
         case EffectType::Pixelate: return "Pixelate";
         case EffectType::Feedback: return "Feedback";
         case EffectType::Glow: return "Glow";
+        case EffectType::Sharpen: return "Sharpen";
         default: return "Unknown";
     }
+}
+
+// Effects that expose a per-effect mic/audio modulator (band selector +
+// amount). These are the "movement / depth / fidelity" effects whose primary
+// parameter is meant to pulse with the music. Existing color/utility effects
+// stay static.
+inline bool effectSupportsAudio(EffectType t) {
+    return t == EffectType::Sharpen;
 }
 
 struct LayerEffect {
@@ -47,4 +57,15 @@ struct LayerEffect {
     float glowThreshold = 0.6f; // brightness threshold (0-1)
     float glowRadius = 8.0f;    // blur radius
     float glowIntensity = 1.0f; // additive strength (0-3)
+
+    // Sharpen (unsharp mask) — boosts high-frequency detail so low-fi /
+    // up-scaled text reads crisp instead of fuzzy.
+    float sharpenAmount = 1.0f; // 0-3 high-pass boost
+    float sharpenRadius = 1.5f; // 0.5-4 texel radius of the soft reference
+
+    // Per-effect audio modulation (only used when effectSupportsAudio(type)).
+    // The effect's primary parameter pulses with the chosen mic/loopback band:
+    // modulated = base + audioAmount * band. Reuses CompositeEngine::m_audio.
+    int   audioSignal = -1;     // -1=off, 0=bass, 1=mid, 2=treble, 3=beat
+    float audioAmount = 0.0f;   // modulation depth (0-1, scaled per effect)
 };

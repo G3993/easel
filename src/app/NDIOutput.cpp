@@ -48,9 +48,15 @@ void NDIOutput::destroy() {
         }
         m_send = nullptr;
     }
+    if (m_pbo[0]) {
+        glDeleteBuffers(2, m_pbo);
+        m_pbo[0] = m_pbo[1] = 0;
+    }
     m_pixelBuffer[0].clear();
     m_lastW = 0;
     m_lastH = 0;
+    m_pboIndex = 0;
+    m_pboFilled = 0;
 }
 
 bool NDIOutput::hasReceivers() const {
@@ -68,34 +74,61 @@ void NDIOutput::send(GLuint texture, int w, int h) {
 
     size_t bytes = (size_t)w * h * 4;
 
-    // Resize buffer if dimensions changed
-    if (w != m_lastW || h != m_lastH) {
+    // (Re)allocate the staging buffer + both PBOs on size change / first use.
+    // A size change invalidates the previously-filled PBO, so reset the fill
+    // counter to re-prime before we map again.
+    if (w != m_lastW || h != m_lastH || m_pbo[0] == 0) {
         m_pixelBuffer[0].resize(bytes);
+        if (m_pbo[0] == 0) glGenBuffers(2, m_pbo);
+        for (int i = 0; i < 2; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         m_lastW = w;
         m_lastH = h;
+        m_pboIndex = 0;
+        m_pboFilled = 0;
     }
 
-    // Ensure GPU has finished rendering before reading back
-    glFlush();
-    glFinish();
+    const int writeIdx = m_pboIndex;
+    const int readIdx  = (m_pboIndex + 1) & 1;
 
+    // Kick off an ASYNCHRONOUS readback of this frame's texture into writeIdx's
+    // PBO. With a pack buffer bound, glGetTexImage returns immediately (the DMA
+    // proceeds in the background) instead of stalling the CPU on the GPU — no
+    // glFinish needed.
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[writeIdx]);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, m_pixelBuffer[0].data());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, (void*)0);
     glBindTexture(GL_TEXTURE_2D, 0);
+    m_pboFilled++;
 
-    // Send synchronously so every frame reaches the receiver
-    NDIlib_video_frame_v2_t frame = {};
-    frame.xres = w;
-    frame.yres = h;
-    frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-    frame.frame_rate_N = 120000;
-    frame.frame_rate_D = 1001;
-    frame.picture_aspect_ratio = (float)w / (float)h;
-    frame.frame_format_type = NDIlib_frame_format_type_progressive;
-    frame.p_data = m_pixelBuffer[0].data();
-    frame.line_stride_in_bytes = w * 4;
+    // Map the OTHER PBO — filled on the previous frame, so its DMA is already
+    // complete and the map doesn't block. Ship that frame (one frame of
+    // latency, zero render-loop stall). Skip until both PBOs are primed.
+    if (m_pboFilled >= 2) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[readIdx]);
+        void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+        if (mapped) {
+            memcpy(m_pixelBuffer[0].data(), mapped, bytes);
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
 
-    rt.api()->send_send_video_v2(m_send, &frame);
+            NDIlib_video_frame_v2_t frame = {};
+            frame.xres = w;
+            frame.yres = h;
+            frame.FourCC = NDIlib_FourCC_video_type_BGRA;
+            frame.frame_rate_N = 120000;
+            frame.frame_rate_D = 1001;
+            frame.picture_aspect_ratio = (float)w / (float)h;
+            frame.frame_format_type = NDIlib_frame_format_type_progressive;
+            frame.p_data = m_pixelBuffer[0].data();
+            frame.line_stride_in_bytes = w * 4;
+            rt.api()->send_send_video_v2(m_send, &frame);
+        }
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    m_pboIndex = readIdx;  // ping-pong: next frame writes the buffer we just read
 }
 
 #endif // HAS_NDI

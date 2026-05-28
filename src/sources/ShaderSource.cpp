@@ -141,6 +141,11 @@ bool ShaderSource::parseISF(const std::string& source) {
                     // Event trigger — behaves like a momentary bool
                     param.defaultBool = false;
                     param.value = false;
+                    // Optional ISF fields used by PropertyPanel's hit-button:
+                    //   MOMENTARY: press-and-hold mode (uniform mirrors held).
+                    //   TARGET:    on tap, randomize this sibling float param.
+                    param.momentary   = input.value("MOMENTARY", false);
+                    param.eventTarget = input.value("TARGET",    std::string(""));
                 } else if (param.type == "text") {
                     // Text input — Shader-Claw compiles to NAME_0..NAME_N + NAME_len uniforms
                     // Store default text and max length
@@ -877,36 +882,11 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         }
         if (!haveRaw) continue;
 
-        // First sample: latch (no slow ramp-up from 0).
-        if (!binding.hasSmoothed) {
-            binding.smoothedValue = raw;
-            binding.hasSmoothed = true;
-        }
-
-        // --- Frame-rate-independent asymmetric follower ---
-        // `smoothing` (0..1) selects a time constant. We keep the legacy
-        // asymmetric feel (punchy attack, softer release) but scale BOTH
-        // rates by the slider so the user can soften the whole envelope.
-        //  s=0   -> very fast (kAttackFast / kReleaseFast)  ~ legacy-snappy
-        //  s=1   -> very slow (kAttackSlow / kReleaseSlow)  ~ heavy glide
-        // Rates are in 1/seconds; alpha = 1 - exp(-rate*dt) is dt-exact, so
-        // behaviour is identical at 30 / 60 / 144 fps.
-        constexpr float kAttackFast  = 28.0f, kAttackSlow  = 2.0f;
-        constexpr float kReleaseFast = 14.0f, kReleaseSlow = 0.9f;
-        float s = binding.smoothing;
-        if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
-        float attackRate  = kAttackFast  + (kAttackSlow  - kAttackFast)  * s;
-        float releaseRate = kReleaseFast + (kReleaseSlow - kReleaseFast) * s;
-        float rate  = (raw > binding.smoothedValue) ? attackRate : releaseRate;
-        float alpha = 1.0f - std::exp(-rate * dt);
-        binding.smoothedValue += (raw - binding.smoothedValue) * alpha;
-
-        // Map the smoothed 0..1 follower onto the per-binding output range.
-        // [rangeMin, rangeMax] IS the effective depth/strength control for a
-        // shader-param binding (there is no separate per-binding strength;
-        // the legacy default rangeMin=paramMin, rangeMax=paramMax preserves
-        // the original 1:1 mapping for existing projects).
-        float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
+        // Frame-rate-independent asymmetric follower + range mapping, now
+        // shared with FluidSource via AudioBinding::follow(). [rangeMin,
+        // rangeMax] IS the effective depth/strength (default rangeMin=paramMin,
+        // rangeMax=paramMax preserves the original 1:1 mapping).
+        float mapped = binding.follow(raw, dt);
 
         // Find the input and set its value
         for (auto& input : m_inputs) {
