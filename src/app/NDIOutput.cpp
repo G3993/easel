@@ -54,7 +54,18 @@ void NDIOutput::destroy() {
         }
         m_send = nullptr;
     }
-    m_pixelBuffer[0].clear();
+    for (int i = 0; i < kReadbackSlots; ++i) {
+        if (m_fence[i]) {
+            glDeleteSync(m_fence[i]);
+            m_fence[i] = nullptr;
+        }
+    }
+    if (m_pbo[0]) {
+        glDeleteBuffers(kReadbackSlots, m_pbo);
+        for (int i = 0; i < kReadbackSlots; ++i) m_pbo[i] = 0;
+    }
+    m_pixelBuffer.clear();
+    m_pboIndex = 0;
     m_lastW = 0;
     m_lastH = 0;
     m_lastSendAt = {};
@@ -78,26 +89,67 @@ void NDIOutput::send(GLuint texture, int w, int h) {
         const double elapsed = std::chrono::duration<double>(now - m_lastSendAt).count();
         if (elapsed < kTargetNdiFrameSeconds) return;
     }
-    m_lastSendAt = now;
-
     size_t bytes = (size_t)w * h * 4;
 
-    // Resize buffer if dimensions changed
-    if (w != m_lastW || h != m_lastH) {
-        m_pixelBuffer[0].resize(bytes);
+    if (w != m_lastW || h != m_lastH || !m_pbo[0]) {
+        for (int i = 0; i < kReadbackSlots; ++i) {
+            if (m_fence[i]) {
+                glDeleteSync(m_fence[i]);
+                m_fence[i] = nullptr;
+            }
+        }
+        if (m_pbo[0]) glDeleteBuffers(kReadbackSlots, m_pbo);
+        glGenBuffers(kReadbackSlots, m_pbo);
+        for (int i = 0; i < kReadbackSlots; ++i) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        m_pixelBuffer.resize(bytes);
+        m_pboIndex = 0;
         m_lastW = w;
         m_lastH = h;
     }
 
-    // Ensure GPU has finished rendering before reading back
-    glFlush();
-    glFinish();
+    int readPBO = m_pboIndex;
+    int mapPBO = (m_pboIndex + 1) % kReadbackSlots;
 
+    if (m_fence[readPBO]) {
+        GLenum status = glClientWaitSync(m_fence[readPBO], 0, 0);
+        if (status == GL_TIMEOUT_EXPIRED) return;
+        glDeleteSync(m_fence[readPBO]);
+        m_fence[readPBO] = nullptr;
+    }
+
+    m_lastSendAt = now;
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[readPBO]);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, m_pixelBuffer[0].data());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
+    m_fence[readPBO] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
-    // Send synchronously, but pace NDI to 60 FPS instead of the monitor refresh rate.
+    bool hasFrame = false;
+    if (m_fence[mapPBO]) {
+        GLenum status = glClientWaitSync(m_fence[mapPBO], 0, 0);
+        if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) {
+            glDeleteSync(m_fence[mapPBO]);
+            m_fence[mapPBO] = nullptr;
+
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
+            void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+            if (ptr) {
+                std::memcpy(m_pixelBuffer.data(), ptr, bytes);
+                hasFrame = true;
+                glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            }
+        }
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    m_pboIndex = (m_pboIndex + 1) % kReadbackSlots;
+
+    if (!hasFrame) return;
+
     NDIlib_video_frame_v2_t frame = {};
     frame.xres = w;
     frame.yres = h;
@@ -106,7 +158,7 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     frame.frame_rate_D = 1000;
     frame.picture_aspect_ratio = (float)w / (float)h;
     frame.frame_format_type = NDIlib_frame_format_type_progressive;
-    frame.p_data = m_pixelBuffer[0].data();
+    frame.p_data = m_pixelBuffer.data();
     frame.line_stride_in_bytes = w * 4;
 
     rt.api()->send_send_video_v2(m_send, &frame);

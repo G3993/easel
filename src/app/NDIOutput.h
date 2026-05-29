@@ -23,7 +23,11 @@ public:
 
 private:
     NDIlib_send_instance_t m_send = nullptr;
-    std::vector<uint8_t> m_pixelBuffer[1];
+    static constexpr int kReadbackSlots = 3;
+    GLuint m_pbo[kReadbackSlots] = {0, 0, 0};
+    GLsync m_fence[kReadbackSlots] = {nullptr, nullptr, nullptr};
+    std::vector<uint8_t> m_pixelBuffer;
+    int m_pboIndex = 0;
     int m_lastW = 0, m_lastH = 0;
     std::string m_publishedName;
     std::chrono::steady_clock::time_point m_lastSendAt{};
