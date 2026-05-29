@@ -510,6 +510,10 @@ void EthereaClient::wsLoop() {
                     if (isFinal && !text.empty()) {
                         if (!m_fullTranscript.empty()) m_fullTranscript += " ";
                         m_fullTranscript += text;
+                        // Bound for 24/7 runs — keep only the recent tail.
+                        constexpr size_t kMaxTranscript = 16000;
+                        if (m_fullTranscript.size() > kMaxTranscript)
+                            m_fullTranscript.erase(0, m_fullTranscript.size() - kMaxTranscript);
                     }
                 }
                 {

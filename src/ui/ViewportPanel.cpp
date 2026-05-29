@@ -134,9 +134,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     MeshWarp* meshWarpPtr = mapping ? &mapping->meshWarp : nullptr;
     ObjMeshWarp* objMeshWarp = mapping ? &mapping->objMeshWarp : nullptr;
     // Skip the whole Canvas render when the workspace is flipped to
-    // Stage or Show. Only one of the three windows submits per frame,
-    // so the dock never shows a tab bar.
-    if (UIManager::sMode != UIManager::WorkspaceMode::Canvas) { return; }
+    // Stage or Show. Mapping mode REUSES this 2D output viewport (so the
+    // corner-pin / mesh-warp / mask handles draw on the live composite),
+    // so it renders here too — only Stage and Show suppress it. Only one
+    // of the central windows submits per frame, so the dock never shows a
+    // tab bar.
+    if (UIManager::sMode != UIManager::WorkspaceMode::Canvas &&
+        UIManager::sMode != UIManager::WorkspaceMode::Mapping) { return; }
     // (Mode-transition Alpha fade removed — it made the panel translucent
     // during the cross-fade which exposed the GL backbuffer underneath as a
     // white flash. Re-introduce only with a non-translucent technique
@@ -1811,18 +1815,19 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
         const float kPillH       = 28.0f;
         const float kSegGap      = 26.0f;   // breathing room between segments
-        const char* labels[3] = {"CANVAS", "STAGE", "PLAY"};
-        Mode      modes[3]    = {Mode::Canvas, Mode::Stage, Mode::Show};
+        const int   kNumTabs     = 4;
+        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "STAGE", "PLAY"};
+        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Stage, Mode::Show};
 
         // Each segment = label width. Icons removed — the workspace tabs
         // now read as text-only, mirroring the rest of the nav row's
         // borderless typographic style.
-        float segW[3];
+        float segW[kNumTabs];
         float totalW = 0.0f;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < kNumTabs; i++) {
             segW[i] = ImGui::CalcTextSize(labels[i]).x;
             totalW += segW[i];
-            if (i < 2) totalW += kSegGap;
+            if (i < kNumTabs - 1) totalW += kSegGap;
         }
 
         // Left-align the workspace tabs — they sit a comfortable distance
@@ -1835,7 +1840,10 @@ void ViewportPanel::renderNavBar(bool stageActive,
         // Workspace tab labels paint into the foreground draw list so they
         // sit above any panel that might be near the nav row in z-order.
         ImDrawList* dl = navFG;
-        int activeIdx = (mode == Mode::Stage) ? 1 : (mode == Mode::Show) ? 2 : 0;
+        int activeIdx = 0;
+        for (int i = 0; i < kNumTabs; i++) {
+            if (modes[i] == mode) { activeIdx = i; break; }
+        }
 
         // Pre-allocate the entire row's footprint with a single Dummy.
         // ImGui asserts at frame end if SetCursorScreenPos pushes the cursor
@@ -1850,7 +1858,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
         float yCenter = rowPos.y + kPillH * 0.5f;
 
         float x = rowPos.x;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < kNumTabs; i++) {
             ImGui::SetCursorScreenPos(ImVec2(x, rowPos.y));
             ImGui::PushID(i);
             ImGui::SetNextItemAllowOverlap();
@@ -1876,7 +1884,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
             }
 
             x += segW[i];
-            if (i < 2) x += kSegGap;
+            if (i < kNumTabs - 1) x += kSegGap;
         }
 
         // Reset cursor to the right edge of the row's pre-allocated rect.

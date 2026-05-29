@@ -1,0 +1,33 @@
+{
+  "slug": "spiral_text",
+  "task": "score this rendered ISF shader against the reference per RUBRIC.md (5 axes 0-5, total /25, anti-pattern checklist).",
+  "inputs": {
+    "rendered_png": "/Users/lu/easel/.planning/drops/20260520/spiral_text/rendered.png",
+    "reference_image": "/Users/lu/Documents/A-List Shaders/spiral_text.jpg",
+    "shader_source": "/Users/lu/easel/shaders/spiral_text.fs",
+    "rubric": "/Users/lu/easel/.planning/auto-improve/RUBRIC.md"
+  },
+  "output_to_write": "/Users/lu/easel/.planning/drops/20260520/spiral_text/score.rubric.json",
+  "schema_expected": {
+    "axes": {
+      "a": "int 0-5",
+      "b": "int 0-5",
+      "c": "int 0-5",
+      "d": "int 0-5",
+      "e": "int 0-5"
+    },
+    "total": "int 0-25",
+    "anti_patterns": {
+      "literal_soccer_scoreboard_pitch": "bool",
+      "sound_wave_ekg": "bool",
+      "spectrum_analyzer_bars": "bool",
+      "default_checkerboard_sdf_grid": "bool",
+      "single_color_noise_plane": "bool",
+      "mirror_symmetric_horizon": "bool",
+      "logo_or_readable_text_central": "bool"
+    },
+    "rationale": "free text, ~3-6 lines explaining the per-axis scores and which anti-patterns (if any) fired"
+  },
+  "binding_floor_rule": "if shader has zero player[*].*/cue.*/data.* binds, cap total at 10/25. audio.*-only passes the floor but caps axis (a) at 1.",
+  "anti_pattern_rule": "any anti-pattern auto-fails axis (d) to 0 and caps total at 8/25."
+}

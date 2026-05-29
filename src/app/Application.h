@@ -34,9 +34,11 @@
 #include "sources/ShaderClawBridge.h"
 #include "sources/ShaderRatings.h"
 #include "sources/ShaderPresets.h"
+#include "sources/ShaderImprover.h"
 #include "sources/ParticleSource.h"
 #include "sources/MovingCompanySource.h"
 #include "sources/FluidSource.h"
+#include "sources/FluidSource3D.h"
 #include "sources/HologramModelSource.h"
 #ifdef __APPLE__
 #include "sources/VisionTracker.h"
@@ -134,6 +136,9 @@ private:
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
     int m_prevActiveZone = 0;
+    // Target frame-rate cap shown/edited in the Canvas section. 0 = uncapped
+    // (vsync only). >0 sleeps after swap to hold the frame to ~1/target sec.
+    float m_targetFPS = 0.0f;
     // Last workspace mode observed in renderUI. Used to detect transitions
     // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
     // reset show-specific UI state without polling every frame.
@@ -187,9 +192,12 @@ private:
     bool          m_bloomEnabled   = true;
     float         m_bloomThreshold = 0.85f;
     float         m_bloomKnee      = 0.30f;
-    float         m_bloomStrength  = 0.55f;
+    float         m_bloomStrength  = 0.70f;   // a touch more glow for the premium finish
     float         m_bloomTint      = 0.40f;
     int           m_bloomBlurPasses = 2;  // 1..6 — more = wider, softer halo
+    // Global finish (saturation grade + film grain + dither) applied in the
+    // bloom composite pass — lifts every layer toward an engine/post-stack look.
+    float         m_finishAmount   = 1.0f;
 
     int m_selectedLayer = -1;
     AudioAnalyzer m_audioAnalyzer;
@@ -261,6 +269,7 @@ private:
 #endif
     void addParticles();
     void addFluid();
+    void addFluid3D();
     void addHologramModel(const std::string& path = ""); // upload 3D model → glitchy hologram; empty path opens the picker
     void addMovingCompany();   // F-117 flying through space (mesh source)
 #ifdef HAS_OPENCV
@@ -280,6 +289,14 @@ private:
     ShaderClawBridge m_shaderClaw;
     ShaderRatings    m_shaderRatings;
     ShaderPresets    m_shaderPresets;
+    ShaderImprover   m_shaderImprover;
+
+    // Push Further (AI shader improve) — styled top-level panel state.
+    bool        m_pushOpen = false;
+    std::string m_pushPath, m_pushTitle, m_pushFile;
+    char        m_pushInstr[512] = {};
+    int         m_pushCombine = 0;   // 0 = none; else index+1 into shaders()
+    void        renderPushFurtherPanel();
 
     // ShaderClaw thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;

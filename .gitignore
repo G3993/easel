@@ -24,3 +24,9 @@ nul
 # macOS
 .DS_Store
 .gstack/
+
+# Python eval virtualenv
+.venv-eval/
+# Easel project backups
+*.bak.*
+default.easel.bak.*

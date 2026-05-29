@@ -67,12 +67,15 @@ public:
     Workspace workspace() const { return m_workspace; }
     void setWorkspace(Workspace w);
 
-    // Current main-viewport workspace. Three modes — only one is rendered
+    // Current main-viewport workspace. Four modes — only one is rendered
     // per frame, the pill switcher in the secondary nav flips this enum:
-    //   Canvas → 2D compositor + layers/properties/sources/timeline
-    //   Stage  → 3D stage view (projector preview)
-    //   Show   → live-performance focus: timeline + MIDI + audio
-    enum class WorkspaceMode { Canvas, Stage, Show };
+    //   Canvas  → 2D compositor + layers/properties/sources/timeline
+    //   Mapping → 2D output + warp/mask params (projection calibration)
+    //   Stage   → 3D stage view (projector preview)
+    //   Show    → live-performance focus: timeline + MIDI + audio
+    // NOTE: order matters — the nav switcher lists them left→right as
+    // Canvas / Mapping / Stage / Play, so Mapping sits between Canvas and Stage.
+    enum class WorkspaceMode { Canvas, Mapping, Stage, Show };
     static WorkspaceMode sMode;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
@@ -189,7 +192,7 @@ public:
     // Mapping). Render at the TOP of each right-dock panel's ImGui::Begin
     // block — `active` controls which pill highlights. With this bar
     // present in every panel we hide the outer ImGui tab bar.
-    enum class QuickNavTab { None = 0, Properties, Shader, Mic, Cam, Win, Mapping };
+    enum class QuickNavTab { None = 0, Properties, Shader, Mic, Music, Cam, Win, Mapping };
     void renderRightDockNavBar(QuickNavTab active);
 
     // Singleton accessor — set during init() so panels without a UIManager

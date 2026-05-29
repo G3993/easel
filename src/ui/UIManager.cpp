@@ -654,7 +654,7 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
                       ImGuiWindowFlags_NoScrollWithMouse);
     const float pillR = 18.0f;
     const float pillW = pillR * 2.0f;
-    const float gap   = 10.0f;                 // 14 → 6 was too tight; 10 sits right
+    const float gap   = 9.0f;                  // 6 pills (Mapping is its own workspace now)
     const float groupW = 6.0f * pillW + 5.0f * gap;
     float availW = ImGui::GetContentRegionAvail().x;
     float startX = (availW - groupW) * 0.5f;
@@ -681,7 +681,19 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
     };
 
     SourceTab activeSub = activeSourcesTab();
+    // When called with None (the host-level pinned bar), the highlighted pill
+    // must reflect the panel that's ACTUALLY visible — m_currentRightPanel —
+    // not the sub-tab default (which is Shader). Otherwise on launch the
+    // Properties panel shows but the Shader pill reads as selected.
+    if (active == QuickNavTab::None && m_currentRightPanel) {
+        if (std::strstr(m_currentRightPanel, "Properties")) active = QuickNavTab::Properties;
+        else if (std::strstr(m_currentRightPanel, "Mapping")) active = QuickNavTab::Mapping;
+        else if (std::strstr(m_currentRightPanel, "Audio")) active = QuickNavTab::Music;
+        // "Sources" panel keeps active=None so the sub-tab (Shader/Mic/Cam/Win)
+        // drives the highlight below.
+    }
     bool actProps  = (active == QuickNavTab::Properties);
+    bool actMusic  = (active == QuickNavTab::Music);
     bool actShader = (active == QuickNavTab::Shader) ||
                      (active != QuickNavTab::Properties &&
                       active != QuickNavTab::Mapping &&
@@ -698,7 +710,6 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
                      (active != QuickNavTab::Properties &&
                       active != QuickNavTab::Mapping &&
                       activeSub == SourceTab::Win);
-    bool actMap    = (active == QuickNavTab::Mapping);
 
     pill("##rdProps", actProps, &lucide::sliders, "Parameters",
          [this]() { focusPanel("        ###Properties"); });
@@ -709,14 +720,17 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
     pill("##rdMic", actMic, &lucide::mic, "Voice / Etherea",
          [this]() { focusSourcesTab(SourceTab::Mic); });
     ImGui::SameLine(0, gap);
+    pill("##rdMusic", actMusic, &lucide::music, "Music / Audio",
+         [this]() { focusPanel("        ###Audio"); });
+    ImGui::SameLine(0, gap);
     pill("##rdCam", actCam, &lucide::camera, "Camera",
          [this]() { focusSourcesTab(SourceTab::Cam); });
     ImGui::SameLine(0, gap);
     pill("##rdWin", actWin, &lucide::monitor, "Display / Capture",
          [this]() { focusSourcesTab(SourceTab::Win); });
-    ImGui::SameLine(0, gap);
-    pill("##rdMap", actMap, &lucide::vectorSquare, "Mapping",
-         [this]() { focusPanel("        ###Mapping"); });
+    // Mapping pill removed — Mapping is now its own top-level workspace
+    // (CANVAS · MAPPING · STAGE · PLAY), so it no longer belongs in the
+    // parameters-panel quick-nav.
 
     // Hairline divider under the bar.
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1117,11 +1131,34 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     bool modeChanged = (s_lastMode != sMode);
     s_lastMode = sMode;
 
-    if (m_firstFrame || sizeChanged || modeChanged) {
+    bool structuralRebuild = (m_firstFrame || sizeChanged);
+
+    // A mode switch no longer tears down the dock node. The full
+    // DockBuilderRemoveNode + resettle below caused a visible one-frame
+    // "jump" of the canvas and panels on every Canvas↔Mapping↔Stage↔Play
+    // switch (windows briefly un-docked to default size/pos, then snapped
+    // back). Per-mode panel composition is already handled by
+    // isPanelVisible() gating — unsubmitted panels vacate the node on their
+    // own — plus the conditional float hosts, so a mode change only needs to
+    // re-seed the tab order and re-fire the right-rail focus.
+    if (structuralRebuild || modeChanged) {
+        m_seedRightDockTabs = true;
+        // In Stage / Mapping modes, surface Mapping as the active right-rail
+        // tab; otherwise Layers leads the group. Pin the sticky right-dock
+        // selection too so a stale pointer can't re-raise a hidden tab.
+        if (sMode == WorkspaceMode::Stage || sMode == WorkspaceMode::Mapping) {
+            m_pendingFocus = "        ###Mapping";
+            m_currentRightPanel = "        ###Mapping";
+        } else {
+            m_pendingFocus = "Layers";
+        }
+        m_pendingFocusFramesLeft = 3;
+    }
+
+    if (structuralRebuild) {
         m_firstFrame = false;
         m_lastDockW = dockSize.x;
         m_lastDockH = dockSize.y;
-        m_seedRightDockTabs = true;
 
         // Always rebuild layout to ensure clean state
         ImGui::DockBuilderRemoveNode(dockspaceId);
@@ -1236,19 +1273,6 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_leftFloatW     = 320.0f;
         m_rightFloatW    = 320.0f;
         m_lastTimelineH  = 0.0f;  // floating overlay — no docked strip
-
-        // Two deferred focus passes: Canvas in the big left slot, Layers as
-        // the active tab in the top-right. SetWindowFocus is called every
-        // frame while m_pendingFocusFramesLeft > 0 so both settle correctly.
-        // In Stage mode, surface Mapping (not Properties) as the active
-        // right-rail tab — when the user goes Canvas→Stage they expect to
-        // see the mapping controls front and center for projector calibration.
-        if (sMode == WorkspaceMode::Stage) {
-            m_pendingFocus = "        ###Mapping";
-        } else {
-            m_pendingFocus = "Layers";
-        }
-        m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
         m_lastDockW = dockSize.x;
@@ -1415,7 +1439,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                 // host, BEFORE the DockSpace. The auto tab bar below it is
                 // still drawn by ImGui (kept for tab-switch machinery) but
                 // overpainted invisibly in drawInspectorTabIcons.
-                renderRightDockNavBar(QuickNavTab::None);
+                // Mapping mode hosts ONLY the Mapping panel, so the pill
+                // switcher would just be a row of dead/duplicate icons —
+                // skip it and let the warp/mask params start at the top.
+                if (sMode != WorkspaceMode::Mapping) {
+                    renderRightDockNavBar(QuickNavTab::None);
+                }
                 // Shrink the auto tab bar's height to ~font height so it
                 // doesn't reserve a visible strip below the pill bar.
                 // FramePadding controls tab height; push y=0 just for the
@@ -1470,7 +1499,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // calling it last means Mapping wins selection in its dock group.
         // In other modes, Layers takes the left, then Properties wins the
         // right group (originally to beat Mapping's early Begin).
-        if (sMode == WorkspaceMode::Stage) {
+        if (sMode == WorkspaceMode::Stage || sMode == WorkspaceMode::Mapping) {
             ImGui::SetWindowFocus(m_pendingFocus);  // "        ###Mapping"
         } else {
             ImGui::SetWindowFocus(m_pendingFocus);  // typically "Layers"
@@ -1525,8 +1554,25 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Sources"))    return true;
         if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
+        if (eq("Audio"))      return true;  // surfaced via the Music pill
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;
+        return false;
+
+    case WorkspaceMode::Mapping:
+        // Mapping is 2D projection calibration: it reuses the Canvas
+        // output viewport (so corner-pin / mesh-warp / mask handles draw
+        // on the live composite) with the Mapping panel — warp params +
+        // masks — as the SOLE right-rail panel. Nothing else docks here:
+        // no Properties, Layers, Sources, Audio or MIDI, so the param
+        // panel is pure mapping and the right-dock pill switcher is
+        // suppressed (see renderRightDockNavBar gate). This workspace is
+        // purely about shaping the output onto physical geometry — no
+        // timeline / bottom transport nav here (you're calibrating geometry,
+        // not scrubbing the show), so the only surfaces are the output
+        // viewport and the Mapping panel.
+        if (eq("Canvas"))     return true;
+        if (eq("Mapping"))    return true;
         return false;
 
     case WorkspaceMode::Stage:

@@ -11,6 +11,7 @@ class LayerStack;
 class BPMSync;
 class SceneManager;
 class MIDIManager;
+struct OutputZone;
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {
@@ -49,7 +50,22 @@ public:
                 SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
                 float appTime = 0.0f, LayerStack* layerStack = nullptr,
                 BPMSync* bpmSync = nullptr, SceneManager* sceneManager = nullptr,
-                int* audioDeviceIdx = nullptr, MIDIManager* midi = nullptr);
+                int* audioDeviceIdx = nullptr, MIDIManager* midi = nullptr,
+                OutputZone* canvasZone = nullptr, float* targetFPS = nullptr);
+
+    // Shared title + label rhythm so the OTHER right-dock parameter panels
+    // (Sources/Shaders/Camera/Display, Audio, Mapping — rendered outside this
+    // class) match this panel's hierarchy EXACTLY. They had drifted into
+    // ad-hoc ImGui::Text labels and inconsistent top spacing, which read as
+    // the params "jumping" when switching tabs.
+    //   PanelSectionHeader: the uppercase H2 section title + collapse chevron.
+    //                       Pass firstSection=true for the top title (no extra
+    //                       top padding) so every tab's first title lands at the
+    //                       same Y. Returns the open/expanded state.
+    //   PanelLabel        : the dim left-gutter label that parks its control at
+    //                       the shared column. Returns the control-column width.
+    static bool  PanelSectionHeader(const char* label, bool firstSection = false);
+    static float PanelLabel(const char* text);
 
     // Stage hookups — when set, the panel renders a Stage Setup section
     // (displays / projectors / surfaces) at the top of the Properties

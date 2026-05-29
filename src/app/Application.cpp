@@ -34,6 +34,7 @@
 #include <set>
 #include <unordered_set>
 #include <chrono>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -348,11 +349,8 @@ bool Application::init() {
         // Update data bus with latest transcript segment
         m_dataBus.set("etherea.latest", text);
         if (isFinal && !text.empty()) {
-            // Accumulate full transcript
-            std::string prev = m_dataBus.get("etherea.transcript");
-            if (!prev.empty()) prev += " ";
-            prev += text;
-            m_dataBus.set("etherea.transcript", prev);
+            // Accumulate full transcript (bounded — see DataBus::appendCapped).
+            m_dataBus.appendCapped("etherea.transcript", text);
         }
         // Record time for voice decay
         m_voiceLastInputTime = glfwGetTime();
@@ -366,10 +364,7 @@ bool Application::init() {
     m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
         m_dataBus.set("cue.latest", text);
         if (isFinal && !text.empty()) {
-            std::string prev = m_dataBus.get("cue.transcript");
-            if (!prev.empty()) prev += " ";
-            prev += text;
-            m_dataBus.set("cue.transcript", prev);
+            m_dataBus.appendCapped("cue.transcript", text);
         }
     });
     m_cueClient.setActionCallback([this](const CueAction& a) {
@@ -489,6 +484,7 @@ bool Application::init() {
 
 void Application::run() {
     while (!glfwWindowShouldClose(m_window)) {
+        double frameStart = glfwGetTime();
         glfwPollEvents();
 
         // ── Esc handling ──────────────────────────────────────────────
@@ -1104,6 +1100,20 @@ void Application::run() {
         }
 
         glfwSwapBuffers(m_window);
+
+        // Frame-rate cap (Canvas → Target). 0 = uncapped (vsync only). When
+        // set, busy-wait the remainder of the frame so we hold ~1/target sec.
+        if (m_targetFPS > 0.0f) {
+            double frameDur = 1.0 / (double)m_targetFPS;
+            double remain   = frameDur - (glfwGetTime() - frameStart);
+            if (remain > 0.0) {
+                // Sleep most of it, then spin the last ~1ms for accuracy.
+                if (remain > 0.002)
+                    std::this_thread::sleep_for(
+                        std::chrono::duration<double>(remain - 0.001));
+                while (glfwGetTime() - frameStart < frameDur) { /* spin */ }
+            }
+        }
     }
 }
 
@@ -1270,6 +1280,43 @@ void Application::updateSources() {
                 // / NDI / shader sources). Clear if the bound layer
                 // vanished or hasn't initialized a texture yet.
                 auto& img = fsrc->imageSource();
+                if (img.sourceLayerId != 0) {
+                    bool found = false;
+                    for (int j = 0; j < m_layerStack.count(); j++) {
+                        auto& srcLayer = m_layerStack[j];
+                        if (srcLayer->id == img.sourceLayerId && srcLayer->source) {
+                            GLuint t = srcLayer->source->textureId();
+                            if (t != 0) {
+                                img.textureId = t;
+                                img.width     = srcLayer->source->width();
+                                img.height    = srcLayer->source->height();
+                                img.flippedV  = srcLayer->source->isFlippedV();
+                                found = true;
+                            }
+                            break;
+                        }
+                    }
+                    if (!found) { img.textureId = 0; img.width = img.height = 0; }
+                } else if (img.textureId != 0) {
+                    img.textureId = 0; img.width = img.height = 0;
+                }
+            }
+
+            // 3D SPH fluid — feed audio + refresh the optional image source.
+            if (layer->source->typeName() == "Fluid3D") {
+                auto* f3 = static_cast<FluidSource3D*>(layer->source.get());
+                f3->applyAudioBindings(
+                    m_audioAnalyzer.smoothedRMS(),
+                    m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.beatDecay(),
+                    audioBindDt,
+                    &m_midiManager
+                );
+                // Resolve the bound image layer's live texture each frame
+                // (mirrors the 2D Fluid image refresh above).
+                auto& img = f3->imageSource();
                 if (img.sourceLayerId != 0) {
                     bool found = false;
                     for (int j = 0; j < m_layerStack.count(); j++) {
@@ -1753,6 +1800,9 @@ void Application::compositeZone(OutputZone& zone) {
         m_bloomCompositeShader.setInt  ("uBloom",    1);
         m_bloomCompositeShader.setFloat("uStrength", m_bloomStrength);
         m_bloomCompositeShader.setFloat("uTint",     m_bloomTint);
+        m_bloomCompositeShader.setFloat("uTime",     (float)glfwGetTime());
+        m_bloomCompositeShader.setVec2 ("uResolution", glm::vec2((float)zone.width, (float)zone.height));
+        m_bloomCompositeShader.setFloat("uFinish",   m_finishAmount);
         m_bloomCompositeShader.setMat3 ("uTransform", glm::mat3(1.0f));
         m_bloomCompositeShader.setBool ("uFlipV",     false);
         glActiveTexture(GL_TEXTURE0);
@@ -2294,10 +2344,7 @@ void Application::startVoiceRecording() {
         // Push the final to the DataBus too so it persists in the bubbles
         // after speech stops, and append to the running transcript.
         m_dataBus.set("cue.latest", s);
-        std::string prev = m_dataBus.get("cue.transcript");
-        if (!prev.empty()) prev += " ";
-        prev += s;
-        m_dataBus.set("cue.transcript", prev);
+        m_dataBus.appendCapped("cue.transcript", s);
         auto intent = easel::voice::parse(s);
         std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
         if (!intent.target.empty()) std::cerr << " target=" << intent.target;
@@ -2583,10 +2630,11 @@ void Application::renderUI() {
             } else if (msg.address == "/easel/workspace" && !msg.strings.empty()) {
                 // Programmatic workspace switch — used by the bridge test
                 // harness AND by the mobile control surface (M2). Accepts
-                // case-insensitive "canvas" / "stage" / "play".
+                // case-insensitive "canvas" / "mapping" / "stage" / "play".
                 std::string w = msg.strings[0];
                 for (auto& c : w) c = (char)tolower((unsigned char)c);
                 if (w == "canvas") UIManager::setMode(UIManager::WorkspaceMode::Canvas);
+                else if (w == "mapping") UIManager::setMode(UIManager::WorkspaceMode::Mapping);
                 else if (w == "stage") UIManager::setMode(UIManager::WorkspaceMode::Stage);
                 else if (w == "play" || w == "show")
                     UIManager::setMode(UIManager::WorkspaceMode::Show);
@@ -2598,6 +2646,10 @@ void Application::renderUI() {
                 const std::string& path = msg.strings[0];
                 if (path == "__fluid__") {
                     addFluid();
+                    // (early-out — special generator token, not a file)
+                }
+                if (path == "__fluid3d__") {
+                    addFluid3D();
                     // (early-out — special generator token, not a file)
                 }
                 // Hologram model token: "__hologram__" opens the picker;
@@ -2613,7 +2665,7 @@ void Application::renderUI() {
                 std::string ext = (dot == std::string::npos)
                     ? std::string{} : path.substr(dot);
                 for (auto& c : ext) c = (char)tolower((unsigned char)c);
-                if (path == "__fluid__" || isHolo) {
+                if (path == "__fluid__" || path == "__fluid3d__" || isHolo) {
                     // handled above
                 } else if (ext == ".fs" || ext == ".frag" || ext == ".glsl") {
                     loadShader(path);
@@ -2847,7 +2899,10 @@ void Application::renderUI() {
     // Floating transport pill is now a docked full-width bottom bar — must
     // match renderFloatingTransportPill's pillH so the dockspace shrinks and
     // its content (timeline, panels) doesn't render under the bar.
-    float transportBarH = 56.0f;
+    // Mapping mode has no timeline or bottom transport nav, so don't reserve
+    // the 56px bottom strip — let the output viewport fill all the way down.
+    float transportBarH = (UIManager::sMode == UIManager::WorkspaceMode::Mapping)
+                        ? 0.0f : 56.0f;
     // Main menu bar removed — the brand glyph + overflow menu now live in
     // the workspace nav row inside the viewport, eliminating the previous
     // 3-row chrome stack (macOS title bar + ImGui menu bar + workspace nav).
@@ -3031,15 +3086,25 @@ void Application::renderUI() {
         // requested) auto-bind the new layer to a Fluid's image source.
         const int prevCount = m_layerStack.count();
         auto bindNewLayerToFluid = [&]() {
-            if (!m_layerPanel.postCreateBindFluidImage) return;
+            bool any = m_layerPanel.postCreateBindFluidImage ||
+                       m_layerPanel.postCreateBindFluid3DImage;
+            if (!any) return;
             if (m_layerStack.count() <= prevCount) {
                 m_layerPanel.postCreateBindFluidImage = nullptr;
+                m_layerPanel.postCreateBindFluid3DImage = nullptr;
                 return;
             }
             uint32_t newId = m_layerStack[m_layerStack.count() - 1]->id;
-            m_layerPanel.postCreateBindFluidImage->imageSource().sourceLayerId = newId;
-            m_layerPanel.postCreateBindFluidImage->m_imageEnabled = true;
-            m_layerPanel.postCreateBindFluidImage = nullptr;
+            if (m_layerPanel.postCreateBindFluidImage) {
+                m_layerPanel.postCreateBindFluidImage->imageSource().sourceLayerId = newId;
+                m_layerPanel.postCreateBindFluidImage->m_imageEnabled = true;
+                m_layerPanel.postCreateBindFluidImage = nullptr;
+            }
+            if (m_layerPanel.postCreateBindFluid3DImage) {
+                m_layerPanel.postCreateBindFluid3DImage->imageSource().sourceLayerId = newId;
+                m_layerPanel.postCreateBindFluid3DImage->m_imageEnabled = true;
+                m_layerPanel.postCreateBindFluid3DImage = nullptr;
+            }
         };
         if (m_layerPanel.wantsAddImage) {
             std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
@@ -3407,7 +3472,7 @@ void Application::renderUI() {
         s_zoneTexs.clear();
         for (auto& zp : m_zones) s_zoneTexs.push_back(zp->warpFBO.textureId());
         m_propertyPanel.setZoneTextures(&s_zoneTexs);
-        m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager);
+        m_propertyPanel.render(selectedLayer, m_maskEditMode, &m_speechState, &mosaicAudio, (float)glfwGetTime(), &m_layerStack, &m_bpmSync, &m_sceneManager, &m_mosaicAudioDevice, &m_midiManager, &activeZone(), &m_targetFPS);
     }
 
     // If a property widget was just activated, push the pre-edit state (before the widget changed it)
@@ -3919,6 +3984,7 @@ void Application::renderUI() {
     // ShaderClaw tab
     if (sourcesTabsOpen && sourcesActiveSub == ST::Shader) {
     {
+        PropertyPanel::PanelSectionHeader("Shaders", /*firstSection=*/true);
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             ImGui::TextWrapped("Connect to a Shader-Claw shaders directory to browse and hot-reload ISF shaders.");
@@ -4021,6 +4087,13 @@ void Application::renderUI() {
                     auto it = m_scThumbnails.find(shader.fullPath);
                     if (it == m_scThumbnails.end() || !it->second.ready) {
                         m_scThumbRenderer = std::make_shared<ShaderSource>();
+                        // Size to thumb res BEFORE loadFromFile so the FBO +
+                        // any multi-pass ping-pong buffers allocate at 160px
+                        // instead of the default 1920x1080. Multi-pass shaders
+                        // (e.g. voronoi_growth_text) otherwise spiked ~33MB of
+                        // full-res RGBA16F buffers per thumbnail. setResolution
+                        // pre-init just stores the dims (no FBO ops yet).
+                        m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
                         if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
                             m_scThumbRenderPath = shader.fullPath;
                             m_scThumbRenderFrame = 0;
@@ -4344,6 +4417,70 @@ void Application::renderUI() {
 
                 ImGui::PopID();
                 gridPos++;
+
+                // ── 3D Fluid (SPH) tile ──────────────────────────────────
+                if (gridPos % cols != 0) ImGui::SameLine(0, cellPad);
+                ImGui::PushID("fluid3d-card");
+                ImVec2 cellPos3 = ImGui::GetCursorScreenPos();
+                bool clicked3 = ImGui::InvisibleButton("##f3tile", ImVec2(thumbSize, cellH));
+                bool hov3 = ImGui::IsItemHovered();
+                ImDrawList* d3 = ImGui::GetWindowDrawList();
+
+                ImU32 tileBg3   = hov3 ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge3 = hov3 ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+                d3->AddRectFilled(cellPos3,
+                                  ImVec2(cellPos3.x + thumbSize, cellPos3.y + cellH),
+                                  tileBg3, 6.0f);
+                d3->AddRect(cellPos3,
+                            ImVec2(cellPos3.x + thumbSize, cellPos3.y + cellH),
+                            tileEdge3, 6.0f, 0, 1.0f);
+
+                ImVec2 thumbMin3(cellPos3.x + 4, cellPos3.y + 4);
+                ImVec2 thumbMax3(cellPos3.x + thumbSize - 4, cellPos3.y + thumbSize - 4);
+                d3->AddRectFilled(thumbMin3, thumbMax3, IM_COL32(6, 9, 22, 255), 4.0f);
+
+                // A violet orb with a soft rim — reads as a 3D liquid blob.
+                {
+                    ImVec2 c((thumbMin3.x + thumbMax3.x) * 0.5f,
+                             (thumbMin3.y + thumbMax3.y) * 0.5f);
+                    float rad = (thumbMax3.x - thumbMin3.x) * 0.30f;
+                    for (int r = 6; r >= 1; r--) {
+                        float rr = rad * (float)r / 6.0f;
+                        int a = (int)(40 + 160 * (1.0f - (float)r / 6.0f));
+                        d3->AddCircleFilled(c, rr, IM_COL32(107, 90, 254, a), 24);
+                    }
+                    d3->AddCircleFilled(ImVec2(c.x - rad * 0.3f, c.y - rad * 0.35f),
+                                        rad * 0.28f, IM_COL32(180, 200, 255, 150), 16);
+                }
+
+                // "+" sigil (create affordance), upper corner so it doesn't
+                // hide the orb.
+                {
+                    ImVec2 c(thumbMax3.x - (thumbMax3.x - thumbMin3.x) * 0.16f,
+                             thumbMin3.y + (thumbMax3.y - thumbMin3.y) * 0.16f);
+                    float arm = (thumbMax3.x - thumbMin3.x) * 0.10f;
+                    float thk = std::max(2.0f, arm * 0.28f);
+                    ImU32 plus = hov3 ? IM_COL32(255, 255, 255, 240)
+                                      : IM_COL32(235, 240, 255, 200);
+                    d3->AddRectFilled(ImVec2(c.x - arm, c.y - thk * 0.5f),
+                                      ImVec2(c.x + arm, c.y + thk * 0.5f), plus, thk * 0.5f);
+                    d3->AddRectFilled(ImVec2(c.x - thk * 0.5f, c.y - arm),
+                                      ImVec2(c.x + thk * 0.5f, c.y + arm), plus, thk * 0.5f);
+                }
+
+                const char* title3 = "3D Fluid";
+                ImVec2 ts3 = ImGui::CalcTextSize(title3);
+                d3->AddText(ImVec2(cellPos3.x + (thumbSize - ts3.x) * 0.5f,
+                                   cellPos3.y + thumbSize - 2),
+                            hov3 ? IM_COL32(255, 255, 255, 255)
+                                 : IM_COL32(220, 226, 235, 220),
+                            title3);
+
+                if (hov3) ParamRow::Tooltip("3D Fluid\n\nNative SPH 3D fluid (volumetric)");
+                if (clicked3) addFluid3D();
+
+                ImGui::PopID();
+                gridPos++;
             }
 
             for (int vi = 0; vi < (int)visibleIdx.size(); vi++) {
@@ -4560,11 +4697,15 @@ void Application::renderUI() {
                         }
                     }
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Improve (Moondream)", nullptr, false, false)) {
-                        // TODO: hook into Moondream auto-improve loop.
-                    }
-                    if (ImGui::MenuItem("Combine With…", nullptr, false, false)) {
-                        // TODO: open shader-picker for A/B merge.
+                    if (ImGui::MenuItem("Push Further…")) {
+                        m_pushPath  = shader.fullPath;
+                        m_pushTitle = shader.title;
+                        m_pushFile  = shader.file;
+                        m_pushInstr[0] = '\0';
+                        m_pushCombine = 0;
+                        m_shaderImprover.reset();
+                        m_pushOpen = true;       // styled panel renders top-level
+                        ImGui::CloseCurrentPopup();
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Delete")) {
@@ -4857,6 +4998,7 @@ void Application::renderUI() {
     // Etherea tab
     if (sourcesTabsOpen && sourcesActiveSub == ST::Mic) {
     {
+        PropertyPanel::PanelSectionHeader("Voice", /*firstSection=*/true);
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
             static std::vector<EthereaSession> sessions;
@@ -5126,6 +5268,7 @@ void Application::renderUI() {
 
 #ifdef HAS_OPENCV
     if (sourcesTabsOpen && sourcesActiveSub == ST::Cam) {
+        PropertyPanel::PanelSectionHeader("Camera", /*firstSection=*/true);
         ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
 
@@ -5240,6 +5383,7 @@ void Application::renderUI() {
     // NDI source list so all "incoming display feed" routes live together.
     if (sourcesTabsOpen && sourcesActiveSub == ST::Win) {
     {
+        PropertyPanel::PanelSectionHeader("Display", /*firstSection=*/true);
 #if defined(_WIN32) || defined(__APPLE__)
         if (flatSection("Screen Capture")) {
             auto capMonitors = CaptureSource::enumerateMonitors();
@@ -5453,6 +5597,7 @@ void Application::renderUI() {
     if (m_ui.isPanelVisible("Audio")) {
     ImGui::Begin("        ###Audio");
     {
+        PropertyPanel::PanelSectionHeader("Audio", /*firstSection=*/true);
         // --- Device selection: [ Input ] [ combo ................ ] [ Refresh ]
         //     Single-line layout — label + combo + refresh all share a row.
 #ifdef HAS_FFMPEG
@@ -6236,6 +6381,300 @@ void Application::renderUI() {
     // (Reset / Flip H / Flip V / X / Y / Size / Rot rows).
 
     // Scenes panel now renders in the Stage-view scope above (where zoneTextures is live).
+
+    // AI "Push Further" panel — top-level so it floats above everything and
+    // doesn't depend on which dock tab is active.
+    renderPushFurtherPanel();
+}
+
+// ── PUSH FURTHER ─ AI shader improve / combine, styled floating panel ──────
+// Sends the shader (+ optional second shader) + a text instruction to Claude,
+// compile-tests the result, then backs up + overwrites the original in place
+// and opens it. The network call lives on a worker thread (ShaderImprover);
+// the compile-test + finalize run here because they need the GL context.
+void Application::renderPushFurtherPanel() {
+    // Finalize a ready candidate every frame (GL thread).
+    if (m_shaderImprover.status() == ShaderImprover::Status::ReadyToCompile) {
+        namespace fs = std::filesystem;
+        std::string tmp  = m_shaderImprover.resultPath();
+        std::string orig = m_shaderImprover.origPath();
+        auto test = std::make_shared<ShaderSource>();
+        if (!tmp.empty() && !orig.empty() && test->loadFromFile(tmp)) {
+            std::error_code ec;
+            const char* home = std::getenv("HOME");
+            fs::path trashDir = fs::path(home ? home : ".") / ".easel" / "trash";
+            fs::create_directories(trashDir, ec);
+            std::string stem = fs::path(orig).stem().string();
+            fs::path bak = trashDir / (stem + ".bak.fs");
+            int s = 1;
+            while (fs::exists(bak)) bak = trashDir / (stem + ".bak" + std::to_string(s++) + ".fs");
+            fs::copy_file(orig, bak, ec);
+            fs::copy_file(tmp, orig, fs::copy_options::overwrite_existing, ec);
+            fs::remove(tmp, ec);
+            if (ec) {
+                m_shaderImprover.markError("Couldn't overwrite original shader");
+            } else {
+                // Reload any layers already running this shader (so they
+                // update live), then ALWAYS load the improved shader onto the
+                // canvas as a fresh selected layer so the result clearly shows.
+                for (int li = 0; li < m_layerStack.count(); li++) {
+                    auto& L = m_layerStack[li];
+                    if (L && L->source && L->source->isShader() &&
+                        L->source->sourcePath() == orig) {
+                        std::ifstream f(orig);
+                        std::stringstream ss; ss << f.rdbuf();
+                        auto sh = std::dynamic_pointer_cast<ShaderSource>(L->source);
+                        if (sh) sh->reload(ss.str());
+                    }
+                }
+                m_shaderClaw.refreshManifest();
+                loadShader(orig);                 // result appears on canvas
+                m_shaderImprover.markDone(orig);
+                std::cerr << "[Improve] done → " << orig << "\n";
+            }
+        } else {
+            std::string glslErr = test ? test->lastError() : std::string();
+            std::error_code ec; std::filesystem::remove(tmp, ec);
+            // Feed the GLSL compile error back to the model for a self-correcting
+            // retry; only surface the real error once retries are exhausted.
+            if (!m_shaderImprover.retryWithError(glslErr)) {
+                std::string shortErr = glslErr.empty()
+                    ? std::string("try a clearer instruction")
+                    : glslErr.substr(0, 200);
+                m_shaderImprover.markError("Didn't compile after retries — " + shortErr);
+            }
+        }
+    }
+
+    if (!m_pushOpen) return;
+
+    ShaderImprover::Status st = m_shaderImprover.status();
+    bool working = (st == ShaderImprover::Status::Working ||
+                    st == ShaderImprover::Status::ReadyToCompile);
+
+    // Center it; dim the screen behind with a full-viewport scrim.
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    {
+        // Background draw list — dims the canvas BEHIND the panel, never over it.
+        ImDrawList* bg = ImGui::GetBackgroundDrawList();
+        bg->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+                          IM_COL32(0, 0, 0, 140));
+    }
+    const float PANEL_W = 440.0f;
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f,
+                                   vp->Pos.y + vp->Size.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(PANEL_W, 0), ImGuiCond_Appearing);
+    // Focus ONLY on the frame it opens — focusing every frame steals focus
+    // back from child popups (the Combine-with dropdown) and closes them.
+    static bool s_wasOpen = false;
+    if (m_pushOpen && !s_wasOpen) ImGui::SetNextWindowFocus();
+    s_wasOpen = m_pushOpen;
+
+    const ImU32 ACCENT  = IM_COL32(150, 120, 255, 255);  // violet
+    const ImU32 ACCENT2 = IM_COL32(90, 210, 255, 255);   // cyan
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20, 18));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(16, 16, 22, 252));
+    ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(150, 120, 255, 90));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,  IM_COL32(255, 255, 255, 12));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 20));
+
+    bool open = true;
+    ImGui::Begin("##pushFurtherPanel", &open,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize |
+                 ImGuiWindowFlags_NoSavedSettings);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 wp = ImGui::GetWindowPos();
+    float ww = ImGui::GetWindowSize().x;
+
+    // ── Header: sparkle glyph + title + shader name + close ──
+    {
+        ImVec2 c = ImGui::GetCursorScreenPos();
+        float cx = c.x + 9, cy = c.y + 9;
+        // 4-point sparkle in accent
+        dl->AddTriangleFilled(ImVec2(cx, cy-9), ImVec2(cx-3, cy), ImVec2(cx+3, cy), ACCENT);
+        dl->AddTriangleFilled(ImVec2(cx, cy+9), ImVec2(cx-3, cy), ImVec2(cx+3, cy), ACCENT);
+        dl->AddTriangleFilled(ImVec2(cx-9, cy), ImVec2(cx, cy-3), ImVec2(cx, cy+3), ACCENT2);
+        dl->AddTriangleFilled(ImVec2(cx+9, cy), ImVec2(cx, cy-3), ImVec2(cx, cy+3), ACCENT2);
+        ImGui::SetCursorScreenPos(ImVec2(c.x + 26, c.y));
+        ImGui::TextUnformatted("PUSH FURTHER");
+        // close ×
+        float xs = 16.0f;
+        ImVec2 xc(wp.x + ww - 20, c.y + 9);
+        bool overX = fabsf(ImGui::GetMousePos().x - xc.x) < 10 &&
+                     fabsf(ImGui::GetMousePos().y - xc.y) < 10;
+        ImU32 xcol = overX ? IM_COL32(255,255,255,255) : IM_COL32(150,155,168,200);
+        dl->AddLine(ImVec2(xc.x-5, xc.y-5), ImVec2(xc.x+5, xc.y+5), xcol, 1.6f);
+        dl->AddLine(ImVec2(xc.x-5, xc.y+5), ImVec2(xc.x+5, xc.y-5), xcol, 1.6f);
+        if (overX && ImGui::IsMouseClicked(0) && !working) { m_pushOpen = false; }
+        (void)xs;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150,155,170,255));
+    ImGui::TextWrapped("%s", m_pushTitle.c_str());
+    ImGui::PopStyleColor();
+    dl->AddLine(ImVec2(wp.x + 18, ImGui::GetCursorScreenPos().y + 4),
+                ImVec2(wp.x + ww - 18, ImGui::GetCursorScreenPos().y + 4),
+                IM_COL32(255,255,255,24), 1.0f);
+    ImGui::Dummy(ImVec2(0, 6));
+
+    // ── Instruction ──
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(190,195,210,255));
+    ImGui::TextUnformatted("How should it be better?");
+    ImGui::PopStyleColor();
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextMultiline("##pfInstr", m_pushInstr, sizeof(m_pushInstr),
+                              ImVec2(-1, 84));
+
+    // ── Combine-with picker ──
+    const auto& sl = m_shaderClaw.shaders();
+    std::string cwLabel = "None";
+    if (m_pushCombine > 0 && m_pushCombine <= (int)sl.size())
+        cwLabel = shaderDisplayName(sl[m_pushCombine-1].title);
+    ImGui::Dummy(ImVec2(0, 2));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(190,195,210,255));
+    ImGui::TextUnformatted("Combine with");
+    ImGui::PopStyleColor();
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##pfCombine", cwLabel.c_str())) {
+        if (ImGui::Selectable("None", m_pushCombine == 0)) m_pushCombine = 0;
+        for (int k = 0; k < (int)sl.size(); k++) {
+            if (sl[k].file == m_pushFile) continue;
+            bool selc = (m_pushCombine == k+1);
+            if (ImGui::Selectable(shaderDisplayName(sl[k].title).c_str(), selc))
+                m_pushCombine = k+1;
+            if (selc) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Dummy(ImVec2(0, 8));
+
+    // ── Generate button (accent gradient, full width, glows on hover) ──
+    {
+        float bh = 38.0f;
+        ImVec2 bp = ImGui::GetCursorScreenPos();
+        float bw = ImGui::GetContentRegionAvail().x;
+        bool clicked = ImGui::InvisibleButton("##pfGen", ImVec2(bw, bh));
+        bool hov = ImGui::IsItemHovered();
+        ImU32 a = working ? IM_COL32(70, 60, 110, 255)
+                : hov     ? IM_COL32(176, 146, 255, 255) : ACCENT;
+        ImU32 b = working ? IM_COL32(50, 70, 95, 255)
+                : hov     ? IM_COL32(120, 226, 255, 255) : ACCENT2;
+        dl->AddRectFilledMultiColor(bp, ImVec2(bp.x+bw, bp.y+bh), a, b, b, a);
+        dl->AddRect(bp, ImVec2(bp.x+bw, bp.y+bh),
+                    IM_COL32(255,255,255, hov?120:60), 9.0f, 0, 1.0f);
+        const char* lbl = working ? "Working…" : "Generate";
+        ImVec2 ts = ImGui::CalcTextSize(lbl);
+        dl->AddText(ImVec2(bp.x + (bw-ts.x)*0.5f, bp.y + (bh-ts.y)*0.5f),
+                    IM_COL32(12, 10, 22, 255), lbl);
+        // rounded mask corners (draw bg rounding by overdrawing window bg corners)
+        if (clicked && !working) {
+            std::string cwPath;
+            if (m_pushCombine > 0 && m_pushCombine <= (int)sl.size())
+                cwPath = sl[m_pushCombine-1].fullPath;
+            // Empty instruction → strong default so combine "just works".
+            std::string instr = m_pushInstr;
+            while (!instr.empty() && (instr.back()==' '||instr.back()=='\n'||instr.back()=='\t'))
+                instr.pop_back();
+            if (instr.empty()) {
+                instr = cwPath.empty()
+                  ? "Push this shader further into a bold, premium, modern result. Add movement, "
+                    "depth and a sense of 3D, fluid/organic motion, evolving patterns and shapes, "
+                    "rhythm and speed controls, simple physics, and rich color-theory palettes. "
+                    "Make it strongly audio-reactive (bass/mid/high) and expose enough sensible "
+                    "parameters (speed, intensity, scale, color, reactivity) for live control."
+                  : "Combine these two shaders into ONE dope, premium, modern single-pass result "
+                    "that fuses both their best ideas. Add movement, depth and a sense of 3D, "
+                    "fluid/organic motion, evolving patterns and shapes, rhythm and speed controls, "
+                    "simple physics, and rich color-theory palettes. Make it strongly audio-reactive "
+                    "(bass/mid/high) and expose enough sensible parameters (speed, intensity, scale, "
+                    "color, reactivity) for live control.";
+            }
+            m_shaderImprover.request(m_pushPath, instr, cwPath, m_shaderClaw.shadersDir());
+        }
+    }
+
+    // ── LIVE MERGE PREVIEW ── while working, animate the two source shaders
+    // fusing: cross-dissolve their thumbnails behind a sweeping scan line +
+    // flickering "building-block" flecks, so it reads as a synthesis in progress.
+    if (working) {
+        auto thumbId = [&](const std::string& full) -> GLuint {
+            auto it = m_scThumbnails.find(full);
+            if (it != m_scThumbnails.end() && it->second.ready && it->second.texture)
+                return it->second.texture->id();
+            return 0;
+        };
+        ImGui::Dummy(ImVec2(0, 8));
+        float pw = ImGui::GetContentRegionAvail().x;
+        float ph = 120.0f;
+        ImVec2 pp = ImGui::GetCursorScreenPos();
+        ImVec2 pe(pp.x + pw, pp.y + ph);
+        ImGui::Dummy(ImVec2(pw, ph));
+        float t = (float)ImGui::GetTime();
+        GLuint ta = thumbId(m_pushPath);
+        GLuint tb = (m_pushCombine > 0 && m_pushCombine <= (int)sl.size())
+                  ? thumbId(sl[m_pushCombine-1].fullPath) : 0;
+        dl->PushClipRect(pp, pe, true);
+        dl->AddRectFilled(pp, pe, IM_COL32(10, 10, 16, 255), 8.0f);
+        // shader A (full), shader B cross-dissolving over it
+        float mixB = 0.5f + 0.5f * sinf(t * 0.9f);
+        if (ta) dl->AddImageRounded((ImTextureID)(intptr_t)ta, pp, pe,
+                    ImVec2(0,1), ImVec2(1,0), IM_COL32(255,255,255,255), 8.0f);
+        else dl->AddRectFilledMultiColor(pp, pe, ACCENT, IM_COL32(18,18,28,255),
+                    IM_COL32(18,18,28,255), ACCENT2);
+        if (tb) dl->AddImageRounded((ImTextureID)(intptr_t)tb, pp, pe,
+                    ImVec2(0,1), ImVec2(1,0), IM_COL32(255,255,255,(int)(190*mixB)), 8.0f);
+        else dl->AddRectFilled(pp, pe, IM_COL32(90,210,255,(int)(110*mixB)), 8.0f);
+        // sweeping scan beam
+        float sx = pp.x + fmodf(t * 200.0f, pw);
+        dl->AddRectFilled(ImVec2(sx-22, pp.y), ImVec2(sx, pe.y), IM_COL32(150,200,255,46));
+        dl->AddRectFilled(ImVec2(sx-1, pp.y), ImVec2(sx+1, pe.y), IM_COL32(190,225,255,210));
+        // building-block flecks
+        for (int i = 0; i < 12; i++) {
+            float fx = fmodf(fabsf(sinf(i*12.9898f))*43758.5f, 1.0f);
+            float fy = fmodf(fabsf(sinf(i*78.233f))*4537.5f, 1.0f);
+            float bl = 0.5f + 0.5f * sinf(t*5.0f + i*1.7f);
+            ImVec2 q(pp.x + fx*pw, pp.y + fy*ph);
+            dl->AddRectFilled(q, ImVec2(q.x+7, q.y+7),
+                              IM_COL32(180,160,255,(int)(140*bl)), 1.5f);
+        }
+        // scanlines + frame
+        for (float y = pp.y; y < pe.y; y += 3.0f)
+            dl->AddLine(ImVec2(pp.x, y), ImVec2(pe.x, y), IM_COL32(0,0,0,38));
+        dl->AddRect(pp, pe, IM_COL32(150,120,255,130), 8.0f, 0, 1.0f);
+        int dd = (int)(t * 3.0) % 4;
+        std::string syn = std::string("SYNTHESIZING") + std::string(dd, '.');
+        dl->AddText(ImVec2(pp.x + 10, pp.y + 8), IM_COL32(225,228,255,235), syn.c_str());
+        dl->PopClipRect();
+    }
+
+    // ── Status row ──
+    std::string msg = m_shaderImprover.message();
+    if (!msg.empty()) {
+        ImGui::Dummy(ImVec2(0, 4));
+        ImU32 mc = (st==ShaderImprover::Status::Error) ? IM_COL32(255,120,120,255)
+                 : (st==ShaderImprover::Status::Done)  ? IM_COL32(120,230,150,255)
+                                                       : IM_COL32(150,190,255,255);
+        // animated spinner dots while working
+        std::string line = msg;
+        if (working) {
+            int d = (int)(ImGui::GetTime() * 3.0) % 4;
+            line = std::string("Working") + std::string(d, '.');
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, mc);
+        ImGui::TextWrapped("%s", line.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::End();
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(4);
+    if (!open && !working) m_pushOpen = false;
 }
 
 // Render the timeline's Work Area to a timestamped .mp4. Seeks the playhead to
@@ -10085,6 +10524,9 @@ void Application::renderNavBarPrefix() {
             if (ImGui::MenuItem("Add Fluid Simulation")) {
                 addFluid();
             }
+            if (ImGui::MenuItem("Add 3D Fluid")) {
+                addFluid3D();
+            }
             if (ImGui::MenuItem("Add Hologram Model...")) {
                 addHologramModel();
             }
@@ -10266,6 +10708,9 @@ void Application::renderMenuBar_legacy() {
             }
             if (ImGui::MenuItem("Add Fluid Simulation")) {
                 addFluid();
+            }
+            if (ImGui::MenuItem("Add 3D Fluid")) {
+                addFluid3D();
             }
             if (ImGui::MenuItem("Add Hologram Model...")) {
                 addHologramModel();
@@ -10648,6 +11093,27 @@ void Application::addFluid() {
     layer->id = m_nextLayerId++;
     layer->source = src;
     layer->name = "Fluid Simulation";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
+void Application::addFluid3D() {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<FluidSource3D>();
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    if (!src->init(w, h)) {
+        std::cerr << "Failed to init FluidSource3D" << std::endl;
+        return;
+    }
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "3D Fluid";
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
@@ -11609,6 +12075,45 @@ void Application::saveProject(const std::string& path) {
                     }
                     if (!abJson.empty()) layerJson["audioBindings"] = abJson;
                 }
+            } else if (layer->source->typeName() == "Fluid3D") {
+                // Native 3D SPH fluid — recreated from scratch on load, so
+                // persist the render look + audio bindings. Separate config
+                // key from "fluidConfig" to avoid collision with 2D Fluid.
+                auto* f = static_cast<FluidSource3D*>(layer->source.get());
+                json fc;
+                fc["deepColor"]   = { f->m_deepColor[0], f->m_deepColor[1], f->m_deepColor[2] };
+                fc["glowColor"]   = { f->m_glowColor[0], f->m_glowColor[1], f->m_glowColor[2] };
+                fc["brightness"]  = f->m_brightness;
+                fc["autoRotate"]  = f->m_autoRotate;
+                fc["rotateSpeed"] = f->m_rotateSpeed;
+                fc["tilt"]        = f->m_tilt;
+                fc["simRes"]      = f->m_simRes;
+                fc["substeps"]    = f->m_substeps;
+                fc["renderScale"] = f->m_renderScale;
+                fc["imageEnabled"]       = f->m_imageEnabled;
+                fc["imageMix"]           = f->m_imageMix;
+                fc["imageSourceLayerId"] = f->imageSource().sourceLayerId;
+                layerJson["fluid3dConfig"] = fc;
+
+                const auto& audioBinds = f->audioBindings();
+                if (!audioBinds.empty()) {
+                    json abJson = json::array();
+                    for (const auto& [name, ab] : audioBinds) {
+                        if (ab.signal == AudioSignal::None) continue;
+                        json abj;
+                        abj["param"]     = name;
+                        abj["signal"]    = (int)ab.signal;
+                        abj["rangeMin"]  = ab.rangeMin;
+                        abj["rangeMax"]  = ab.rangeMax;
+                        abj["smoothing"] = ab.smoothing;
+                        if (ab.signal == AudioSignal::MidiCC) {
+                            abj["midiCC"]      = ab.midiCC;
+                            abj["midiChannel"] = ab.midiChannel;
+                        }
+                        abJson.push_back(abj);
+                    }
+                    if (!abJson.empty()) layerJson["audioBindings"] = abJson;
+                }
             } else if (layer->source->typeName() == "Hologram Model") {
                 // sourcePath already holds the model file; persist the look.
                 auto* hm = static_cast<HologramModelSource*>(layer->source.get());
@@ -12127,6 +12632,52 @@ void Application::loadProject(const std::string& path) {
                     // layer id by the Fluid branch in the main loop).
                     src->m_imageEnabled        = fc.value("imageEnabled",   src->m_imageEnabled);
                     src->m_imageIntensity      = fc.value("imageIntensity", src->m_imageIntensity);
+                    src->imageSource().sourceLayerId =
+                        fc.value("imageSourceLayerId",
+                                 (uint32_t)src->imageSource().sourceLayerId);
+                }
+                int fw = 1280, fh = 720;
+                if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() &&
+                    m_zones[m_activeZone]) {
+                    fw = m_zones[m_activeZone]->width;
+                    fh = m_zones[m_activeZone]->height;
+                }
+                if (src->init(fw, fh)) {
+                    if (layerJson.contains("audioBindings")) {
+                        for (const auto& abj : layerJson["audioBindings"]) {
+                            AudioBinding ab;
+                            ab.signal = (AudioSignal)abj.value("signal", 0);
+                            ab.rangeMin = abj.value("rangeMin", 0.0f);
+                            ab.rangeMax = abj.value("rangeMax", 1.0f);
+                            ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.midiCC = abj.value("midiCC", -1);
+                            ab.midiChannel = abj.value("midiChannel", -1);
+                            src->audioBindings()[abj.value("param", "")] = ab;
+                        }
+                    }
+                    layer->source = src;
+                }
+            } else if (sourceType == "Fluid3D") {
+                // Rebuild the native 3D SPH fluid. simRes is applied BEFORE
+                // init() since it sizes the volumes.
+                auto src = std::make_shared<FluidSource3D>();
+                if (layerJson.contains("fluid3dConfig")) {
+                    const auto& fc = layerJson["fluid3dConfig"];
+                    if (fc.contains("deepColor") && fc["deepColor"].is_array() &&
+                        fc["deepColor"].size() == 3)
+                        for (int i = 0; i < 3; i++) src->m_deepColor[i] = fc["deepColor"][i].get<float>();
+                    if (fc.contains("glowColor") && fc["glowColor"].is_array() &&
+                        fc["glowColor"].size() == 3)
+                        for (int i = 0; i < 3; i++) src->m_glowColor[i] = fc["glowColor"][i].get<float>();
+                    src->m_brightness  = fc.value("brightness",  src->m_brightness);
+                    src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
+                    src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
+                    src->m_tilt        = fc.value("tilt",        src->m_tilt);
+                    src->m_simRes      = fc.value("simRes",      src->m_simRes);
+                    src->m_substeps    = fc.value("substeps",    src->m_substeps);
+                    src->m_renderScale = fc.value("renderScale", src->m_renderScale);
+                    src->m_imageEnabled   = fc.value("imageEnabled", src->m_imageEnabled);
+                    src->m_imageMix       = fc.value("imageMix",     src->m_imageMix);
                     src->imageSource().sourceLayerId =
                         fc.value("imageSourceLayerId",
                                  (uint32_t)src->imageSource().sourceLayerId);

@@ -88,6 +88,11 @@ public:
     // Load from ISF .fs file (optionally with paired .vs)
     bool loadFromFile(const std::string& path);
 
+    // GLSL compile/link error from the last failed load (for Push Further
+    // retry feedback). Empty if the last load succeeded.
+    std::string lastError() const { return m_lastError; }
+    std::string m_lastError;
+
     // Load from raw ISF source code (for live bridge)
     bool loadFromCode(const std::string& isfSource);
 

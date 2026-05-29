@@ -3,6 +3,7 @@
 #include "render/GLTransition.h"
 #include <glm/glm.hpp>
 #include <iostream>
+#include <unordered_set>
 
 // Render a gl-transitions.com shader blending source A → nextSource B at
 // layer->transitionProgress into the provided scratch FBO. Returns the FBO
@@ -395,6 +396,30 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     float dt = m_audio.time - m_lastTime;
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
     m_lastTime = m_audio.time;
+
+    // Prune per-layer / per-path GPU caches to what's still live. Without
+    // this, feedback FBOs (full-canvas, one per layer ID) and lazily-compiled
+    // transition shaders accumulate forever — layer IDs are never reused, so
+    // every add/remove of a feedback or between-row-transition layer orphaned
+    // a full-res FBO / ShaderSource for the lifetime of the app.
+    if (!m_feedbackFBOs.empty() || !m_isfTransitions.empty()) {
+        std::unordered_set<uint32_t> liveIds;
+        std::unordered_set<std::string> livePaths;
+        for (const auto& l : layers) {
+            if (!l) continue;
+            liveIds.insert(l->id);
+            if (!l->betweenRowShaderPath.empty())
+                livePaths.insert(l->betweenRowShaderPath);
+        }
+        for (auto it = m_feedbackFBOs.begin(); it != m_feedbackFBOs.end(); ) {
+            if (liveIds.count(it->first) == 0) it = m_feedbackFBOs.erase(it);
+            else ++it;
+        }
+        for (auto it = m_isfTransitions.begin(); it != m_isfTransitions.end(); ) {
+            if (livePaths.count(it->first) == 0) it = m_isfTransitions.erase(it);
+            else ++it;
+        }
+    }
 
     // Solo-aware visibility: if any layer is solo'd, only solo'd layers render.
     bool anySoloed = false;

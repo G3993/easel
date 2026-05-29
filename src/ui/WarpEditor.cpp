@@ -1,5 +1,6 @@
 #include "ui/WarpEditor.h"
 #include "ui/UIManager.h"
+#include "ui/PropertyPanel.h"
 #include "app/MappingProfile.h"
 #include <imgui.h>
 #include <filesystem>
@@ -54,6 +55,10 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     ImGui::PopStyleVar(3);
 
     // 6-pill nav is rendered at the right-dock host level (one bar total).
+
+    // Consistent top title — same uppercase H2 + spacing as every other
+    // right-dock parameter panel (Properties / Shaders / Camera / Audio).
+    PropertyPanel::PanelSectionHeader("Mapping", /*firstSection=*/true);
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {

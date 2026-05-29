@@ -1,0 +1,5 @@
+{
+  "task": "text_legibility (skipped)",
+  "skip": true,
+  "reason": "no msg text input"
+}

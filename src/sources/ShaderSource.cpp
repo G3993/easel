@@ -527,6 +527,7 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
     }
 
     if (!m_shader.loadFromSource(vertSrc, fragSrc)) {
+        m_lastError = m_shader.lastError();
         std::cerr << "Failed to compile ISF shader" << std::endl;
         {
             FILE* f = fopen("/tmp/etherea_debug.log", "a");
@@ -658,8 +659,12 @@ void ShaderSource::update() {
 
             m_quad.draw();
 
-            // Swap ping-pong for persistent passes
-            if (pass.persistent && pass.ppFBO) {
+            // Swap ping-pong after ANY targeted pass so subsequent passes (and
+            // the final pass) read what this pass just wrote. Previously only
+            // persistent passes swapped, so a plain intermediate TARGET buffer
+            // stayed on the stale read side → later passes sampled an empty
+            // buffer (the black-output bug that blocked multi-pass shaders).
+            if (pass.ppFBO) {
                 pass.ppFBO->swap();
             }
         }

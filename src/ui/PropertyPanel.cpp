@@ -9,11 +9,13 @@
 #include "app/MIDIManager.h"
 #include "compositing/BlendMode.h"
 #include "compositing/LayerStack.h"
+#include "app/OutputZone.h"
 #include "ui/LayerPanel.h"
 #include "sources/ShaderSource.h"
 #include "sources/VideoSource.h"
 #include "sources/ParticleSource.h"
 #include "sources/FluidSource.h"
+#include "sources/FluidSource3D.h"
 #include "sources/HologramModelSource.h"
 #include "sources/MovingCompanySource.h"
 #include "app/DataBus.h"
@@ -375,6 +377,16 @@ static bool sectionHeader(const char* label, bool* open,
     ImGui::SetCursorScreenPos(rowStart);
     ImGui::Dummy(ImVec2(rowW, headlineSize + 6.0f));
     return *state;
+}
+
+// Public wrappers so panels rendered OUTSIDE this class (Sources / Audio /
+// Mapping, which live in Application.cpp + WarpEditor.cpp) share the exact
+// same section-title and label rhythm — single source of truth, no drift.
+bool PropertyPanel::PanelSectionHeader(const char* label, bool firstSection) {
+    return sectionHeader(label, nullptr, firstSection);
+}
+float PropertyPanel::PanelLabel(const char* text) {
+    return labelGutter(text, kDimText);
 }
 
 // Horizontal pill-group selector: active pill is filled, others are outlined.
@@ -1076,7 +1088,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
                            float appTime, LayerStack* layerStack,
                            BPMSync* bpmSync, SceneManager* sceneManager,
-                           int* audioDeviceIdx, MIDIManager* midi) {
+                           int* audioDeviceIdx, MIDIManager* midi,
+                           OutputZone* canvasZone, float* targetFPS) {
     ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(FLT_MAX, FLT_MAX));
     // Window name uses the "display###ID" form so the tab shows a minimal
     // "    ###Properties" — a few spaces reserve the tab's visible width
@@ -1376,7 +1389,112 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // this child so the quick-bar above stays pinned during scroll. Both
     // End() paths (the empty-state early-return and the normal end of
     // render) close this child before closing the outer window.
+    // Transparent child bg so the scroll region matches the panel exactly —
+    // the global theme ChildBg carries a 2% white tint that otherwise reads
+    // as a lighter "container" rectangle inside the parameters panel.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
     ImGui::BeginChild("##propContent", ImVec2(0, 0), false, 0);
+    ImGui::PopStyleColor();
+
+    // ── CANVAS ─────────────────────────────────────────────────────────
+    // Canvas resolution / aspect ratio + frame rate. This is a Canvas-mode
+    // composition concern, so it's pinned at the top of the inspector ONLY
+    // in Canvas mode — in Stage mode the parameters panel is the spatial
+    // Setup inspector and the resolution/FPS block would just be noise.
+    if (canvasZone && UIManager::sMode == UIManager::WorkspaceMode::Canvas) {
+        if (sectionHeader("Canvas", nullptr, /*firstSection=*/true)) {
+            OutputZone& cz = *canvasZone;
+            int cw = cz.width, ch = cz.height;
+
+            // Aspect ratio, gcd-reduced (3840x2160 -> 16:9).
+            auto igcd = [](int a, int b){ while (b){ int t=b; b=a%b; a=t; } return a<1?1:a; };
+            int gg = igcd(cw, ch);
+            char aspectBuf[24];
+            snprintf(aspectBuf, sizeof(aspectBuf), "%d:%d", cw/std::max(gg,1), ch/std::max(gg,1));
+
+            struct CRes { const char* label; int w; int h; };
+            static const CRes cpres[] = {
+                {"1080p · 16:9",    1920, 1080}, {"4K · 16:9",       3840, 2160},
+                {"720p · 16:9",     1280, 720},  {"1440p · 16:9",    2560, 1440},
+                {"Vertical · 9:16", 1080, 1920}, {"Square · 1:1",    1080, 1080},
+                {"Ultrawide · 21:9",2560, 1080},
+            };
+            char resLabel[56];
+            snprintf(resLabel, sizeof(resLabel), "%d x %d   (%s)", cw, ch, aspectBuf);
+
+            labelGutter("RESOLUTION", kDimText);
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##canvasRes", resLabel)) {
+                for (auto& p : cpres) {
+                    bool sel = (cw == p.w && ch == p.h);
+                    char it[56];
+                    snprintf(it, sizeof(it), "%-18s %d x %d", p.label, p.w, p.h);
+                    if (ImGui::Selectable(it, sel)) cz.resize(p.w, p.h);
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            // Custom W x H (commit on Apply, not per keystroke).
+            static int s_cw = 0, s_ch = 0;
+            static OutputZone* s_lastZone = nullptr;
+            if (s_lastZone != &cz) { s_cw = cw; s_ch = ch; s_lastZone = &cz; }
+            ImGui::SetNextItemWidth(74); ImGui::InputInt("##canvasCW", &s_cw, 0);
+            ImGui::SameLine(0, 6); ImGui::TextDisabled("x"); ImGui::SameLine(0, 6);
+            ImGui::SetNextItemWidth(74); ImGui::InputInt("##canvasCH", &s_ch, 0);
+            ImGui::SameLine(0, 8);
+            bool okCustom = s_cw >= 64 && s_ch >= 64 && s_cw <= 16384 && s_ch <= 16384;
+            if (!okCustom) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Apply") && okCustom) cz.resize(s_cw, s_ch);
+            if (!okCustom) ImGui::EndDisabled();
+
+            // ── Frame rate ── live readout (color-coded) + target cap.
+            ImGui::Dummy(ImVec2(0, 4));
+            float liveFPS = ImGui::GetIO().Framerate;
+            ImU32 fpsCol = liveFPS >= 50.0f ? IM_COL32(120, 220, 140, 255)
+                         : liveFPS >= 30.0f ? IM_COL32(235, 205, 90, 255)
+                                            : IM_COL32(235, 110, 110, 255);
+            labelGutter("FRAME RATE", kDimText);
+            ImGui::PushStyleColor(ImGuiCol_Text, fpsCol);
+            ImGui::Text("%.0f fps  ", liveFPS);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 2);
+            // live pulse dot
+            {
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float r = 3.0f, cy = p.y + ImGui::GetTextLineHeight() * 0.5f;
+                float pulse = 0.5f + 0.5f * sinf(appTime * 3.0f);
+                ImGui::GetWindowDrawList()->AddCircleFilled(
+                    ImVec2(p.x + r, cy), r, fpsCol, 12);
+                (void)pulse;
+                ImGui::Dummy(ImVec2(r * 2 + 4, ImGui::GetTextLineHeight()));
+            }
+
+            if (targetFPS) {
+                struct FPSOpt { const char* label; float v; };
+                static const FPSOpt fopts[] = {
+                    {"Uncapped (vsync)", 0.0f}, {"24", 24.0f}, {"30", 30.0f},
+                    {"48", 48.0f}, {"60", 60.0f}, {"120", 120.0f},
+                };
+                const char* cur = "Uncapped (vsync)";
+                for (auto& o : fopts) if (*targetFPS == o.v) { cur = o.label; break; }
+                labelGutter("TARGET", kDimText);
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##canvasFPS", cur)) {
+                    for (auto& o : fopts) {
+                        bool sel = (*targetFPS == o.v);
+                        if (ImGui::Selectable(o.label, sel)) *targetFPS = o.v;
+                        if (sel) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            ImGui::Dummy(ImVec2(0, 6));
+        }
+    }
+
+    // (Single LAYERS section — the full stacked list — lives below, in the
+    // "LAYERS block" that also carries "+ Add New Layer".)
 
     // Stage Setup section — only when the workspace is Stage mode and
     // we have a StageView reference. Tool selection (Move/Rotate/Scale)
@@ -1607,60 +1725,91 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
         }
 
-        // Layer Nav row: leading EYE visibility toggle + current layer name.
-        // Reuses the exact name shown elsewhere (".fs" stripped for shaders).
-        // Hidden when the LAYERS section is collapsed. Layer selection lives
-        // in the Layers panel / left rail — this row has no prev/next UI.
+        // Layer list: EVERY layer as a stacked container (top of stack first,
+        // matching composite order). Per row: eye visibility toggle, name
+        // (".fs" stripped), click-to-select, ▲▼ reorder. Selection + add +
+        // reorder all drive the shared state the Layers panel already owns.
         if (layersBodyOpen && m_selectedLayer && layerStack && layerStack->count() > 0) {
-            ImGui::Dummy(ImVec2(0, kRowGapY));
-            float rowW = ImGui::GetContentRegionAvail().x;
-            ImVec2 rs = ImGui::GetCursorScreenPos();
+            int n = layerStack->count();
             ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 mp = ImGui::GetMousePos();
             float frameH = ImGui::GetFrameHeight();
-            float midY = rs.y + frameH * 0.5f;
-            // Leading slot is now an EYE visibility toggle (its own ID),
-            // controlling the SAME layer->visible / userHidden state the old
-            // LAYERS-header checkmark drove (same semantics + undo trip).
-            // Occupies the former glyph slot (centre x = rs.x + 9, 16px) so
-            // the name text X and row rhythm are unchanged.
-            {
-                float eX = rs.x + 9.0f;
-                ImVec2 saveCur = ImGui::GetCursorScreenPos();
-                ImGui::SetCursorScreenPos(ImVec2(eX - 9.0f, midY - 9.0f));
-                bool eHit = ImGui::InvisibleButton("##layerEyeToggle",
-                                                   ImVec2(18.0f, 18.0f));
-                bool eHov = ImGui::IsItemHovered();
-                bool eOn  = layer->visible && !layer->userHidden;
-                if (eHit) {
-                    layer->userHidden = eOn ? true : false;
-                    layer->visible    = !layer->userHidden;
-                    undoNeeded = true;
-                }
-                // Visible = the bright value tone; hidden = the SAME label
-                // hue at a lower alpha (alpha-derived disabled state, not a
-                // new colour); hover lifts to full value.
+            int reorderFrom = -1, reorderTo = -1;
+            for (int i = n - 1; i >= 0; i--) {
+                auto& L = (*layerStack)[i];
+                if (!L) continue;
+                ImGui::PushID(i);
+                ImGui::Dummy(ImVec2(0, kRowGapY));
+                float rowW = ImGui::GetContentRegionAvail().x;
+                ImVec2 rs = ImGui::GetCursorScreenPos();
+                float midY = rs.y + frameH * 0.5f;
+                bool sel = (*m_selectedLayer == i);
+
+                // Full-row select hit first; sub-zones (eye / chevrons) below
+                // override on click via manual hit-test.
+                ImGui::InvisibleButton("##lrowSel", ImVec2(rowW, frameH));
+                bool rowHov = ImGui::IsItemHovered();
+
+                ImU32 bg = sel    ? IM_COL32(255, 255, 255, 26)
+                         : rowHov ? IM_COL32(255, 255, 255, 12)
+                                  : IM_COL32(255, 255, 255, 5);
+                dl->AddRectFilled(rs, ImVec2(rs.x + rowW, rs.y + frameH), bg, 6.0f);
+                dl->AddRect(rs, ImVec2(rs.x + rowW, rs.y + frameH),
+                            sel ? IM_COL32(255, 255, 255, 90) : kColCtrlBorder,
+                            6.0f, 0, 1.0f);
+
+                bool eOn = L->visible && !L->userHidden;
+
+                // Eye toggle (manual hit-test).
+                float eX = rs.x + 14.0f;
+                bool overEye = fabsf(mp.x - eX) < 11 && fabsf(mp.y - midY) < 11;
                 ImU32 eCol = eOn ? kColValue : kColLabelDim;
-                if (eHov) eCol = IM_COL32(255, 255, 255, 255);
+                if (overEye && rowHov) eCol = IM_COL32(255, 255, 255, 255);
                 if (eOn) lucide::eye   (dl, eX, midY, 16.0f, eCol);
                 else     lucide::eyeOff(dl, eX, midY, 16.0f, eCol);
-                ImGui::SetCursorScreenPos(saveCur);
+
+                // Name (".fs" stripped for shader layers).
+                std::string nm = L->name;
+                if (nm.size() >= 3) {
+                    std::string tl = nm.substr(nm.size() - 3);
+                    for (auto& c : tl) c = (char)tolower((unsigned char)c);
+                    if (tl == ".fs") nm.erase(nm.size() - 3);
+                }
+                dl->AddText(ImVec2(rs.x + 30.0f, midY - ImGui::GetFontSize() * 0.5f),
+                            eOn ? kColValue : kColLabelDim, nm.c_str());
+
+                // ▲▼ reorder chevrons (right). ▲ = toward top (on top).
+                float chX = rs.x + rowW - 16.0f;
+                bool overUp = (i < n - 1) && fabsf(mp.x - chX) < 10 &&
+                              mp.y > rs.y && mp.y < midY;
+                bool overDn = (i > 0) && fabsf(mp.x - chX) < 10 &&
+                              mp.y > midY && mp.y < rs.y + frameH;
+                ImU32 upCol = (i < n - 1) ? (overUp ? IM_COL32(255,255,255,255) : kColLabelDim)
+                                          : IM_COL32(80, 84, 94, 110);
+                ImU32 dnCol = (i > 0) ? (overDn ? IM_COL32(255,255,255,255) : kColLabelDim)
+                                      : IM_COL32(80, 84, 94, 110);
+                dl->AddTriangleFilled(ImVec2(chX-4, midY-2), ImVec2(chX+4, midY-2),
+                                      ImVec2(chX, midY-7), upCol);
+                dl->AddTriangleFilled(ImVec2(chX-4, midY+2), ImVec2(chX+4, midY+2),
+                                      ImVec2(chX, midY+7), dnCol);
+
+                if (ImGui::IsMouseClicked(0) && rowHov) {
+                    if (overUp)       { reorderFrom = i; reorderTo = i + 1; }
+                    else if (overDn)  { reorderFrom = i; reorderTo = i - 1; }
+                    else if (overEye) { L->userHidden = eOn; L->visible = !L->userHidden; undoNeeded = true; }
+                    else              { *m_selectedLayer = i; }
+                }
+
+                ImGui::SetCursorScreenPos(ImVec2(rs.x, rs.y));
+                ImGui::Dummy(ImVec2(rowW, frameH));
+                ImGui::PopID();
             }
-            // Display name — strip a trailing ".fs" for shader layers.
-            std::string nm = layer->name;
-            if (nm.size() >= 3) {
-                std::string t = nm.substr(nm.size() - 3);
-                for (auto& c : t) c = (char)tolower((unsigned char)c);
-                if (t == ".fs") nm.erase(nm.size() - 3);
+            if (reorderFrom >= 0 && reorderTo >= 0 && reorderTo < n) {
+                layerStack->moveLayer(reorderFrom, reorderTo);
+                if (*m_selectedLayer == reorderFrom) *m_selectedLayer = reorderTo;
+                undoNeeded = true;
             }
-            // Name spans the full reclaimed width (no prev/next slot).
-            float textX = rs.x + 24.0f;
-            dl->AddText(ImVec2(textX, midY - ImGui::GetFontSize() * 0.5f),
-                        kColValue, nm.c_str());
-            // Subtle container hairline for the row.
-            dl->AddRect(ImVec2(rs.x, rs.y), ImVec2(rs.x + rowW, rs.y + frameH),
-                        kColCtrlBorder, 6.0f, 0, 1.0f);
-            ImGui::SetCursorScreenPos(ImVec2(rs.x, rs.y));
-            ImGui::Dummy(ImVec2(rowW, frameH + kRowPadY));
+            ImGui::Dummy(ImVec2(0, kRowPadY));
         }
     }
     // (No trailing spacer here — Transform's own 10px header lead provides the
@@ -3129,6 +3278,145 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::Checkbox("Sunrays", &fsrc->m_sunrays);
             if (fsrc->m_sunrays)
                 fluidParam("sunraysWeight", "Sunray Weight", &fsrc->m_sunraysWeight, 0.0f, 2.0f, "%.2f");
+        }
+    }
+
+    // --- 3D Fluid (SPH) controls ---
+    if (layer->source && layer->source->typeName() == "Fluid3D") {
+        auto* f3 = static_cast<FluidSource3D*>(layer->source.get());
+
+        sectionBreak();
+        static bool fluid3dOpen = true;
+        if (sectionHeader("3D Fluid", &fluid3dOpen)) {
+            ImGui::Dummy(ImVec2(0, 4));
+
+            // Bind-capable param: paramSlider + audio/MIDI bind popup + inline
+            // range, keyed by an id FluidSource3D::applyAudioBindings() maps back.
+            auto f3Param = [&](const char* pid, const char* label, float* v,
+                               float lo, float hi, const char* fmt) {
+                auto& bindings = f3->audioBindings();
+                auto bit = bindings.find(pid);
+                bool isBound = (bit != bindings.end() &&
+                                bit->second.signal != AudioSignal::None);
+                ImGui::PushID(pid);
+                ParamSliderResult ps = paramSlider("##f3", label, v, lo, hi,
+                                                   isBound, fmt);
+                if (ps.activated) undoNeeded = true;
+                if (ps.openBindMenu) ImGui::OpenPopup("##f3bind");
+                audioBindPopup("##f3bind", label, bindings, pid, lo, hi,
+                               midi, ps.boltPos);
+                if (isBound) {
+                    AudioBinding& abr = bindings[pid];
+                    float liveDriven = abr.rangeMin +
+                        abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
+                    ImGui::Indent(14.0f);
+                    if (rangeSlider("##f3rng", "range",
+                                    &abr.rangeMin, &abr.rangeMax, lo, hi,
+                                    &liveDriven))
+                        undoNeeded = true;
+                    ImGui::Unindent(14.0f);
+                }
+                ImGui::PopID();
+            };
+
+            {
+                std::vector<PresetParam> pp = {
+                    { "brightness",  f3->m_brightness,  0.0f,  6.0f },
+                    { "rotateSpeed", f3->m_rotateSpeed, 0.0f,  2.0f },
+                    { "tilt",        f3->m_tilt,       -1.57f, 1.57f },
+                };
+                if (audioPresetRow(f3->audioBindings(), pp, layer->id))
+                    undoNeeded = true;
+            }
+
+            f3Param("brightness",  "Brightness", &f3->m_brightness,  0.0f,  6.0f,  "%.2f");
+            ImGui::Checkbox("Auto-rotate", &f3->m_autoRotate);
+            if (f3->m_autoRotate)
+                f3Param("rotateSpeed", "Spin Speed", &f3->m_rotateSpeed, 0.0f, 2.0f, "%.2f");
+            f3Param("tilt", "Tilt", &f3->m_tilt, -1.57f, 1.57f, "%.2f");
+
+            ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
+
+            sectionBreak();
+            // Quality / performance.
+            {
+                float rs = f3->m_renderScale * 100.0f;
+                if (pillSlider("Render Sharpness", &rs, 25.0f, 100.0f, "%.0f%%"))
+                    f3->m_renderScale = rs / 100.0f;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Render resolution as %% of the output zone.\n"
+                                      "100%% = crispest; lower = faster.");
+            }
+            {
+                float sr = (float)f3->m_simRes;
+                if (pillSlider("Sim Detail (grid)", &sr, 32.0f, 80.0f, "%.0f"))
+                    f3->m_simRes = (int)sr;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("3D grid edge — higher = finer fluid detail,\n"
+                                      "much higher GPU cost. Reseeds on change.");
+            }
+            {
+                float ss = (float)f3->m_substeps;
+                if (pillSlider("Sim Substeps", &ss, 1.0f, 4.0f, "%.0f"))
+                    f3->m_substeps = (int)ss;
+            }
+
+            sectionBreak();
+            // ── Image — color the fluid surface with another layer ──────
+            ImGui::Checkbox("Image", &f3->m_imageEnabled);
+            if (f3->m_imageEnabled) {
+                auto& img = f3->imageSource();
+                const char* curName = "(none)";
+                if (layerStack) {
+                    for (int i = 0; i < layerStack->count(); i++) {
+                        auto& L = (*layerStack)[i];
+                        if (L && L->id == img.sourceLayerId) {
+                            curName = L->name.empty() ? "(unnamed)" : L->name.c_str();
+                            break;
+                        }
+                    }
+                }
+                dimLabel("SOURCE", kRowLabel, false);
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##f3ImgSrc", curName)) {
+                    if (ImGui::Selectable("(none)", img.sourceLayerId == 0)) {
+                        img.sourceLayerId = 0; img.textureId = 0; undoNeeded = true;
+                    }
+                    if (layerStack) {
+                        for (int i = 0; i < layerStack->count(); i++) {
+                            auto& L = (*layerStack)[i];
+                            if (!L || !L->source) continue;
+                            if (L->id == layer->id) continue;   // skip self
+                            const char* nm = L->name.empty() ? "(unnamed)" : L->name.c_str();
+                            bool sel = (img.sourceLayerId == L->id);
+                            ImGui::PushID((int)L->id);
+                            if (ImGui::Selectable(nm, sel)) { img.sourceLayerId = L->id; undoNeeded = true; }
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                f3Param("imageMix", "Image Amount", &f3->m_imageMix, 0.0f, 1.0f, "%.2f");
+                if (m_layerPanel) {
+                    ImGui::Dummy(ImVec2(0, 2));
+                    dimLabel("ADD AS SOURCE", kRowLabel, false);
+                    float avail = ImGui::GetContentRegionAvail().x;
+                    float bw = (avail - 12.0f) / 3.0f;
+                    auto addBtn = [&](const char* label, bool* flag) {
+                        if (ImGui::Button(label, ImVec2(bw, 0))) {
+                            *flag = true;
+                            m_layerPanel->postCreateBindFluid3DImage = f3;
+                            undoNeeded = true;
+                        }
+                    };
+                    addBtn("+ Image",  &m_layerPanel->wantsAddImage);
+                    ImGui::SameLine(0, 6);
+                    addBtn("+ Video",  &m_layerPanel->wantsAddVideo);
+                    ImGui::SameLine(0, 6);
+                    addBtn("+ Shader", &m_layerPanel->wantsAddShader);
+                }
+            }
         }
     }
 

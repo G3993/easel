@@ -1,0 +1,22 @@
+{
+  "task": "Inspect the rendered PNG and decide if the visible text is legible in the expected human reading orientation.",
+  "rendered_png": "/Users/lu/easel/.planning/drops/20260520/connectnumbers_text/rendered.png",
+  "sample_msg": "HELLO WORLD CONVERSATION VISUAL TEST",
+  "checks": [
+    "Is text visible at all? If not \u2192 verdict=NO_TEXT_VISIBLE, text_legible=false.",
+    "Are letters mirrored along X (reads right-to-left or each glyph reversed)? \u2192 verdict=BACKWARD_X, text_legible=false.",
+    "Are letters flipped along Y (upside down)? \u2192 verdict=FLIPPED_Y, text_legible=false.",
+    "Are glyphs garbled / unrecognisable (wrong cells, fragmented beyond recognition)? \u2192 verdict=GARBLED, text_legible=false.",
+    "Otherwise \u2192 verdict=PASS, text_legible=true."
+  ],
+  "tolerance": [
+    "Some designs rotate glyphs along a path (spiral, circle of cards). If glyph orientation MATCHES the design's local frame (e.g. tangent to the curve) and reads correctly when the head is tilted to follow the curve, that is PASS.",
+    "Partial fragmentation by an intentional pixel/glitch effect is acceptable IF the underlying letter shapes (when reconstructed mentally) are upright. If you can't tell, mark NO_TEXT_VISIBLE rather than GARBLED."
+  ],
+  "output_to_write": "/Users/lu/easel/.planning/drops/20260520/connectnumbers_text/check_text_legible.agent.json",
+  "schema_expected": {
+    "text_legible": "bool",
+    "verdict": "one of: PASS, BACKWARD_X, FLIPPED_Y, GARBLED, NO_TEXT_VISIBLE",
+    "reason": "1-2 sentence rationale citing visible glyphs/words"
+  }
+}
