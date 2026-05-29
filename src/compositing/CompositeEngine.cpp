@@ -3,6 +3,8 @@
 #include "render/GLTransition.h"
 #include <glm/glm.hpp>
 #include <iostream>
+#include <set>
+#include <string>
 
 // Render a gl-transitions.com shader blending source A → nextSource B at
 // layer->transitionProgress into the provided scratch FBO. Returns the FBO
@@ -357,6 +359,12 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
 
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
     clear();
+
+    // Track which lazily-cached resources are referenced this frame so we can
+    // evict stale ones at the end (see prune block after the layer loop). These
+    // are local to the frame; entries NOT recorded here are candidates for
+    // eviction once the GL context (current on this render thread) is free.
+    std::set<std::string> usedIsfTransitions;
 
     float dt = m_audio.time - m_lastTime;
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
@@ -824,6 +832,9 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         //   - shader is missing any of those → interstitial fallback:
         //     crossfade A → shader → B across the transition window.
         if (layer->betweenRowActive && !layer->betweenRowShaderPath.empty()) {
+            // Mark this transition shader as referenced this frame so the
+            // end-of-frame prune keeps it alive.
+            usedIsfTransitions.insert(layer->betweenRowShaderPath);
             auto& slot = m_isfTransitions[layer->betweenRowShaderPath];
             if (!slot) {
                 auto s = std::make_shared<ShaderSource>();
@@ -1009,6 +1020,60 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     }
 
     Framebuffer::unbind();
+
+    // ── Evict stale lazily-cached resources ─────────────────────────────────
+    // Both caches below are populated lazily and were previously never cleared,
+    // so their owned GL resources accumulated in VRAM over a long session as
+    // layers were removed or transition shaders cycled (bounded by distinct
+    // keys, not frames — slow growth). We run this AFTER the layer loop so no
+    // entry referenced this frame is freed, and on the render thread where the
+    // GL context is current, so the Framebuffer / ShaderSource destructors free
+    // their GL objects safely.
+
+    // m_feedbackFBOs: keyed by layer id. Any key not among the layers we were
+    // handed this frame belongs to a removed (or this frame absent) layer and
+    // cannot be referenced again, so erase it. erase() runs ~Framebuffer(),
+    // which deletes the FBO + texture.
+    if (!m_feedbackFBOs.empty()) {
+        std::set<uint32_t> liveLayerIds;
+        for (const auto& l : layers) {
+            if (l) liveLayerIds.insert(l->id);
+        }
+        for (auto it = m_feedbackFBOs.begin(); it != m_feedbackFBOs.end(); ) {
+            if (liveLayerIds.find(it->first) == liveLayerIds.end())
+                it = m_feedbackFBOs.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    // m_isfTransitions: keyed by shader path. We can't tie a path to a single
+    // layer (multiple layers may share a transition shader, and the same path
+    // can come and go as transition windows open/close), so instead of erasing
+    // the instant a path is unused we age it out. A path referenced this frame
+    // resets its idle counter; one untouched for kIsfTransitionGraceFrames is
+    // erased (running ~ShaderSource() to free its GL program/FBO). The grace
+    // period avoids recompiling a transition that merely flickers in and out of
+    // its active window across consecutive frames.
+    {
+        constexpr int kIsfTransitionGraceFrames = 240; // ~4s at 60fps
+        // Bump idle counters / reset touched ones, then evict the expired.
+        for (auto it = m_isfTransitions.begin(); it != m_isfTransitions.end(); ) {
+            const std::string& path = it->first;
+            if (usedIsfTransitions.find(path) != usedIsfTransitions.end()) {
+                m_isfTransitionIdle[path] = 0;
+                ++it;
+            } else {
+                int idle = ++m_isfTransitionIdle[path];
+                if (idle >= kIsfTransitionGraceFrames) {
+                    m_isfTransitionIdle.erase(path);
+                    it = m_isfTransitions.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
 }
 
 GLuint CompositeEngine::resultTexture() const {

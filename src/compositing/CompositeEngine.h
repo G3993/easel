@@ -86,6 +86,13 @@ private:
     // window is active. Populated on first render that references the path.
     std::map<std::string, std::shared_ptr<ShaderSource>> m_isfTransitions;
 
+    // Per-entry count of consecutive frames m_isfTransitions[path] went
+    // untouched. Used to evict transition shaders after a grace period so the
+    // cache doesn't grow unbounded as transition shaders cycle over a long
+    // session, while avoiding recompile thrash for transitions that flicker
+    // in and out of their active window. Keyed identically to m_isfTransitions.
+    std::map<std::string, int> m_isfTransitionIdle;
+
     float m_lastTime = 0;
 
     void clear();

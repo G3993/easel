@@ -282,6 +282,20 @@ bool WGCCapture::update() {
         return false;
     }
 
+    // Scope guard: every WGC frame must be Close()'d (via IClosable) to recycle
+    // its surface back into the capture pool. Without this, each frame leaks a
+    // GPU surface -> per-frame VRAM growth. Fires at scope exit on EVERY return
+    // path below (after CopySubresourceRegion + Map have read the pixels).
+    struct FrameCloser {
+        ABI_Cap::IDirect3D11CaptureFrame* f;
+        ~FrameCloser() {
+            ComPtr<ABI_F::IClosable> c;
+            if (f && SUCCEEDED(f->QueryInterface(__uuidof(ABI_F::IClosable),
+                                                 reinterpret_cast<void**>(c.GetAddressOf()))))
+                c->Close();
+        }
+    } frameCloser{ frame.Get() };
+
     // Get the content size (may differ from pool size if window resized)
     ABI::Windows::Graphics::SizeInt32 contentSize;
     frame->get_ContentSize(&contentSize);

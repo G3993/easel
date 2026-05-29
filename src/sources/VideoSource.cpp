@@ -185,6 +185,9 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
     int ret = avcodec_send_packet(m_audioCodecCtx, pkt);
     if (ret < 0) return;
 
+    // Drain all frames produced by this packet; a single send_packet can yield
+    // multiple frames. Always unref each drained frame to avoid leaking decoder
+    // reference buffers.
     while (avcodec_receive_frame(m_audioCodecCtx, frame) == 0) {
         // Resample to output format (float32, stereo/device channels, device sample rate)
         int outSamples = swr_get_out_samples(m_swrCtx, frame->nb_samples);
@@ -193,7 +196,10 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
 
         int converted = swr_convert(m_swrCtx, &outPtr, outSamples,
                                      (const uint8_t**)frame->extended_data, frame->nb_samples);
-        if (converted <= 0) continue;
+        if (converted <= 0) {
+            av_frame_unref(frame);
+            continue;
+        }
 
         // Write to ring buffer
         size_t ringSize = m_audioRing.size();
@@ -204,6 +210,8 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
             wp = (wp + 1) % ringSize;
         }
         m_audioWritePos.store(wp);
+
+        av_frame_unref(frame);
     }
 }
 
@@ -528,8 +536,17 @@ void VideoSource::decodeLoop() {
 
         if (pkt->stream_index == m_videoStreamIndex) {
             avcodec_send_packet(m_codecCtx, pkt);
-            ret = avcodec_receive_frame(m_codecCtx, frame);
-            if (ret == 0 && !hasPendingVideo) {
+            // Drain all frames produced by this packet; a single send_packet can
+            // yield multiple frames (esp. B-frame streams). Always unref each
+            // drained frame to avoid leaking decoder reference buffers, including
+            // the dropped-frame path when hasPendingVideo is already true.
+            while ((ret = avcodec_receive_frame(m_codecCtx, frame)) == 0) {
+                if (hasPendingVideo) {
+                    // Already have a frame queued; drop this one (still must unref).
+                    av_frame_unref(frame);
+                    continue;
+                }
+
                 // Transfer hardware frame to software if needed (VideoToolbox)
                 AVFrame* swFrame = nullptr;
                 AVFrame* srcFrame = frame;
@@ -539,7 +556,7 @@ void VideoSource::decodeLoop() {
                         srcFrame = swFrame;
                     } else {
                         av_frame_free(&swFrame);
-                        av_packet_unref(pkt);
+                        av_frame_unref(frame);
                         continue;
                     }
                 }
@@ -567,6 +584,8 @@ void VideoSource::decodeLoop() {
                     pendingPts = frame->pts * m_timeBase;
                 }
                 hasPendingVideo = true;
+
+                av_frame_unref(frame);
             }
         } else if (pkt->stream_index == m_audioStreamIndex) {
             decodeAudioPacket(audioFrame, pkt);
