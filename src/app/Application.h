@@ -178,6 +178,16 @@ private:
     Texture m_testPattern;
     Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
 
+    // MAPPING-workspace calibration patterns (black & white). In Mapping mode
+    // the warp source is replaced by one of these so the user aligns geometry
+    // to crisp lines instead of live content / the color test pattern. The
+    // active one is chosen via the Mapping panel's Test Pattern dropdown
+    // (WarpEditor::testPatternIndex). Order MUST match kPatternNames there:
+    // 0 Grid, 1 Checkerboard, 2 Crosshair, 3 Concentric Circles, 4 Dots,
+    // 5 Solid White.
+    static constexpr int kMapPatternCount = 6;
+    Texture m_mapPatterns[kMapPatternCount];
+
     // Phase Q v4 — bloom pipeline. Half-res FBOs ping-pong for the
     // separable Gaussian; uCompositeFBO holds the screen-blended
     // result before it's copied back to warpFBO.
@@ -189,10 +199,13 @@ private:
     Framebuffer   m_bloomBrightFBO;       // half-res, 16F
     Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
     Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
-    bool          m_bloomEnabled   = true;
+    // Global post bloom OFF by default — it was glowing every layer/shader and
+    // reading as a soft haze. Crisp output is the default; flip on (or raise
+    // strength) only when a deliberately glowy finish is wanted.
+    bool          m_bloomEnabled   = false;
     float         m_bloomThreshold = 0.85f;
     float         m_bloomKnee      = 0.30f;
-    float         m_bloomStrength  = 0.70f;   // a touch more glow for the premium finish
+    float         m_bloomStrength  = 0.70f;
     float         m_bloomTint      = 0.40f;
     int           m_bloomBlurPasses = 2;  // 1..6 — more = wider, softer halo
     // Global finish (saturation grade + film grain + dither) applied in the

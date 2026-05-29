@@ -48,17 +48,28 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     // right-column panels read as one rhythm. Properties uses (28, 22)
     // window pad / (10, 6) item / (12, 9) frame — was (20, 18) / (8, 12)
     // here, which gave Mapping a tighter, denser feel than Properties.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28, 22));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(10, 6));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(12, 9));
+    PropertyPanel::PushPanelStyle();   // same inset/rhythm as every other panel
     ImGui::Begin("        ###Mapping");
-    ImGui::PopStyleVar(3);
+    PropertyPanel::PopPanelStyle();
 
     // 6-pill nav is rendered at the right-dock host level (one bar total).
 
     // Consistent top title — same uppercase H2 + spacing as every other
     // right-dock parameter panel (Properties / Shaders / Camera / Audio).
     PropertyPanel::PanelSectionHeader("Mapping", /*firstSection=*/true);
+
+    // Test-pattern selector — in MAPPING workspace the output is replaced by a
+    // black/white calibration pattern so you align geometry, not live content.
+    // Index order MUST match Application::m_mapPatterns.
+    if (UIManager::sMode == UIManager::WorkspaceMode::Mapping) {
+        static const char* kPatternNames[] = {
+            "Grid", "Checkerboard", "Crosshair", "Concentric Circles",
+            "Dots", "Solid White"
+        };
+        PropertyPanel::PanelLabel("TEST PATTERN");
+        ImGui::Combo("##mapTestPattern", &m_testPattern,
+                     kPatternNames, IM_ARRAYSIZE(kPatternNames));
+    }
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {

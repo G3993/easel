@@ -1151,6 +1151,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             m_currentRightPanel = "        ###Mapping";
         } else {
             m_pendingFocus = "Layers";
+            // Reset the sticky right-dock selection back to Parameters —
+            // otherwise it stays pinned to "###Mapping" from a prior
+            // Stage/Mapping visit and the right panel never switches context
+            // when you return to Canvas.
+            m_currentRightPanel = "        ###Properties";
         }
         m_pendingFocusFramesLeft = 3;
     }

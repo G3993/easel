@@ -388,6 +388,16 @@ bool PropertyPanel::PanelSectionHeader(const char* label, bool firstSection) {
 float PropertyPanel::PanelLabel(const char* text) {
     return labelGutter(text, kDimText);
 }
+void PropertyPanel::PushPanelStyle() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kStepY * 4.5f, kStepY * 4.5f)); // 18,18 symmetric inset
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(kColGap, kStepY * 0.5f));       // 12,2
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(kInnerPad, kStepY * 2.5f));     // 12,10
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding,  6.0f);
+}
+void PropertyPanel::PopPanelStyle() {
+    ImGui::PopStyleVar(5);
+}
 
 // Horizontal pill-group selector: active pill is filled, others are outlined.
 // Returns the newly-selected index, or `current` if nothing changed.
@@ -1123,13 +1133,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // space ABOVE the first section title ("LAYERS", firstSection=true, no
     // top Dummy) equals the left/right inset (and the bottom inset). The
     // shared multiplier guarantees x == y with no separate magic number.
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kStepY * 4.5f, kStepY * 4.5f)); // 18,18 (symmetric inset)
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(kColGap, kStepY * 0.5f));       // 12,2 (Y 4→2: row separation tightened)
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(kInnerPad, kStepY * 2.5f));     // 12,10
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding,  6.0f);
+    PushPanelStyle();   // canonical inset shared by ALL right-dock panels
     ImGui::Begin("        ###Properties");
-    ImGui::PopStyleVar(5);
+    PopPanelStyle();
 
 #if 0
     // ── SOURCES tab strip ─────────────────────────────────────────────

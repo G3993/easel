@@ -154,9 +154,10 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // the window — same row as the macOS traffic-light buttons. Matches
     // Figma's single thin chrome row instead of a stacked title-bar + nav.
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    // #141414 — exact hex requested for the canvas background.
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0x14/255.0f, 0x14/255.0f, 0x14/255.0f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0x14/255.0f, 0x14/255.0f, 0x14/255.0f, 1.0f));
+    // Pure black canvas background — true #000 so the comp reads with real
+    // blacks behind it (was #141414 grey, which made the stage feel washed).
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,  ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
     ImGui::Begin("Canvas", nullptr,
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar();
@@ -858,7 +859,11 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // Application) OR mask-edit mode is active (canvas mask mode deselects
     // the layer but keeps inMaskMode true, so it still shows the gold
     // handles). Gating the whole block also suppresses hit-test/drag.
-    const bool warpEditContext = m_layerSelected || inMaskMode;
+    // MAPPING workspace is the dedicated projection-calibration mode — the
+    // corner-pin / mesh-warp handles are its WHOLE point, so they're always
+    // live there regardless of layer selection or mask mode.
+    const bool inMappingMode = (UIManager::sMode == UIManager::WorkspaceMode::Mapping);
+    const bool warpEditContext = m_layerSelected || inMaskMode || inMappingMode;
     const bool warpDrawOK = warpEditContext &&
                             (!inMaskMode || warpMode != WarpMode::ObjMesh);
     if (warpDrawOK && m_imageSize.x > 0 && m_imageSize.y > 0) {

@@ -67,6 +67,15 @@ public:
     static bool  PanelSectionHeader(const char* label, bool firstSection = false);
     static float PanelLabel(const char* text);
 
+    // Canonical right-dock panel style (window padding / item spacing / frame
+    // padding+rounding). EVERY parameter panel must Push this before its
+    // ImGui::Begin() and Pop it after — otherwise each panel Begin()s with a
+    // different WindowPadding (Properties 18, Mapping 22, Sources/Audio the
+    // global default) and the first title lands a few px off, which reads as a
+    // small vertical "jump" when switching tabs.
+    static void PushPanelStyle();   // call immediately BEFORE Begin()
+    static void PopPanelStyle();    // call immediately AFTER Begin()
+
     // Stage hookups — when set, the panel renders a Stage Setup section
     // (displays / projectors / surfaces) at the top of the Properties
     // window when the workspace mode is Stage.

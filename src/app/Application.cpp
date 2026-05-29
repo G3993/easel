@@ -344,6 +344,67 @@ bool Application::init() {
         m_maskGrid.updateData(pixels.data(), gw, gh);
     }
 
+    // MAPPING-mode calibration patterns — high-res (1024²), black & white,
+    // so projector-mapped surfaces show crisp alignment geometry. One texture
+    // per dropdown option; order matches kPatternNames in WarpEditor.cpp.
+    {
+        const int pw = 1024, ph = 1024;
+        std::vector<uint8_t> px(pw * ph * 4);
+        auto fill = [&](int which) {
+            for (int y = 0; y < ph; y++) {
+                for (int x = 0; x < pw; x++) {
+                    int idx = (y * pw + x) * 4;
+                    float nx = x / (float)(pw - 1) * 2.0f - 1.0f;  // -1..1
+                    float ny = y / (float)(ph - 1) * 2.0f - 1.0f;
+                    bool on = false;
+                    switch (which) {
+                    case 0: { // Grid
+                        const int cell = 64, line = 2;
+                        on = (x % cell < line) || (y % cell < line) ||
+                             (x >= pw - line) || (y >= ph - line);
+                    } break;
+                    case 1: { // Checkerboard
+                        const int cell = 64;
+                        on = (((x / cell) + (y / cell)) % 2) == 0;
+                    } break;
+                    case 2: { // Crosshair + diagonals + border
+                        const int line = 2;
+                        bool cross = (std::abs(x - pw / 2) < line) ||
+                                     (std::abs(y - ph / 2) < line) ||
+                                     (x < line) || (y < line) ||
+                                     (x >= pw - line) || (y >= ph - line);
+                        bool diag = (std::abs(x - y) < line) ||
+                                    (std::abs(x - (pw - 1 - y)) < line);
+                        on = cross || diag;
+                    } break;
+                    case 3: { // Concentric circles
+                        float r = std::sqrt(nx * nx + ny * ny) * 8.0f;
+                        on = (r - std::floor(r)) < 0.14f;
+                    } break;
+                    case 4: { // Dots
+                        const int cell = 64;
+                        int dx = x % cell - cell / 2, dy = y % cell - cell / 2;
+                        on = (dx * dx + dy * dy) < 36;  // ~r6 dots
+                    } break;
+                    default: // Solid White
+                        on = true;
+                        break;
+                    }
+                    uint8_t v = on ? 255 : 12;
+                    px[idx + 0] = v;
+                    px[idx + 1] = v;
+                    px[idx + 2] = on ? 255 : 16;
+                    px[idx + 3] = 255;
+                }
+            }
+        };
+        for (int i = 0; i < kMapPatternCount; i++) {
+            fill(i);
+            m_mapPatterns[i].createEmpty(pw, ph);
+            m_mapPatterns[i].updateData(px.data(), pw, ph);
+        }
+    }
+
     // Etherea client — WebSocket for real-time transcript, SSE for hints
     m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
         // Update data bus with latest transcript segment
@@ -1563,6 +1624,16 @@ void Application::compositeZone(OutputZone& zone) {
     if (m_maskEditMode) {
         sourceTex = m_maskGrid.id();
     }
+    // MAPPING workspace: always show the selected black/white calibration
+    // pattern as the warp source (overrides live content AND the color test
+    // pattern) so the user aligns geometry to crisp lines. Takes precedence
+    // over the mask-edit grid above since it's the deliberate mapping aid.
+    if (UIManager::sMode == UIManager::WorkspaceMode::Mapping) {
+        int pi = m_warpEditor.testPatternIndex();
+        if (pi < 0) pi = 0;
+        if (pi >= kMapPatternCount) pi = kMapPatternCount - 1;
+        sourceTex = m_mapPatterns[pi].id();
+    }
 
     // Per-layer masks are applied during compositing (CompositeEngine).
     // Canvas-level masks (MappingProfile) are applied here, after compositing, before warp.
@@ -1660,7 +1731,15 @@ void Application::compositeZone(OutputZone& zone) {
     // Cost: ~16× fragment work in the warp shader (still cheap — it's a
     // passthrough sample with a homography on UVs) plus 4 texture reads
     // in the downsample. M-series GPUs are fine.
-    const int kWarpSS = 4;
+    // Supersample factor for warp-edge AA, scaled DOWN as the canvas grows so
+    // the intermediate buffer never explodes. At 4K, 4× = 15360×8640 = 132 MP
+    // cleared+rendered+downsampled EVERY frame (~37ms even with no layers) —
+    // and native 4K is already crisp, so it gains nothing. Cap the supersample
+    // buffer near ~4K on its long edge: 4K→1×, 1440/1080p→2×, smaller→4×.
+    int kWarpSS = 4;
+    int longEdge = std::max(zone.width, zone.height);
+    if (longEdge >= 3840)      kWarpSS = 1;
+    else if (longEdge >= 1920) kWarpSS = 2;
     static Framebuffer s_warpSSFBO;
     const int ssW = zone.width  * kWarpSS;
     const int ssH = zone.height * kWarpSS;
@@ -1900,7 +1979,20 @@ void Application::renderReadbackFBO(OutputZone& zone) {
 }
 
 void Application::presentOutputs() {
-    glFinish(); // Ensure all zone FBOs are written before presenting
+    // Only force a full GPU sync when a zone is actually presented to a
+    // SEPARATE projector GL context (the FBO must be finished before that
+    // context samples it). The old unconditional per-frame glFinish() stalled
+    // the CPU on the GPU every frame — capping FPS (e.g. 24fps) even with an
+    // empty scene and no projector attached. Editor preview + NDI (async)
+    // need no sync here, so skip it in the common case.
+    bool needsSync = false;
+    for (auto& zp : m_zones) {
+        if (zp && zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor >= 0) {
+            needsSync = true;
+            break;
+        }
+    }
+    if (needsSync) glFinish();
 
     // Track which monitor indices are still needed
     std::set<int> neededMonitors;
@@ -3833,7 +3925,9 @@ void Application::renderUI() {
     bool sourcesVisible = m_ui.isPanelVisible("Sources");
     // Icon-pad + ###ID — empty label space gives drawInspectorTabIcons()
     // room to paint the Sources icon over the tab.
+    PropertyPanel::PushPanelStyle();  // shared inset so tabs don't jump
     bool sourcesOpen = sourcesVisible && ImGui::Begin("        ###Sources");
+    PropertyPanel::PopPanelStyle();
     // 6-pill nav is rendered at the right-dock host level (one bar total).
     // Tab bar — pinned at uniform icon-only width. Reorderable was the
     // culprit behind the "first tab wide / rest clustered" spacing
@@ -5595,7 +5689,9 @@ void Application::renderUI() {
 
     // Audio panel — BPM, device, levels, gain controls
     if (m_ui.isPanelVisible("Audio")) {
+    PropertyPanel::PushPanelStyle();
     ImGui::Begin("        ###Audio");
+    PropertyPanel::PopPanelStyle();
     {
         PropertyPanel::PanelSectionHeader("Audio", /*firstSection=*/true);
         // --- Device selection: [ Input ] [ combo ................ ] [ Refresh ]
@@ -6057,8 +6153,11 @@ void Application::renderUI() {
 
     // MIDI panel — device selection + mapping
     if (m_ui.isPanelVisible("MIDI")) {
+    PropertyPanel::PushPanelStyle();
     ImGui::Begin("        ###MIDI");
+    PropertyPanel::PopPanelStyle();
     {
+        PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/true);
         auto devices = m_midiManager.listDevices();
         if (devices.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
