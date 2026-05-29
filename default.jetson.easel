@@ -67,7 +67,7 @@
     {
      "name": "audioReact",
      "type": "float",
-     "value": 0.35
+     "value": 0.0
     }
    ],
    "sourcePath": "shaders/color_world.fs",

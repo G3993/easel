@@ -12,7 +12,7 @@
     { "NAME": "hueShift",    "LABEL": "Hue",             "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0 },
     { "NAME": "fog",         "LABEL": "Atmosphere",      "TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.8 },
     { "NAME": "bloom",       "LABEL": "Bloom",           "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.9 },
-    { "NAME": "audioReact",  "LABEL": "Audio React",     "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.3 }
+    { "NAME": "audioReact",  "LABEL": "Audio React",     "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.0 }
   ]
 }*/
 

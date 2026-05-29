@@ -8,7 +8,7 @@
     { "NAME": "outlineWeight","LABEL": "Outline Weight", "TYPE": "float", "MIN": 0.001,"MAX": 0.010,"DEFAULT": 0.0042 },
     { "NAME": "speechBubble", "LABEL": "Speech Bubble",  "TYPE": "bool",  "DEFAULT": false },
     { "NAME": "panelDuration","LABEL": "Panel Seconds",  "TYPE": "float", "MIN": 4.0,  "MAX": 20.0, "DEFAULT": 9.0 },
-    { "NAME": "audioReact",   "LABEL": "Audio React",    "TYPE": "float", "MIN": 0.0,  "MAX": 2.0,  "DEFAULT": 1.0 }
+    { "NAME": "audioReact",   "LABEL": "Audio React",    "TYPE": "float", "MIN": 0.0,  "MAX": 2.0,  "DEFAULT": 0.0 }
   ]
 }*/
 

@@ -1291,12 +1291,19 @@ void Application::updateSources() {
                     if (sw == 0 || sh == 0) { sw = activeZone().width; sh = activeZone().height; }
                 }
                 shaderSrc->setResolution(sw, sh);
+                bool shaderAudioOn = layer->audioReactive;
+                float shaderAudioLevel = shaderAudioOn ? m_audioAnalyzer.smoothedRMS() : 0.0f;
+                float shaderAudioBass = shaderAudioOn ? m_audioAnalyzer.bass() : 0.0f;
+                float shaderAudioMid = shaderAudioOn
+                    ? (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f
+                    : 0.0f;
+                float shaderAudioHigh = shaderAudioOn ? m_audioAnalyzer.treble() : 0.0f;
                 shaderSrc->setAudioState(
-                    m_audioAnalyzer.smoothedRMS(),
-                    m_audioAnalyzer.bass(),
-                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
-                    m_audioAnalyzer.treble(),
-                    m_audioAnalyzer.fftTexture()
+                    shaderAudioLevel,
+                    shaderAudioBass,
+                    shaderAudioMid,
+                    shaderAudioHigh,
+                    shaderAudioOn ? m_audioAnalyzer.fftTexture() : 0
                 );
                 shaderSrc->applyAudioBindings(
                     m_audioAnalyzer.smoothedRMS(),

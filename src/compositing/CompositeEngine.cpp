@@ -42,10 +42,13 @@ static GLuint renderLayerGLTransition(const std::shared_ptr<Layer>& layer,
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    bool audioOn = layer->audioReactive;
     xition->render(texA, texB, layer->transitionProgress, w, h,
-                   audio.rms, audio.bass,
-                   (audio.lowMid + audio.highMid) * 0.5f, audio.treble,
-                   audio.beatDecay);
+                   audioOn ? audio.rms : 0.0f,
+                   audioOn ? audio.bass : 0.0f,
+                   audioOn ? (audio.lowMid + audio.highMid) * 0.5f : 0.0f,
+                   audioOn ? audio.treble : 0.0f,
+                   audioOn ? audio.beatDecay : 0.0f);
 
     Framebuffer::unbind();
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
@@ -882,10 +885,13 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
                 float p = layer->betweenRowProgress;
 
-                // Audio bindings so user transition shaders can react too.
-                slot->setAudioState(m_audio.rms, m_audio.bass,
-                                    (m_audio.lowMid + m_audio.highMid) * 0.5f,
-                                    m_audio.treble, m_audio.fftTexture);
+                // Keep transition shader audio opt-in through the layer Audio toggle.
+                bool audioOn = layer->audioReactive;
+                slot->setAudioState(audioOn ? m_audio.rms : 0.0f,
+                                    audioOn ? m_audio.bass : 0.0f,
+                                    audioOn ? (m_audio.lowMid + m_audio.highMid) * 0.5f : 0.0f,
+                                    audioOn ? m_audio.treble : 0.0f,
+                                    audioOn ? m_audio.fftTexture : 0);
 
                 if (hasFrom && hasTo && hasProgress) {
                     // (d) Full contract: shader is the transition.
@@ -979,12 +985,15 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 glViewport(0, 0, m_width, m_height);
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
+                bool audioOn = layer->audioReactive;
                 xition->render(fromSrc, m_betweenRowFBO.textureId(),
                                layer->betweenRowProgress,
                                m_width, m_height,
-                               m_audio.rms, m_audio.bass,
-                               (m_audio.lowMid + m_audio.highMid) * 0.5f,
-                               m_audio.treble, m_audio.beatDecay);
+                               audioOn ? m_audio.rms : 0.0f,
+                               audioOn ? m_audio.bass : 0.0f,
+                               audioOn ? (m_audio.lowMid + m_audio.highMid) * 0.5f : 0.0f,
+                               audioOn ? m_audio.treble : 0.0f,
+                               audioOn ? m_audio.beatDecay : 0.0f);
                 Framebuffer::unbind();
             }
         }
