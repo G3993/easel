@@ -75,6 +75,15 @@ public:
     float m_glowColor[3]  = {0.420f, 0.302f, 0.996f}; // velocity glow
     float m_brightness    = 2.5f;     // diffuse multiplier
 
+    // ── Color + lighting options (defaults reproduce the original look) ──
+    float m_lightDir[3]    = {0.820f, 1.000f, 0.702f}; // key-light direction
+    float m_lightIntensity = 1.0f;    // diffuse key intensity
+    float m_ambient        = 0.10f;   // ambient fill (shadow floor)
+    float m_specular       = 1.0f;    // reflection/specular strength
+    float m_shallowColor[3]= {0.60f, 0.85f, 1.00f};    // rim / grazing-edge tint
+    float m_rim            = 0.0f;    // rim amount (0 = off)
+    float m_saturation     = 1.0f;    // output saturation
+
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
     float m_tilt          = -0.5f;

@@ -121,6 +121,54 @@ public:
     float highMid() const { return m_smoothHighMid; }
     float treble() const { return m_smoothTreble; }
 
+    // --- Audio Feature Bus: Tier 1 extras + Tier 2 spectral character ---
+    // All normalized 0-1 unless noted; pre-smoothed, ready as GLSL uniforms.
+    float sub() const        { return m_smoothSub; }       // sub-bass (coarse, ~bin1)
+    float punch() const      { return m_punch; }           // transient crest (peak-hold)
+    float brightness() const { return m_brightness; }      // spectral centroid, log-mapped
+    float spread() const     { return m_spread; }          // focused(0) vs washy(1)
+    float rolloff() const    { return m_rolloff; }          // body(0) vs air(1)
+    float flatness() const   { return m_flatness; }        // tonal(0) vs noise(1)
+    float flux() const       { return m_flux; }            // spectral change / movement
+    float onset() const      { return m_onset; }           // discrete attack pulse
+    float onsetRate() const  { return m_onsetRate; }       // rhythmic busyness
+    float tilt() const       { return m_tilt; }            // warm(-1) vs harsh(+1)
+    float zcr() const        { return m_zcr; }             // sibilance / cheap noisiness
+    float texture() const    { return m_texture; }         // crispy(1) vs smooth(0)
+
+    // --- Tier 3: affect / mood (0-1) ---
+    float valence() const   { return m_valence; }
+    float arousal() const   { return m_arousal; }
+    float tension() const   { return m_tension; }
+    float warmth() const    { return m_warmth; }
+    float softness() const  { return m_softness; }
+    float roughness() const { return m_roughness; }
+    float charm() const     { return m_charm; }
+    // --- Tier 4: structure / build-up ---
+    float energy() const      { return m_energy; }
+    float energyVel() const   { return m_energyVel; }     // -1..1
+    float energyAcc() const   { return m_energyAcc; }     // -1..1
+    float buildup() const     { return m_buildup; }
+    float buildupRate() const { return m_buildupRate; }   // -1..1
+    float drop() const        { return m_drop; }
+    float novelty() const     { return m_novelty; }
+    float sectionPhase() const{ return m_sectionPhase; }
+    float sectionAge() const  { return m_sectionAge; }
+    float layers() const      { return m_layers; }
+    float density() const     { return m_density; }
+    const float* presence() const { return m_presence; }  // [4] bass/lowMid/highMid/treble
+    const float* flow() const     { return m_flow; }      // [2] drift vector -1..1
+    // --- Tier 5: palette (linear RGB anchors) + harmony ---
+    const float* palShadow() const { return m_palShadow; }
+    const float* palMid() const    { return m_palMid; }
+    const float* palHigh() const   { return m_palHigh; }
+    const float* palAccent() const { return m_palAccent; }
+    float palTemp() const          { return m_palTemp; }
+    float palSat() const           { return m_palSat; }
+    const float* chroma() const    { return m_chroma; }   // [12]
+    float dominantPitch() const    { return m_dominantPitch; }
+    float majorMinor() const       { return m_majorMinor; }
+
     // True RMS from sample buffer (0-1)
     float rms() const { return m_smoothRMS; }
 
@@ -246,8 +294,80 @@ private:
     Texture m_fftTex;
     uint8_t m_fftTexData[128] = {};
 
+    // --- Audio Feature Bus state (Tier 1 extras + Tier 2 spectral) ---
+    // Adaptive gain control: tracks a slow running [lo,hi] envelope and maps
+    // the raw value into 0-1, so "shape" features stay well-scaled across very
+    // different material without a fixed magic constant.
+    struct AGC {
+        float lo = 0.0f, hi = 0.05f;
+        float norm(float x, float dt) {
+            // hi rises fast to peaks, falls slowly; lo the mirror.
+            float upHi = 1.0f - std::exp(-6.0f * dt);    // fast catch
+            float dnHi = 1.0f - std::exp(-0.20f * dt);   // slow release
+            hi += (x - hi) * (x > hi ? upHi : dnHi);
+            float upLo = 1.0f - std::exp(-0.20f * dt);
+            float dnLo = 1.0f - std::exp(-6.0f * dt);
+            lo += (x - lo) * (x < lo ? dnLo : upLo);
+            float d = std::max(1e-4f, hi - lo);
+            float y = (x - lo) / d;
+            return y < 0.0f ? 0.0f : (y > 1.0f ? 1.0f : y);
+        }
+    };
+    // Instant attack, hold, then exponential decay — for transient channels.
+    struct PeakHold {
+        float v = 0.0f, hold = 0.0f;
+        float update(float x, float dt, float holdT, float decayTau) {
+            if (x >= v) { v = x; hold = holdT; }
+            else if (hold > 0.0f) { hold -= dt; }
+            else { v *= std::exp(-dt / std::max(1e-3f, decayTau)); }
+            return v;
+        }
+    };
+
+    float m_prevSpec[kBins] = {};
+    float m_smoothSub = 0;
+    float m_brightness = 0, m_spread = 0, m_rolloff = 0, m_flatness = 0;
+    float m_flux = 0, m_onset = 0, m_onsetRate = 0, m_tilt = 0, m_zcr = 0, m_texture = 0.5f;
+    float m_punch = 0;
+    float m_fluxFloor = 1e-3f;          // slow running floor for flux normalization
+    float m_onsetMedian = 0;            // adaptive onset threshold
+    float m_beatCooldownOnset = 0;      // refractory for onset peak-pick
+    AGC m_agcBright, m_agcFlat, m_agcFlux, m_agcTilt;
+    PeakHold m_punchPH, m_onsetPH, m_dropPH;
+
+    // Tier 3 — affect (neutral init)
+    float m_valence = 0.5f, m_arousal = 0, m_tension = 0, m_warmth = 0.5f;
+    float m_softness = 0.5f, m_roughness = 0, m_charm = 0.05f;
+    // Tier 4 — structure (dual-timescale)
+    float m_energyFast = 0, m_energySlow = 0, m_energyRunMax = 1e-3f;
+    float m_energy = 0, m_energyVel = 0, m_energyAcc = 0, m_prevEnergy = 0, m_prevEnergyVel = 0;
+    float m_buildup = 0, m_buildupRate = 0, m_prevBuildup = 0, m_drop = 0;
+    float m_novelty = 0, m_sectionPhase = 0, m_sectionAge = 0; int m_sectionCount = 0;
+    float m_sectionCooldown = 0;
+    float m_layers = 0, m_density = 0;
+    float m_presence[4] = {0, 0, 0, 0};
+    float m_band12[12] = {0}, m_band12Slow[12] = {0};
+    float m_flow[2] = {0, 0};
+    // Tier 5 — palette + harmony
+    float m_chroma[12] = {0};
+    int   m_binToPC[kBins] = {0};
+    bool  m_binToPCInit = false;
+    float m_dominantPitch = 0, m_majorMinor = 0.5f;
+    float m_hueSin = 0, m_hueCos = 1, m_accHueSin = 0, m_accHueCos = 1; // circular hue smoothing
+    float m_palShadow[3] = {0.05f,0.05f,0.06f};
+    float m_palMid[3]    = {0.30f,0.30f,0.33f};
+    float m_palHigh[3]   = {0.80f,0.80f,0.84f};
+    float m_palAccent[3] = {0.90f,0.85f,0.70f};
+    float m_palTemp = 0, m_palSat = 0.3f;
+
     void runFFT();
     void computeBands();
+    void computeSpectralFeatures(float dt); // Tier 2 + sub/punch over m_spectrum
+    void computeAffect(float dt);           // Tier 3 valence/arousal/tension/...
+    void computeStructure(float dt);        // Tier 4 energy/buildup/drop/section/layers
+    void computeFlow(float dt);             // drift vector from low-freq envelopes
+    void computeChroma(float dt);           // 12-bin pitch class, dominant, major/minor
+    void computePalette(float dt);          // Tier 5 Oklch ramp + accent
     void detectBeat(float dt);
     void smoothBands(float dt);
     void updateFFTTexture();

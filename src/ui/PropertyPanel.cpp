@@ -3343,6 +3343,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
+            pillSlider("Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
+            pillSlider("Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
+
+            sectionBreak();
+            ImGui::TextDisabled("Lighting");
+            ImGui::SliderFloat3("Light Dir",   f3->m_lightDir, -1.0f, 1.0f);
+            pillSlider("Light Intensity", &f3->m_lightIntensity, 0.0f, 3.0f, "%.2f");
+            pillSlider("Ambient",         &f3->m_ambient,        0.0f, 1.0f, "%.2f");
+            pillSlider("Specular",        &f3->m_specular,       0.0f, 3.0f, "%.2f");
 
             sectionBreak();
             // Quality / performance.

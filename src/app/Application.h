@@ -136,6 +136,50 @@ private:
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
     int m_prevActiveZone = 0;
+
+    // ── Multi-screen output mode ─────────────────────────────────────
+    // Independent: each zone drives its own monitor (the existing path).
+    // Spanned:     one wide "span" canvas is sliced left-to-right across
+    //              several monitors, so a single visual stretches/moves
+    //              across screens. The two are alternatives, toggled live.
+    enum class OutputMode { Independent, Spanned };
+    OutputMode m_outputMode = OutputMode::Independent;
+
+    // The span canvas: its own compositor / warp / layer-visibility at a
+    // user-defined resolution (default 3840x1080 = two side-by-side 1080p
+    // screens). Lazily created the first time spanned mode is used.
+    std::unique_ptr<OutputZone> m_spanZone;
+    int m_spanWidth  = 3840;
+    int m_spanHeight = 1080;
+
+    // Horizontal slices of the span canvas, ordered left-to-right. Each slice
+    // crops the [u0,u1] sub-rect of the (flat) span canvas, warps it through
+    // its OWN mapping profile (independent per-projector corner-pin), then
+    // presents fullscreen on one monitor.
+    struct SpanSlice {
+        int monitor = -1;
+        float u0 = 0.0f;
+        float u1 = 1.0f;
+        int mappingIndex = -1;   // own MappingProfile in m_mappings (-1 until created)
+    };
+    std::vector<SpanSlice> m_spanSlices;
+    // Per-slice GPU targets (parallel to m_spanSlices): cropFBO holds the
+    // projector's flat half, warpFBO the corner-pinned result. Kept out of
+    // SpanSlice so the struct stays copyable.
+    std::vector<Framebuffer> m_spanCropFBO;
+    std::vector<Framebuffer> m_spanWarpFBO;
+    // Per-projector mapping profiles, kept SEPARATE from m_mappings so the
+    // normal Mapping workspace (which enumerates m_mappings) never sees or
+    // touches them. SpanSlice.mappingIndex indexes into this vector.
+    std::vector<std::unique_ptr<MappingProfile>> m_spanMappings;
+
+    OutputZone& ensureSpanZone();   // create + size the span canvas on demand
+    void layoutSpanSlices();        // even left->right split across the slices
+    void ensureSpanSliceResources(); // size per-slice FBOs + mapping profiles
+    // Shared projector create/retry/backoff helper (used by both the
+    // independent per-zone path and the spanned slice path). Returns an
+    // active projector for the monitor, or nullptr if it isn't ready yet.
+    ProjectorOutput* ensureProjector(int monitorIndex);
     // Target frame-rate cap shown/edited in the Canvas section. 0 = uncapped
     // (vsync only). >0 sleeps after swap to hold the frame to ~1/target sec.
     float m_targetFPS = 0.0f;
@@ -231,6 +275,11 @@ private:
     VisionTracker m_visionTracker;
 #endif
     float m_audioRMS = 0; // backward compat: smoothed audio level
+    // Global "Audio -> Shaders" switch. When true, the full AudioFeatures bus is
+    // fed to every shader's GLSL uniforms; when false, shaders get a neutral
+    // (zeroed) bus — the panic off-switch that the old "feed zeros" decision
+    // provided. The explicit per-param audio-binding system is independent.
+    bool m_audioToShaders = true;
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;

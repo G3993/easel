@@ -1,5 +1,6 @@
 #pragma once
 #include "sources/ContentSource.h"
+#include "sources/AudioFeatures.h"
 #include "render/ShaderProgram.h"
 #include "render/Framebuffer.h"
 #include "render/Mesh.h"
@@ -120,6 +121,11 @@ public:
     // Audio state for ISF shaders (Shader-Claw naming convention)
     void setAudioState(float rms, float bass, float mid, float high, GLuint fftTex);
 
+    // New Audio Feature Bus — full per-frame perceptual feature set. Stores the
+    // struct AND mirrors the legacy audioLevel/Bass/Mid/High/FFT fields so old
+    // shaders keep working unchanged.
+    void setAudioFeatures(const AudioFeatures& f);
+
     // Mouse state for interactive shaders (CFD paint, etc.)
     void setMouseState(float x, float y, bool down);
 
@@ -195,6 +201,7 @@ private:
     // Audio state cached for upload
     float m_audioRMS = 0, m_audioBass = 0, m_audioMid = 0, m_audioHigh = 0;
     GLuint m_audioFFTTex = 0;
+    AudioFeatures m_af;   // full feature bus (uploaded alongside legacy fields)
 
     // Image input bindings (input name -> external texture)
     std::map<std::string, ImageBinding> m_imageBindings;

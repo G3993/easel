@@ -180,6 +180,13 @@ bool Application::init() {
     // traffic-light buttons (Figma / VS Code style), freeing the row the
     // OS would otherwise reserve for a separate title strip.
     EaselMac_UnifyTitleBar(m_window);
+    // Disable macOS native (green-button) fullscreen on the editor window.
+    // If the editor is in native fullscreen when a projector opens or an NDI
+    // receiver triggers a window/display change, macOS force-exits fullscreen
+    // and GLFW aborts on a transient zero content scale (SIGABRT). Easel uses
+    // its own borderless fullscreen, so native fullscreen is unneeded here.
+    extern void disableNativeFullscreen(GLFWwindow*);
+    disableNativeFullscreen(m_window);
 #endif
 
     // Set window icon (search multiple paths since exe may be in build/Release/).
@@ -1276,7 +1283,45 @@ void Application::updateSources() {
                 // analyzer directly and animates param VALUES. Feeding zeros
                 // neutralizes every `audioReact`-style shader globally without
                 // editing the shader files; they fall back to base visuals.
-                shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0);
+                if (m_audioToShaders) {
+                    // Assemble the Audio Feature Bus and feed it to the shader.
+                    AudioFeatures af;
+                    auto& a = m_audioAnalyzer;
+                    af.level   = a.smoothedRMS(); af.sub = a.sub(); af.bass = a.bass();
+                    af.lowMid  = a.lowMid(); af.highMid = a.highMid(); af.treble = a.treble();
+                    af.punch   = a.punch();
+                    af.beat    = a.beatDecay();
+                    af.beatPhase = m_bpmSync.beatPhase(); af.beatPulse = m_bpmSync.beatPulse();
+                    af.barPhase  = m_bpmSync.barPhase();   af.bpm = m_bpmSync.bpm();
+                    af.tempo01 = std::min(std::max((m_bpmSync.bpm() - 60.0f) / 120.0f, 0.0f), 1.0f);
+                    af.brightness = a.brightness(); af.spread = a.spread(); af.rolloff = a.rolloff();
+                    af.flatness = a.flatness(); af.flux = a.flux(); af.onset = a.onset();
+                    af.onsetRate = a.onsetRate(); af.tilt = a.tilt(); af.zcr = a.zcr();
+                    af.texture = a.texture();
+                    // Tier 3 — affect
+                    af.valence = a.valence(); af.arousal = a.arousal(); af.tension = a.tension();
+                    af.warmth = a.warmth(); af.softness = a.softness();
+                    af.roughness = a.roughness(); af.charm = a.charm();
+                    // Tier 4 — structure
+                    af.energy = a.energy(); af.energyVel = a.energyVel(); af.energyAcc = a.energyAcc();
+                    af.buildup = a.buildup(); af.buildupRate = a.buildupRate(); af.drop = a.drop();
+                    af.novelty = a.novelty(); af.sectionPhase = a.sectionPhase();
+                    af.sectionAge = a.sectionAge(); af.layers = a.layers(); af.density = a.density();
+                    for (int pi = 0; pi < 4; pi++) af.presence[pi] = a.presence()[pi];
+                    af.flow[0] = a.flow()[0]; af.flow[1] = a.flow()[1];
+                    // Tier 5 — palette (Oklch ramp) + harmony
+                    for (int ci = 0; ci < 3; ci++) {
+                        af.palShadow[ci] = a.palShadow()[ci]; af.palMid[ci] = a.palMid()[ci];
+                        af.palHigh[ci]   = a.palHigh()[ci];   af.palAccent[ci] = a.palAccent()[ci];
+                    }
+                    af.palTemp = a.palTemp(); af.palSat = a.palSat();
+                    af.dominantPitch = a.dominantPitch(); af.majorMinor = a.majorMinor();
+                    for (int ci = 0; ci < 12; ci++) af.chroma[ci] = a.chroma()[ci];
+                    af.fftTex = a.fftTexture();
+                    shaderSrc->setAudioFeatures(af);
+                } else {
+                    shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0); // global neutralize
+                }
                 shaderSrc->applyAudioBindings(
                     m_audioAnalyzer.smoothedRMS(),
                     m_audioAnalyzer.bass(),
@@ -1577,6 +1622,11 @@ void Application::compositeAndWarp() {
     // Composite each zone independently
     for (auto& zonePtr : m_zones) {
         compositeZone(*zonePtr);
+    }
+    // In spanned mode, also composite the wide span canvas (its own
+    // compositor / visibility / warp at the user-defined resolution).
+    if (m_outputMode == OutputMode::Spanned) {
+        compositeZone(ensureSpanZone());
     }
 }
 
@@ -2004,6 +2054,79 @@ void Application::renderReadbackFBO(OutputZone& zone) {
     Framebuffer::unbind();
 }
 
+ProjectorOutput* Application::ensureProjector(int monitorIndex) {
+    if (monitorIndex < 0) return nullptr;
+    auto it = m_projectors.find(monitorIndex);
+    if (it != m_projectors.end() && it->second->isActive())
+        return it->second.get();
+
+    // Rate-limit creation retries so a persistently-failing monitor (e.g. the
+    // editor's own) doesn't hammer glfwCreateWindow every frame. Retry no more
+    // often than once per ~60 frames.
+    static std::unordered_map<int, int> s_retryCountdown;
+    int& countdown = s_retryCountdown[monitorIndex];
+    if (countdown > 0) { countdown--; return nullptr; }
+
+    auto proj = std::make_unique<ProjectorOutput>();
+    if (proj->create(m_window, monitorIndex)) {
+        ProjectorOutput* raw = proj.get();
+        m_projectors[monitorIndex] = std::move(proj);
+        return raw;
+    }
+    countdown = 60; // back off ~1s before next attempt
+    return nullptr;
+}
+
+OutputZone& Application::ensureSpanZone() {
+    if (!m_spanZone) {
+        m_spanZone = std::make_unique<OutputZone>();
+        m_spanZone->name = "Span";
+        m_spanZone->init();
+        // -1 = NO whole-canvas warp. The span canvas stays flat; each projector
+        // slice applies its OWN corner-pin below. This also guarantees the span
+        // canvas never touches the default zone's mapping profile.
+        m_spanZone->mappingIndex = -1;
+    }
+    if (m_spanWidth < 16)  m_spanWidth = 16;
+    if (m_spanHeight < 16) m_spanHeight = 16;
+    if (m_spanZone->width != m_spanWidth || m_spanZone->height != m_spanHeight) {
+        m_spanZone->resize(m_spanWidth, m_spanHeight);
+    }
+    if (m_spanSlices.empty()) {
+        // Default: two equal halves (left / right) for a 2-screen wall.
+        m_spanSlices = { SpanSlice{-1, 0.0f, 0.5f, -1}, SpanSlice{-1, 0.5f, 1.0f, -1} };
+    }
+    return *m_spanZone;
+}
+
+void Application::ensureSpanSliceResources() {
+    int n = (int)m_spanSlices.size();
+    if ((int)m_spanCropFBO.size() != n) m_spanCropFBO.resize(n);
+    if ((int)m_spanWarpFBO.size() != n) m_spanWarpFBO.resize(n);
+    // Each slice gets its own corner-pin profile in the SEPARATE m_spanMappings
+    // store (never m_mappings — the normal mapping UI must not see these).
+    for (int i = 0; i < n; i++) {
+        if (m_spanSlices[i].mappingIndex < 0 ||
+            m_spanSlices[i].mappingIndex >= (int)m_spanMappings.size()) {
+            auto mp = std::make_unique<MappingProfile>();
+            mp->init();
+            mp->name = "Projector " + std::to_string(i + 1);
+            m_spanSlices[i].mappingIndex = (int)m_spanMappings.size();
+            m_spanMappings.push_back(std::move(mp));
+        }
+    }
+}
+
+void Application::layoutSpanSlices() {
+    int n = (int)m_spanSlices.size();
+    if (n <= 0) return;
+    // Even left-to-right split across the canvas width.
+    for (int i = 0; i < n; i++) {
+        m_spanSlices[i].u0 = (float)i / (float)n;
+        m_spanSlices[i].u1 = (float)(i + 1) / (float)n;
+    }
+}
+
 void Application::presentOutputs() {
     // Only force a full GPU sync when a zone is actually presented to a
     // SEPARATE projector GL context (the FBO must be finished before that
@@ -2012,10 +2135,16 @@ void Application::presentOutputs() {
     // empty scene and no projector attached. Editor preview + NDI (async)
     // need no sync here, so skip it in the common case.
     bool needsSync = false;
-    for (auto& zp : m_zones) {
-        if (zp && zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor >= 0) {
-            needsSync = true;
-            break;
+    if (m_outputMode == OutputMode::Spanned) {
+        for (auto& s : m_spanSlices) {
+            if (s.monitor >= 0) { needsSync = true; break; }
+        }
+    } else {
+        for (auto& zp : m_zones) {
+            if (zp && zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor >= 0) {
+                needsSync = true;
+                break;
+            }
         }
     }
     if (needsSync) glFinish();
@@ -2027,7 +2156,11 @@ void Application::presentOutputs() {
     for (int i = 0; i < (int)m_zones.size(); i++) {
         auto& zone = *m_zones[i];
 
-        if (zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0) {
+        // Independent mode only: each zone drives its own monitor. In Spanned
+        // mode the projectors are driven by the span-slice pass below instead,
+        // so we skip per-zone fullscreen routing here (NDI/Spout still run).
+        if (m_outputMode == OutputMode::Independent &&
+            zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0) {
             // Verify monitor still exists before using it.
             auto monitors = ProjectorOutput::enumerateMonitors();
             if (zone.outputMonitor >= (int)monitors.size()) {
@@ -2040,43 +2173,14 @@ void Application::presentOutputs() {
                 neededMonitors.insert(zone.outputMonitor);
             } else {
                 neededMonitors.insert(zone.outputMonitor);
-                // Ensure a projector exists on this monitor
-                auto it = m_projectors.find(zone.outputMonitor);
-                if (it == m_projectors.end() || !it->second->isActive()) {
-                    // Rate-limit retries so a persistently-failing monitor
-                    // (e.g. editor's own) doesn't hammer glfwCreateWindow
-                    // every frame. Retry no more often than once per ~60
-                    // frames; after too many failures, give up and clear.
-                    static std::unordered_map<int, int> s_retryCountdown;
-                    static std::unordered_map<int, int> s_failureCount;
-                    int key = zone.outputMonitor;
-                    int& countdown = s_retryCountdown[key];
-                    if (countdown > 0) {
-                        countdown--;
-                    } else {
-                        auto proj = std::make_unique<ProjectorOutput>();
-                        if (proj->create(m_window, zone.outputMonitor)) {
-                            zone.resize(proj->projectorWidth(), proj->projectorHeight());
-                            m_projectors[zone.outputMonitor] = std::move(proj);
-                            s_failureCount[key] = 0;
-                        } else {
-                            // Back off for ~1s before next retry.
-                            countdown = 60;
-                            if (++s_failureCount[key] >= 10) {
-                                // 10 consecutive failures (~10s) — give up.
-                                std::cerr << "Projector on monitor " << key
-                                          << " failed 10 times; clearing zone output."
-                                          << std::endl;
-                                zone.outputDest = OutputDest::None;
-                                zone.outputMonitor = -1;
-                                s_failureCount[key] = 0;
-                            }
-                        }
+                ProjectorOutput* proj = ensureProjector(zone.outputMonitor);
+                if (proj) {
+                    // Size the zone canvas to the physical projector.
+                    if (zone.width != proj->projectorWidth() ||
+                        zone.height != proj->projectorHeight()) {
+                        zone.resize(proj->projectorWidth(), proj->projectorHeight());
                     }
-                }
-                auto it2 = m_projectors.find(zone.outputMonitor);
-                if (it2 != m_projectors.end() && it2->second->isActive()) {
-                    it2->second->present(zone.warpFBO.textureId());
+                    proj->present(zone.warpFBO.textureId());
                 }
             }
         }
@@ -2113,6 +2217,106 @@ void Application::presentOutputs() {
             }
         }
 #endif
+    }
+
+    // Spanned mode: for each monitor slice, crop its [u0,u1] half out of the
+    // FLAT span composite, warp it through THAT projector's own corner-pin,
+    // then present it fullscreen. Per-projector warp = independent alignment.
+    if (m_outputMode == OutputMode::Spanned && m_spanZone) {
+        ensureSpanSliceResources();
+        GLuint flat = m_spanZone->canvasTexture; // unwarped wide composite
+        auto monitors = ProjectorOutput::enumerateMonitors();
+        bool didCrop = false;
+        for (int i = 0; i < (int)m_spanSlices.size(); i++) {
+            auto& slice = m_spanSlices[i];
+            if (slice.monitor < 0) continue;
+            neededMonitors.insert(slice.monitor); // keep alive across transient list changes
+            if (slice.monitor >= (int)monitors.size()) continue;
+            ProjectorOutput* proj = ensureProjector(slice.monitor);
+            if (!proj || !flat) continue;
+
+            int pw = proj->projectorWidth();
+            int ph = proj->projectorHeight();
+            if (pw <= 0 || ph <= 0) continue;
+
+            Framebuffer& cropFBO = m_spanCropFBO[i];
+            Framebuffer& warpFBO = m_spanWarpFBO[i];
+            if (cropFBO.width() != pw || cropFBO.height() != ph) cropFBO.create(pw, ph);
+            if (warpFBO.width() != pw || warpFBO.height() != ph) warpFBO.create(pw, ph);
+
+            // 1) Crop the projector's flat half into cropFBO at native res.
+            float u0 = slice.u0;
+            float w  = slice.u1 - slice.u0;
+            if (w < 0.0f) w = 0.0f;
+            cropFBO.bind();
+            glViewport(0, 0, pw, ph);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            m_passthroughShader.use();
+            m_passthroughShader.setInt("uTexture", 0);
+            m_passthroughShader.setFloat("uOpacity", 1.0f);
+            m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+            m_passthroughShader.setBool("uHasMask", false);
+            m_passthroughShader.setBool("uFlipV", false);
+            m_passthroughShader.setFloat("uTileX", 1.0f);
+            m_passthroughShader.setFloat("uTileY", 1.0f);
+            m_passthroughShader.setInt("uMosaicMode", 0);
+            m_passthroughShader.setFloat("uMosaicTransition", 1.0f);
+            m_passthroughShader.setFloat("uFeather", 0.0f);
+            m_passthroughShader.setVec4("uCrop", glm::vec4(0.0f));
+            m_passthroughShader.setVec2("uUVOffset", glm::vec2(u0, 0.0f));
+            m_passthroughShader.setVec2("uUVScale",  glm::vec2(w, 1.0f));
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, flat);
+            m_quad.draw();
+            Framebuffer::unbind();
+            didCrop = true;
+
+            // 2) Warp the cropped half through this slice's own mapping profile.
+            MappingProfile* mp = (slice.mappingIndex >= 0 &&
+                                  slice.mappingIndex < (int)m_spanMappings.size())
+                                 ? m_spanMappings[slice.mappingIndex].get() : nullptr;
+            warpFBO.bind();
+            glViewport(0, 0, pw, ph);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            GLuint croppedTex = cropFBO.textureId();
+            if (mp && mp->warpMode == ViewportPanel::WarpMode::CornerPin) {
+                mp->cornerPin.render(croppedTex);
+            } else if (mp && mp->warpMode == ViewportPanel::WarpMode::MeshWarp) {
+                mp->meshWarp.render(croppedTex);
+            } else if (mp && mp->warpMode == ViewportPanel::WarpMode::ObjMesh) {
+                mp->objMeshWarp.render(croppedTex, (float)pw / (float)ph);
+            } else {
+                // No/unknown mapping — straight copy.
+                m_passthroughShader.use();
+                m_passthroughShader.setInt("uTexture", 0);
+                m_passthroughShader.setFloat("uOpacity", 1.0f);
+                m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+                m_passthroughShader.setBool("uHasMask", false);
+                m_passthroughShader.setBool("uFlipV", false);
+                m_passthroughShader.setFloat("uTileX", 1.0f);
+                m_passthroughShader.setFloat("uTileY", 1.0f);
+                m_passthroughShader.setInt("uMosaicMode", 0);
+                m_passthroughShader.setFloat("uMosaicTransition", 1.0f);
+                m_passthroughShader.setFloat("uFeather", 0.0f);
+                m_passthroughShader.setVec4("uCrop", glm::vec4(0.0f));
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, croppedTex);
+                m_quad.draw();
+            }
+            Framebuffer::unbind();
+
+            // 3) Present the warped, aligned half to the projector.
+            proj->present(warpFBO.textureId());
+        }
+        // The shared passthrough shader's UV-remap was set above; restore it to
+        // identity so every OTHER user of m_passthroughShader is unaffected.
+        if (didCrop) {
+            m_passthroughShader.use();
+            m_passthroughShader.setVec2("uUVOffset", glm::vec2(0.0f, 0.0f));
+            m_passthroughShader.setVec2("uUVScale",  glm::vec2(1.0f, 1.0f));
+        }
     }
 
     // Clean up projectors for monitors no longer claimed by any zone
@@ -2832,6 +3036,47 @@ void Application::renderUI() {
                     if (on) m_zones[zi]->visibleLayerIds.insert(lid);
                     else    m_zones[zi]->visibleLayerIds.erase(lid);
                 }
+            } else if (msg.address == "/easel/audio/toshaders" && !msg.ints.empty()) {
+                // Global Audio -> Shaders switch (the panic off-switch).
+                m_audioToShaders = (msg.ints[0] != 0);
+            } else if (msg.address == "/easel/output/mode" && !msg.ints.empty()) {
+                // /easel/output/mode <0=Independent | 1=Spanned>
+                m_outputMode = (msg.ints[0] != 0) ? OutputMode::Spanned
+                                                  : OutputMode::Independent;
+                if (m_outputMode == OutputMode::Spanned) ensureSpanZone();
+            } else if (msg.address == "/easel/span/res" && msg.ints.size() >= 2) {
+                // /easel/span/res <width> <height>  (custom span-canvas resolution)
+                m_spanWidth  = msg.ints[0];
+                m_spanHeight = msg.ints[1];
+                ensureSpanZone(); // applies the resize
+            } else if (msg.address == "/easel/span/slices" && !msg.ints.empty()) {
+                // /easel/span/slices <count>  — set slice count, auto split L->R
+                int n = msg.ints[0];
+                if (n < 1) n = 1;
+                if (n > 16) n = 16;
+                m_spanSlices.assign(n, SpanSlice{});
+                layoutSpanSlices();
+            } else if (msg.address == "/easel/span/slice" && msg.ints.size() >= 2) {
+                // /easel/span/slice <sliceIndex> <monitor> [<u0> <u1>]
+                ensureSpanZone();
+                int si  = msg.ints[0];
+                int mon = msg.ints[1];
+                if (si >= 0 && si < (int)m_spanSlices.size()) {
+                    m_spanSlices[si].monitor = mon;
+                    if (msg.floats.size() >= 2) {
+                        m_spanSlices[si].u0 = msg.floats[0];
+                        m_spanSlices[si].u1 = msg.floats[1];
+                    }
+                }
+            } else if (msg.address == "/easel/span/setup" && msg.ints.size() >= 4) {
+                // /easel/span/setup <w> <h> <monLeft> <monRight>
+                // One-shot: switch to spanned, set res, and assign two halves.
+                m_spanWidth  = msg.ints[0];
+                m_spanHeight = msg.ints[1];
+                ensureSpanZone();
+                m_spanSlices = { SpanSlice{ msg.ints[2], 0.0f, 0.5f },
+                                 SpanSlice{ msg.ints[3], 0.5f, 1.0f } };
+                m_outputMode = OutputMode::Spanned;
             } else if (msg.address == "/easel/clip/remove"
                        && msg.ints.size() >= 2) {
                 // /easel/clip/remove <layerIndex> <clipId>
@@ -4255,6 +4500,31 @@ void Application::renderUI() {
                 subTabBtn("Text", 1);
                 ImGui::SameLine(0, 6);
                 subTabBtn("3D",   2);
+
+                // Right-aligned "Reload" pill — rescans the shader library
+                // (manifest + files) so freshly-added shaders appear without
+                // a restart. Sits just left of the "+" import pill.
+                {
+                    const char* reloadLbl = "Reload";
+                    float plusW   = ImGui::CalcTextSize("+").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    float reloadW = ImGui::CalcTextSize(reloadLbl).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    ImGui::SameLine(0, 0);
+                    float reloadX = ImGui::GetWindowContentRegionMax().x - plusW - 6.0f - reloadW;
+                    if (reloadX > ImGui::GetCursorPosX() + 6.0f) ImGui::SetCursorPosX(reloadX);
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    if (ImGui::Button(reloadLbl) && m_shaderClaw.isConnected()) {
+                        m_shaderClaw.refreshManifest();
+                        std::cout << "[ShaderClaw] Library refreshed ("
+                                  << m_shaderClaw.shaders().size() << " shaders)\n";
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(4);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Refresh shader library");
+                }
 
                 // Right-aligned "+" pill — same visual treatment as the
                 // unselected VFX/Text/3D pills, just sits at the right
@@ -10681,6 +10951,73 @@ void Application::renderNavBarPrefix() {
             }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Output")) {
+            // Global Audio -> Shaders switch (feeds the Audio Feature Bus to
+            // every shader's GLSL uniforms; off = neutralized / fed zeros).
+            ImGui::MenuItem("Audio -> Shaders", nullptr, &m_audioToShaders);
+            ImGui::Separator();
+            // Two alternative output modes (the existing per-zone behaviour is
+            // "Independent"; "Spanned" slices one wide canvas across screens).
+            bool spanned = (m_outputMode == OutputMode::Spanned);
+            ImGui::TextDisabled("Output Mode");
+            if (ImGui::RadioButton("Independent (unique per screen)", !spanned)) {
+                m_outputMode = OutputMode::Independent;
+            }
+            if (ImGui::RadioButton("Spanned (one visual across screens)", spanned)) {
+                m_outputMode = OutputMode::Spanned;
+                ensureSpanZone();
+            }
+
+            if (m_outputMode == OutputMode::Spanned) {
+                ensureSpanZone();
+                ImGui::Separator();
+                ImGui::TextDisabled("Span Canvas (custom resolution)");
+                int wh[2] = { m_spanWidth, m_spanHeight };
+                ImGui::SetNextItemWidth(170);
+                if (ImGui::InputInt2("W x H", wh)) {
+                    m_spanWidth  = wh[0] < 16 ? 16 : wh[0];
+                    m_spanHeight = wh[1] < 16 ? 16 : wh[1];
+                    ensureSpanZone();
+                }
+                if (ImGui::SmallButton("3840x1080")) { m_spanWidth = 3840; m_spanHeight = 1080; ensureSpanZone(); }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("2560x720"))  { m_spanWidth = 2560; m_spanHeight = 720;  ensureSpanZone(); }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("5760x1080")) { m_spanWidth = 5760; m_spanHeight = 1080; ensureSpanZone(); }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Screen Slices (left -> right)");
+                auto monitors = ProjectorOutput::enumerateMonitors();
+                int nslices = (int)m_spanSlices.size();
+                ImGui::SetNextItemWidth(140);
+                if (ImGui::SliderInt("Slices", &nslices, 1, 4)) {
+                    if (nslices < 1) nslices = 1;
+                    m_spanSlices.assign(nslices, SpanSlice{});
+                    layoutSpanSlices();
+                }
+                for (int s = 0; s < (int)m_spanSlices.size(); s++) {
+                    ImGui::PushID(s);
+                    auto& slice = m_spanSlices[s];
+                    const char* cur = "- none -";
+                    if (slice.monitor >= 0 && slice.monitor < (int)monitors.size())
+                        cur = monitors[slice.monitor].name.c_str();
+                    char label[64];
+                    snprintf(label, sizeof(label), "Slice %d  [%.2f-%.2f]", s + 1, slice.u0, slice.u1);
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::BeginCombo(label, cur)) {
+                        if (ImGui::Selectable("- none -", slice.monitor < 0)) slice.monitor = -1;
+                        for (int mi = 0; mi < (int)monitors.size(); mi++) {
+                            bool sel = (slice.monitor == mi);
+                            if (ImGui::Selectable(monitors[mi].name.c_str(), sel)) slice.monitor = mi;
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PopID();
+                }
+                if (ImGui::SmallButton("Even split L->R")) layoutSpanSlices();
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Layer")) {
             if (ImGui::MenuItem("Remove Selected") && m_selectedLayer >= 0) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
@@ -12209,6 +12546,13 @@ void Application::saveProject(const std::string& path) {
                 fc["deepColor"]   = { f->m_deepColor[0], f->m_deepColor[1], f->m_deepColor[2] };
                 fc["glowColor"]   = { f->m_glowColor[0], f->m_glowColor[1], f->m_glowColor[2] };
                 fc["brightness"]  = f->m_brightness;
+                fc["shallowColor"]= { f->m_shallowColor[0], f->m_shallowColor[1], f->m_shallowColor[2] };
+                fc["lightDir"]    = { f->m_lightDir[0], f->m_lightDir[1], f->m_lightDir[2] };
+                fc["lightIntensity"] = f->m_lightIntensity;
+                fc["ambient"]     = f->m_ambient;
+                fc["specular"]    = f->m_specular;
+                fc["rim"]         = f->m_rim;
+                fc["saturation"]  = f->m_saturation;
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -12795,6 +13139,17 @@ void Application::loadProject(const std::string& path) {
                         fc["glowColor"].size() == 3)
                         for (int i = 0; i < 3; i++) src->m_glowColor[i] = fc["glowColor"][i].get<float>();
                     src->m_brightness  = fc.value("brightness",  src->m_brightness);
+                    if (fc.contains("shallowColor") && fc["shallowColor"].is_array() &&
+                        fc["shallowColor"].size() == 3)
+                        for (int i = 0; i < 3; i++) src->m_shallowColor[i] = fc["shallowColor"][i].get<float>();
+                    if (fc.contains("lightDir") && fc["lightDir"].is_array() &&
+                        fc["lightDir"].size() == 3)
+                        for (int i = 0; i < 3; i++) src->m_lightDir[i] = fc["lightDir"][i].get<float>();
+                    src->m_lightIntensity = fc.value("lightIntensity", src->m_lightIntensity);
+                    src->m_ambient        = fc.value("ambient",        src->m_ambient);
+                    src->m_specular       = fc.value("specular",       src->m_specular);
+                    src->m_rim            = fc.value("rim",            src->m_rim);
+                    src->m_saturation     = fc.value("saturation",     src->m_saturation);
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);

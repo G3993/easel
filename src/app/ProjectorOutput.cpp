@@ -15,13 +15,19 @@ std::vector<MonitorInfo> ProjectorOutput::enumerateMonitors() {
     GLFWmonitor** monitors = glfwGetMonitors(&count);
 
     for (int i = 0; i < count; i++) {
+        // During a display reconfiguration (projector plug/switch) GLFW can
+        // briefly report a monitor whose video mode is null. Dereferencing it
+        // crashed; query defensively and fall back to a sane size so indices
+        // stay stable and projector routing recovers next frame.
+        const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
+        const char* nm = glfwGetMonitorName(monitors[i]);
         MonitorInfo info;
         info.monitor = monitors[i];
-        info.name = glfwGetMonitorName(monitors[i]);
-        const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
+        info.name = nm ? nm : "Display";
+        info.x = 0; info.y = 0;
         glfwGetMonitorPos(monitors[i], &info.x, &info.y);
-        info.width = mode->width;
-        info.height = mode->height;
+        info.width  = mode ? mode->width  : 1920;
+        info.height = mode ? mode->height : 1080;
         result.push_back(info);
     }
 
@@ -159,6 +165,11 @@ void ProjectorOutput::destroy() {
 }
 
 void ProjectorOutput::present(GLuint texture) {
+    presentCrop(texture, 0.0f, 0.0f, 1.0f, 1.0f);
+}
+
+void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
+                                  float uScaleX, float uScaleY) {
     if (!m_window || !texture) return;
 
     // Check if close was requested (e.g. Escape pressed on projector window)
@@ -180,6 +191,9 @@ void ProjectorOutput::present(GLuint texture) {
     m_shader.setInt("uTexture", 0);
     m_shader.setFloat("uOpacity", 1.0f);
     m_shader.setMat3("uTransform", glm::mat3(1.0f));
+    // Slice the source texture (identity 0,0,1,1 for the full-frame present()).
+    m_shader.setVec2("uUVOffset", glm::vec2(uOffX, uOffY));
+    m_shader.setVec2("uUVScale",  glm::vec2(uScaleX, uScaleY));
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);

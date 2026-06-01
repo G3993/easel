@@ -56,7 +56,8 @@ vec3 size3d;
 
 #define PI 3.1415926535
 #define TWO_PI 6.28318530718
-#define light_dir normalize(vec3(0.820,1.000,0.702))
+uniform vec3 uLightDir;
+#define light_dir normalize(uLightDir)
 #define surface_tension 0.5
 #define surface_tension_rad 2.0
 #define initial_particle_density 1u
@@ -339,6 +340,13 @@ uniform float uTilt;
 uniform vec3  uDeep;
 uniform vec3  uGlow;
 uniform float uBright;
+// ── color + lighting options (defaults reproduce the original look) ──
+uniform float uLightInt;   // diffuse key-light intensity (1 = original)
+uniform float uAmbient;    // ambient fill (0.1 = original)
+uniform float uSpec;       // reflection/specular strength (1 = original)
+uniform vec3  uShallow;    // rim / grazing-edge tint
+uniform float uRim;        // rim amount (0 = off / original)
+uniform float uSat;        // output saturation (1 = unchanged)
 uniform sampler2D uImage;
 uniform int   uImageOn;
 uniform float uImageMix;
@@ -454,7 +462,15 @@ void main(){
             vec3 refl = env(refl_d.yzx);
             float K = 1. - pow(max(dot(normal, refl_d), 0.), 3.);
             K = mix(0.0, K, 0.75);
-            col = uBright*shadow*albedo*LdotN*(1.0 - K) + 0.1*ray.color + shadow*refl*K;
+            // rim/fresnel tint toward the shallow colour at grazing angles
+            float fres = pow(1.0 - max(dot(normal, -ray.rd), 0.0), 3.0);
+            albedo = mix(albedo, uShallow, fres * uRim);
+            col = uBright*shadow*albedo*(LdotN*uLightInt)*(1.0 - K)
+                + uAmbient*ray.color
+                + shadow*refl*K*uSpec;
+            // output saturation
+            float luma = dot(col, vec3(0.299, 0.587, 0.114));
+            col = mix(vec3(luma), col, uSat);
         }
     }
     fragColor = vec4(col, 1.0);
@@ -683,6 +699,14 @@ void FluidSource3D::renderToOutput() {
     glUniform3fv(glGetUniformLocation(m_progRender, "uDeep"), 1, m_deepColor);
     glUniform3fv(glGetUniformLocation(m_progRender, "uGlow"), 1, m_glowColor);
     glUniform1f(glGetUniformLocation(m_progRender, "uBright"), m_brightness);
+    // Color + lighting options
+    glUniform3fv(glGetUniformLocation(m_progRender, "uLightDir"), 1, m_lightDir);
+    glUniform1f(glGetUniformLocation(m_progRender, "uLightInt"), m_lightIntensity);
+    glUniform1f(glGetUniformLocation(m_progRender, "uAmbient"), m_ambient);
+    glUniform1f(glGetUniformLocation(m_progRender, "uSpec"), m_specular);
+    glUniform3fv(glGetUniformLocation(m_progRender, "uShallow"), 1, m_shallowColor);
+    glUniform1f(glGetUniformLocation(m_progRender, "uRim"), m_rim);
+    glUniform1f(glGetUniformLocation(m_progRender, "uSat"), m_saturation);
     // Image injection — colors the surface albedo (mapped to world x/y).
     bool imgOn = (m_imageEnabled && m_image.textureId != 0);
     glActiveTexture(GL_TEXTURE0 + 3);
@@ -748,6 +772,7 @@ void FluidSource3D::update() {
         // D: volB → volD
         glUseProgram(m_progD);
         bindVolume(m_progD, "uDensity", m_volB, 0);
+        glUniform3fv(glGetUniformLocation(m_progD, "uLightDir"), 1, m_lightDir); // shadow march dir
         runVolumePass(m_progD, m_volD);
         m_frame++;
     }
