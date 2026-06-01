@@ -1635,27 +1635,30 @@ void Application::compositeZone(OutputZone& zone) {
         sourceTex = m_mapPatterns[pi].id();
     }
 
-    // Per-layer masks are applied during compositing (CompositeEngine).
-    // Canvas-level masks (MappingProfile) are applied here, after compositing, before warp.
-    auto* mpMask = mappingForZone(zone);
+    // Canvas-level masks (MappingProfile). These now clip the FINAL warped
+    // output ("what you see is what gets masked"), so here we only COMBINE the
+    // mask shapes; the actual clip is applied after the warp+bloom pass below.
+    auto*  mpMask         = mappingForZone(zone);
+    int    maskValidCount = 0;
+    GLuint maskCombinedTex = 0;
+    float  maskFeather    = 0.0f;
+    bool   maskInvert     = false;
     if (mpMask && !mpMask->masks.empty()) {
-        int validCount = 0;
         GLuint singleMaskTex = 0;
-        float singleFeather = 0.0f;
-        bool singleInvert = false;
         for (auto& mask : mpMask->masks) {
             if (mask.texture && mask.texture->id() && mask.path.count() >= 3) {
-                validCount++;
+                maskValidCount++;
                 singleMaskTex = mask.texture->id();
-                if (validCount == 1) {
-                    singleFeather = mask.feather;
-                    singleInvert = mask.invert;
+                if (maskValidCount == 1) {
+                    maskFeather = mask.feather;
+                    maskInvert  = mask.invert;
                 }
             }
         }
-        if (validCount > 0) {
-            GLuint combinedMaskTex = singleMaskTex;
-            if (validCount > 1) {
+        if (maskValidCount > 0) {
+            maskCombinedTex = singleMaskTex;
+            if (maskValidCount > 1) {
+                // Union all mask shapes into m_maskPingPongFBO (read later).
                 if (m_maskPingPongFBO.width() != zone.width || m_maskPingPongFBO.height() != zone.height)
                     m_maskPingPongFBO.create(zone.width, zone.height);
                 m_maskPingPongFBO.bind();
@@ -1685,39 +1688,12 @@ void Application::compositeZone(OutputZone& zone) {
                 }
                 glDisable(GL_BLEND);
                 Framebuffer::unbind();
-                combinedMaskTex = m_maskPingPongFBO.textureId();
+                maskCombinedTex = m_maskPingPongFBO.textureId();
             }
-            // Apply the canvas mask to the composite
-            if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height)
-                m_edgeBlendFBO.create(zone.width, zone.height);
-            m_edgeBlendFBO.bind();
-            glViewport(0, 0, zone.width, zone.height);
-            glClearColor(0, 0, 0, 0);
-            glClear(GL_COLOR_BUFFER_BIT);
-            m_passthroughShader.use();
-            m_passthroughShader.setInt("uTexture", 0);
-            m_passthroughShader.setFloat("uOpacity", 1.0f);
-            m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
-            m_passthroughShader.setBool("uHasMask", true);
-            m_passthroughShader.setInt("uMask", 1);
-            m_passthroughShader.setBool("uFlipV", false);
-            m_passthroughShader.setFloat("uTileX", 1.0f);
-            m_passthroughShader.setFloat("uTileY", 1.0f);
-            m_passthroughShader.setInt("uMosaicMode", 0);
-            m_passthroughShader.setFloat("uFeather", 0.0f);
-            m_passthroughShader.setFloat("uMaskFeather", singleFeather);
-            m_passthroughShader.setBool("uMaskInvert", singleInvert);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, sourceTex);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, combinedMaskTex);
-            m_quad.draw();
-            Framebuffer::unbind();
-            sourceTex = m_edgeBlendFBO.textureId();
         }
     }
 
-    // Store composite texture for canvas preview
+    // Store composite texture for canvas preview (pre-warp, pre-mask)
     zone.canvasTexture = sourceTex;
 
     // ── Warp pass — 4× supersample + 4-tap explicit downsample ─────
@@ -1956,6 +1932,56 @@ void Application::compositeZone(OutputZone& zone) {
         Framebuffer::unbind();
     }
 
+    // ── Canvas mask — applied to the FINAL warped/bloomed/edge-blended output.
+    // The mask clips in the SAME space the user drew it (over the projected
+    // image): what you see is what gets masked. warpFBO -> tmp -> warpFBO.
+    if (maskValidCount > 0 && maskCombinedTex) {
+        Framebuffer& tmp = m_edgeBlendFBO; // reuse scratch (edge blend already done)
+        if (tmp.width() != zone.width || tmp.height() != zone.height)
+            tmp.create(zone.width, zone.height);
+        tmp.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        m_passthroughShader.use();
+        m_passthroughShader.setInt("uTexture", 0);
+        m_passthroughShader.setFloat("uOpacity", 1.0f);
+        m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_passthroughShader.setBool("uHasMask", true);
+        m_passthroughShader.setInt("uMask", 1);
+        m_passthroughShader.setBool("uFlipV", false);
+        m_passthroughShader.setFloat("uTileX", 1.0f);
+        m_passthroughShader.setFloat("uTileY", 1.0f);
+        m_passthroughShader.setInt("uMosaicMode", 0);
+        m_passthroughShader.setFloat("uFeather", 0.0f);
+        m_passthroughShader.setFloat("uMaskFeather", maskFeather);
+        m_passthroughShader.setBool("uMaskInvert", maskInvert);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, maskCombinedTex);
+        m_quad.draw();
+        glActiveTexture(GL_TEXTURE0);
+        Framebuffer::unbind();
+
+        // Copy the masked result back into warpFBO.
+        zone.warpFBO.bind();
+        glViewport(0, 0, zone.width, zone.height);
+        m_passthroughShader.use();
+        m_passthroughShader.setInt("uTexture", 0);
+        m_passthroughShader.setFloat("uOpacity", 1.0f);
+        m_passthroughShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_passthroughShader.setBool("uHasMask", false);
+        m_passthroughShader.setBool("uFlipV", false);
+        m_passthroughShader.setFloat("uTileX", 1.0f);
+        m_passthroughShader.setFloat("uTileY", 1.0f);
+        m_passthroughShader.setInt("uMosaicMode", 0);
+        m_passthroughShader.setFloat("uFeather", 0.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tmp.textureId());
+        m_quad.draw();
+        Framebuffer::unbind();
+    }
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
@@ -3259,7 +3285,7 @@ void Application::renderUI() {
         ImGui::Text("Canvas Masks");
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
-        ImGui::Text("Clips entire output before warp");
+        ImGui::Text("Clips the final projected output");
         ImGui::PopStyleColor();
         if (canvasMaskMapping) {
             for (int mi = 0; mi < (int)canvasMaskMapping->masks.size(); mi++) {
