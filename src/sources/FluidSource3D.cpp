@@ -1006,6 +1006,11 @@ void FluidSource3D::applyJourney(float level, float energy, float build,
         m_journeyPos += (target - m_journeyPos) * (1.0f - std::exp(-rate*dt));
         pos = m_journeyPos;
     }
+    // Safety: a non-finite or out-of-range position would write garbage into
+    // every look param. Clamp hard so the morph can never break the visual.
+    if (!std::isfinite(pos)) pos = 0.0f;
+    if (pos < 0.0f) pos = 0.0f; else if (pos > 1.0f) pos = 1.0f;
+    m_journeyPos = pos;
     const FluidLook& A = m_look[0]; const FluidLook& B = m_look[1];
     #define LRP(f) (A.f + (B.f - A.f) * pos)
     for (int i = 0; i < 3; i++) {
