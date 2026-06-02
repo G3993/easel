@@ -978,15 +978,8 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
 // value, and range. Shader params and FluidSource members both reduce to this.
 struct PresetParam { std::string name; float cur, lo, hi; };
 
-// Audio-reactivity intensity presets. depthLo/Hi = modulation depth as a
-// fraction of each param's range; smoothLo/Hi = follower smoothing range;
-// useBeat allows the punchy Beat signal. All tuned to stay smooth.
-struct FxPreset { const char* name; float depthLo, depthHi, smoothLo, smoothHi; bool useBeat; };
-static const FxPreset kAudioPresets[3] = {
-    { "Subtle",  0.07f, 0.15f, 0.84f, 0.93f, false },
-    { "Medium",  0.15f, 0.28f, 0.72f, 0.85f, false },
-    { "Intense", 0.26f, 0.45f, 0.60f, 0.76f, false },
-};
+// (Audio reactivity is now a continuous Intensity slider + Shuffle — see
+// audioPresetRow below — instead of discrete Subtle/Medium/Intense presets.)
 
 // Renders the [Subtle][Medium][Intense][re-roll] audio-reactivity row, shared
 // by the shader "Effects" and fluid "Fluid" sections. Clicking a preset binds
@@ -999,98 +992,113 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
                            const std::vector<PresetParam>& params,
                            uint32_t stateKey) {
     bool changed = false;
-    int activeCount = 0;
-    for (auto& kv : bindings)
-        if (kv.second.signal != AudioSignal::None) activeCount++;
-    bool on = activeCount > 0;
 
-    static std::unordered_map<uint32_t, int> sActivePreset;
-    int activeIdx = -1;
-    if (on) {
-        auto it = sActivePreset.find(stateKey);
-        if (it != sActivePreset.end()) activeIdx = it->second;
-    }
+    // Per-layer state: a random "recipe" (which params, which signals, and a
+    // random CENTER for each) plus a continuous intensity. The recipe lets the
+    // Intensity slider re-scale modulation depth LIVE without re-randomizing,
+    // and makes Shuffle pick a genuinely new set whose motion is CENTRED in
+    // each param's range (so it moves both ways — no longer anchored to the
+    // current value and always drifting upward).
+    struct RecipeE { int idx; AudioSignal sig; float center01; bool invert; };
+    struct Recipe   { std::vector<RecipeE> e; bool has = false; };
+    static std::unordered_map<uint32_t, Recipe> sRecipe;
+    static std::unordered_map<uint32_t, float>  sIntensity;
+    static std::unordered_map<uint32_t, bool>   sInit;
+    static std::mt19937 rng{std::random_device{}()};
 
-    auto applyPreset = [&](int p) {
-        const FxPreset& pr = kAudioPresets[p];
-        std::vector<int> idx;
-        for (int i = 0; i < (int)params.size(); i++) idx.push_back(i);
-        static std::mt19937 rng{std::random_device{}()};
-        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-        std::shuffle(idx.begin(), idx.end(), rng);
-        const AudioSignal cs[] = { AudioSignal::Level, AudioSignal::Bass,
-                                   AudioSignal::Mid, AudioSignal::High };
+    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.45f; sInit[stateKey] = true; }
+    float& intensity = sIntensity[stateKey];
+
+    auto buildFromRecipe = [&]() {
+        Recipe& r = sRecipe[stateKey];
+        if (!r.has) return;
         bindings.clear();
-        int n = std::min(5, (int)idx.size());
-        for (int j = 0; j < n; j++) {
-            const PresetParam& pp = params[idx[j]];
-            float span = pp.hi - pp.lo;
-            float depth = span * (pr.depthLo +
-                          (pr.depthHi - pr.depthLo) * u01(rng));
+        for (auto& e : r.e) {
+            if (e.idx < 0 || e.idx >= (int)params.size()) continue;
+            const PresetParam& pp = params[e.idx];
+            float span = pp.hi - pp.lo; if (span <= 0.0f) continue;
+            float half   = span * (0.12f + 0.60f * intensity) * 0.5f; // subtle..intense
+            float center = pp.lo + e.center01 * span;
+            float rmin = center - half, rmax = center + half;
+            if (rmin < pp.lo) rmin = pp.lo;
+            if (rmax > pp.hi) rmax = pp.hi;
+            if (e.invert) { float t = rmin; rmin = rmax; rmax = t; } // loud -> down
             AudioBinding ab;
-            ab.signal = (pr.useBeat && rng() % 4 == 0) ? AudioSignal::Beat
-                                                       : cs[rng() % 4];
-            ab.rangeMin = pp.cur;
-            ab.rangeMax = std::min(pp.hi, pp.cur + depth);
-            if (ab.rangeMax - ab.rangeMin < span * 0.04f) {
-                ab.rangeMin = std::max(pp.lo, pp.cur - depth);
-                ab.rangeMax = pp.cur;
-            }
-            ab.smoothing = pr.smoothLo + (pr.smoothHi - pr.smoothLo) * u01(rng);
+            ab.signal    = e.sig;
+            ab.rangeMin  = rmin;
+            ab.rangeMax  = rmax;
+            ab.smoothing = 0.90f - 0.32f * intensity;   // syrupy..snappier
             bindings[pp.name] = ab;
         }
-        sActivePreset[stateKey] = p;
         changed = true;
     };
 
+    auto shuffle = [&]() {
+        Recipe r; r.has = true;
+        std::vector<int> idx;
+        for (int i = 0; i < (int)params.size(); i++) idx.push_back(i);
+        std::shuffle(idx.begin(), idx.end(), rng);
+        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+        // Continuous drivers (skip the impulse/inverted Drop/Silence/Momentum).
+        const AudioSignal cs[] = { AudioSignal::Level, AudioSignal::Bass,
+                                   AudioSignal::Mid,   AudioSignal::High,
+                                   AudioSignal::Energy, AudioSignal::Build };
+        int n = std::min(5, (int)idx.size());
+        for (int j = 0; j < n; j++) {
+            RecipeE e;
+            e.idx      = idx[j];
+            e.sig      = cs[rng() % 6];
+            e.center01 = 0.25f + 0.50f * u01(rng);   // random centre, room both ways
+            e.invert   = (rng() % 2 == 0);           // ~half fall as energy rises
+            r.e.push_back(e);
+        }
+        sRecipe[stateKey] = r;
+        buildFromRecipe();
+    };
+
+    // After a project reload the bindings persist but the recipe is gone —
+    // derive one from the existing bindings so the slider can still re-scale.
+    if (!sRecipe[stateKey].has) {
+        Recipe r;
+        for (int i = 0; i < (int)params.size(); i++) {
+            auto it = bindings.find(params[i].name);
+            if (it == bindings.end() || it->second.signal == AudioSignal::None) continue;
+            float span = params[i].hi - params[i].lo; if (span <= 0.0f) continue;
+            float center = 0.5f * (it->second.rangeMin + it->second.rangeMax);
+            RecipeE e; e.idx = i; e.sig = it->second.signal;
+            e.center01 = (center - params[i].lo) / span;
+            e.invert   = (it->second.rangeMin > it->second.rangeMax);
+            r.e.push_back(e); r.has = true;
+        }
+        if (r.has) sRecipe[stateKey] = r;
+    }
+
+    // ── UI: Intensity slider (Subtle -> Intense) + Shuffle + Off ────────────
+    if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f")) {
+        if (intensity < 0.0f) intensity = 0.0f; else if (intensity > 1.0f) intensity = 1.0f;
+        if (sRecipe[stateKey].has) buildFromRecipe();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How hard the music moves the params, live:\n"
+                          "Subtle (left) -> Intense (right).\n"
+                          "Shuffle picks WHICH params react.");
+
+    bool hasSet = sRecipe[stateKey].has && !bindings.empty();
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
     float avail = ImGui::GetContentRegionAvail().x;
     float gap   = ImGui::GetStyle().ItemSpacing.x;
-    float refW  = 30.0f;
-    float btnW  = (avail - refW - gap * 3.0f) / 3.0f;
-    if (btnW < 36.0f) btnW = 36.0f;
-
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
-    for (int p = 0; p < 3; p++) {
-        bool sel = (activeIdx == p);
-        if (sel) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        kColAccentV);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColAccentV);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColAccentV);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.06f, 0.03f, 1.0f));
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColCtrlBgActiveV);
-            ImGui::PushStyleColor(ImGuiCol_Text, kColValueV);
-        }
-        if (p > 0) ImGui::SameLine();
-        if (ImGui::Button(kAudioPresets[p].name, ImVec2(btnW, 28))) {
-            if (sel) { bindings.clear(); sActivePreset.erase(stateKey); changed = true; }
-            else applyPreset(p);
-        }
-        ImGui::PopStyleColor(4);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(sel
-                ? "Audio reactivity on (click to turn off)."
-                : "Bind ~5 random params to audio at this intensity.");
-    }
-
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColCtrlBgActiveV);
-    ImVec2 rcur = ImGui::GetCursorScreenPos();
-    bool reroll = ImGui::Button("##fxReroll", ImVec2(refW, 28));
-    {
-        ImU32 ic = ImGui::IsItemHovered() ? kColValue : kColLabel;
-        lucide::repeat(ImGui::GetWindowDrawList(),
-                       rcur.x + refW * 0.5f, rcur.y + 14.0f, 15.0f, ic);
-    }
-    ImGui::PopStyleColor(3);
+    float bW    = (avail - gap) * 0.5f;
+    if (ImGui::Button("Shuffle", ImVec2(bW, 28))) shuffle();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Re-roll a new random set at the current intensity.");
-    if (reroll) applyPreset(activeIdx >= 0 ? activeIdx : 0);
-
+        ImGui::SetTooltip("Pick a fresh random set of params to react —\n"
+                          "each centred randomly in its range, so it moves\n"
+                          "both up AND down, not always up.");
+    ImGui::SameLine();
+    if (ImGui::Button(hasSet ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
+        bindings.clear(); sRecipe[stateKey] = Recipe{}; changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Turn audio reactivity off (clear the auto-bindings).");
     ImGui::PopStyleVar();
     ImGui::Dummy(ImVec2(0, 4));
     return changed;
@@ -3327,16 +3335,6 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::PopID();
             };
 
-            {
-                std::vector<PresetParam> pp = {
-                    { "brightness",  f3->m_brightness,  0.0f,  6.0f },
-                    { "rotateSpeed", f3->m_rotateSpeed, 0.0f,  2.0f },
-                    { "tilt",        f3->m_tilt,       -1.57f, 1.57f },
-                };
-                if (audioPresetRow(f3->audioBindings(), pp, layer->id))
-                    undoNeeded = true;
-            }
-
             f3Param("brightness",  "Brightness", &f3->m_brightness,  0.0f,  6.0f,  "%.2f");
             ImGui::Checkbox("Auto-rotate", &f3->m_autoRotate);
             if (f3->m_autoRotate)
@@ -3399,6 +3397,32 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 } else {
                     ImGui::ProgressBar(f3->m_journeyPos, ImVec2(-1, 6), "");  // live position
                 }
+            }
+
+            // Audio reactivity: a continuous Subtle->Intense slider + Shuffle
+            // that auto-binds a random set of params to the music (lives here
+            // in VJ now). Shuffle picks new params centred randomly in range.
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::TextDisabled("Audio reactivity");
+            {
+                std::vector<PresetParam> pp = {
+                    { "brightness",     f3->m_brightness,     0.0f,  6.0f },
+                    { "rotateSpeed",    f3->m_rotateSpeed,    0.0f,  2.0f },
+                    { "tilt",           f3->m_tilt,          -1.57f, 1.57f },
+                    { "zoom",           f3->m_zoom,           0.5f,  4.0f },
+                    { "gravity",        f3->m_gravity,        0.0f,  4.0f },
+                    { "vortex",         f3->m_vortex,         0.0f,  3.0f },
+                    { "turbulence",     f3->m_turbulence,     0.0f,  2.0f },
+                    { "forceScale",     f3->m_forceScale,     0.1f,  4.0f },
+                    { "sphereScale",    f3->m_sphereScale,    0.05f, 1.5f },
+                    { "ambient",        f3->m_ambient,        0.0f,  1.0f },
+                    { "specular",       f3->m_specular,       0.0f,  3.0f },
+                    { "rim",            f3->m_rim,            0.0f,  1.0f },
+                    { "saturation",     f3->m_saturation,     0.0f,  2.0f },
+                    { "lightIntensity", f3->m_lightIntensity, 0.0f,  3.0f },
+                };
+                if (audioPresetRow(f3->audioBindings(), pp, layer->id))
+                    undoNeeded = true;
             }
 
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
