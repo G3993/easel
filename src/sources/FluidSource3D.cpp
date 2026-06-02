@@ -949,12 +949,45 @@ void FluidSource3D::lookFromArray(int which, const float* in) {
     m_lookSet[which] = true;
 }
 
+void FluidSource3D::loadLook(int which) {
+    if (which < 0 || which > 1) return;
+    const FluidLook& L = m_look[which];
+    for (int i = 0; i < 3; i++) {
+        m_deepColor[i]    = L.deepColor[i];    m_glowColor[i]   = L.glowColor[i];
+        m_shallowColor[i] = L.shallowColor[i]; m_bgTop[i]       = L.bgTop[i];
+        m_bgBottom[i]     = L.bgBottom[i];
+    }
+    m_brightness = L.brightness; m_lightIntensity = L.lightIntensity;
+    m_ambient = L.ambient; m_specular = L.specular; m_rim = L.rim;
+    m_saturation = L.saturation; m_bgAlpha = L.bgAlpha; m_sphereScale = L.sphereScale;
+    m_zoom = L.zoom; m_gravity = L.gravity; m_vortex = L.vortex;
+    m_turbulence = L.turbulence; m_forceScale = L.forceScale;
+    m_rotateSpeed = L.rotateSpeed; m_tilt = L.tilt;
+}
+
 void FluidSource3D::applyJourney(float level, float energy, float build,
                                  float momentum, float drop, float dt) {
-    if (!m_journeyEnabled || !m_lookSet[0] || !m_lookSet[1]) return;
     if (!(dt > 0.0f)) dt = 1.0f/60.0f; if (dt > 0.1f) dt = 0.1f;
+
+    // On a mode switch, set up the live params for the new mode: load the look
+    // you're about to edit (so the sliders show it), or ensure both ends exist
+    // before performing.
+    if (m_vjMode != m_vjModePrev) {
+        if (m_vjMode == 0)      { if (m_lookSet[0]) loadLook(0); else captureLook(0); }
+        else if (m_vjMode == 1) { if (m_lookSet[1]) loadLook(1); else captureLook(1); }
+        else { if (!m_lookSet[0]) captureLook(0); if (!m_lookSet[1]) captureLook(1); }
+        m_vjModePrev = m_vjMode;
+    }
+
+    // Edit modes (Low/High): the live params ARE the look. Snapshot them every
+    // frame so every tweak updates that end — full manual control, no lock-in,
+    // and no morph runs.
+    if (m_vjMode != 2) { captureLook(m_vjMode); return; }
+
+    // Live: crossfade Low <-> High by the song, or by a hand-grabbed fader.
+    if (!m_lookSet[0] || !m_lookSet[1]) return;
     float pos;
-    if (m_journeyManual) {
+    if (m_vjGrab) {
         pos = m_journeyPos = m_journeyPosManual;
     } else {
         float drive = energy;

@@ -111,10 +111,14 @@ public:
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
     float m_tilt          = -0.5f;
 
-    // ── Journey: crossfade the ENTIRE look between a calm "Valley" and an
-    // intense "Peak" snapshot, driven by the song's structural energy, so the
-    // music takes the visuals up and down as one coherent gesture instead of
-    // a handful of params twitching independently. ──────────────────────────
+    // ── VJ: crossfade the ENTIRE look between a "Low" (chill) and a "High"
+    // (intense) snapshot, driven by the song's structural energy, so the music
+    // takes the visuals up and down as one coherent gesture. Three modes:
+    //   Low  — edit the chill look with full manual control (live = the Low snap)
+    //   High — edit the intense look with full manual control
+    //   Live — the music (or a hand-grabbed fader) rides Low <-> High
+    // No lock-in: you only lose slider control while actually performing (Live),
+    // and even then you can grab the fader. ──────────────────────────────────
     struct FluidLook {
         float deepColor[3]    = {0.220f, 0.349f, 1.000f};
         float glowColor[3]    = {0.420f, 0.302f, 0.996f};
@@ -127,16 +131,18 @@ public:
         float rotateSpeed = 0.2f, tilt = -0.5f;
     };
     static constexpr int kLookFloats = 30;   // serialized flat-array size
-    bool      m_journeyEnabled   = false;
-    bool      m_journeyManual    = false;     // scrub manually instead of audio-driven
+    int       m_vjMode           = 0;         // 0=Low(edit) 1=High(edit) 2=Live(perform)
+    int       m_vjModePrev       = -1;        // transient: detect mode switch to load look
+    bool      m_vjGrab           = false;     // Live: grab the fader (manual position)
     int       m_journeySignal    = 0;         // 0=Energy 1=Build 2=Level 3=Momentum
-    float     m_journeyGain      = 1.5f;      // scales the drive so songs reach Peak
-    float     m_journeyPosManual = 0.0f;      // manual scrub 0..1 (authoring/preview)
+    float     m_journeyGain      = 1.5f;      // scales the drive so songs reach High
+    float     m_journeyPosManual = 0.0f;      // hand-grabbed fader 0..1 (Live)
     float     m_journeyPos       = 0.0f;      // live smoothed position 0..1
     float     m_journeyDropEnv   = 0.0f;      // drop-snap envelope
-    bool      m_lookSet[2]       = {false, false};   // [0]=Valley captured, [1]=Peak
-    FluidLook m_look[2];                       // [0]=Valley, [1]=Peak
-    void captureLook(int which);               // snapshot current look into [which]
+    bool      m_lookSet[2]       = {false, false};   // [0]=Low captured, [1]=High
+    FluidLook m_look[2];                       // [0]=Low (chill), [1]=High (intense)
+    void captureLook(int which);               // live look -> snapshot [which]
+    void loadLook(int which);                  // snapshot [which] -> live look
     void applyJourney(float level, float energy, float build,
                       float momentum, float drop, float dt);
     void lookToArray(int which, float* out) const;   // persistence helpers
