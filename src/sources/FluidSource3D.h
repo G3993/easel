@@ -46,6 +46,10 @@ public:
     std::string typeName() const override { return "Fluid3D"; }
     std::string sourcePath() const override { return "__fluid3d__"; }
 
+    // Re-run the seed block (clears velocities, restocks the initial blob).
+    // Recovers from any chaotic/blown-out state the force fields can reach.
+    void reseed() { m_frame = 0; }
+
     // ── Audio/MIDI-reactive parameter bindings ────────────────────────
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }

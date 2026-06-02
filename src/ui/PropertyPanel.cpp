@@ -3355,6 +3355,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                                   "Cohesion: SPH inter-particle force (surface tension).\n"
                                   "All are audio-bindable; Audio Motion also pumps\n"
                                   "vortex + turbulence as the sound gets louder.");
+            if (ImGui::Button("Reset Fluid"))
+                f3->reseed();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Re-seed the particle blob and clear all motion.\n"
+                                  "Use this to recover if the forces blow it out.");
 
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
