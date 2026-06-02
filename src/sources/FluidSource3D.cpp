@@ -211,19 +211,19 @@ void IntegrateParticle(inout Particle p, vec3 pos, float time){
         if(rl > 1e-4) p.force += gravity * uVortex * 6.0 * sw / rl;
     }
     // Chaotic turbulence: a DIVERGENCE-FREE flow (ABC-flow form — each
-    // component depends only on the *other* two axes, so div = 0). This stirs
-    // the fluid without compressing/rarefying it, which is what kept the old
-    // position-sinusoid version shredding the structure into an unrecoverable
-    // state. Add a little velocity damping with it so energy bleeds off when
-    // you dial it back down.
+    // component depends only on the *other* two axes, so div = 0), applied as
+    // a BOUNDED VELOCITY NUDGE rather than an accelerating force. Pushing it as
+    // a force kept flinging every particle to max velocity ("flips out"); a
+    // nudge toward a small target stir-velocity is self-limiting and stable,
+    // and pulls energy back out when you dial it down.
     if(uTurbulence != 0.0){
         vec3 q = p.pos*0.35;
         vec3 flow = vec3(
             sin(q.z + time)      + cos(q.y + 0.7*time),
             sin(q.x + 1.3*time)  + cos(q.z + time),
             sin(q.y + 0.7*time)  + cos(q.x + 1.3*time));
-        p.force += gravity * uTurbulence * 3.0 * flow;
-        p.vel   *= 1.0 - 0.02*clamp(uTurbulence, 0.0, 1.0);
+        vec3 target = flow * (0.12 * uTurbulence);          // gentle stir speed
+        p.vel = mix(p.vel, target, clamp(0.08*uTurbulence, 0.0, 0.5));
     }
     p.vel *= mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0));   // extra damping when calm → settles
     vec4 border = border_grad(p.pos);
