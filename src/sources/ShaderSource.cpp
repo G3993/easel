@@ -954,7 +954,9 @@ void ShaderSource::unbindImageInput(const std::string& name) {
 }
 
 void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                                      float dt, MIDIManager* midi) {
+                                      float dt, MIDIManager* midi,
+                                      float energy, float build, float drop,
+                                      float silence, float momentum) {
     // Clamp dt so a stall / first frame can't blow the exponential up. The
     // smoother is time-constant based (frame-rate independent): alpha is
     // derived from a per-second rate and the real frame dt, identical in
@@ -974,6 +976,11 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
             case AudioSignal::Mid:   raw = mid; break;
             case AudioSignal::High:  raw = high; break;
             case AudioSignal::Beat:  raw = beat; break;
+            case AudioSignal::Energy:   raw = energy;   break;
+            case AudioSignal::Build:    raw = build;    break;
+            case AudioSignal::Drop:     raw = drop;     break;
+            case AudioSignal::Silence:  raw = silence;  break;
+            case AudioSignal::Momentum: raw = momentum; break;
             case AudioSignal::MidiCC: {
                 if (midi && binding.midiCC >= 0) {
                     float v = midi->getCCValue(binding.midiChannel, binding.midiCC);

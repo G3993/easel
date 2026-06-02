@@ -905,7 +905,9 @@ void FluidSource3D::update() {
 
 void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
                                        float high, float beat, float dt,
-                                       MIDIManager* midi) {
+                                       MIDIManager* midi,
+                                       float energy, float build, float drop,
+                                       float silence, float momentum) {
     // Track overall loudness (attack fast, release slow) for the calm->intense
     // motion drive — independent of explicit per-param bindings.
     float aRate = (level > m_audioEnergy) ? 6.0f : 1.5f;
@@ -921,6 +923,11 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
             case AudioSignal::Mid:   raw = mid;   break;
             case AudioSignal::High:  raw = high;  break;
             case AudioSignal::Beat:  raw = beat;  break;
+            case AudioSignal::Energy:   raw = energy;   break;
+            case AudioSignal::Build:    raw = build;    break;
+            case AudioSignal::Drop:     raw = drop;     break;
+            case AudioSignal::Silence:  raw = silence;  break;
+            case AudioSignal::Momentum: raw = momentum; break;
             case AudioSignal::MidiCC: {
                 if (midi && b.midiCC >= 0) {
                     float v = midi->getCCValue(b.midiChannel, b.midiCC);

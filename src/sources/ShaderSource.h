@@ -146,7 +146,9 @@ public:
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
     void applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                            float dt, class MIDIManager* midi = nullptr);
+                            float dt, class MIDIManager* midi = nullptr,
+                            float energy = 0.0f, float build = 0.0f, float drop = 0.0f,
+                            float silence = 0.0f, float momentum = 0.5f);
 
     // Resolution (defaults to 1920x1080, can be changed)
     void setResolution(int w, int h);

@@ -896,8 +896,10 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
             ImGui::Dummy(ImVec2(0, 4));
         }
 
+        // Order MUST match the AudioSignal enum (the combo maps index->enum).
         static const char* signalNames[] = {
-            "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI" };
+            "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI",
+            "Energy", "Build", "Drop", "Silence", "Momentum" };
         dimLabel("SOURCE", kRowLabel, false);
         int sigIdx = (int)ab.signal;
         ImGui::SetNextItemWidth(-1);

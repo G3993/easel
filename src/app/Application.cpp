@@ -1242,6 +1242,24 @@ void Application::updateSources() {
     float audioBindDt = (float)(s_nowBindTime - s_lastBindTime);
     s_lastBindTime = s_nowBindTime;
 
+    // ── "Listening" signals (time-aware musical dynamics) ─────────────────
+    // Computed once per frame from the analyzer's structure layer, shared by
+    // every layer's audio bindings. These let a binding follow the SONG's arc
+    // (highs/lows/builds/drops/pauses) rather than the instantaneous level.
+    // Always available — independent of the Audio→Shaders bus toggle.
+    float audioSigEnergy   = m_audioAnalyzer.energy();                       // slow altitude
+    float audioSigBuild    = m_audioAnalyzer.buildup();                      // riser progress
+    float audioSigDrop     = m_audioAnalyzer.drop();                         // impact impulse
+    float audioSigMomentum = std::min(std::max(m_audioAnalyzer.energyVel() * 0.5f + 0.5f,
+                                                0.0f), 1.0f);                // <0.5 falling, >0.5 rising
+    // Silence: rises as the track drops below a soft loudness floor (pauses).
+    float audioSigSilence = 0.0f;
+    {
+        float r = m_audioAnalyzer.smoothedRMS();
+        float q = std::min(std::max((r - 0.015f) / (0.070f - 0.015f), 0.0f), 1.0f);
+        audioSigSilence = 1.0f - (q * q * (3.0f - 2.0f * q));   // smoothstep, inverted
+    }
+
     // Get mouse state for interactive shaders (normalized 0-1)
     double mx, my;
     glfwGetCursorPos(m_window, &mx, &my);
@@ -1345,7 +1363,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
@@ -1394,7 +1414,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 // Refresh the optional image-inject source from its bound
                 // layer (mirrors the ShaderSource imageBindings refresh
@@ -1434,7 +1456,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 // Resolve the bound image layer's live texture each frame
                 // (mirrors the 2D Fluid image refresh above).
