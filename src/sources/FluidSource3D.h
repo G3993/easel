@@ -66,7 +66,7 @@ public:
     ImageRef&       imageSource()       { return m_image; }
     const ImageRef& imageSource() const { return m_image; }
     bool  m_imageEnabled = false;
-    float m_imageMix     = 0.85f;   // 0 = palette only, 1 = full image albedo
+    float m_imageMix     = 1.0f;    // 0 = palette only, 1 = full image albedo (video colors)
 
     // ── Live render config (PropertyPanel "Fluid3D" section, M5) ──────
     // The SPH constants live as GLSL #defines for now (faithful to the
@@ -83,6 +83,15 @@ public:
     float m_shallowColor[3]= {0.60f, 0.85f, 1.00f};    // rim / grazing-edge tint
     float m_rim            = 0.0f;    // rim amount (0 = off)
     float m_saturation     = 1.0f;    // output saturation
+    // Background (also reflection env) + blob sphere size. Defaults = original.
+    float m_bgTop[3]       = {0.12f, 0.16f, 0.28f};
+    float m_bgBottom[3]    = {0.02f, 0.03f, 0.06f};
+    float m_bgAlpha        = 1.0f;    // 0 = transparent bg (composites under)
+    float m_sphereScale    = 1.0f;    // particle sphere size (lower = smaller blobs)
+    // Audio-driven motion: 0 = off (original constant motion); higher = the
+    // fluid is calm when quiet and churns as the music gets loud.
+    float m_audioIntensity = 0.0f;
+    float m_audioEnergy    = 0.0f;    // smoothed loudness (updated from audio)
 
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)

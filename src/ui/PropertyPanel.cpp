@@ -3340,19 +3340,24 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             if (f3->m_autoRotate)
                 f3Param("rotateSpeed", "Spin Speed", &f3->m_rotateSpeed, 0.0f, 2.0f, "%.2f");
             f3Param("tilt", "Tilt", &f3->m_tilt, -1.57f, 1.57f, "%.2f");
+            f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
 
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
-            pillSlider("Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
-            pillSlider("Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
+            f3Param("rim",        "Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
+            f3Param("saturation", "Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
+            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,    ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom, ImGuiColorEditFlags_NoInputs);
+            f3Param("bgAlpha",    "BG Opacity",  &f3->m_bgAlpha,    0.0f, 1.0f, "%.2f");
+            f3Param("sphereScale","Blob Size",   &f3->m_sphereScale,0.05f,1.5f, "%.2f");
 
             sectionBreak();
             ImGui::TextDisabled("Lighting");
             ImGui::SliderFloat3("Light Dir",   f3->m_lightDir, -1.0f, 1.0f);
-            pillSlider("Light Intensity", &f3->m_lightIntensity, 0.0f, 3.0f, "%.2f");
-            pillSlider("Ambient",         &f3->m_ambient,        0.0f, 1.0f, "%.2f");
-            pillSlider("Specular",        &f3->m_specular,       0.0f, 3.0f, "%.2f");
+            f3Param("lightIntensity", "Light Intensity", &f3->m_lightIntensity, 0.0f, 3.0f, "%.2f");
+            f3Param("ambient",        "Ambient",         &f3->m_ambient,        0.0f, 1.0f, "%.2f");
+            f3Param("specular",       "Specular",        &f3->m_specular,       0.0f, 3.0f, "%.2f");
 
             sectionBreak();
             // Quality / performance.

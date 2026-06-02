@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 
 // ─────────────────────────────────────────────────────────────────────
 // GLSL 330 core. Port of shadertoy mstfzS "Particle cluster grid SPH 3D".
@@ -51,6 +52,7 @@ static const char* COMMON = R"(
 uniform float uSize;
 uniform int   uFrame;
 uniform float uTime;
+uniform float uEnergy;   // audio-driven motion intensity (1 = original)
 
 vec3 size3d;
 
@@ -190,7 +192,10 @@ vec4 border_grad(vec3 p){
             k.xxxx*distance2border(p + k.xxx*dx))/vec4(4.*dx,4.*dx,4.*dx,4.);
 }
 void IntegrateParticle(inout Particle p, vec3 pos, float time){
-    p.force += gravity*vec3(0.4*sin(0.7*time), 0.2*cos(0.5*time), -1.0);
+    // uEnergy scales the turbulent wobble: calm (small) when audio is quiet,
+    // churning (large) when it's loud. Downward gravity (-1) is unaffected.
+    p.force += gravity*vec3(0.4*sin(0.7*time)*uEnergy, 0.2*cos(0.5*time)*uEnergy, -1.0);
+    p.vel *= mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0));   // extra damping when calm → settles
     vec4 border = border_grad(p.pos);
     vec3 bound = 1.*normalize(border.xyz)*exp(-0.4*border.w*border.w);
     p.force += force_boundary*bound*dt;
@@ -347,6 +352,10 @@ uniform float uSpec;       // reflection/specular strength (1 = original)
 uniform vec3  uShallow;    // rim / grazing-edge tint
 uniform float uRim;        // rim amount (0 = off / original)
 uniform float uSat;        // output saturation (1 = unchanged)
+uniform vec3  uBgTop;      // background gradient top (also reflection env)
+uniform vec3  uBgBottom;   // background gradient bottom
+uniform float uBgAlpha;    // background opacity (0 = transparent / composites under)
+uniform float uSphereScale;// particle sphere size multiplier (1 = original)
 uniform sampler2D uImage;
 uniform int   uImageOn;
 uniform float uImageMix;
@@ -391,7 +400,7 @@ vec2 iBox(vec3 ro, vec3 rd, vec3 bs){
 vec3 env(vec3 d){
     d = normalize(d);
     float t = clamp(0.5 + 0.5*d.y, 0.0, 1.0);
-    vec3 col = mix(vec3(0.02,0.03,0.06), vec3(0.12,0.16,0.28), t);
+    vec3 col = mix(uBgBottom, uBgTop, t);
     col += vec3(0.06,0.04,0.10) * pow(1.0 - abs(d.y), 4.0);   // warm horizon rim
     // Bright key light → tight specular highlight that slides across the
     // reflective surface, which is what reads as crisp + 3D.
@@ -413,8 +422,8 @@ vec4 calcNormal(vec3 p, float dx){
 void TraceCell(inout Ray ray, vec3 p){
     Particle p0, p1;
     unpackParticles(LOAD3D(uParticles, p), p, p0, p1);
-    if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, 0.85), uGlow * length(p0.vel));
-    if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, 0.85), uGlow * length(p0.vel));
+    if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
+    if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
 }
 void TraceCells(inout Ray ray, vec3 p){
     vec3 p0 = floor(p);
@@ -434,6 +443,7 @@ void main(){
     vec3 ro = size3d*0.5 - crd*d;
     vec2 tdBox = iBox(ro - size3d*0.5, rd, 0.5*size3d);
     vec3 col = env(rd.yzx);
+    float alpha = uBgAlpha;
     if(tdBox.x < MAX_DIST){
         float td = max(tdBox.x, 0.0);
         float step_size = 2.0;
@@ -471,9 +481,13 @@ void main(){
             // output saturation
             float luma = dot(col, vec3(0.299, 0.587, 0.114));
             col = mix(vec3(luma), col, uSat);
+            // Retain the video/texture color: blend the lit result back toward
+            // the raw image albedo so reflections/diffuse don't wash it out.
+            if(uImageOn == 1) col = mix(col, albedo, 0.6*uImageMix);
+            alpha = 1.0;
         }
     }
-    fragColor = vec4(col, 1.0);
+    fragColor = vec4(col, alpha);
 })";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -707,6 +721,10 @@ void FluidSource3D::renderToOutput() {
     glUniform3fv(glGetUniformLocation(m_progRender, "uShallow"), 1, m_shallowColor);
     glUniform1f(glGetUniformLocation(m_progRender, "uRim"), m_rim);
     glUniform1f(glGetUniformLocation(m_progRender, "uSat"), m_saturation);
+    glUniform3fv(glGetUniformLocation(m_progRender, "uBgTop"), 1, m_bgTop);
+    glUniform3fv(glGetUniformLocation(m_progRender, "uBgBottom"), 1, m_bgBottom);
+    glUniform1f(glGetUniformLocation(m_progRender, "uBgAlpha"), m_bgAlpha);
+    glUniform1f(glGetUniformLocation(m_progRender, "uSphereScale"), m_sphereScale);
     // Image injection — colors the surface albedo (mapped to world x/y).
     bool imgOn = (m_imageEnabled && m_image.textureId != 0);
     glActiveTexture(GL_TEXTURE0 + 3);
@@ -764,6 +782,13 @@ void FluidSource3D::update() {
         runVolumePass(m_progB, m_volB);
         // C: volA + volB → volC
         glUseProgram(m_progC);
+        // Audio-driven motion: calm when quiet, churning when loud. At
+        // m_audioIntensity==0 this is exactly 1.0 (original behaviour).
+        {
+            float hot = 0.25f + (2.5f - 0.25f) * m_audioEnergy;     // calm..intense by loudness
+            float energyU = 1.0f + (hot - 1.0f) * m_audioIntensity; // gated by the user amount
+            glUniform1f(glGetUniformLocation(m_progC, "uEnergy"), energyU);
+        }
         bindVolume(m_progC, "uParticles", m_volA, 0);
         bindVolume(m_progC, "uDensity",   m_volB, 1);
         glUniform1i(glGetUniformLocation(m_progC, "uFrame"), m_frame);
@@ -791,6 +816,11 @@ void FluidSource3D::update() {
 void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
                                        float high, float beat, float dt,
                                        MIDIManager* midi) {
+    // Track overall loudness (attack fast, release slow) for the calm->intense
+    // motion drive — independent of explicit per-param bindings.
+    float aRate = (level > m_audioEnergy) ? 6.0f : 1.5f;
+    m_audioEnergy += (level - m_audioEnergy) * (1.0f - std::exp(-aRate * std::max(dt, 1e-3f)));
+
     if (m_audioBindings.empty()) return;
     for (auto& [name, b] : m_audioBindings) {
         if (b.signal == AudioSignal::None) continue;
@@ -817,6 +847,14 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
         else if (name == "brightness")  { dst = &m_brightness;  lo = 0.0f; hi = 6.0f; }
         else if (name == "tilt")        { dst = &m_tilt;        lo = -1.57f; hi = 1.57f; }
         else if (name == "imageMix")    { dst = &m_imageMix;    lo = 0.0f; hi = 1.0f; }
+        else if (name == "sphereScale") { dst = &m_sphereScale; lo = 0.05f; hi = 1.5f; }
+        else if (name == "bgAlpha")     { dst = &m_bgAlpha;     lo = 0.0f; hi = 1.0f; }
+        else if (name == "lightIntensity"){ dst = &m_lightIntensity; lo = 0.0f; hi = 3.0f; }
+        else if (name == "ambient")     { dst = &m_ambient;     lo = 0.0f; hi = 1.0f; }
+        else if (name == "specular")    { dst = &m_specular;    lo = 0.0f; hi = 3.0f; }
+        else if (name == "rim")         { dst = &m_rim;         lo = 0.0f; hi = 1.0f; }
+        else if (name == "saturation")  { dst = &m_saturation;  lo = 0.0f; hi = 2.0f; }
+        else if (name == "audioIntensity"){ dst = &m_audioIntensity; lo = 0.0f; hi = 1.0f; }
         if (dst) { if (mapped < lo) mapped = lo; if (mapped > hi) mapped = hi; *dst = mapped; }
     }
 }

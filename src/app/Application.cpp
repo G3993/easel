@@ -1251,6 +1251,22 @@ void Application::updateSources() {
     float normMY = (winH > 0) ? 1.0f - (float)(my / winH) : 0.5f; // flip Y for GL
     bool mousePressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
+    // Layers bound as an image/texture input by another layer (Fluid3D, Fluid)
+    // must keep updating even when hidden — otherwise the texture freezes on
+    // one frame. Collect those source ids so the hide-skip below spares them.
+    std::set<uint32_t> referencedSources;
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& l = m_layerStack[i];
+        if (!l->source) continue;
+        if (l->source->typeName() == "Fluid3D") {
+            uint32_t sid = static_cast<FluidSource3D*>(l->source.get())->imageSource().sourceLayerId;
+            if (sid) referencedSources.insert(sid);
+        } else if (l->source->typeName() == "Fluid") {
+            uint32_t sid = static_cast<FluidSource*>(l->source.get())->imageSource().sourceLayerId;
+            if (sid) referencedSources.insert(sid);
+        }
+    }
+
     for (int i = 0; i < m_layerStack.count(); i++) {
         auto& layer = m_layerStack[i];
         if (layer->source) {
@@ -1459,9 +1475,15 @@ void Application::updateSources() {
                 }
             }
 
-            layer->source->update();
-            if (layer->shaderTransitionActive && layer->nextSource) {
-                layer->nextSource->update();
+            // Skip updating hidden layers — a hidden layer isn't composited, so
+            // its (often expensive, e.g. 3D fluid) per-frame work is pure waste.
+            // EXCEPT layers used as an image/texture input by another layer:
+            // those must keep advancing so the texture stays animated.
+            if (layer->visible || referencedSources.count(layer->id)) {
+                layer->source->update();
+                if (layer->shaderTransitionActive && layer->nextSource) {
+                    layer->nextSource->update();
+                }
             }
 
             // Auto-crop: detect black borders once when source first has a valid texture
@@ -12553,6 +12575,11 @@ void Application::saveProject(const std::string& path) {
                 fc["specular"]    = f->m_specular;
                 fc["rim"]         = f->m_rim;
                 fc["saturation"]  = f->m_saturation;
+                fc["bgTop"]    = { f->m_bgTop[0], f->m_bgTop[1], f->m_bgTop[2] };
+                fc["bgBottom"] = { f->m_bgBottom[0], f->m_bgBottom[1], f->m_bgBottom[2] };
+                fc["bgAlpha"]  = f->m_bgAlpha;
+                fc["sphereScale"] = f->m_sphereScale;
+                fc["audioIntensity"] = f->m_audioIntensity;
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -13150,6 +13177,13 @@ void Application::loadProject(const std::string& path) {
                     src->m_specular       = fc.value("specular",       src->m_specular);
                     src->m_rim            = fc.value("rim",            src->m_rim);
                     src->m_saturation     = fc.value("saturation",     src->m_saturation);
+                    if (fc.contains("bgTop") && fc["bgTop"].is_array() && fc["bgTop"].size()==3)
+                        for (int i=0;i<3;i++) src->m_bgTop[i] = fc["bgTop"][i].get<float>();
+                    if (fc.contains("bgBottom") && fc["bgBottom"].is_array() && fc["bgBottom"].size()==3)
+                        for (int i=0;i<3;i++) src->m_bgBottom[i] = fc["bgBottom"][i].get<float>();
+                    src->m_bgAlpha     = fc.value("bgAlpha",     src->m_bgAlpha);
+                    src->m_sphereScale = fc.value("sphereScale", src->m_sphereScale);
+                    src->m_audioIntensity = fc.value("audioIntensity", src->m_audioIntensity);
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);
