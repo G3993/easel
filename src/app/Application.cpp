@@ -12581,6 +12581,10 @@ void Application::saveProject(const std::string& path) {
                 fc["sphereScale"] = f->m_sphereScale;
                 fc["zoom"]        = f->m_zoom;
                 fc["audioIntensity"] = f->m_audioIntensity;
+                fc["gravity"]    = f->m_gravity;
+                fc["vortex"]     = f->m_vortex;
+                fc["turbulence"] = f->m_turbulence;
+                fc["forceScale"] = f->m_forceScale;
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -13186,6 +13190,10 @@ void Application::loadProject(const std::string& path) {
                     src->m_sphereScale = fc.value("sphereScale", src->m_sphereScale);
                     src->m_zoom        = fc.value("zoom",        src->m_zoom);
                     src->m_audioIntensity = fc.value("audioIntensity", src->m_audioIntensity);
+                    src->m_gravity     = fc.value("gravity",     src->m_gravity);
+                    src->m_vortex      = fc.value("vortex",      src->m_vortex);
+                    src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
+                    src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);
