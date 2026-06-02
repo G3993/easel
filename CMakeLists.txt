@@ -3,9 +3,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-    project(Easel VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+    project(Easel VERSION 0.2.0 LANGUAGES C CXX OBJCXX)
 else()
-    project(Easel VERSION 0.1.0 LANGUAGES C CXX)
+    project(Easel VERSION 0.2.0 LANGUAGES C CXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
