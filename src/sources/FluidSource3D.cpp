@@ -475,15 +475,24 @@ void main(){
             // rim/fresnel tint toward the shallow colour at grazing angles
             float fres = pow(1.0 - max(dot(normal, -ray.rd), 0.0), 3.0);
             albedo = mix(albedo, uShallow, fres * uRim);
-            col = uBright*shadow*albedo*(LdotN*uLightInt)*(1.0 - K)
-                + uAmbient*ray.color
-                + shadow*refl*K*uSpec;
+            // Split body (diffuse + ambient) from the glassy specular reflection
+            // so the image can recolor the body without killing the wet highlight.
+            vec3 specCol = shadow*refl*K*uSpec;
+            vec3 bodyCol = uBright*shadow*albedo*(LdotN*uLightInt)*(1.0 - K)
+                         + uAmbient*ray.color;
+            // The liquid's color should COME FROM the image: recolor the lit body
+            // to the image hue at full strength while keeping the sim's luminance,
+            // so it still reads as a shaded 3D liquid. uImageMix fades this in.
+            if(uImageOn == 1){
+                float bl = dot(bodyCol, vec3(0.299, 0.587, 0.114));
+                float al = dot(albedo,  vec3(0.299, 0.587, 0.114)) + 1e-4;
+                vec3 recolored = albedo * (bl / al);   // image chroma at body luminance
+                bodyCol = mix(bodyCol, recolored, uImageMix);
+            }
+            col = bodyCol + specCol;
             // output saturation
             float luma = dot(col, vec3(0.299, 0.587, 0.114));
             col = mix(vec3(luma), col, uSat);
-            // Retain the video/texture color: blend the lit result back toward
-            // the raw image albedo so reflections/diffuse don't wash it out.
-            if(uImageOn == 1) col = mix(col, albedo, 0.6*uImageMix);
             alpha = 1.0;
         }
     }
