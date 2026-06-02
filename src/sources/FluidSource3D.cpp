@@ -59,6 +59,7 @@ uniform float uGravityAdd;  // gravity strength delta (0 = original 1g)
 uniform float uVortex;      // coherent swirl around the vertical axis (0 = off)
 uniform float uTurbulence;  // chaotic turbulent push (0 = off)
 uniform float uForceAdd;    // SPH inter-particle (cohesion) force delta (0 = original)
+uniform float uSphereShape; // container shape: 0 = cube (original), 1 = sphere
 
 vec3 size3d;
 
@@ -186,8 +187,15 @@ void ApplyForce(inout Particle p, in Particle incoming){
 float minv(vec3 a){ return min(min(a.x, a.y), a.z); }
 float maxv(vec3 a){ return max(max(a.x, a.y), a.z); }
 float distance2border(vec3 p){
+    // Box SDF (inside-positive): distance to the nearest cube face.
     vec3 a = vec3(size3d - 1.) - p;
-    return min(minv(p), minv(a)) + 1.;
+    float boxd = min(minv(p), minv(a)) + 1.;
+    // Sphere SDF (inside-positive): distance to the inscribed sphere surface.
+    // Blending the two gives a rounded-box continuum at intermediate values.
+    vec3  c = size3d*0.5;
+    float R = minv(size3d)*0.5 - 1.0;
+    float sphd = R - length(p - c);
+    return mix(boxd, sphd, uSphereShape);
 }
 vec4 border_grad(vec3 p){
     const float dx = 0.001;
@@ -202,13 +210,18 @@ void IntegrateParticle(inout Particle p, vec3 pos, float time){
     // churning (large) when it's loud. uGravityAdd scales the downward pull
     // (0 = 1g; -1 = zero-g float; >0 = heavier).
     p.force += gravity*vec3(0.4*sin(0.7*time)*uEnergy, 0.2*cos(0.5*time)*uEnergy, -(1.0 + uGravityAdd));
-    // Coherent vortex: a tangential swirl around the vertical axis through the
-    // volume centre (normalized so it's a steady push regardless of radius).
+    // Coherent vortex: a tangential swirl around the vertical axis, applied as
+    // a BOUNDED VELOCITY NUDGE (not an accumulating force, which used to spin
+    // every particle up to max velocity and never let it stop). Self-limiting;
+    // motion ceases the moment you set it back to 0.
     if(uVortex != 0.0){
         vec3 r  = p.pos - size3d*0.5;
         vec3 sw = vec3(-r.y, r.x, 0.0);
         float rl = length(sw);
-        if(rl > 1e-4) p.force += gravity * uVortex * 6.0 * sw / rl;
+        if(rl > 1e-4){
+            vec3 target = (sw/rl) * (0.5 * uVortex);        // tangential stir speed
+            p.vel = mix(p.vel, target, clamp(0.06*uVortex, 0.0, 0.4));
+        }
     }
     // Chaotic turbulence: a DIVERGENCE-FREE flow (ABC-flow form — each
     // component depends only on the *other* two axes, so div = 0), applied as
@@ -225,7 +238,17 @@ void IntegrateParticle(inout Particle p, vec3 pos, float time){
         vec3 target = flow * (0.12 * uTurbulence);          // gentle stir speed
         p.vel = mix(p.vel, target, clamp(0.08*uTurbulence, 0.0, 0.5));
     }
-    p.vel *= mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0));   // extra damping when calm → settles
+    // Global velocity damping — the key to recoverability. The original look
+    // is essentially preserved at rest (a hair of 0.997), but the moment any
+    // extra forcing is engaged (vortex / turbulence / heavier gravity /
+    // stronger cohesion / loud audio) the damping deepens so energy can always
+    // bleed off. Without this, combining forces saturates the sim into a
+    // permanent max-velocity chaos it can never re-form from.
+    float activity = uVortex + uTurbulence + abs(uGravityAdd)
+                   + abs(uForceAdd) + max(uEnergy - 1.0, 0.0);
+    float damp = min(mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0)),
+                     0.997 - 0.03*clamp(activity, 0.0, 1.5));
+    p.vel *= clamp(damp, 0.94, 1.0);
     vec4 border = border_grad(p.pos);
     vec3 bound = 1.*normalize(border.xyz)*exp(-0.4*border.w*border.w);
     p.force += force_boundary*bound*dt;
@@ -320,11 +343,18 @@ void main(){
         IntegrateParticle(p1, pos, uTime);
     }
     if(uFrame < 10){
-        if(pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
-           pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
-           pos.z < 0.85*size3d.z && pos.z > 0.15*size3d.z){
-            p0.mass = initial_particle_density; p1.mass = 0u;
+        bool seed;
+        if(uSphereShape > 0.5){
+            // Seed the inscribed sphere so the fluid starts as a ball that
+            // holds its spherical shape (the wall force only acts near the
+            // surface, so particles must begin inside it).
+            seed = length(pos - size3d*0.5) < (minv(size3d)*0.5 - 2.0);
+        } else {
+            seed = (pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
+                    pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
+                    pos.z < 0.85*size3d.z && pos.z > 0.15*size3d.z);
         }
+        if(seed){ p0.mass = initial_particle_density; p1.mass = 0u; }
         p0.pos = pos; p0.vel = vec3(0.0);
         p1.pos = pos; p1.vel = vec3(0.0);
     }
@@ -837,6 +867,14 @@ void FluidSource3D::update() {
             glUniform1f(glGetUniformLocation(m_progC, "uForceAdd"),   m_forceScale - 1.0f);
             glUniform1f(glGetUniformLocation(m_progC, "uVortex"),     m_vortex     + audioPump * 0.8f);
             glUniform1f(glGetUniformLocation(m_progC, "uTurbulence"), m_turbulence + audioPump * 1.2f);
+            glUniform1f(glGetUniformLocation(m_progC, "uSphereShape"), m_sphereShape);
+        }
+        // Switching the container box<->sphere needs a reseed: the wall force
+        // only acts near the surface, so stray particles outside the new shape
+        // would otherwise never migrate in. Re-seed once on the crossing.
+        {
+            bool wantSphere = (m_sphereShape > 0.5f);
+            if (wantSphere != m_seedingSphere) { m_seedingSphere = wantSphere; m_frame = 0; }
         }
         bindVolume(m_progC, "uParticles", m_volA, 0);
         bindVolume(m_progC, "uDensity",   m_volB, 1);
@@ -902,6 +940,7 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
         else if (name == "vortex")      { dst = &m_vortex;      lo = 0.0f;  hi = 3.0f; }
         else if (name == "turbulence")  { dst = &m_turbulence;  lo = 0.0f;  hi = 2.0f; }
         else if (name == "forceScale")  { dst = &m_forceScale;  lo = 0.1f;  hi = 4.0f; }
+        else if (name == "sphereShape") { dst = &m_sphereShape; lo = 0.0f;  hi = 1.0f; }
         else if (name == "bgAlpha")     { dst = &m_bgAlpha;     lo = 0.0f; hi = 1.0f; }
         else if (name == "lightIntensity"){ dst = &m_lightIntensity; lo = 0.0f; hi = 3.0f; }
         else if (name == "ambient")     { dst = &m_ambient;     lo = 0.0f; hi = 1.0f; }

@@ -12585,6 +12585,7 @@ void Application::saveProject(const std::string& path) {
                 fc["vortex"]     = f->m_vortex;
                 fc["turbulence"] = f->m_turbulence;
                 fc["forceScale"] = f->m_forceScale;
+                fc["sphereShape"] = f->m_sphereShape;
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -13194,6 +13195,7 @@ void Application::loadProject(const std::string& path) {
                     src->m_vortex      = fc.value("vortex",      src->m_vortex);
                     src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
                     src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
+                    src->m_sphereShape = fc.value("sphereShape", src->m_sphereShape);
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);

@@ -3345,6 +3345,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
             sectionBreak();
             ImGui::TextDisabled("Forces");
+            f3Param("sphereShape", "Container", &f3->m_sphereShape, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Container shape: 0 = cube, 1 = sphere\n"
+                                  "(rounded box in between). Reseeds the fluid\n"
+                                  "when you cross between box and sphere.");
             f3Param("gravity",    "Gravity",    &f3->m_gravity,    0.0f, 4.0f, "%.2f");
             f3Param("vortex",     "Vortex",     &f3->m_vortex,     0.0f, 3.0f, "%.2f");
             f3Param("turbulence", "Turbulence", &f3->m_turbulence, 0.0f, 2.0f, "%.2f");

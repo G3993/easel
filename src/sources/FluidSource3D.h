@@ -102,6 +102,8 @@ public:
     float m_vortex         = 0.0f;    // coherent swirl around vertical axis (0 = off)
     float m_turbulence     = 0.0f;    // chaotic turbulent churn (0 = off)
     float m_forceScale     = 1.0f;    // SPH cohesion force (1 = original)
+    float m_sphereShape    = 0.0f;    // container: 0 = cube (original), 1 = sphere
+    bool  m_seedingSphere  = false;   // tracks the box<->sphere crossing for reseed
 
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
