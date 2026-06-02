@@ -345,10 +345,13 @@ void main(){
     if(uFrame < 10){
         bool seed;
         if(uSphereShape > 0.5){
-            // Seed the inscribed sphere so the fluid starts as a ball that
-            // holds its spherical shape (the wall force only acts near the
-            // surface, so particles must begin inside it).
-            seed = length(pos - size3d*0.5) < (minv(size3d)*0.5 - 2.0);
+            // Seed a COMPACT blob in the upper part of the sphere (NOT the whole
+            // sphere — filling every cell packs it to rest density with no room
+            // to move, so it looks frozen). It drops into the spherical bowl and
+            // sloshes like the box's partial seed does. (z+ is up; gravity is -z.)
+            float R = minv(size3d)*0.5;
+            vec3  sc = size3d*0.5 + vec3(0.0, 0.0, 0.30*R);
+            seed = length(pos - sc) < 0.50*R;
         } else {
             seed = (pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
                     pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
