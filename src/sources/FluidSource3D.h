@@ -88,6 +88,7 @@ public:
     float m_bgBottom[3]    = {0.02f, 0.03f, 0.06f};
     float m_bgAlpha        = 1.0f;    // 0 = transparent bg (composites under)
     float m_sphereScale    = 1.0f;    // particle sphere size (lower = smaller blobs)
+    float m_zoom           = 1.0f;    // camera zoom (1 = original; >1 zooms in)
     // Audio-driven motion: 0 = off (original constant motion); higher = the
     // fluid is calm when quiet and churns as the music gets loud.
     float m_audioIntensity = 0.0f;

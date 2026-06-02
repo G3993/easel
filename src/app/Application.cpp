@@ -12579,6 +12579,7 @@ void Application::saveProject(const std::string& path) {
                 fc["bgBottom"] = { f->m_bgBottom[0], f->m_bgBottom[1], f->m_bgBottom[2] };
                 fc["bgAlpha"]  = f->m_bgAlpha;
                 fc["sphereScale"] = f->m_sphereScale;
+                fc["zoom"]        = f->m_zoom;
                 fc["audioIntensity"] = f->m_audioIntensity;
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
@@ -13183,6 +13184,7 @@ void Application::loadProject(const std::string& path) {
                         for (int i=0;i<3;i++) src->m_bgBottom[i] = fc["bgBottom"][i].get<float>();
                     src->m_bgAlpha     = fc.value("bgAlpha",     src->m_bgAlpha);
                     src->m_sphereScale = fc.value("sphereScale", src->m_sphereScale);
+                    src->m_zoom        = fc.value("zoom",        src->m_zoom);
                     src->m_audioIntensity = fc.value("audioIntensity", src->m_audioIntensity);
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);

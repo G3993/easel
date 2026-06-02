@@ -3340,6 +3340,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             if (f3->m_autoRotate)
                 f3Param("rotateSpeed", "Spin Speed", &f3->m_rotateSpeed, 0.0f, 2.0f, "%.2f");
             f3Param("tilt", "Tilt", &f3->m_tilt, -1.57f, 1.57f, "%.2f");
+            f3Param("zoom", "Zoom", &f3->m_zoom, 0.5f, 4.0f, "%.2f");
             f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
 
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);

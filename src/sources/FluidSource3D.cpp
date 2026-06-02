@@ -356,6 +356,7 @@ uniform vec3  uBgTop;      // background gradient top (also reflection env)
 uniform vec3  uBgBottom;   // background gradient bottom
 uniform float uBgAlpha;    // background opacity (0 = transparent / composites under)
 uniform float uSphereScale;// particle sphere size multiplier (1 = original)
+uniform float uZoom;       // camera zoom (1 = original; >1 zooms in, telephoto)
 uniform sampler2D uImage;
 uniform int   uImageOn;
 uniform float uImageMix;
@@ -372,7 +373,8 @@ mat3 getCamera(vec2 a){
 }
 vec3 getRay(vec2 a, vec2 pos){
     mat3 cam = getCamera(a);
-    return normalize(transpose(cam)*vec3(FOV*pos.x, 1.0, FOV*pos.y));
+    float fov = FOV / max(uZoom, 0.05);   // narrower FOV = telephoto zoom-in
+    return normalize(transpose(cam)*vec3(fov*pos.x, 1.0, fov*pos.y));
 }
 struct Ray { vec3 ro; vec3 rd; float td; vec3 normal; vec3 color; };
 void iSphere(inout Ray ray, vec4 sphere, vec3 color){
@@ -734,6 +736,7 @@ void FluidSource3D::renderToOutput() {
     glUniform3fv(glGetUniformLocation(m_progRender, "uBgBottom"), 1, m_bgBottom);
     glUniform1f(glGetUniformLocation(m_progRender, "uBgAlpha"), m_bgAlpha);
     glUniform1f(glGetUniformLocation(m_progRender, "uSphereScale"), m_sphereScale);
+    glUniform1f(glGetUniformLocation(m_progRender, "uZoom"), m_zoom);
     // Image injection — colors the surface albedo (mapped to world x/y).
     bool imgOn = (m_imageEnabled && m_image.textureId != 0);
     glActiveTexture(GL_TEXTURE0 + 3);
@@ -857,6 +860,7 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
         else if (name == "tilt")        { dst = &m_tilt;        lo = -1.57f; hi = 1.57f; }
         else if (name == "imageMix")    { dst = &m_imageMix;    lo = 0.0f; hi = 1.0f; }
         else if (name == "sphereScale") { dst = &m_sphereScale; lo = 0.05f; hi = 1.5f; }
+        else if (name == "zoom")        { dst = &m_zoom;        lo = 0.5f;  hi = 4.0f; }
         else if (name == "bgAlpha")     { dst = &m_bgAlpha;     lo = 0.0f; hi = 1.0f; }
         else if (name == "lightIntensity"){ dst = &m_lightIntensity; lo = 0.0f; hi = 3.0f; }
         else if (name == "ambient")     { dst = &m_ambient;     lo = 0.0f; hi = 1.0f; }
