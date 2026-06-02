@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 
 // ─────────────────────────────────────────────────────────────────────
 // GLSL 330 core. Port of shadertoy mstfzS "Particle cluster grid SPH 3D".
@@ -51,6 +52,14 @@ static const char* COMMON = R"(
 uniform float uSize;
 uniform int   uFrame;
 uniform float uTime;
+uniform float uEnergy;   // audio-driven motion intensity (1 = original)
+// Extra force fields — all formulated so 0 == original behaviour, so an
+// unbound uniform can never break the sim. The base SPH #defines are untouched.
+uniform float uGravityAdd;  // gravity strength delta (0 = original 1g)
+uniform float uVortex;      // coherent swirl around the vertical axis (0 = off)
+uniform float uTurbulence;  // chaotic turbulent push (0 = off)
+uniform float uForceAdd;    // SPH inter-particle (cohesion) force delta (0 = original)
+uniform float uSphereShape; // container shape: 0 = cube (original), 1 = sphere
 
 vec3 size3d;
 
@@ -172,14 +181,21 @@ void ApplyForce(inout Particle p, in Particle incoming){
     float SPH_F = f * pressure;
     float F = surface_tension*GD(d, surface_tension_rad);
     float Friction = 0.45 * dot(dir, dvel) * GD(d, 1.5);
-    p.force += force_k * dir * (F + SPH_F + Friction) * irho / rest_density;
+    p.force += (1.0 + uForceAdd) * force_k * dir * (F + SPH_F + Friction) * irho / rest_density;
 }
 
 float minv(vec3 a){ return min(min(a.x, a.y), a.z); }
 float maxv(vec3 a){ return max(max(a.x, a.y), a.z); }
 float distance2border(vec3 p){
+    // Box SDF (inside-positive): distance to the nearest cube face.
     vec3 a = vec3(size3d - 1.) - p;
-    return min(minv(p), minv(a)) + 1.;
+    float boxd = min(minv(p), minv(a)) + 1.;
+    // Sphere SDF (inside-positive): distance to the inscribed sphere surface.
+    // Blending the two gives a rounded-box continuum at intermediate values.
+    vec3  c = size3d*0.5;
+    float R = minv(size3d)*0.5 - 1.0;
+    float sphd = R - length(p - c);
+    return mix(boxd, sphd, uSphereShape);
 }
 vec4 border_grad(vec3 p){
     const float dx = 0.001;
@@ -190,7 +206,49 @@ vec4 border_grad(vec3 p){
             k.xxxx*distance2border(p + k.xxx*dx))/vec4(4.*dx,4.*dx,4.*dx,4.);
 }
 void IntegrateParticle(inout Particle p, vec3 pos, float time){
-    p.force += gravity*vec3(0.4*sin(0.7*time), 0.2*cos(0.5*time), -1.0);
+    // uEnergy scales the turbulent wobble: calm (small) when audio is quiet,
+    // churning (large) when it's loud. uGravityAdd scales the downward pull
+    // (0 = 1g; -1 = zero-g float; >0 = heavier).
+    p.force += gravity*vec3(0.4*sin(0.7*time)*uEnergy, 0.2*cos(0.5*time)*uEnergy, -(1.0 + uGravityAdd));
+    // Coherent vortex: a tangential swirl around the vertical axis, applied as
+    // a BOUNDED VELOCITY NUDGE (not an accumulating force, which used to spin
+    // every particle up to max velocity and never let it stop). Self-limiting;
+    // motion ceases the moment you set it back to 0.
+    if(uVortex != 0.0){
+        vec3 r  = p.pos - size3d*0.5;
+        vec3 sw = vec3(-r.y, r.x, 0.0);
+        float rl = length(sw);
+        if(rl > 1e-4){
+            vec3 target = (sw/rl) * (0.5 * uVortex);        // tangential stir speed
+            p.vel = mix(p.vel, target, clamp(0.06*uVortex, 0.0, 0.4));
+        }
+    }
+    // Chaotic turbulence: a DIVERGENCE-FREE flow (ABC-flow form — each
+    // component depends only on the *other* two axes, so div = 0), applied as
+    // a BOUNDED VELOCITY NUDGE rather than an accelerating force. Pushing it as
+    // a force kept flinging every particle to max velocity ("flips out"); a
+    // nudge toward a small target stir-velocity is self-limiting and stable,
+    // and pulls energy back out when you dial it down.
+    if(uTurbulence != 0.0){
+        vec3 q = p.pos*0.35;
+        vec3 flow = vec3(
+            sin(q.z + time)      + cos(q.y + 0.7*time),
+            sin(q.x + 1.3*time)  + cos(q.z + time),
+            sin(q.y + 0.7*time)  + cos(q.x + 1.3*time));
+        vec3 target = flow * (0.12 * uTurbulence);          // gentle stir speed
+        p.vel = mix(p.vel, target, clamp(0.08*uTurbulence, 0.0, 0.5));
+    }
+    // Global velocity damping — the key to recoverability. The original look
+    // is essentially preserved at rest (a hair of 0.997), but the moment any
+    // extra forcing is engaged (vortex / turbulence / heavier gravity /
+    // stronger cohesion / loud audio) the damping deepens so energy can always
+    // bleed off. Without this, combining forces saturates the sim into a
+    // permanent max-velocity chaos it can never re-form from.
+    float activity = uVortex + uTurbulence + abs(uGravityAdd)
+                   + abs(uForceAdd) + max(uEnergy - 1.0, 0.0);
+    float damp = min(mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0)),
+                     0.997 - 0.03*clamp(activity, 0.0, 1.5));
+    p.vel *= clamp(damp, 0.94, 1.0);
     vec4 border = border_grad(p.pos);
     vec3 bound = 1.*normalize(border.xyz)*exp(-0.4*border.w*border.w);
     p.force += force_boundary*bound*dt;
@@ -285,11 +343,21 @@ void main(){
         IntegrateParticle(p1, pos, uTime);
     }
     if(uFrame < 10){
-        if(pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
-           pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
-           pos.z < 0.85*size3d.z && pos.z > 0.15*size3d.z){
-            p0.mass = initial_particle_density; p1.mass = 0u;
+        bool seed;
+        if(uSphereShape > 0.5){
+            // Seed a COMPACT blob in the upper part of the sphere (NOT the whole
+            // sphere — filling every cell packs it to rest density with no room
+            // to move, so it looks frozen). It drops into the spherical bowl and
+            // sloshes like the box's partial seed does. (z+ is up; gravity is -z.)
+            float R = minv(size3d)*0.5;
+            vec3  sc = size3d*0.5 + vec3(0.0, 0.0, 0.30*R);
+            seed = length(pos - sc) < 0.50*R;
+        } else {
+            seed = (pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
+                    pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
+                    pos.z < 0.85*size3d.z && pos.z > 0.15*size3d.z);
         }
+        if(seed){ p0.mass = initial_particle_density; p1.mass = 0u; }
         p0.pos = pos; p0.vel = vec3(0.0);
         p1.pos = pos; p1.vel = vec3(0.0);
     }
@@ -347,6 +415,11 @@ uniform float uSpec;       // reflection/specular strength (1 = original)
 uniform vec3  uShallow;    // rim / grazing-edge tint
 uniform float uRim;        // rim amount (0 = off / original)
 uniform float uSat;        // output saturation (1 = unchanged)
+uniform vec3  uBgTop;      // background gradient top (also reflection env)
+uniform vec3  uBgBottom;   // background gradient bottom
+uniform float uBgAlpha;    // background opacity (0 = transparent / composites under)
+uniform float uSphereScale;// particle sphere size multiplier (1 = original)
+uniform float uZoom;       // camera zoom (1 = original; >1 zooms in, telephoto)
 uniform sampler2D uImage;
 uniform int   uImageOn;
 uniform float uImageMix;
@@ -363,7 +436,8 @@ mat3 getCamera(vec2 a){
 }
 vec3 getRay(vec2 a, vec2 pos){
     mat3 cam = getCamera(a);
-    return normalize(transpose(cam)*vec3(FOV*pos.x, 1.0, FOV*pos.y));
+    float fov = FOV / max(uZoom, 0.05);   // narrower FOV = telephoto zoom-in
+    return normalize(transpose(cam)*vec3(fov*pos.x, 1.0, fov*pos.y));
 }
 struct Ray { vec3 ro; vec3 rd; float td; vec3 normal; vec3 color; };
 void iSphere(inout Ray ray, vec4 sphere, vec3 color){
@@ -391,7 +465,7 @@ vec2 iBox(vec3 ro, vec3 rd, vec3 bs){
 vec3 env(vec3 d){
     d = normalize(d);
     float t = clamp(0.5 + 0.5*d.y, 0.0, 1.0);
-    vec3 col = mix(vec3(0.02,0.03,0.06), vec3(0.12,0.16,0.28), t);
+    vec3 col = mix(uBgBottom, uBgTop, t);
     col += vec3(0.06,0.04,0.10) * pow(1.0 - abs(d.y), 4.0);   // warm horizon rim
     // Bright key light → tight specular highlight that slides across the
     // reflective surface, which is what reads as crisp + 3D.
@@ -413,8 +487,8 @@ vec4 calcNormal(vec3 p, float dx){
 void TraceCell(inout Ray ray, vec3 p){
     Particle p0, p1;
     unpackParticles(LOAD3D(uParticles, p), p, p0, p1);
-    if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, 0.85), uGlow * length(p0.vel));
-    if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, 0.85), uGlow * length(p0.vel));
+    if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
+    if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
 }
 void TraceCells(inout Ray ray, vec3 p){
     vec3 p0 = floor(p);
@@ -434,6 +508,7 @@ void main(){
     vec3 ro = size3d*0.5 - crd*d;
     vec2 tdBox = iBox(ro - size3d*0.5, rd, 0.5*size3d);
     vec3 col = env(rd.yzx);
+    float alpha = uBgAlpha;
     if(tdBox.x < MAX_DIST){
         float td = max(tdBox.x, 0.0);
         float step_size = 2.0;
@@ -465,15 +540,28 @@ void main(){
             // rim/fresnel tint toward the shallow colour at grazing angles
             float fres = pow(1.0 - max(dot(normal, -ray.rd), 0.0), 3.0);
             albedo = mix(albedo, uShallow, fres * uRim);
-            col = uBright*shadow*albedo*(LdotN*uLightInt)*(1.0 - K)
-                + uAmbient*ray.color
-                + shadow*refl*K*uSpec;
+            // Split body (diffuse + ambient) from the glassy specular reflection
+            // so the image can recolor the body without killing the wet highlight.
+            vec3 specCol = shadow*refl*K*uSpec;
+            vec3 bodyCol = uBright*shadow*albedo*(LdotN*uLightInt)*(1.0 - K)
+                         + uAmbient*ray.color;
+            // The liquid's color should COME FROM the image: recolor the lit body
+            // to the image hue at full strength while keeping the sim's luminance,
+            // so it still reads as a shaded 3D liquid. uImageMix fades this in.
+            if(uImageOn == 1){
+                float bl = dot(bodyCol, vec3(0.299, 0.587, 0.114));
+                float al = dot(albedo,  vec3(0.299, 0.587, 0.114)) + 1e-4;
+                vec3 recolored = albedo * (bl / al);   // image chroma at body luminance
+                bodyCol = mix(bodyCol, recolored, uImageMix);
+            }
+            col = bodyCol + specCol;
             // output saturation
             float luma = dot(col, vec3(0.299, 0.587, 0.114));
             col = mix(vec3(luma), col, uSat);
+            alpha = 1.0;
         }
     }
-    fragColor = vec4(col, 1.0);
+    fragColor = vec4(col, alpha);
 })";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -584,7 +672,7 @@ void FluidSource3D::destroyFBO(FBO& f) {
 void FluidSource3D::reallocVolumes() {
     destroyVolume(m_volA); destroyVolume(m_volB);
     destroyVolume(m_volC); destroyVolume(m_volD);
-    m_simRes = std::max(8, std::min(80, m_simRes));
+    m_simRes = std::max(8, std::min(128, m_simRes));
     m_size = m_simRes;
     m_volA = createVolume(m_size, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, GL_NEAREST);
     m_volC = createVolume(m_size, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, GL_NEAREST);
@@ -613,7 +701,7 @@ bool FluidSource3D::init(int outW, int outH) {
     m_renderScale = std::min(1.0f, std::max(0.25f, m_renderScale));
     m_outW = std::max(2, (int)std::round(m_zoneW * m_renderScale));
     m_outH = std::max(2, (int)std::round(m_zoneH * m_renderScale));
-    m_simRes = std::max(8, std::min(80, m_simRes));
+    m_simRes = std::max(8, std::min(128, m_simRes));
     m_size = m_simRes;
 
     std::string common = COMMON;
@@ -707,6 +795,11 @@ void FluidSource3D::renderToOutput() {
     glUniform3fv(glGetUniformLocation(m_progRender, "uShallow"), 1, m_shallowColor);
     glUniform1f(glGetUniformLocation(m_progRender, "uRim"), m_rim);
     glUniform1f(glGetUniformLocation(m_progRender, "uSat"), m_saturation);
+    glUniform3fv(glGetUniformLocation(m_progRender, "uBgTop"), 1, m_bgTop);
+    glUniform3fv(glGetUniformLocation(m_progRender, "uBgBottom"), 1, m_bgBottom);
+    glUniform1f(glGetUniformLocation(m_progRender, "uBgAlpha"), m_bgAlpha);
+    glUniform1f(glGetUniformLocation(m_progRender, "uSphereScale"), m_sphereScale);
+    glUniform1f(glGetUniformLocation(m_progRender, "uZoom"), m_zoom);
     // Image injection — colors the surface albedo (mapped to world x/y).
     bool imgOn = (m_imageEnabled && m_image.textureId != 0);
     glActiveTexture(GL_TEXTURE0 + 3);
@@ -764,6 +857,28 @@ void FluidSource3D::update() {
         runVolumePass(m_progB, m_volB);
         // C: volA + volB → volC
         glUseProgram(m_progC);
+        // Audio-driven motion: calm when quiet, churning when loud. At
+        // m_audioIntensity==0 this is exactly 1.0 (original behaviour).
+        {
+            float hot = 0.25f + (2.5f - 0.25f) * m_audioEnergy;     // calm..intense by loudness
+            float energyU = 1.0f + (hot - 1.0f) * m_audioIntensity; // gated by the user amount
+            glUniform1f(glGetUniformLocation(m_progC, "uEnergy"), energyU);
+            // Extra force fields. All default to 0 == original. Audio Motion
+            // also pumps vortex + turbulence so it churns harder as it gets loud.
+            float audioPump = m_audioIntensity * m_audioEnergy;
+            glUniform1f(glGetUniformLocation(m_progC, "uGravityAdd"), m_gravity   - 1.0f);
+            glUniform1f(glGetUniformLocation(m_progC, "uForceAdd"),   m_forceScale - 1.0f);
+            glUniform1f(glGetUniformLocation(m_progC, "uVortex"),     m_vortex     + audioPump * 0.8f);
+            glUniform1f(glGetUniformLocation(m_progC, "uTurbulence"), m_turbulence + audioPump * 1.2f);
+            glUniform1f(glGetUniformLocation(m_progC, "uSphereShape"), m_sphereShape);
+        }
+        // Switching the container box<->sphere needs a reseed: the wall force
+        // only acts near the surface, so stray particles outside the new shape
+        // would otherwise never migrate in. Re-seed once on the crossing.
+        {
+            bool wantSphere = (m_sphereShape > 0.5f);
+            if (wantSphere != m_seedingSphere) { m_seedingSphere = wantSphere; m_frame = 0; }
+        }
         bindVolume(m_progC, "uParticles", m_volA, 0);
         bindVolume(m_progC, "uDensity",   m_volB, 1);
         glUniform1i(glGetUniformLocation(m_progC, "uFrame"), m_frame);
@@ -788,9 +903,145 @@ void FluidSource3D::update() {
     if (prevDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
 }
 
+// ── Journey: snapshot the current look, and crossfade between the two ─────
+void FluidSource3D::captureLook(int which) {
+    if (which < 0 || which > 1) return;
+    FluidLook& L = m_look[which];
+    for (int i = 0; i < 3; i++) {
+        L.deepColor[i]    = m_deepColor[i];    L.glowColor[i]   = m_glowColor[i];
+        L.shallowColor[i] = m_shallowColor[i]; L.bgTop[i]       = m_bgTop[i];
+        L.bgBottom[i]     = m_bgBottom[i];
+    }
+    L.brightness = m_brightness; L.lightIntensity = m_lightIntensity;
+    L.ambient = m_ambient; L.specular = m_specular; L.rim = m_rim;
+    L.saturation = m_saturation; L.bgAlpha = m_bgAlpha; L.sphereScale = m_sphereScale;
+    L.zoom = m_zoom; L.gravity = m_gravity; L.vortex = m_vortex;
+    L.turbulence = m_turbulence; L.forceScale = m_forceScale;
+    L.rotateSpeed = m_rotateSpeed; L.tilt = m_tilt;
+    m_lookSet[which] = true;
+}
+
+void FluidSource3D::lookToArray(int which, float* o) const {
+    if (which < 0 || which > 1) return;
+    const FluidLook& L = m_look[which]; int n = 0;
+    for (int i=0;i<3;i++) o[n++]=L.deepColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.glowColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.shallowColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.bgTop[i];
+    for (int i=0;i<3;i++) o[n++]=L.bgBottom[i];
+    o[n++]=L.brightness; o[n++]=L.lightIntensity; o[n++]=L.ambient; o[n++]=L.specular;
+    o[n++]=L.rim; o[n++]=L.saturation; o[n++]=L.bgAlpha; o[n++]=L.sphereScale; o[n++]=L.zoom;
+    o[n++]=L.gravity; o[n++]=L.vortex; o[n++]=L.turbulence; o[n++]=L.forceScale;
+    o[n++]=L.rotateSpeed; o[n++]=L.tilt;   // n == kLookFloats (30)
+}
+void FluidSource3D::lookFromArray(int which, const float* in) {
+    if (which < 0 || which > 1) return;
+    FluidLook& L = m_look[which]; int n = 0;
+    for (int i=0;i<3;i++) L.deepColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.glowColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.shallowColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.bgTop[i]=in[n++];
+    for (int i=0;i<3;i++) L.bgBottom[i]=in[n++];
+    L.brightness=in[n++]; L.lightIntensity=in[n++]; L.ambient=in[n++]; L.specular=in[n++];
+    L.rim=in[n++]; L.saturation=in[n++]; L.bgAlpha=in[n++]; L.sphereScale=in[n++]; L.zoom=in[n++];
+    L.gravity=in[n++]; L.vortex=in[n++]; L.turbulence=in[n++]; L.forceScale=in[n++];
+    L.rotateSpeed=in[n++]; L.tilt=in[n++];
+    m_lookSet[which] = true;
+}
+
+void FluidSource3D::loadLook(int which) {
+    if (which < 0 || which > 1) return;
+    const FluidLook& L = m_look[which];
+    for (int i = 0; i < 3; i++) {
+        m_deepColor[i]    = L.deepColor[i];    m_glowColor[i]   = L.glowColor[i];
+        m_shallowColor[i] = L.shallowColor[i]; m_bgTop[i]       = L.bgTop[i];
+        m_bgBottom[i]     = L.bgBottom[i];
+    }
+    m_brightness = L.brightness; m_lightIntensity = L.lightIntensity;
+    m_ambient = L.ambient; m_specular = L.specular; m_rim = L.rim;
+    m_saturation = L.saturation; m_bgAlpha = L.bgAlpha; m_sphereScale = L.sphereScale;
+    m_zoom = L.zoom; m_gravity = L.gravity; m_vortex = L.vortex;
+    m_turbulence = L.turbulence; m_forceScale = L.forceScale;
+    m_rotateSpeed = L.rotateSpeed; m_tilt = L.tilt;
+}
+
+void FluidSource3D::applyJourney(float level, float energy, float build,
+                                 float momentum, float drop, float dt) {
+    if (!(dt > 0.0f)) dt = 1.0f/60.0f; if (dt > 0.1f) dt = 0.1f;
+
+    // On a mode switch, set up the live params for the new mode: load the look
+    // you're about to edit (so the sliders show it), or ensure both ends exist
+    // before performing.
+    if (m_vjMode != m_vjModePrev) {
+        if (m_vjMode == 0)      { if (m_lookSet[0]) loadLook(0); else captureLook(0); }
+        else if (m_vjMode == 1) { if (m_lookSet[1]) loadLook(1); else captureLook(1); }
+        else { if (!m_lookSet[0]) captureLook(0); if (!m_lookSet[1]) captureLook(1); }
+        m_vjModePrev = m_vjMode;
+    }
+
+    // Edit modes (Low/High): the live params ARE the look. Snapshot them every
+    // frame so every tweak updates that end — full manual control, no lock-in,
+    // and no morph runs.
+    if (m_vjMode != 2) { captureLook(m_vjMode); return; }
+
+    // Live: crossfade Low <-> High by the song, or by a hand-grabbed fader.
+    if (!m_lookSet[0] || !m_lookSet[1]) return;
+    float pos;
+    if (m_vjGrab) {
+        pos = m_journeyPos = m_journeyPosManual;
+    } else {
+        float drive = energy;
+        if      (m_journeySignal == 1) drive = build;
+        else if (m_journeySignal == 2) drive = level;
+        else if (m_journeySignal == 3) drive = momentum;
+        drive *= m_journeyGain;
+        float lead = (momentum - 0.5f) * 2.0f;            // rising energy leads
+        float target = drive + 0.25f * std::max(lead, 0.0f);
+        if (target < 0.0f) target = 0.0f; if (target > 1.0f) target = 1.0f;
+        // Drop snap: jump toward Peak when a drop lands, then decay (~0.5s).
+        m_journeyDropEnv = std::max(m_journeyDropEnv * std::exp(-2.0f*dt), drop);
+        target = std::max(target, m_journeyDropEnv);
+        // Asymmetric glide: rise fast (ride builds/drops), fall slower (linger).
+        float rate = (target > m_journeyPos) ? 3.5f : 1.1f;
+        m_journeyPos += (target - m_journeyPos) * (1.0f - std::exp(-rate*dt));
+        pos = m_journeyPos;
+    }
+    // Safety: a non-finite or out-of-range position would write garbage into
+    // every look param. Clamp hard so the morph can never break the visual.
+    if (!std::isfinite(pos)) pos = 0.0f;
+    if (pos < 0.0f) pos = 0.0f; else if (pos > 1.0f) pos = 1.0f;
+    m_journeyPos = pos;
+    const FluidLook& A = m_look[0]; const FluidLook& B = m_look[1];
+    #define LRP(f) (A.f + (B.f - A.f) * pos)
+    for (int i = 0; i < 3; i++) {
+        m_deepColor[i]    = A.deepColor[i]    + (B.deepColor[i]    - A.deepColor[i])    * pos;
+        m_glowColor[i]    = A.glowColor[i]    + (B.glowColor[i]    - A.glowColor[i])    * pos;
+        m_shallowColor[i] = A.shallowColor[i] + (B.shallowColor[i] - A.shallowColor[i]) * pos;
+        m_bgTop[i]        = A.bgTop[i]        + (B.bgTop[i]        - A.bgTop[i])        * pos;
+        m_bgBottom[i]     = A.bgBottom[i]     + (B.bgBottom[i]     - A.bgBottom[i])     * pos;
+    }
+    m_brightness=LRP(brightness); m_lightIntensity=LRP(lightIntensity); m_ambient=LRP(ambient);
+    m_specular=LRP(specular); m_rim=LRP(rim); m_saturation=LRP(saturation); m_bgAlpha=LRP(bgAlpha);
+    m_sphereScale=LRP(sphereScale); m_zoom=LRP(zoom); m_gravity=LRP(gravity); m_vortex=LRP(vortex);
+    m_turbulence=LRP(turbulence); m_forceScale=LRP(forceScale);
+    m_rotateSpeed=LRP(rotateSpeed); m_tilt=LRP(tilt);
+    #undef LRP
+}
+
 void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
                                        float high, float beat, float dt,
-                                       MIDIManager* midi) {
+                                       MIDIManager* midi,
+                                       float energy, float build, float drop,
+                                       float silence, float momentum) {
+    // Track overall loudness (attack fast, release slow) for the calm->intense
+    // motion drive — independent of explicit per-param bindings.
+    float aRate = (level > m_audioEnergy) ? 6.0f : 1.5f;
+    m_audioEnergy += (level - m_audioEnergy) * (1.0f - std::exp(-aRate * std::max(dt, 1e-3f)));
+
+    // Journey morph FIRST (sets the base look between Valley/Peak), so any
+    // explicit per-param bindings below can still layer accents on top.
+    applyJourney(level, energy, build, momentum, drop, dt);
+
     if (m_audioBindings.empty()) return;
     for (auto& [name, b] : m_audioBindings) {
         if (b.signal == AudioSignal::None) continue;
@@ -801,6 +1052,11 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
             case AudioSignal::Mid:   raw = mid;   break;
             case AudioSignal::High:  raw = high;  break;
             case AudioSignal::Beat:  raw = beat;  break;
+            case AudioSignal::Energy:   raw = energy;   break;
+            case AudioSignal::Build:    raw = build;    break;
+            case AudioSignal::Drop:     raw = drop;     break;
+            case AudioSignal::Silence:  raw = silence;  break;
+            case AudioSignal::Momentum: raw = momentum; break;
             case AudioSignal::MidiCC: {
                 if (midi && b.midiCC >= 0) {
                     float v = midi->getCCValue(b.midiChannel, b.midiCC);
@@ -817,6 +1073,20 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
         else if (name == "brightness")  { dst = &m_brightness;  lo = 0.0f; hi = 6.0f; }
         else if (name == "tilt")        { dst = &m_tilt;        lo = -1.57f; hi = 1.57f; }
         else if (name == "imageMix")    { dst = &m_imageMix;    lo = 0.0f; hi = 1.0f; }
+        else if (name == "sphereScale") { dst = &m_sphereScale; lo = 0.05f; hi = 1.5f; }
+        else if (name == "zoom")        { dst = &m_zoom;        lo = 0.5f;  hi = 4.0f; }
+        else if (name == "gravity")     { dst = &m_gravity;     lo = 0.0f;  hi = 4.0f; }
+        else if (name == "vortex")      { dst = &m_vortex;      lo = 0.0f;  hi = 3.0f; }
+        else if (name == "turbulence")  { dst = &m_turbulence;  lo = 0.0f;  hi = 2.0f; }
+        else if (name == "forceScale")  { dst = &m_forceScale;  lo = 0.1f;  hi = 4.0f; }
+        else if (name == "sphereShape") { dst = &m_sphereShape; lo = 0.0f;  hi = 1.0f; }
+        else if (name == "bgAlpha")     { dst = &m_bgAlpha;     lo = 0.0f; hi = 1.0f; }
+        else if (name == "lightIntensity"){ dst = &m_lightIntensity; lo = 0.0f; hi = 3.0f; }
+        else if (name == "ambient")     { dst = &m_ambient;     lo = 0.0f; hi = 1.0f; }
+        else if (name == "specular")    { dst = &m_specular;    lo = 0.0f; hi = 3.0f; }
+        else if (name == "rim")         { dst = &m_rim;         lo = 0.0f; hi = 1.0f; }
+        else if (name == "saturation")  { dst = &m_saturation;  lo = 0.0f; hi = 2.0f; }
+        else if (name == "audioIntensity"){ dst = &m_audioIntensity; lo = 0.0f; hi = 1.0f; }
         if (dst) { if (mapped < lo) mapped = lo; if (mapped > hi) mapped = hi; *dst = mapped; }
     }
 }

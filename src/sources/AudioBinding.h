@@ -15,6 +15,16 @@ enum class AudioSignal {
     High,
     Beat,    // beat decay (0-1 pulse)
     MidiCC,  // MIDI control change (uses midiCC/midiChannel fields)
+    // ── "Listening" signals — time-aware musical dynamics, not instantaneous
+    // level. Sourced from the AudioAnalyzer's structure layer so the visuals
+    // follow the SONG's arc (highs, lows, builds, drops, pauses) instead of
+    // just twitching to the current loudness. APPENDED after MidiCC so the
+    // serialized int values of the original signals never shift.
+    Energy,    // slow arrangement altitude — the high<->low journey
+    Build,     // riser / build-up progress — anticipation before a peak
+    Drop,      // structural impact impulse — fires when a drop lands
+    Silence,   // rises when the track goes quiet (pauses / breakdowns)
+    Momentum,  // energy rising(>0.5) vs falling(<0.5), remapped to 0..1
 };
 
 // Per-parameter audio/MIDI binding

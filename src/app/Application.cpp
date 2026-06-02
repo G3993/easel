@@ -1242,6 +1242,24 @@ void Application::updateSources() {
     float audioBindDt = (float)(s_nowBindTime - s_lastBindTime);
     s_lastBindTime = s_nowBindTime;
 
+    // ── "Listening" signals (time-aware musical dynamics) ─────────────────
+    // Computed once per frame from the analyzer's structure layer, shared by
+    // every layer's audio bindings. These let a binding follow the SONG's arc
+    // (highs/lows/builds/drops/pauses) rather than the instantaneous level.
+    // Always available — independent of the Audio→Shaders bus toggle.
+    float audioSigEnergy   = m_audioAnalyzer.energy();                       // slow altitude
+    float audioSigBuild    = m_audioAnalyzer.buildup();                      // riser progress
+    float audioSigDrop     = m_audioAnalyzer.drop();                         // impact impulse
+    float audioSigMomentum = std::min(std::max(m_audioAnalyzer.energyVel() * 0.5f + 0.5f,
+                                                0.0f), 1.0f);                // <0.5 falling, >0.5 rising
+    // Silence: rises as the track drops below a soft loudness floor (pauses).
+    float audioSigSilence = 0.0f;
+    {
+        float r = m_audioAnalyzer.smoothedRMS();
+        float q = std::min(std::max((r - 0.015f) / (0.070f - 0.015f), 0.0f), 1.0f);
+        audioSigSilence = 1.0f - (q * q * (3.0f - 2.0f * q));   // smoothstep, inverted
+    }
+
     // Get mouse state for interactive shaders (normalized 0-1)
     double mx, my;
     glfwGetCursorPos(m_window, &mx, &my);
@@ -1250,6 +1268,22 @@ void Application::updateSources() {
     float normMX = (winW > 0) ? (float)(mx / winW) : 0.5f;
     float normMY = (winH > 0) ? 1.0f - (float)(my / winH) : 0.5f; // flip Y for GL
     bool mousePressed = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
+    // Layers bound as an image/texture input by another layer (Fluid3D, Fluid)
+    // must keep updating even when hidden — otherwise the texture freezes on
+    // one frame. Collect those source ids so the hide-skip below spares them.
+    std::set<uint32_t> referencedSources;
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& l = m_layerStack[i];
+        if (!l->source) continue;
+        if (l->source->typeName() == "Fluid3D") {
+            uint32_t sid = static_cast<FluidSource3D*>(l->source.get())->imageSource().sourceLayerId;
+            if (sid) referencedSources.insert(sid);
+        } else if (l->source->typeName() == "Fluid") {
+            uint32_t sid = static_cast<FluidSource*>(l->source.get())->imageSource().sourceLayerId;
+            if (sid) referencedSources.insert(sid);
+        }
+    }
 
     for (int i = 0; i < m_layerStack.count(); i++) {
         auto& layer = m_layerStack[i];
@@ -1329,7 +1363,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
@@ -1378,7 +1414,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 // Refresh the optional image-inject source from its bound
                 // layer (mirrors the ShaderSource imageBindings refresh
@@ -1418,7 +1456,9 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay(),
                     audioBindDt,
-                    &m_midiManager
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
                 );
                 // Resolve the bound image layer's live texture each frame
                 // (mirrors the 2D Fluid image refresh above).
@@ -1459,9 +1499,15 @@ void Application::updateSources() {
                 }
             }
 
-            layer->source->update();
-            if (layer->shaderTransitionActive && layer->nextSource) {
-                layer->nextSource->update();
+            // Skip updating hidden layers — a hidden layer isn't composited, so
+            // its (often expensive, e.g. 3D fluid) per-frame work is pure waste.
+            // EXCEPT layers used as an image/texture input by another layer:
+            // those must keep advancing so the texture stays animated.
+            if (layer->visible || referencedSources.count(layer->id)) {
+                layer->source->update();
+                if (layer->shaderTransitionActive && layer->nextSource) {
+                    layer->nextSource->update();
+                }
             }
 
             // Auto-crop: detect black borders once when source first has a valid texture
@@ -12800,6 +12846,31 @@ void Application::saveProject(const std::string& path) {
                 fc["specular"]    = f->m_specular;
                 fc["rim"]         = f->m_rim;
                 fc["saturation"]  = f->m_saturation;
+                fc["bgTop"]    = { f->m_bgTop[0], f->m_bgTop[1], f->m_bgTop[2] };
+                fc["bgBottom"] = { f->m_bgBottom[0], f->m_bgBottom[1], f->m_bgBottom[2] };
+                fc["bgAlpha"]  = f->m_bgAlpha;
+                fc["sphereScale"] = f->m_sphereScale;
+                fc["zoom"]        = f->m_zoom;
+                fc["audioIntensity"] = f->m_audioIntensity;
+                fc["gravity"]    = f->m_gravity;
+                fc["vortex"]     = f->m_vortex;
+                fc["turbulence"] = f->m_turbulence;
+                fc["forceScale"] = f->m_forceScale;
+                fc["sphereShape"] = f->m_sphereShape;
+                // VJ morph (Low/High look snapshots + drive config).
+                fc["vjMode"]         = f->m_vjMode;
+                fc["vjGrab"]         = f->m_vjGrab;
+                fc["journeySignal"]  = f->m_journeySignal;
+                fc["journeyGain"]    = f->m_journeyGain;
+                fc["journeyPosManual"] = f->m_journeyPosManual;
+                if (f->m_lookSet[0]) {
+                    float a[FluidSource3D::kLookFloats]; f->lookToArray(0, a);
+                    fc["lookLow"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
+                }
+                if (f->m_lookSet[1]) {
+                    float a[FluidSource3D::kLookFloats]; f->lookToArray(1, a);
+                    fc["lookHigh"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
+                }
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -13411,6 +13482,38 @@ void Application::loadProject(const std::string& path) {
                     src->m_specular       = fc.value("specular",       src->m_specular);
                     src->m_rim            = fc.value("rim",            src->m_rim);
                     src->m_saturation     = fc.value("saturation",     src->m_saturation);
+                    if (fc.contains("bgTop") && fc["bgTop"].is_array() && fc["bgTop"].size()==3)
+                        for (int i=0;i<3;i++) src->m_bgTop[i] = fc["bgTop"][i].get<float>();
+                    if (fc.contains("bgBottom") && fc["bgBottom"].is_array() && fc["bgBottom"].size()==3)
+                        for (int i=0;i<3;i++) src->m_bgBottom[i] = fc["bgBottom"][i].get<float>();
+                    src->m_bgAlpha     = fc.value("bgAlpha",     src->m_bgAlpha);
+                    src->m_sphereScale = fc.value("sphereScale", src->m_sphereScale);
+                    src->m_zoom        = fc.value("zoom",        src->m_zoom);
+                    src->m_audioIntensity = fc.value("audioIntensity", src->m_audioIntensity);
+                    src->m_gravity     = fc.value("gravity",     src->m_gravity);
+                    src->m_vortex      = fc.value("vortex",      src->m_vortex);
+                    src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
+                    src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
+                    src->m_sphereShape = fc.value("sphereShape", src->m_sphereShape);
+                    src->m_vjMode           = fc.value("vjMode",         src->m_vjMode);
+                    src->m_vjGrab           = fc.value("vjGrab",         src->m_vjGrab);
+                    src->m_journeySignal    = fc.value("journeySignal",  src->m_journeySignal);
+                    src->m_journeyGain      = fc.value("journeyGain",    src->m_journeyGain);
+                    src->m_journeyPosManual = fc.value("journeyPosManual", src->m_journeyPosManual);
+                    if (fc.contains("lookLow") && fc["lookLow"].is_array() &&
+                        fc["lookLow"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookLow"][i].get<float>();
+                        src->lookFromArray(0, a);
+                    }
+                    if (fc.contains("lookHigh") && fc["lookHigh"].is_array() &&
+                        fc["lookHigh"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookHigh"][i].get<float>();
+                        src->lookFromArray(1, a);
+                    }
+                    // m_vjModePrev stays -1 so the first frame loads the right
+                    // look for the restored mode.
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);

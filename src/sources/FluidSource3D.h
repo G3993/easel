@@ -46,11 +46,17 @@ public:
     std::string typeName() const override { return "Fluid3D"; }
     std::string sourcePath() const override { return "__fluid3d__"; }
 
+    // Re-run the seed block (clears velocities, restocks the initial blob).
+    // Recovers from any chaotic/blown-out state the force fields can reach.
+    void reseed() { m_frame = 0; }
+
     // ── Audio/MIDI-reactive parameter bindings ────────────────────────
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
     void applyAudioBindings(float level, float bass, float mid, float high,
-                            float beat, float dt, class MIDIManager* midi = nullptr);
+                            float beat, float dt, class MIDIManager* midi = nullptr,
+                            float energy = 0.0f, float build = 0.0f, float drop = 0.0f,
+                            float silence = 0.0f, float momentum = 0.5f);
 
     // ── Image injection ──────────────────────────────────────────────
     // Tint the fluid surface with a bound layer's texture, mapped across
@@ -66,7 +72,7 @@ public:
     ImageRef&       imageSource()       { return m_image; }
     const ImageRef& imageSource() const { return m_image; }
     bool  m_imageEnabled = false;
-    float m_imageMix     = 0.85f;   // 0 = palette only, 1 = full image albedo
+    float m_imageMix     = 1.0f;    // 0 = palette only, 1 = full image albedo (video colors)
 
     // ── Live render config (PropertyPanel "Fluid3D" section, M5) ──────
     // The SPH constants live as GLSL #defines for now (faithful to the
@@ -83,10 +89,64 @@ public:
     float m_shallowColor[3]= {0.60f, 0.85f, 1.00f};    // rim / grazing-edge tint
     float m_rim            = 0.0f;    // rim amount (0 = off)
     float m_saturation     = 1.0f;    // output saturation
+    // Background (also reflection env) + blob sphere size. Defaults = original.
+    float m_bgTop[3]       = {0.12f, 0.16f, 0.28f};
+    float m_bgBottom[3]    = {0.02f, 0.03f, 0.06f};
+    float m_bgAlpha        = 1.0f;    // 0 = transparent bg (composites under)
+    float m_sphereScale    = 1.0f;    // particle sphere size (lower = smaller blobs)
+    float m_zoom           = 1.0f;    // camera zoom (1 = original; >1 zooms in)
+    // Audio-driven motion: 0 = off (original constant motion); higher = the
+    // fluid is calm when quiet and churns as the music gets loud.
+    float m_audioIntensity = 0.0f;
+    float m_audioEnergy    = 0.0f;    // smoothed loudness (updated from audio)
+    // Force fields (layered on top of the base SPH; defaults = original look).
+    float m_gravity        = 1.0f;    // gravity strength (0 = zero-g, 1 = original)
+    float m_vortex         = 0.0f;    // coherent swirl around vertical axis (0 = off)
+    float m_turbulence     = 0.0f;    // chaotic turbulent churn (0 = off)
+    float m_forceScale     = 1.0f;    // SPH cohesion force (1 = original)
+    float m_sphereShape    = 0.0f;    // container: 0 = cube (original), 1 = sphere
+    bool  m_seedingSphere  = false;   // tracks the box<->sphere crossing for reseed
 
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
     float m_tilt          = -0.5f;
+
+    // ── VJ: crossfade the ENTIRE look between a "Low" (chill) and a "High"
+    // (intense) snapshot, driven by the song's structural energy, so the music
+    // takes the visuals up and down as one coherent gesture. Three modes:
+    //   Low  — edit the chill look with full manual control (live = the Low snap)
+    //   High — edit the intense look with full manual control
+    //   Live — the music (or a hand-grabbed fader) rides Low <-> High
+    // No lock-in: you only lose slider control while actually performing (Live),
+    // and even then you can grab the fader. ──────────────────────────────────
+    struct FluidLook {
+        float deepColor[3]    = {0.220f, 0.349f, 1.000f};
+        float glowColor[3]    = {0.420f, 0.302f, 0.996f};
+        float shallowColor[3] = {0.60f, 0.85f, 1.00f};
+        float bgTop[3]        = {0.12f, 0.16f, 0.28f};
+        float bgBottom[3]     = {0.02f, 0.03f, 0.06f};
+        float brightness = 2.5f, lightIntensity = 1.0f, ambient = 0.10f, specular = 1.0f;
+        float rim = 0.0f, saturation = 1.0f, bgAlpha = 1.0f, sphereScale = 1.0f, zoom = 1.0f;
+        float gravity = 1.0f, vortex = 0.0f, turbulence = 0.0f, forceScale = 1.0f;
+        float rotateSpeed = 0.2f, tilt = -0.5f;
+    };
+    static constexpr int kLookFloats = 30;   // serialized flat-array size
+    int       m_vjMode           = 0;         // 0=Low(edit) 1=High(edit) 2=Live(perform)
+    int       m_vjModePrev       = -1;        // transient: detect mode switch to load look
+    bool      m_vjGrab           = false;     // Live: grab the fader (manual position)
+    int       m_journeySignal    = 0;         // 0=Energy 1=Build 2=Level 3=Momentum
+    float     m_journeyGain      = 1.5f;      // scales the drive so songs reach High
+    float     m_journeyPosManual = 0.0f;      // hand-grabbed fader 0..1 (Live)
+    float     m_journeyPos       = 0.0f;      // live smoothed position 0..1
+    float     m_journeyDropEnv   = 0.0f;      // drop-snap envelope
+    bool      m_lookSet[2]       = {false, false};   // [0]=Low captured, [1]=High
+    FluidLook m_look[2];                       // [0]=Low (chill), [1]=High (intense)
+    void captureLook(int which);               // live look -> snapshot [which]
+    void loadLook(int which);                  // snapshot [which] -> live look
+    void applyJourney(float level, float energy, float build,
+                      float momentum, float drop, float dt);
+    void lookToArray(int which, float* out) const;   // persistence helpers
+    void lookFromArray(int which, const float* in);
 
     int   m_simRes        = 64;       // size3d cube edge (volume realloc on change)
     int   m_substeps      = 1;        // sim iterations per frame
