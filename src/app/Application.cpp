@@ -209,7 +209,7 @@ bool Application::init() {
     glfwSetDropCallback(m_window, Application::dropCallback);
 
     glfwMakeContextCurrent(m_window);
-    glfwSwapInterval(1); // vsync — saves CPU, NDI sends after swap
+    glfwSwapInterval(0); // NDI/output pacing is handled explicitly.
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD" << std::endl;
@@ -1634,7 +1634,12 @@ void Application::compositeZone(OutputZone& zone) {
     // Cost: ~16× fragment work in the warp shader (still cheap — it's a
     // passthrough sample with a homography on UVs) plus 4 texture reads
     // in the downsample. M-series GPUs are fine.
-    const int kWarpSS = 4;
+    //
+    // Reduced 4->1 for the Etherea FluxRT pipeline: the warped output is sent over
+    // NDI to FluxRT, which restyles it with diffusion and discards Easel's edge AA,
+    // so 16x supersampling is wasted GPU work here. Restore to 4 if sending Easel's
+    // raw output straight to a projector/display where the AA is actually visible.
+    const int kWarpSS = 1;
     static Framebuffer s_warpSSFBO;
     const int ssW = zone.width  * kWarpSS;
     const int ssH = zone.height * kWarpSS;
@@ -1871,7 +1876,7 @@ void Application::renderReadbackFBO(OutputZone& zone) {
 }
 
 void Application::presentOutputs() {
-    glFinish(); // Ensure all zone FBOs are written before presenting
+    glFlush(); // Submit zone FBO work without stalling the render loop.
 
     // Track which monitor indices are still needed
     std::set<int> neededMonitors;
@@ -3730,21 +3735,38 @@ void Application::renderUI() {
                 ImGui::SameLine(0, 6);
                 subTabBtn("3D",   2);
 
-                // Right-aligned "+" pill — same visual treatment as the
-                // unselected VFX/Text/3D pills, just sits at the right
-                // edge of the row.
+                // Right-aligned pills — Refresh (re-scan for newly added
+                // shaders) then "+" (import a shader file). Same visual
+                // treatment as the unselected VFX/Text/3D pills, anchored to
+                // the right edge of the row as a small cluster.
                 ImGui::SameLine(0, 0);
-                const char* importLbl = "+";
-                float importW = ImGui::CalcTextSize(importLbl).x
-                              + ImGui::GetStyle().FramePadding.x * 2.0f;
-                float importX = ImGui::GetWindowContentRegionMax().x - importW;
-                if (importX > ImGui::GetCursorPosX() + 6.0f)
-                    ImGui::SetCursorPosX(importX);
+                const char* refreshLbl = "\xE2\x86\xBA"; // ↺
+                const char* importLbl  = "+";
+                const float pillGap = 6.0f;
+                float framePadX = ImGui::GetStyle().FramePadding.x * 2.0f;
+                float refreshW  = ImGui::CalcTextSize(refreshLbl).x + framePadX;
+                float importW   = ImGui::CalcTextSize(importLbl).x  + framePadX;
+                float clusterX  = ImGui::GetWindowContentRegionMax().x
+                                - (refreshW + pillGap + importW);
+                if (clusterX > ImGui::GetCursorPosX() + 6.0f)
+                    ImGui::SetCursorPosX(clusterX);
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+
+                // Refresh pill — re-reads the manifest / re-scans the shaders
+                // directory so shaders added since connecting show up. The
+                // file watcher only hot-reloads already-loaded files, so newly
+                // added files need this explicit rescan.
+                if (ImGui::Button("\xE2\x86\xBA##scRefresh")) {
+                    m_shaderClaw.refreshManifest();
+                }
+                if (ImGui::IsItemHovered())
+                    ParamRow::Tooltip("Re-scan for newly added shaders");
+                ImGui::SameLine(0, pillGap);
+
                 if (ImGui::Button(importLbl)) {
                     std::string picked = openFileDialog("Fragment shader\0*.fs;*.frag;*.glsl\0\0");
                     if (!picked.empty() && m_shaderClaw.isConnected()) {
@@ -4358,7 +4380,7 @@ void Application::renderUI() {
                     const float addH = ImGui::GetFrameHeight() + 4.0f; // taller than default
                     const float addW = 52.0f;
                     if (ImGui::Button("Add", ImVec2(addW, addH))) {
-                        addNDISource(m_ndiSources[i].name);
+                        addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                     }
                     ImGui::PopStyleColor(4);
                     ImGui::SameLine(0, 10);
@@ -4838,7 +4860,7 @@ void Application::renderUI() {
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.50f));
                         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
                         if (ImGui::Button("Add")) {
-                            addNDISource(m_ndiSources[i].name);
+                            addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                         }
                         ImGui::PopStyleColor(4);
                         ImGui::PopID();
@@ -5556,7 +5578,7 @@ void Application::renderUI() {
             for (const auto& s : m_ndiSources) {
                 ImGui::PushID(s.name.c_str());
                 if (ImGui::Button(s.name.c_str(), ImVec2(-1, 0)))
-                    addNDISource(s.name);
+                    addNDISource(s.name, s.url);
                 ImGui::PopID();
             }
             ImGui::PopStyleColor(2);
@@ -9994,7 +10016,7 @@ void Application::renderMenuBar_legacy() {
                 }
                 for (int i = 0; i < (int)m_ndiSources.size(); i++) {
                     if (ImGui::MenuItem(m_ndiSources[i].name.c_str())) {
-                        addNDISource(m_ndiSources[i].name);
+                        addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                     }
                 }
                 ImGui::EndMenu();
@@ -10419,10 +10441,10 @@ void Application::loadShader(const std::string& path) {
 }
 
 #ifdef HAS_NDI
-void Application::addNDISource(const std::string& senderName) {
+void Application::addNDISource(const std::string& senderName, const std::string& senderUrl) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<NDISource>();
-    if (!source->connect(senderName)) {
+    if (!source->connect(senderName, senderUrl)) {
         std::cerr << "Failed to connect to NDI source: " << senderName << std::endl;
         return;
     }
@@ -10700,6 +10722,14 @@ void Application::saveProject(const std::string& path) {
         if (layer->source) {
             layerJson["sourceType"] = layer->source->typeName();
             layerJson["sourcePath"] = layer->source->sourcePath();
+#ifdef HAS_NDI
+            if (layer->source->typeName() == "NDI") {
+                auto* ndiSrc = dynamic_cast<NDISource*>(layer->source.get());
+                if (ndiSrc && !ndiSrc->sourceUrl().empty()) {
+                    layerJson["sourceUrl"] = ndiSrc->sourceUrl();
+                }
+            }
+#endif
 
             // Save shader parameters
             if (layer->source->isShader()) {
@@ -11181,7 +11211,8 @@ void Application::loadProject(const std::string& path) {
 #ifdef HAS_NDI
             } else if (sourceType == "NDI" && !sourcePath.empty()) {
                 auto src = std::make_shared<NDISource>();
-                if (src->connect(sourcePath)) {
+                std::string sourceUrl = layerJson.value("sourceUrl", "");
+                if (src->connect(sourcePath, sourceUrl)) {
                     layer->source = src;
                 }
 #endif

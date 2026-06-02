@@ -309,7 +309,7 @@ private:
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
-    void addNDISource(const std::string& senderName);
+    void addNDISource(const std::string& senderName, const std::string& senderUrl = "");
 #endif
 
 #ifdef HAS_SPOUT
