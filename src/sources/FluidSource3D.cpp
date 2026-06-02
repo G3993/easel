@@ -903,6 +903,93 @@ void FluidSource3D::update() {
     if (prevDepth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
 }
 
+// ── Journey: snapshot the current look, and crossfade between the two ─────
+void FluidSource3D::captureLook(int which) {
+    if (which < 0 || which > 1) return;
+    FluidLook& L = m_look[which];
+    for (int i = 0; i < 3; i++) {
+        L.deepColor[i]    = m_deepColor[i];    L.glowColor[i]   = m_glowColor[i];
+        L.shallowColor[i] = m_shallowColor[i]; L.bgTop[i]       = m_bgTop[i];
+        L.bgBottom[i]     = m_bgBottom[i];
+    }
+    L.brightness = m_brightness; L.lightIntensity = m_lightIntensity;
+    L.ambient = m_ambient; L.specular = m_specular; L.rim = m_rim;
+    L.saturation = m_saturation; L.bgAlpha = m_bgAlpha; L.sphereScale = m_sphereScale;
+    L.zoom = m_zoom; L.gravity = m_gravity; L.vortex = m_vortex;
+    L.turbulence = m_turbulence; L.forceScale = m_forceScale;
+    L.rotateSpeed = m_rotateSpeed; L.tilt = m_tilt;
+    m_lookSet[which] = true;
+}
+
+void FluidSource3D::lookToArray(int which, float* o) const {
+    if (which < 0 || which > 1) return;
+    const FluidLook& L = m_look[which]; int n = 0;
+    for (int i=0;i<3;i++) o[n++]=L.deepColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.glowColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.shallowColor[i];
+    for (int i=0;i<3;i++) o[n++]=L.bgTop[i];
+    for (int i=0;i<3;i++) o[n++]=L.bgBottom[i];
+    o[n++]=L.brightness; o[n++]=L.lightIntensity; o[n++]=L.ambient; o[n++]=L.specular;
+    o[n++]=L.rim; o[n++]=L.saturation; o[n++]=L.bgAlpha; o[n++]=L.sphereScale; o[n++]=L.zoom;
+    o[n++]=L.gravity; o[n++]=L.vortex; o[n++]=L.turbulence; o[n++]=L.forceScale;
+    o[n++]=L.rotateSpeed; o[n++]=L.tilt;   // n == kLookFloats (30)
+}
+void FluidSource3D::lookFromArray(int which, const float* in) {
+    if (which < 0 || which > 1) return;
+    FluidLook& L = m_look[which]; int n = 0;
+    for (int i=0;i<3;i++) L.deepColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.glowColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.shallowColor[i]=in[n++];
+    for (int i=0;i<3;i++) L.bgTop[i]=in[n++];
+    for (int i=0;i<3;i++) L.bgBottom[i]=in[n++];
+    L.brightness=in[n++]; L.lightIntensity=in[n++]; L.ambient=in[n++]; L.specular=in[n++];
+    L.rim=in[n++]; L.saturation=in[n++]; L.bgAlpha=in[n++]; L.sphereScale=in[n++]; L.zoom=in[n++];
+    L.gravity=in[n++]; L.vortex=in[n++]; L.turbulence=in[n++]; L.forceScale=in[n++];
+    L.rotateSpeed=in[n++]; L.tilt=in[n++];
+    m_lookSet[which] = true;
+}
+
+void FluidSource3D::applyJourney(float level, float energy, float build,
+                                 float momentum, float drop, float dt) {
+    if (!m_journeyEnabled || !m_lookSet[0] || !m_lookSet[1]) return;
+    if (!(dt > 0.0f)) dt = 1.0f/60.0f; if (dt > 0.1f) dt = 0.1f;
+    float pos;
+    if (m_journeyManual) {
+        pos = m_journeyPos = m_journeyPosManual;
+    } else {
+        float drive = energy;
+        if      (m_journeySignal == 1) drive = build;
+        else if (m_journeySignal == 2) drive = level;
+        else if (m_journeySignal == 3) drive = momentum;
+        drive *= m_journeyGain;
+        float lead = (momentum - 0.5f) * 2.0f;            // rising energy leads
+        float target = drive + 0.25f * std::max(lead, 0.0f);
+        if (target < 0.0f) target = 0.0f; if (target > 1.0f) target = 1.0f;
+        // Drop snap: jump toward Peak when a drop lands, then decay (~0.5s).
+        m_journeyDropEnv = std::max(m_journeyDropEnv * std::exp(-2.0f*dt), drop);
+        target = std::max(target, m_journeyDropEnv);
+        // Asymmetric glide: rise fast (ride builds/drops), fall slower (linger).
+        float rate = (target > m_journeyPos) ? 3.5f : 1.1f;
+        m_journeyPos += (target - m_journeyPos) * (1.0f - std::exp(-rate*dt));
+        pos = m_journeyPos;
+    }
+    const FluidLook& A = m_look[0]; const FluidLook& B = m_look[1];
+    #define LRP(f) (A.f + (B.f - A.f) * pos)
+    for (int i = 0; i < 3; i++) {
+        m_deepColor[i]    = A.deepColor[i]    + (B.deepColor[i]    - A.deepColor[i])    * pos;
+        m_glowColor[i]    = A.glowColor[i]    + (B.glowColor[i]    - A.glowColor[i])    * pos;
+        m_shallowColor[i] = A.shallowColor[i] + (B.shallowColor[i] - A.shallowColor[i]) * pos;
+        m_bgTop[i]        = A.bgTop[i]        + (B.bgTop[i]        - A.bgTop[i])        * pos;
+        m_bgBottom[i]     = A.bgBottom[i]     + (B.bgBottom[i]     - A.bgBottom[i])     * pos;
+    }
+    m_brightness=LRP(brightness); m_lightIntensity=LRP(lightIntensity); m_ambient=LRP(ambient);
+    m_specular=LRP(specular); m_rim=LRP(rim); m_saturation=LRP(saturation); m_bgAlpha=LRP(bgAlpha);
+    m_sphereScale=LRP(sphereScale); m_zoom=LRP(zoom); m_gravity=LRP(gravity); m_vortex=LRP(vortex);
+    m_turbulence=LRP(turbulence); m_forceScale=LRP(forceScale);
+    m_rotateSpeed=LRP(rotateSpeed); m_tilt=LRP(tilt);
+    #undef LRP
+}
+
 void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
                                        float high, float beat, float dt,
                                        MIDIManager* midi,
@@ -912,6 +999,10 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
     // motion drive — independent of explicit per-param bindings.
     float aRate = (level > m_audioEnergy) ? 6.0f : 1.5f;
     m_audioEnergy += (level - m_audioEnergy) * (1.0f - std::exp(-aRate * std::max(dt, 1e-3f)));
+
+    // Journey morph FIRST (sets the base look between Valley/Peak), so any
+    // explicit per-param bindings below can still layer accents on top.
+    applyJourney(level, energy, build, momentum, drop, dt);
 
     if (m_audioBindings.empty()) return;
     for (auto& [name, b] : m_audioBindings) {

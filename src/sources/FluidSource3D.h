@@ -111,6 +111,37 @@ public:
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
     float m_tilt          = -0.5f;
 
+    // ── Journey: crossfade the ENTIRE look between a calm "Valley" and an
+    // intense "Peak" snapshot, driven by the song's structural energy, so the
+    // music takes the visuals up and down as one coherent gesture instead of
+    // a handful of params twitching independently. ──────────────────────────
+    struct FluidLook {
+        float deepColor[3]    = {0.220f, 0.349f, 1.000f};
+        float glowColor[3]    = {0.420f, 0.302f, 0.996f};
+        float shallowColor[3] = {0.60f, 0.85f, 1.00f};
+        float bgTop[3]        = {0.12f, 0.16f, 0.28f};
+        float bgBottom[3]     = {0.02f, 0.03f, 0.06f};
+        float brightness = 2.5f, lightIntensity = 1.0f, ambient = 0.10f, specular = 1.0f;
+        float rim = 0.0f, saturation = 1.0f, bgAlpha = 1.0f, sphereScale = 1.0f, zoom = 1.0f;
+        float gravity = 1.0f, vortex = 0.0f, turbulence = 0.0f, forceScale = 1.0f;
+        float rotateSpeed = 0.2f, tilt = -0.5f;
+    };
+    static constexpr int kLookFloats = 30;   // serialized flat-array size
+    bool      m_journeyEnabled   = false;
+    bool      m_journeyManual    = false;     // scrub manually instead of audio-driven
+    int       m_journeySignal    = 0;         // 0=Energy 1=Build 2=Level 3=Momentum
+    float     m_journeyGain      = 1.5f;      // scales the drive so songs reach Peak
+    float     m_journeyPosManual = 0.0f;      // manual scrub 0..1 (authoring/preview)
+    float     m_journeyPos       = 0.0f;      // live smoothed position 0..1
+    float     m_journeyDropEnv   = 0.0f;      // drop-snap envelope
+    bool      m_lookSet[2]       = {false, false};   // [0]=Valley captured, [1]=Peak
+    FluidLook m_look[2];                       // [0]=Valley, [1]=Peak
+    void captureLook(int which);               // snapshot current look into [which]
+    void applyJourney(float level, float energy, float build,
+                      float momentum, float drop, float dt);
+    void lookToArray(int which, float* out) const;   // persistence helpers
+    void lookFromArray(int which, const float* in);
+
     int   m_simRes        = 64;       // size3d cube edge (volume realloc on change)
     int   m_substeps      = 1;        // sim iterations per frame
     // Render resolution as a fraction of the zone size. 1.0 = full/crisp;

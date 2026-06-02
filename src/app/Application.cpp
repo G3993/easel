@@ -12610,6 +12610,22 @@ void Application::saveProject(const std::string& path) {
                 fc["turbulence"] = f->m_turbulence;
                 fc["forceScale"] = f->m_forceScale;
                 fc["sphereShape"] = f->m_sphereShape;
+                // Journey morph (Valley/Peak look snapshots + drive config).
+                fc["journeyEnabled"] = f->m_journeyEnabled;
+                fc["journeyManual"]  = f->m_journeyManual;
+                fc["journeySignal"]  = f->m_journeySignal;
+                fc["journeyGain"]    = f->m_journeyGain;
+                fc["journeyPosManual"] = f->m_journeyPosManual;
+                fc["lookSetValley"]  = f->m_lookSet[0];
+                fc["lookSetPeak"]    = f->m_lookSet[1];
+                if (f->m_lookSet[0]) {
+                    float a[FluidSource3D::kLookFloats]; f->lookToArray(0, a);
+                    fc["lookValley"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
+                }
+                if (f->m_lookSet[1]) {
+                    float a[FluidSource3D::kLookFloats]; f->lookToArray(1, a);
+                    fc["lookPeak"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
+                }
                 fc["autoRotate"]  = f->m_autoRotate;
                 fc["rotateSpeed"] = f->m_rotateSpeed;
                 fc["tilt"]        = f->m_tilt;
@@ -13220,6 +13236,23 @@ void Application::loadProject(const std::string& path) {
                     src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
                     src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
                     src->m_sphereShape = fc.value("sphereShape", src->m_sphereShape);
+                    src->m_journeyEnabled   = fc.value("journeyEnabled", src->m_journeyEnabled);
+                    src->m_journeyManual    = fc.value("journeyManual",  src->m_journeyManual);
+                    src->m_journeySignal    = fc.value("journeySignal",  src->m_journeySignal);
+                    src->m_journeyGain      = fc.value("journeyGain",    src->m_journeyGain);
+                    src->m_journeyPosManual = fc.value("journeyPosManual", src->m_journeyPosManual);
+                    if (fc.contains("lookValley") && fc["lookValley"].is_array() &&
+                        fc["lookValley"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookValley"][i].get<float>();
+                        src->lookFromArray(0, a);
+                    }
+                    if (fc.contains("lookPeak") && fc["lookPeak"].is_array() &&
+                        fc["lookPeak"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookPeak"][i].get<float>();
+                        src->lookFromArray(1, a);
+                    }
                     src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
                     src->m_rotateSpeed = fc.value("rotateSpeed", src->m_rotateSpeed);
                     src->m_tilt        = fc.value("tilt",        src->m_tilt);

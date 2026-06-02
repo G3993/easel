@@ -3368,6 +3368,45 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 ImGui::SetTooltip("Re-seed the particle blob and clear all motion.\n"
                                   "Use this to recover if the forces blow it out.");
 
+            // ── Journey: crossfade the whole look Valley <-> Peak by energy ──
+            sectionBreak();
+            ImGui::TextDisabled("Journey (audio morph)");
+            ImGui::Checkbox("Enable Journey", &f3->m_journeyEnabled);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Crossfade the ENTIRE look between a calm Valley\n"
+                                  "and an intense Peak, driven by the song's energy.\n"
+                                  "Workflow: dial a calm look -> Set Valley; dial an\n"
+                                  "intense look -> Set Peak; then enable.");
+            if (ImGui::Button(f3->m_lookSet[0] ? "Set Valley *" : "Set Valley"))
+                f3->captureLook(0);
+            ImGui::SameLine();
+            if (ImGui::Button(f3->m_lookSet[1] ? "Set Peak *" : "Set Peak"))
+                f3->captureLook(1);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Snapshot the current look as the Valley (calm) or\n"
+                                  "Peak (intense) end of the morph. * = captured.");
+            {
+                const char* jsig[] = { "Energy", "Build", "Level", "Momentum" };
+                ImGui::SetNextItemWidth(-1);
+                ImGui::Combo("##jsig", &f3->m_journeySignal, jsig, IM_ARRAYSIZE(jsig));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Which listening signal drives the journey.\n"
+                                      "Energy = the song's slow high/low arc.");
+            }
+            pillSlider("Drive Gain", &f3->m_journeyGain, 0.5f, 4.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Scale the drive up so quieter tracks still reach Peak.");
+            ImGui::Checkbox("Manual scrub", &f3->m_journeyManual);
+            if (f3->m_journeyManual) {
+                pillSlider("Position", &f3->m_journeyPosManual, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Manually scrub Valley(0) <-> Peak(1) to author\n"
+                                      "and preview the two looks without audio.");
+            } else {
+                float jp = f3->m_journeyPos;       // live read-only position bar
+                ImGui::ProgressBar(jp, ImVec2(-1, 6), "");
+            }
+
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
