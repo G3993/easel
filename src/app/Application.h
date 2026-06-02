@@ -457,12 +457,12 @@ private:
     // affordances. Independent of the docked timeline.
     void renderFloatingActionPills();
 
-    // Timeline export flow — when true, render loop auto-stops the recorder
-    // and pauses playback when the playhead crosses the Work Area end.
-    bool   m_timelineExporting = false;
+    // Recording is indefinite/live: the REC button records the active zone's
+    // output continuously until the user stops it (no Work-Area auto-stop).
+    bool   m_timelineExporting = false;   // retained (always false) for legacy UI checks
     double m_timelineExportEnd = 0.0;
     std::string m_timelineExportPath;
-    void   startTimelineExport();
+    void   startRecording();
 
     // Timeline panel visibility. Toggled via the T key or the transport-bar
     // show/hide button. Defaults to visible so the panel is discoverable.

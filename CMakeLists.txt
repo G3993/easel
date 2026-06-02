@@ -126,15 +126,19 @@ if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg
-if(FFMPEG_FOUND)
+# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg + OpenSSL.
+# Off by default: libdatachannel/libsrtp need OpenSSL dev libs, which aren't
+# present on this machine. Configure with -DEASEL_ENABLE_WHEP=ON (after
+# installing OpenSSL) to build it.
+option(EASEL_ENABLE_WHEP "Build WHEP/WebRTC source (needs libdatachannel + OpenSSL)" OFF)
+if(FFMPEG_FOUND AND EASEL_ENABLE_WHEP)
     FetchContent_MakeAvailable(libdatachannel)
     set(HAS_WHEP TRUE)
     message(STATUS "WHEP source enabled (libdatachannel + FFmpeg)")
 else()
     set(HAS_WHEP FALSE)
     list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
-    message(STATUS "WHEP source disabled (requires FFmpeg)")
+    message(STATUS "WHEP source disabled (set -DEASEL_ENABLE_WHEP=ON + OpenSSL to enable)")
 endif()
 
 # Platform-specific source exclusions
@@ -274,12 +278,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL z
+    glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL
 )
+# NOTE: zlib ('z') was dropped from the link list — gzipCompress() is stubbed
+# out in this build (no zlib dev libs on Windows). Re-add 'z' (or zlibstatic)
+# here if you reinstate gzip compression. See the note in Application.cpp.
 
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject
+        dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject iphlpapi
     )
 elseif(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE

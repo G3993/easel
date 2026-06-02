@@ -28,6 +28,7 @@
 #include "stb_image_write.h"
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -851,12 +852,8 @@ void Application::run() {
                 }
             }
 
-            // Export flow: auto-stop recorder + pause when playhead crosses the Work Area end.
-            if (m_timelineExporting && m_timeline.playhead() >= m_timelineExportEnd - 1e-3) {
-                if (m_recorder.isActive()) m_recorder.stop();
-                m_timeline.pause();
-                m_timelineExporting = false;
-            }
+            // Recording is indefinite/live now — there is no Work-Area auto-stop.
+            // The REC button records the live output until the user clicks stop.
         }
 
         compositeAndWarp();
@@ -7257,12 +7254,32 @@ void Application::renderPushFurtherPanel() {
     if (!open && !working) m_pushOpen = false;
 }
 
-// Render the timeline's Work Area to a timestamped .mp4. Seeks the playhead to
-// the in-point, starts playback + recorder, and arms the render-loop auto-stop
-// that fires when the playhead crosses the out-point.
-void Application::startTimelineExport() {
+// Frame-rate hint for the recorder. PTS is wall-clock VFR, so this only feeds the
+// GOP cadence + framerate metadata — but a value matching the real render rate keeps
+// keyframe spacing sane. Prefer the user's FPS cap if set, else the display refresh.
+static int recorderFpsHint(float targetFPS) {
+    if (targetFPS > 0.0f) {
+        int t = (int)(targetFPS + 0.5f);
+        return t < 1 ? 1 : t;
+    }
+    int fps = 60;
+    if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
+        if (const GLFWvidmode* vm = glfwGetVideoMode(mon)) {
+            if (vm->refreshRate > 0) fps = vm->refreshRate;
+        }
+    }
+    if (fps < 24) fps = 24;
+    if (fps > 240) fps = 240;
+    return fps;
+}
+
+// Start an indefinite, live recording of the active zone's output to a timestamped
+// .mp4. Records continuously until the user clicks stop — does NOT move the playhead,
+// force playback, or bind to the timeline Work Area. Frame timing is wall-clock VFR,
+// so the file captures whatever rate the app renders at, at correct playback speed.
+void Application::startRecording() {
 #ifdef HAS_FFMPEG
-    if (m_timelineExporting || m_recorder.isActive()) return;
+    if (m_recorder.isActive()) return;
 
     auto now = std::chrono::system_clock::now();
     auto t   = std::chrono::system_clock::to_time_t(now);
@@ -7273,25 +7290,15 @@ void Application::startTimelineExport() {
     localtime_r(&t, &tm_buf);
 #endif
     char fname[160];
-    strftime(fname, sizeof(fname), "recordings/timeline_%Y%m%d_%H%M%S.mp4", &tm_buf);
+    strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
 
     auto& zone = activeZone();
     m_recorder.setAudioDevice(m_selectedAudioDevice);
-    if (!m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30)) {
-        std::cerr << "[Timeline] Export failed: recorder.start() returned false\n";
+    if (!m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), recorderFpsHint(m_targetFPS))) {
+        std::cerr << "[REC] Recording failed: recorder.start() returned false\n";
         return;
     }
-
-    double waStart = m_timeline.workAreaStart();
-    double waEnd   = m_timeline.workAreaEnd();
-    m_timeline.seek(waStart);
-    m_timeline.play();
-
-    m_timelineExporting = true;
-    m_timelineExportEnd = waEnd;
-    m_timelineExportPath = fname;
-    std::cerr << "[Timeline] Exporting " << waStart << "s → " << waEnd
-              << "s to " << fname << "\n";
+    std::cerr << "[REC] Recording (indefinite) to " << fname << "\n";
 #endif
 }
 
@@ -7855,7 +7862,7 @@ void Application::renderFloatingTransportPill() {
                         m_timelineExporting = false;
                     } else {
                         m_recorder.setAudioDevice(m_selectedAudioDevice);
-                        startTimelineExport();
+                        startRecording();
                     }
                 }
                 if (ImGui::IsItemHovered())
@@ -8228,7 +8235,7 @@ void Application::renderFloatingTransportPill() {
                 m_timelineExporting = false;
             } else {
                 m_recorder.setAudioDevice(m_selectedAudioDevice);
-                startTimelineExport();
+                startRecording();
             }
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip(recActive ? "Recording — click to stop" : "Record (work area)");
@@ -8461,7 +8468,7 @@ void Application::renderFloatingActionPills() {
                 m_timelineExporting = false;
             } else {
                 m_recorder.setAudioDevice(m_selectedAudioDevice);
-                startTimelineExport();
+                startRecording();
             }
 #endif
          });
@@ -10839,7 +10846,7 @@ void Application::renderTransportBar() {
             char fname[128];
             strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
             m_recorder.setAudioDevice(m_selectedAudioDevice);
-            m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), 30);
+            m_recorder.start(fname, zone.warpFBO.width(), zone.warpFBO.height(), recorderFpsHint(m_targetFPS));
         }
         // Idle: the button's red text is enough; no extra dot (it overlapped the label).
     } else {
@@ -12063,27 +12070,16 @@ void Application::handleDroppedFiles() {
 // The agent + tests recognize a "z:" prefix and decompress; raw JSON
 // (no prefix) stays parseable for smaller payloads / legacy listeners.
 // ---------------------------------------------------------------------
-#include <zlib.h>
-static std::string gzipCompress(const std::string& src) {
-    z_stream zs{};
-    if (deflateInit2(&zs, Z_BEST_SPEED, Z_DEFLATED,
-                      15 | 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
-        return {};
-    zs.next_in = (Bytef*)src.data();
-    zs.avail_in = (uInt)src.size();
-    std::string out;
-    out.reserve(src.size() / 3);
-    char chunk[16384];
-    int rc;
-    do {
-        zs.next_out = (Bytef*)chunk;
-        zs.avail_out = sizeof(chunk);
-        rc = deflate(&zs, Z_FINISH);
-        out.append(chunk, sizeof(chunk) - zs.avail_out);
-    } while (rc == Z_OK);
-    deflateEnd(&zs);
-    if (rc != Z_STREAM_END) return {};
-    return out;
+// gzip compression is DISABLED in this Windows build: zlib dev libs aren't
+// installed and the fork pinned no zlib dependency. Returning empty makes
+// toWirePayload() fall back to sending raw JSON — a path the original code
+// already supports (`if (z.empty()) return json;`). This is safe on Windows,
+// whose UDP datagram cap (~64 KB) far exceeds macOS's 9216-byte cap that the
+// compression was working around. To restore gzip, vendor zlib (e.g.
+// FetchContent madler/zlib + link zlibstatic) and reinstate the deflate()
+// body that previously lived here.
+static std::string gzipCompress(const std::string& /*src*/) {
+    return {};
 }
 static std::string b64Encode(const std::string& src) {
     static const char* kAlpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

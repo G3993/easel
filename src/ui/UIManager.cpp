@@ -1655,7 +1655,11 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // Sources / Mapping tabs); the rail no longer hosts a Layers
         // toggle. The floating layer thumbnail strip below is kept so
         // the user can scrub layers visually without opening the panel.
-        const Item items[] = {};
+        // Left rail currently has no icon items (all moved to the right
+        // Control Panel). MSVC rejects a zero-size array (`Item items[] = {}`),
+        // so use a null pointer + explicit count — the draw loop below is
+        // bounded by kRailItems and never dereferences it while empty.
+        const Item* items = nullptr;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float kBtn   = 36.0f;        // circular hit + visual diameter — matches transport pill
         const float kGlyph = 16.0f;        // smaller glyph, generous margin
@@ -1664,7 +1668,7 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // cursor down by half of the leftover space so the three icons sit
         // visually centered within the rail's available height.
         const float kThumbReserve = 110.0f;  // approximate space the layer thumbnail callback uses
-        const int  kRailItems = (int)(sizeof(items) / sizeof(items[0]));
+        const int  kRailItems = 0;  // see note above — no left-rail icons
         float stackH = (float)kRailItems * kBtn + (float)(kRailItems - 1) * kIconGap;
         float availH = h - kThumbReserve - 24.0f;  // 24 = window padding (12 top + 12 bottom)
         float topSpacer = std::max(0.0f, (availH - stackH) * 0.5f);
