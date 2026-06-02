@@ -290,6 +290,7 @@ elseif(APPLE)
         "-framework AudioToolbox"
         "-framework CoreMIDI"
         "-framework CoreFoundation"
+        "-framework SystemConfiguration"
         "-framework ScreenCaptureKit"
         "-framework CoreGraphics"
         "-framework CoreMedia"
@@ -498,8 +499,13 @@ if(HAS_WHEP)
 endif()
 
 if(HAS_NDI)
+    # NDIRuntime.cpp/NDISource.cpp now call into NdiNetworkConfig (which uses
+    # NetAdapters), so these test exes must compile + link the new modules and
+    # the nlohmann include path. iphlpapi/ws2_32 auto-link via pragmas in
+    # NetAdapters.cpp; macOS needs SystemConfiguration (added below).
     add_executable(test_ndi_receive
         tests/test_ndi_receive.cpp src/sources/NDIRuntime.cpp src/sources/NDISource.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp
         src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
     )
     target_compile_definitions(test_ndi_receive PRIVATE HAS_NDI=1)
@@ -507,20 +513,28 @@ if(HAS_NDI)
         target_compile_definitions(test_ndi_receive PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     target_include_directories(test_ndi_receive PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include ${stb_SOURCE_DIR})
-    target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL)
+    target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL nlohmann_json::nlohmann_json)
 
-    add_executable(test_ndi_capture tests/test_ndi_capture.cpp src/sources/NDIRuntime.cpp)
+    add_executable(test_ndi_capture tests/test_ndi_capture.cpp src/sources/NDIRuntime.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp)
     target_compile_definitions(test_ndi_capture PRIVATE HAS_NDI=1)
     target_include_directories(test_ndi_capture PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
-    target_link_libraries(test_ndi_capture PRIVATE glfw glad OpenGL::GL)
+    target_link_libraries(test_ndi_capture PRIVATE glfw glad OpenGL::GL nlohmann_json::nlohmann_json)
 
-    add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp)
+    add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp)
     target_compile_definitions(test_ndi_list PRIVATE HAS_NDI=1)
     if(WIN32)
         target_compile_definitions(test_ndi_list PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     target_include_directories(test_ndi_list PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
-    target_link_libraries(test_ndi_list PRIVATE glfw glad OpenGL::GL)
+    target_link_libraries(test_ndi_list PRIVATE glfw glad OpenGL::GL nlohmann_json::nlohmann_json)
+
+    if(APPLE)
+        target_link_libraries(test_ndi_receive PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+        target_link_libraries(test_ndi_capture PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+        target_link_libraries(test_ndi_list    PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+    endif()
 endif()
 
 if(WIN32)

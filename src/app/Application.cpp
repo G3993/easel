@@ -472,6 +472,9 @@ bool Application::init() {
     }
 
 #ifdef HAS_NDI
+    // Stash the (default) network selection before the FIRST init so the config
+    // file + NDI_CONFIG_DIR exist before initialize(); a loaded project re-applies.
+    NDIRuntime::setPendingNetworkSettings(m_ndiNetwork);
     NDIRuntime::instance().init();
     if (NDIRuntime::instance().isAvailable()) {
         // Create persistent finder — it accumulates sources over time via mDNS
@@ -5891,6 +5894,188 @@ void Application::renderUI() {
                         ImGui::PopID();
                     }
                 }
+            }
+
+            // ── NDI Network — choose Wi-Fi vs Ethernet + verify reachability
+            if (flatSection("NDI Network")) {
+                // Append an IP to extraIps (comma-joined, whitespace-trimmed, deduped).
+                auto appendExtraIp = [this](const std::string& ipRaw) {
+                    auto trim = [](std::string s) {
+                        size_t a = s.find_first_not_of(" \t");
+                        if (a == std::string::npos) return std::string();
+                        size_t b = s.find_last_not_of(" \t");
+                        return s.substr(a, b - a + 1);
+                    };
+                    std::string ip = trim(ipRaw);
+                    if (ip.empty()) return;
+                    std::vector<std::string> toks;
+                    std::stringstream ss(m_ndiNetwork.extraIps);
+                    std::string t;
+                    while (std::getline(ss, t, ',')) { t = trim(t); if (!t.empty()) toks.push_back(t); }
+                    for (auto& e : toks) if (e == ip) return;  // already present
+                    toks.push_back(ip);
+                    std::string joined;
+                    for (size_t k = 0; k < toks.size(); ++k) { if (k) joined += ","; joined += toks[k]; }
+                    m_ndiNetwork.extraIps = joined;
+                };
+
+                if (m_netAdapters.empty()) m_netAdapters = EnumerateNetworkAdapters();
+
+                std::string curLabel = "Auto (all interfaces)";
+                if (m_ndiNetwork.enabled && !m_ndiNetwork.interfaceIp.empty()) {
+                    curLabel = m_ndiNetwork.interfaceIp;
+                    for (const auto& a : m_netAdapters)
+                        if (a.ipv4 == m_ndiNetwork.interfaceIp) {
+                            curLabel = std::string(NetAdapterKindTag(a.kind)) + "  -  " + a.ipv4;
+                            break;
+                        }
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::TextUnformatted("Send NDI over");
+                ImGui::PopStyleColor();
+                ImGui::SetNextItemWidth(220.0f);
+                if (ImGui::BeginCombo("##ndiNic", curLabel.c_str())) {
+                    if (ImGui::Selectable("Auto (all interfaces)", !m_ndiNetwork.enabled)) {
+                        m_ndiNetwork.enabled = false;
+                        m_ndiNetwork.interfaceName.clear();
+                        m_ndiNetwork.interfaceIp.clear();
+                        applyNdiNetworkSettings(true);
+                    }
+                    for (const auto& a : m_netAdapters) {
+                        std::string lbl = std::string(NetAdapterKindTag(a.kind)) + "  -  " + a.ipv4
+                                          + "   (" + a.friendlyLabel + ")";
+                        bool sel = m_ndiNetwork.enabled && m_ndiNetwork.interfaceIp == a.ipv4;
+                        if (ImGui::Selectable(lbl.c_str(), sel)) {
+                            m_ndiNetwork.enabled = true;
+                            m_ndiNetwork.interfaceName = a.name;
+                            m_ndiNetwork.interfaceIp = a.ipv4;
+                            applyNdiNetworkSettings(true);
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Refresh##ndiNic")) {
+                    m_netAdapters = EnumerateNetworkAdapters();
+                    refreshNdiPeerStatus();
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextWrapped(m_ndiNetwork.enabled
+                    ? "Pinned: NDI sends/receives only on this adapter (machine-wide, effective now)."
+                    : "Auto: NDI uses all active network adapters.");
+                ImGui::PopStyleColor();
+
+                bool pinnedWifi = false;
+                if (m_ndiNetwork.enabled)
+                    for (const auto& a : m_netAdapters)
+                        if (a.ipv4 == m_ndiNetwork.interfaceIp && a.kind == NetAdapterInfo::Kind::WiFi)
+                            pinnedWifi = true;
+                if (pinnedWifi) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.70f, 0.30f, 1.0f));
+                    ImGui::TextWrapped("Wi-Fi can drop frames under load — Ethernet is recommended for reliable NDI.");
+                    ImGui::PopStyleColor();
+                }
+
+                ImGui::Dummy(ImVec2(0, 6));
+
+                // ── Device Reachability ───────────────────────────────
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::TextUnformatted("Device Reachability");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Re-check##ndiPeers")) refreshNdiPeerStatus();
+                if (glfwGetTime() - m_ndiPeerStatusLastRefresh > 5.0) refreshNdiPeerStatus();
+
+                if (m_ndiPeerStatus.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                    ImGui::TextWrapped("No NDI peers discovered yet. If a device is on another subnet or Wi-Fi/Ethernet segment, add its IP under Peer IPs.");
+                    ImGui::PopStyleColor();
+                } else {
+                    for (int i = 0; i < (int)m_ndiPeerStatus.size(); i++) {
+                        const auto& p = m_ndiPeerStatus[i];
+                        ImGui::PushID(8500 + i);
+                        std::string nm = p.name.length() > 36 ? p.name.substr(0, 33) + "..." : p.name;
+                        ImGui::PushStyleColor(ImGuiCol_Text, p.reachable
+                            ? ImVec4(0.22f, 0.82f, 0.52f, 1.0f) : ImVec4(0.85f, 0.45f, 0.45f, 1.0f));
+                        ImGui::TextUnformatted(nm.c_str());
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine();
+                        const char* tag = p.reachable
+                            ? (p.sameSubnet ? "reachable" : "reachable (cross-subnet)")
+                            : (p.sameSubnet ? "no NDI port (firewall?)" : "unreachable (different subnet)");
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                        ImGui::TextUnformatted(tag);
+                        ImGui::PopStyleColor();
+                        if (!p.reachable && !p.sameSubnet && !p.ip.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Add IP")) {
+                                appendExtraIp(p.ip);
+                                applyNdiNetworkSettings(true);
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+
+                ImGui::Dummy(ImVec2(0, 4));
+
+                // Manual cross-subnet peer IPs.
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+                ImGui::TextUnformatted("Peer IPs");
+                ImGui::PopStyleColor();
+                {
+                    static char extraBuf[512] = {};
+                    bool editing = (ImGui::GetActiveID() == ImGui::GetID("##ndiExtraIps"));
+                    if (!editing) {
+                        std::strncpy(extraBuf, m_ndiNetwork.extraIps.c_str(), sizeof(extraBuf) - 1);
+                        extraBuf[sizeof(extraBuf) - 1] = '\0';
+                    }
+                    ImGui::SetNextItemWidth(260.0f);
+                    ImGui::InputText("##ndiExtraIps", extraBuf, sizeof(extraBuf));
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        m_ndiNetwork.extraIps = extraBuf;
+                        applyNdiNetworkSettings(true);
+                    }
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextWrapped("Comma-separated IPs of NDI devices on other subnets (queried directly over TCP 5960).");
+                ImGui::PopStyleColor();
+
+                ImGui::Dummy(ImVec2(0, 4));
+
+                // Discovery Server — guaranteed cross-subnet mutual discovery.
+                if (ImGui::Checkbox("Use NDI Discovery Server", &m_ndiNetwork.useDiscoveryServer))
+                    applyNdiNetworkSettings(true);
+                if (m_ndiNetwork.useDiscoveryServer) {
+                    static char srvBuf[256] = {};
+                    bool editingSrv = (ImGui::GetActiveID() == ImGui::GetID("##ndiDiscoSrv"));
+                    if (!editingSrv) {
+                        std::strncpy(srvBuf, m_ndiNetwork.discoveryServer.c_str(), sizeof(srvBuf) - 1);
+                        srvBuf[sizeof(srvBuf) - 1] = '\0';
+                    }
+                    ImGui::SetNextItemWidth(200.0f);
+                    ImGui::InputText("##ndiDiscoSrv", srvBuf, sizeof(srvBuf));
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        m_ndiNetwork.discoveryServer = srvBuf;
+                        applyNdiNetworkSettings(true);
+                    }
+                    if (!m_ndiNetwork.discoveryServer.empty()) {
+                        if (glfwGetTime() - m_ndiServerUpLastRefresh > 5.0) {
+                            m_ndiServerUp = NdiNetworkConfig::tcpProbe(m_ndiNetwork.discoveryServer, 5959);
+                            m_ndiServerUpLastRefresh = glfwGetTime();
+                        }
+                        ImGui::SameLine();
+                        ImGui::PushStyleColor(ImGuiCol_Text, m_ndiServerUp
+                            ? ImVec4(0.22f, 0.82f, 0.52f, 1.0f) : ImVec4(0.85f, 0.45f, 0.45f, 1.0f));
+                        ImGui::TextUnformatted(m_ndiServerUp ? "registry reachable" : "cannot reach :5959");
+                        ImGui::PopStyleColor();
+                    }
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::TextWrapped("A Discovery Server lets every device find each other across subnets and Wi-Fi/Ethernet boundaries (central registration on TCP 5959). Run it on one always-on host and enter its IP here on every device.");
+                ImGui::PopStyleColor();
             }
 
             // ── NDI Broadcast — outbound senders (composition + per-layer)
@@ -12269,9 +12454,75 @@ void Application::publishPlayIfChanged() {
     }
 }
 
+#ifdef HAS_NDI
+// Apply the current NDI network selection: write ndi-config.v1.json (+ set
+// NDI_CONFIG_DIR) and, when requested, re-initialize the NDI runtime so a new
+// adapter pin / discovery setting takes effect (the SDK reads its config only at
+// initialize() time). reinit=false just persists for the next launch.
+void Application::applyNdiNetworkSettings(bool reinit) {
+    NDIRuntime::setPendingNetworkSettings(m_ndiNetwork);
+    if (reinit && NDIRuntime::instance().isAvailable()) {
+        // Destroy sender + finder BEFORE the runtime so we never touch a stale
+        // api() pointer, then recreate them against the re-initialized runtime.
+        m_ndiOutput.destroy();
+        m_ndiFinder.destroy();
+        NDIRuntime::instance().reinitWithSettings(m_ndiNetwork);
+        if (NDIRuntime::instance().isAvailable()) {
+            m_ndiFinder.create();
+            m_ndiSources = m_ndiFinder.sources();
+            if (m_ndiOutputEnabled) m_ndiOutput.create("Lu");
+        }
+    } else {
+        // No runtime (or reinit not requested): persist config for the next launch.
+        NdiNetworkConfig::applyToEnv(m_ndiNetwork);
+    }
+    m_netAdapters.clear();            // force NIC re-enumeration on next panel draw
+    m_ndiPeerStatusLastRefresh = 0.0; // force peer re-classification
+}
+
+// Re-enumerate NICs and classify each discovered NDI peer (same-subnet + TCP
+// reachability). Blocking probes — call on demand / throttled, never per frame.
+void Application::refreshNdiPeerStatus() {
+    m_netAdapters = EnumerateNetworkAdapters();
+
+    // Active NIC ip/mask for same-subnet math: the pinned adapter when set, else
+    // the first Wi-Fi/Ethernet adapter as a best-effort default.
+    std::string activeIp, activeMask;
+    if (m_ndiNetwork.enabled && !m_ndiNetwork.interfaceIp.empty()) {
+        activeIp = m_ndiNetwork.interfaceIp;
+        for (const auto& a : m_netAdapters)
+            if (a.ipv4 == m_ndiNetwork.interfaceIp) { activeMask = a.subnetMask; break; }
+    }
+    if (activeIp.empty()) {
+        for (const auto& a : m_netAdapters)
+            if (a.kind == NetAdapterInfo::Kind::Ethernet || a.kind == NetAdapterInfo::Kind::WiFi) {
+                activeIp = a.ipv4; activeMask = a.subnetMask; break;
+            }
+    }
+
+    std::vector<std::pair<std::string, std::string>> pairs;
+    pairs.reserve(m_ndiSources.size());
+    for (const auto& s : m_ndiSources) pairs.emplace_back(s.name, s.url);
+    m_ndiPeerStatus = NdiNetworkConfig::classifyPeers(pairs, activeIp, activeMask);
+    m_ndiPeerStatusLastRefresh = glfwGetTime();
+}
+#endif // HAS_NDI
+
 void Application::saveProject(const std::string& path) {
     json j;
     j["version"] = 2;
+
+#ifdef HAS_NDI
+    // NDI network selection — additive; older projects omit it and load as Auto.
+    j["ndiNetwork"] = {
+        {"enabled", m_ndiNetwork.enabled},
+        {"interface", m_ndiNetwork.interfaceName},
+        {"interfaceIp", m_ndiNetwork.interfaceIp},
+        {"extraIps", m_ndiNetwork.extraIps},
+        {"useDiscoveryServer", m_ndiNetwork.useDiscoveryServer},
+        {"discoveryServer", m_ndiNetwork.discoveryServer},
+    };
+#endif
 
     // Save mapping profiles
     json mappingsJson = json::array();
@@ -12707,6 +12958,20 @@ void Application::loadProject(const std::string& path) {
         std::cerr << "Failed to parse project: " << e.what() << std::endl;
         return;
     }
+
+#ifdef HAS_NDI
+    // NDI network selection (additive — absent in older projects → stays Auto).
+    if (j.contains("ndiNetwork")) {
+        const auto& n = j["ndiNetwork"];
+        m_ndiNetwork.enabled            = n.value("enabled", false);
+        m_ndiNetwork.interfaceName      = n.value("interface", std::string());
+        m_ndiNetwork.interfaceIp        = n.value("interfaceIp", std::string());
+        m_ndiNetwork.extraIps           = n.value("extraIps", std::string());
+        m_ndiNetwork.useDiscoveryServer = n.value("useDiscoveryServer", false);
+        m_ndiNetwork.discoveryServer    = n.value("discoveryServer", std::string());
+        applyNdiNetworkSettings(/*reinit=*/true);
+    }
+#endif
 
     // Clear current state
     while (m_layerStack.count() > 0) {

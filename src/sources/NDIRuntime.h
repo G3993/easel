@@ -8,6 +8,7 @@
 
 #include <cstddef>  // for NULL — NDI headers use it without including it
 #include <Processing.NDI.Lib.h>
+#include "net/NdiNetworkConfig.h"  // NdiNetworkSettings
 
 // NDI SDK 6 uses NDIlib_v6_3 as the API struct; earlier code used "NDIlib_api"
 typedef NDIlib_v6_3 NDIlib_api;
@@ -23,6 +24,15 @@ public:
 
     bool init();
     void shutdown();
+
+    // NDI reads its machine config (ndi-config.v1.json: adapter pin + discovery)
+    // ONLY at initialize() time. Application stashes the user's selection here
+    // BEFORE the early init() runs (defaults = Auto); init() writes the config from
+    // it. A LIVE change (project load / UI) must go through reinitWithSettings(),
+    // which tears the runtime down and re-initializes so the new pin takes effect.
+    static void setPendingNetworkSettings(const NdiNetworkSettings& s);
+    static const NdiNetworkSettings& pendingNetworkSettings();
+    bool reinitWithSettings(const NdiNetworkSettings& s);
 
 private:
     NDIRuntime() = default;

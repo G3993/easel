@@ -66,9 +66,12 @@
 #include "app/DataBus.h"
 #include "stage/StageView.h"
 
+#include "app/NetAdapters.h"
+
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
 #include "app/NDIOutput.h"
+#include "net/NdiNetworkConfig.h"
 #endif
 
 #ifdef HAS_SPOUT
@@ -402,6 +405,16 @@ private:
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);
+
+    // Wi-Fi / Ethernet NIC pin + cross-device reachability (see NdiNetworkConfig).
+    NdiNetworkSettings m_ndiNetwork;             // persisted machine-wide selection
+    std::vector<NetAdapterInfo> m_netAdapters;   // cached; refreshed on panel open / Refresh
+    std::vector<NdiPeerStatus> m_ndiPeerStatus;  // cached peer reachability
+    double m_ndiPeerStatusLastRefresh = 0.0;
+    bool m_ndiServerUp = false;                  // cached discovery-server :5959 probe
+    double m_ndiServerUpLastRefresh = 0.0;
+    void applyNdiNetworkSettings(bool reinit);   // write config (+ optional NDI re-init)
+    void refreshNdiPeerStatus();                 // re-enumerate adapters + classify peers
 #endif
 
 #ifdef HAS_SPOUT
