@@ -3343,6 +3343,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             f3Param("zoom", "Zoom", &f3->m_zoom, 0.5f, 4.0f, "%.2f");
             f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
 
+            sectionBreak();
+            ImGui::TextDisabled("Forces");
+            f3Param("gravity",    "Gravity",    &f3->m_gravity,    0.0f, 4.0f, "%.2f");
+            f3Param("vortex",     "Vortex",     &f3->m_vortex,     0.0f, 3.0f, "%.2f");
+            f3Param("turbulence", "Turbulence", &f3->m_turbulence, 0.0f, 2.0f, "%.2f");
+            f3Param("forceScale", "Cohesion",   &f3->m_forceScale, 0.1f, 4.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Gravity: 0 = zero-g float, 1 = normal, >1 heavier.\n"
+                                  "Vortex: coherent swirl. Turbulence: chaotic churn.\n"
+                                  "Cohesion: SPH inter-particle force (surface tension).\n"
+                                  "All are audio-bindable; Audio Motion also pumps\n"
+                                  "vortex + turbulence as the sound gets louder.");
+
             ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
@@ -3372,11 +3385,13 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             }
             {
                 float sr = (float)f3->m_simRes;
-                if (pillSlider("Sim Detail (grid)", &sr, 32.0f, 80.0f, "%.0f"))
+                if (pillSlider("Sim Detail (grid)", &sr, 32.0f, 128.0f, "%.0f"))
                     f3->m_simRes = (int)sr;
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("3D grid edge — higher = finer fluid detail,\n"
-                                      "much higher GPU cost. Reseeds on change.");
+                    ImGui::SetTooltip("3D grid edge — particle count is roughly edge^3\n"
+                                      "(64 ~= 260K, 96 ~= 880K, 128 ~= 2.1M). Higher =\n"
+                                      "finer fluid detail, much higher GPU cost.\n"
+                                      "Reseeds on change.");
             }
             {
                 float ss = (float)f3->m_substeps;

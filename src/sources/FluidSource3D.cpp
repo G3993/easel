@@ -53,6 +53,12 @@ uniform float uSize;
 uniform int   uFrame;
 uniform float uTime;
 uniform float uEnergy;   // audio-driven motion intensity (1 = original)
+// Extra force fields — all formulated so 0 == original behaviour, so an
+// unbound uniform can never break the sim. The base SPH #defines are untouched.
+uniform float uGravityAdd;  // gravity strength delta (0 = original 1g)
+uniform float uVortex;      // coherent swirl around the vertical axis (0 = off)
+uniform float uTurbulence;  // chaotic turbulent push (0 = off)
+uniform float uForceAdd;    // SPH inter-particle (cohesion) force delta (0 = original)
 
 vec3 size3d;
 
@@ -174,7 +180,7 @@ void ApplyForce(inout Particle p, in Particle incoming){
     float SPH_F = f * pressure;
     float F = surface_tension*GD(d, surface_tension_rad);
     float Friction = 0.45 * dot(dir, dvel) * GD(d, 1.5);
-    p.force += force_k * dir * (F + SPH_F + Friction) * irho / rest_density;
+    p.force += (1.0 + uForceAdd) * force_k * dir * (F + SPH_F + Friction) * irho / rest_density;
 }
 
 float minv(vec3 a){ return min(min(a.x, a.y), a.z); }
@@ -193,8 +199,24 @@ vec4 border_grad(vec3 p){
 }
 void IntegrateParticle(inout Particle p, vec3 pos, float time){
     // uEnergy scales the turbulent wobble: calm (small) when audio is quiet,
-    // churning (large) when it's loud. Downward gravity (-1) is unaffected.
-    p.force += gravity*vec3(0.4*sin(0.7*time)*uEnergy, 0.2*cos(0.5*time)*uEnergy, -1.0);
+    // churning (large) when it's loud. uGravityAdd scales the downward pull
+    // (0 = 1g; -1 = zero-g float; >0 = heavier).
+    p.force += gravity*vec3(0.4*sin(0.7*time)*uEnergy, 0.2*cos(0.5*time)*uEnergy, -(1.0 + uGravityAdd));
+    // Coherent vortex: a tangential swirl around the vertical axis through the
+    // volume centre (normalized so it's a steady push regardless of radius).
+    if(uVortex != 0.0){
+        vec3 r  = p.pos - size3d*0.5;
+        vec3 sw = vec3(-r.y, r.x, 0.0);
+        float rl = length(sw);
+        if(rl > 1e-4) p.force += gravity * uVortex * 6.0 * sw / rl;
+    }
+    // Chaotic turbulence: domain-warped sinusoids, distinct from the coherent
+    // vortex — gives churny, broken-up motion that reads well with audio.
+    if(uTurbulence != 0.0){
+        vec3 q  = p.pos*0.25;
+        vec3 tb = vec3(sin(q.y + time), sin(q.z + 1.3*time), sin(q.x + 0.7*time));
+        p.force += gravity * uTurbulence * 5.0 * tb;
+    }
     p.vel *= mix(0.985, 1.0, clamp(uEnergy, 0.0, 1.0));   // extra damping when calm → settles
     vec4 border = border_grad(p.pos);
     vec3 bound = 1.*normalize(border.xyz)*exp(-0.4*border.w*border.w);
@@ -609,7 +631,7 @@ void FluidSource3D::destroyFBO(FBO& f) {
 void FluidSource3D::reallocVolumes() {
     destroyVolume(m_volA); destroyVolume(m_volB);
     destroyVolume(m_volC); destroyVolume(m_volD);
-    m_simRes = std::max(8, std::min(80, m_simRes));
+    m_simRes = std::max(8, std::min(128, m_simRes));
     m_size = m_simRes;
     m_volA = createVolume(m_size, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, GL_NEAREST);
     m_volC = createVolume(m_size, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, GL_NEAREST);
@@ -638,7 +660,7 @@ bool FluidSource3D::init(int outW, int outH) {
     m_renderScale = std::min(1.0f, std::max(0.25f, m_renderScale));
     m_outW = std::max(2, (int)std::round(m_zoneW * m_renderScale));
     m_outH = std::max(2, (int)std::round(m_zoneH * m_renderScale));
-    m_simRes = std::max(8, std::min(80, m_simRes));
+    m_simRes = std::max(8, std::min(128, m_simRes));
     m_size = m_simRes;
 
     std::string common = COMMON;
@@ -800,6 +822,13 @@ void FluidSource3D::update() {
             float hot = 0.25f + (2.5f - 0.25f) * m_audioEnergy;     // calm..intense by loudness
             float energyU = 1.0f + (hot - 1.0f) * m_audioIntensity; // gated by the user amount
             glUniform1f(glGetUniformLocation(m_progC, "uEnergy"), energyU);
+            // Extra force fields. All default to 0 == original. Audio Motion
+            // also pumps vortex + turbulence so it churns harder as it gets loud.
+            float audioPump = m_audioIntensity * m_audioEnergy;
+            glUniform1f(glGetUniformLocation(m_progC, "uGravityAdd"), m_gravity   - 1.0f);
+            glUniform1f(glGetUniformLocation(m_progC, "uForceAdd"),   m_forceScale - 1.0f);
+            glUniform1f(glGetUniformLocation(m_progC, "uVortex"),     m_vortex     + audioPump * 0.8f);
+            glUniform1f(glGetUniformLocation(m_progC, "uTurbulence"), m_turbulence + audioPump * 1.2f);
         }
         bindVolume(m_progC, "uParticles", m_volA, 0);
         bindVolume(m_progC, "uDensity",   m_volB, 1);
@@ -861,6 +890,10 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
         else if (name == "imageMix")    { dst = &m_imageMix;    lo = 0.0f; hi = 1.0f; }
         else if (name == "sphereScale") { dst = &m_sphereScale; lo = 0.05f; hi = 1.5f; }
         else if (name == "zoom")        { dst = &m_zoom;        lo = 0.5f;  hi = 4.0f; }
+        else if (name == "gravity")     { dst = &m_gravity;     lo = 0.0f;  hi = 4.0f; }
+        else if (name == "vortex")      { dst = &m_vortex;      lo = 0.0f;  hi = 3.0f; }
+        else if (name == "turbulence")  { dst = &m_turbulence;  lo = 0.0f;  hi = 2.0f; }
+        else if (name == "forceScale")  { dst = &m_forceScale;  lo = 0.1f;  hi = 4.0f; }
         else if (name == "bgAlpha")     { dst = &m_bgAlpha;     lo = 0.0f; hi = 1.0f; }
         else if (name == "lightIntensity"){ dst = &m_lightIntensity; lo = 0.0f; hi = 3.0f; }
         else if (name == "ambient")     { dst = &m_ambient;     lo = 0.0f; hi = 1.0f; }

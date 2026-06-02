@@ -93,6 +93,11 @@ public:
     // fluid is calm when quiet and churns as the music gets loud.
     float m_audioIntensity = 0.0f;
     float m_audioEnergy    = 0.0f;    // smoothed loudness (updated from audio)
+    // Force fields (layered on top of the base SPH; defaults = original look).
+    float m_gravity        = 1.0f;    // gravity strength (0 = zero-g, 1 = original)
+    float m_vortex         = 0.0f;    // coherent swirl around vertical axis (0 = off)
+    float m_turbulence     = 0.0f;    // chaotic turbulent churn (0 = off)
+    float m_forceScale     = 1.0f;    // SPH cohesion force (1 = original)
 
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
