@@ -1076,7 +1076,10 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     // ── UI: Intensity slider (Subtle -> Intense) + Shuffle + Off ────────────
     if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f")) {
         if (intensity < 0.0f) intensity = 0.0f; else if (intensity > 1.0f) intensity = 1.0f;
+        // Touching the slider with nothing bound yet auto-picks a set, so it
+        // always DOES something (no need to hit Shuffle first to see motion).
         if (sRecipe[stateKey].has) buildFromRecipe();
+        else shuffle();
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How hard the music moves the params, live:\n"
