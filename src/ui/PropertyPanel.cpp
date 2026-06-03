@@ -908,6 +908,36 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
 
         if (ab.signal == AudioSignal::MidiCC) {
             ImGui::Dummy(ImVec2(0, 5));
+            // Dropdown of every control the connected MIDI device has actually
+            // sent — pick a knob/fader instead of typing its CC number.
+            if (midi) {
+                auto ccs = midi->seenCCs();
+                dimLabel("MIDI param", kRowLabel, false);
+                char preview[48];
+                if (ab.midiCC >= 0)
+                    snprintf(preview, sizeof(preview), "Ch%d  CC%d",
+                             ab.midiChannel + 1, ab.midiCC);
+                else
+                    snprintf(preview, sizeof(preview), "%s",
+                             ccs.empty() ? "(move a knob to detect)" : "Pick a control...");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##midiparam", preview)) {
+                    if (ccs.empty())
+                        ImGui::TextDisabled("No MIDI received yet — move a knob,\nor use MIDI Learn below.");
+                    for (const auto& cc : ccs) {
+                        char lbl[48];
+                        float v = midi->getCCValue(cc.first, cc.second);
+                        snprintf(lbl, sizeof(lbl), "Ch%d  CC%d   (%.0f%%)",
+                                 cc.first + 1, cc.second, v < 0 ? 0.0f : v * 100.0f);
+                        bool sel = (ab.midiCC == cc.second && ab.midiChannel == cc.first);
+                        if (ImGui::Selectable(lbl, sel)) {
+                            ab.midiCC = cc.second; ab.midiChannel = cc.first;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::Dummy(ImVec2(0, 3));
+            }
             dimLabel("MIDI CC", kRowLabel, false);
             ImGui::SetNextItemWidth(70);
             ImGui::InputInt("##cc", &ab.midiCC, 1, 1);
