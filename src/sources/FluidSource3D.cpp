@@ -95,9 +95,9 @@ uint packvec3(vec3 v){
     uvec3 sv = uvec3(round(clamp(v*scale, -1.0, 1.0) * 255.0) + 255.0);
     return uint(expo + 15) | (sv.x << 5) | (sv.y << 14) | (sv.z << 23);
 }
-vec3 unpackvec3(uint packed){
-    int expo = int(packed & 0x1Fu) - 15;
-    vec3 sv = vec3((packed >> 5) & 0x1FFu, (packed >> 14) & 0x1FFu, (packed >> 23) & 0x1FFu);
+vec3 unpackvec3(uint pk){
+    int expo = int(pk & 0x1Fu) - 15;
+    vec3 sv = vec3((pk >> 5) & 0x1FFu, (pk >> 14) & 0x1FFu, (pk >> 23) & 0x1FFu);
     vec3 v = (sv - 255.0) / 255.0;
     v *= exp2(float(expo));
     return v;
