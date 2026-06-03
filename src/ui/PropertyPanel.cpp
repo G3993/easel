@@ -1036,7 +1036,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     static std::unordered_map<uint32_t, bool>   sInit;
     static std::mt19937 rng{std::random_device{}()};
 
-    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.45f; sInit[stateKey] = true; }
+    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.30f; sInit[stateKey] = true; }
     float& intensity = sIntensity[stateKey];
 
     auto buildFromRecipe = [&]() {
@@ -1047,7 +1047,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             if (e.idx < 0 || e.idx >= (int)params.size()) continue;
             const PresetParam& pp = params[e.idx];
             float span = pp.hi - pp.lo; if (span <= 0.0f) continue;
-            float half   = span * (0.12f + 0.60f * intensity) * 0.5f; // subtle..intense
+            float half   = span * (0.08f + 0.42f * intensity) * 0.5f; // subtle..intense
             float center = pp.lo + e.center01 * span;
             float rmin = center - half, rmax = center + half;
             if (rmin < pp.lo) rmin = pp.lo;
@@ -1057,7 +1057,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             ab.signal    = e.sig;
             ab.rangeMin  = rmin;
             ab.rangeMax  = rmax;
-            ab.smoothing = 0.90f - 0.32f * intensity;   // syrupy..snappier
+            ab.smoothing = 0.95f - 0.28f * intensity;   // syrupy..less syrupy (never strobey)
             bindings[pp.name] = ab;
         }
         changed = true;

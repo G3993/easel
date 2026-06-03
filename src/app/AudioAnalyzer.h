@@ -276,8 +276,10 @@ private:
     // Default smoothing rates — chosen so a typical reactive shader gets
     // a punchy attack but a soft release that doesn't strobe on every
     // beat. Mutable via smoothAttack() / smoothRelease() accessors.
-    float m_smoothAttackRate  = 8.0f;
-    float m_smoothReleaseRate = 3.0f;
+    // Gentler defaults so audio reactivity glides instead of strobing on every
+    // beat — was 8/3, which read as "way too fast" when working with shaders.
+    float m_smoothAttackRate  = 4.5f;
+    float m_smoothReleaseRate = 1.8f;
 
     // Smoothed values
     float m_smoothBass = 0, m_smoothLowMid = 0, m_smoothHighMid = 0, m_smoothTreble = 0;
