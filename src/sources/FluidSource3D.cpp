@@ -60,6 +60,7 @@ uniform float uVortex;      // coherent swirl around the vertical axis (0 = off)
 uniform float uTurbulence;  // chaotic turbulent push (0 = off)
 uniform float uForceAdd;    // SPH inter-particle (cohesion) force delta (0 = original)
 uniform float uSphereShape; // container shape: 0 = cube (original), 1 = sphere
+uniform float uFill;        // how much of the container is seeded with fluid (0..1)
 
 vec3 size3d;
 
@@ -344,18 +345,17 @@ void main(){
     }
     if(uFrame < 10){
         bool seed;
+        // uFill controls how much fluid is seeded — small blob .. full container.
         if(uSphereShape > 0.5){
-            // Seed a COMPACT blob in the upper part of the sphere (NOT the whole
-            // sphere — filling every cell packs it to rest density with no room
-            // to move, so it looks frozen). It drops into the spherical bowl and
-            // sloshes like the box's partial seed does. (z+ is up; gravity is -z.)
-            float R = minv(size3d)*0.5;
+            // Ball in the upper part of the sphere; radius grows with uFill.
+            float R  = minv(size3d)*0.5;
             vec3  sc = size3d*0.5 + vec3(0.0, 0.0, 0.30*R);
-            seed = length(pos - sc) < 0.50*R;
+            seed = length(pos - sc) < (0.25 + 0.65*uFill)*R;
         } else {
-            seed = (pos.x < 0.5*size3d.x && pos.x > 0.0*size3d.x &&
-                    pos.y < 0.85*size3d.y && pos.y > 0.15*size3d.y &&
-                    pos.z < 0.85*size3d.z && pos.z > 0.15*size3d.z);
+            // Centred box region; half-extent grows with uFill.
+            float h = 0.15 + 0.35*uFill;          // 0.15..0.50 of the grid
+            vec3  d = abs(pos - size3d*0.5) / size3d;
+            seed = (d.x < h && d.y < h && d.z < h);
         }
         if(seed){ p0.mass = initial_particle_density; p1.mass = 0u; }
         p0.pos = pos; p0.vel = vec3(0.0);
@@ -419,6 +419,7 @@ uniform vec3  uBgTop;      // background gradient top (also reflection env)
 uniform vec3  uBgBottom;   // background gradient bottom
 uniform float uBgAlpha;    // background opacity (0 = transparent / composites under)
 uniform float uSphereScale;// particle sphere size multiplier (1 = original)
+uniform float uParticleCube;// 0 = round particles (original), 1 = cube particles
 uniform float uZoom;       // camera zoom (1 = original; >1 zooms in, telephoto)
 uniform sampler2D uImage;
 uniform int   uImageOn;
@@ -450,6 +451,26 @@ void iSphere(inout Ray ray, vec4 sphere, vec3 color){
         float d1 = -b-h, d2 = -b+h;
         if(d1 >= 0.0 && d1 <= ray.td){ ray.normal = normalize(ro + ray.rd*d1); ray.color = color; ray.td = d1; }
         else if(d2 >= 0.0 && d2 <= ray.td){ ray.normal = normalize(ro + ray.rd*d2); ray.color = color; ray.td = d2; }
+    }
+}
+// Ray vs axis-aligned cube (slab method) with the entry-face normal, so
+// particles can render as cubes instead of spheres. Updates the ray like
+// iSphere does (nearest hit only).
+void iCube(inout Ray ray, vec3 center, float hs, vec3 color){
+    vec3 ro = ray.ro - center;
+    vec3 inv = 1.0 / (ray.rd + vec3(1e-8));
+    vec3 n = inv * ro;
+    vec3 k = abs(inv) * hs;
+    vec3 t1 = -n - k, t2 = -n + k;
+    float tN = max(max(t1.x, t1.y), t1.z);
+    float tF = min(min(t2.x, t2.y), t2.z);
+    if(tN > tF || tF < 0.0) return;
+    float td = (tN >= 0.0) ? tN : tF;
+    if(td >= 0.0 && td <= ray.td){
+        ray.td = td;
+        ray.color = color;
+        // Face normal = the axis whose near-plane (t1) was the max.
+        ray.normal = -sign(ray.rd) * step(t1.yzx, t1.xyz) * step(t1.zxy, t1.xyz);
     }
 }
 vec2 iBox(vec3 ro, vec3 rd, vec3 bs){
@@ -487,8 +508,14 @@ vec4 calcNormal(vec3 p, float dx){
 void TraceCell(inout Ray ray, vec3 p){
     Particle p0, p1;
     unpackParticles(LOAD3D(uParticles, p), p, p0, p1);
-    if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
-    if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, 0.85*uSphereScale), uGlow * length(p0.vel));
+    float rad = 0.85*uSphereScale;
+    if(uParticleCube > 0.5){
+        if(p0.mass > 0u) iCube(ray, p0.pos, rad, uGlow * length(p0.vel));
+        if(p1.mass > 0u) iCube(ray, p1.pos, rad, uGlow * length(p0.vel));
+    } else {
+        if(p0.mass > 0u) iSphere(ray, vec4(p0.pos, rad), uGlow * length(p0.vel));
+        if(p1.mass > 0u) iSphere(ray, vec4(p1.pos, rad), uGlow * length(p0.vel));
+    }
 }
 void TraceCells(inout Ray ray, vec3 p){
     vec3 p0 = floor(p);
@@ -523,7 +550,10 @@ void main(){
         if(ray.td < tdBox.y){
             vec3 p0 = ray.ro + ray.rd*ray.td;
             vec3 normal = normalize(calcNormal(p0, 0.5).xyz);
-            normal = -normalize(mix(normal, ray.normal, 0.25));
+            // Cubes want their flat face normal to read; spheres keep the smooth
+            // density-gradient normal (only lightly biased by the hit normal).
+            float nMix = (uParticleCube > 0.5) ? 0.85 : 0.25;
+            normal = -normalize(mix(normal, ray.normal, nMix));
             vec3 albedo = uDeep;
             if(uImageOn == 1){
                 vec2 iuv = clamp(p0.xy / size3d.xy, 0.0, 1.0);
@@ -799,6 +829,7 @@ void FluidSource3D::renderToOutput() {
     glUniform3fv(glGetUniformLocation(m_progRender, "uBgBottom"), 1, m_bgBottom);
     glUniform1f(glGetUniformLocation(m_progRender, "uBgAlpha"), m_bgAlpha);
     glUniform1f(glGetUniformLocation(m_progRender, "uSphereScale"), m_sphereScale);
+    glUniform1f(glGetUniformLocation(m_progRender, "uParticleCube"), m_particleCube ? 1.0f : 0.0f);
     glUniform1f(glGetUniformLocation(m_progRender, "uZoom"), m_zoom);
     // Image injection — colors the surface albedo (mapped to world x/y).
     bool imgOn = (m_imageEnabled && m_image.textureId != 0);
@@ -871,13 +902,15 @@ void FluidSource3D::update() {
             glUniform1f(glGetUniformLocation(m_progC, "uVortex"),     m_vortex     + audioPump * 0.8f);
             glUniform1f(glGetUniformLocation(m_progC, "uTurbulence"), m_turbulence + audioPump * 1.2f);
             glUniform1f(glGetUniformLocation(m_progC, "uSphereShape"), m_sphereShape);
+            glUniform1f(glGetUniformLocation(m_progC, "uFill"), m_fillAmount);
         }
-        // Switching the container box<->sphere needs a reseed: the wall force
-        // only acts near the surface, so stray particles outside the new shape
-        // would otherwise never migrate in. Re-seed once on the crossing.
+        // Switching the container box<->sphere, or changing the fill amount,
+        // needs a reseed: the wall force only acts near the surface, so the
+        // fluid volume only changes when the seed block re-runs.
         {
             bool wantSphere = (m_sphereShape > 0.5f);
             if (wantSphere != m_seedingSphere) { m_seedingSphere = wantSphere; m_frame = 0; }
+            if (std::fabs(m_fillAmount - m_fillPrev) > 0.001f) { m_fillPrev = m_fillAmount; m_frame = 0; }
         }
         bindVolume(m_progC, "uParticles", m_volA, 0);
         bindVolume(m_progC, "uDensity",   m_volB, 1);

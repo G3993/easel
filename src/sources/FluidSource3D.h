@@ -106,6 +106,9 @@ public:
     float m_forceScale     = 1.0f;    // SPH cohesion force (1 = original)
     float m_sphereShape    = 0.0f;    // container: 0 = cube (original), 1 = sphere
     bool  m_seedingSphere  = false;   // tracks the box<->sphere crossing for reseed
+    float m_fillAmount     = 0.5f;    // how much fluid is seeded (0 = little .. 1 = full)
+    float m_fillPrev       = -1.0f;   // tracks fill changes to trigger a reseed
+    bool  m_particleCube   = false;   // render particles as cubes instead of spheres
 
     bool  m_autoRotate    = true;
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)

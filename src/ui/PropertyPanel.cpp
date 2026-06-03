@@ -3377,6 +3377,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
 
             sectionBreak();
+            ImGui::TextDisabled("Particles");
+            pillSlider("Fluid Amount", &f3->m_fillAmount, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How much fluid fills the container — more = more\n"
+                                  "particles, fuller. Reseeds as you drag.\n"
+                                  "(For finer detail / max particle count, raise\n"
+                                  "Sim Detail in Quality below.)");
+            f3Param("sphereScale", "Blob Size", &f3->m_sphereScale, 0.05f, 1.5f, "%.2f");
+            ImGui::Checkbox("Cube particles", &f3->m_particleCube);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Render particles as cubes instead of round blobs.");
+
+            sectionBreak();
             ImGui::TextDisabled("Forces");
             f3Param("sphereShape", "Container", &f3->m_sphereShape, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered())
@@ -3458,15 +3471,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     undoNeeded = true;
             }
 
-            ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
+            sectionBreak();
+            ImGui::TextDisabled("Colors");
+            ImGui::ColorEdit3("Liquid",    f3->m_deepColor,    ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Glow",      f3->m_glowColor,    ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Rim",       f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,        ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom,     ImGuiColorEditFlags_NoInputs);
             f3Param("rim",        "Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
             f3Param("saturation", "Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
-            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,    ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom, ImGuiColorEditFlags_NoInputs);
             f3Param("bgAlpha",    "BG Opacity",  &f3->m_bgAlpha,    0.0f, 1.0f, "%.2f");
-            f3Param("sphereScale","Blob Size",   &f3->m_sphereScale,0.05f,1.5f, "%.2f");
 
             sectionBreak();
             ImGui::TextDisabled("Lighting");

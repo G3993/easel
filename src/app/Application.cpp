@@ -12610,6 +12610,8 @@ void Application::saveProject(const std::string& path) {
                 fc["turbulence"] = f->m_turbulence;
                 fc["forceScale"] = f->m_forceScale;
                 fc["sphereShape"] = f->m_sphereShape;
+                fc["fillAmount"]  = f->m_fillAmount;
+                fc["particleCube"] = f->m_particleCube;
                 // VJ morph (Low/High look snapshots + drive config).
                 fc["vjMode"]         = f->m_vjMode;
                 fc["vjGrab"]         = f->m_vjGrab;
@@ -13234,6 +13236,8 @@ void Application::loadProject(const std::string& path) {
                     src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
                     src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
                     src->m_sphereShape = fc.value("sphereShape", src->m_sphereShape);
+                    src->m_fillAmount  = fc.value("fillAmount",  src->m_fillAmount);
+                    src->m_particleCube = fc.value("particleCube", src->m_particleCube);
                     src->m_vjMode           = fc.value("vjMode",         src->m_vjMode);
                     src->m_vjGrab           = fc.value("vjGrab",         src->m_vjGrab);
                     src->m_journeySignal    = fc.value("journeySignal",  src->m_journeySignal);
