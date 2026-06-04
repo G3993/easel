@@ -903,8 +903,18 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
         dimLabel("SOURCE", kRowLabel, false);
         int sigIdx = (int)ab.signal;
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames)))
+        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames))) {
             ab.signal = (AudioSignal)sigIdx;
+            // Pick MIDI -> connect a controller if needed and ARM LEARN, so the
+            // user can just move a knob and it binds (no extra clicks).
+            if (ab.signal == AudioSignal::MidiCC && midi) {
+                if (!midi->isOpen()) {
+                    auto devs = midi->listDevices();
+                    if (!devs.empty()) midi->openDevice(0);
+                }
+                midi->startLearn();
+            }
+        }
 
         if (ab.signal == AudioSignal::MidiCC) {
             ImGui::Dummy(ImVec2(0, 5));

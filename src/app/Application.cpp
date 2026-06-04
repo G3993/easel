@@ -2903,6 +2903,17 @@ void Application::renderUI() {
 
     // Process MIDI events
     {
+        // Auto-connect the first available controller (throttled ~1s) so MIDI
+        // "just works" — no need to open it in the MIDI panel first. Skipped if
+        // the user explicitly chose "None".
+        static double s_midiScan = 0.0;
+        double nowT = glfwGetTime();
+        if (!m_midiManager.isOpen() && !m_midiUserDisconnected &&
+            nowT - s_midiScan > 1.0) {
+            s_midiScan = nowT;
+            auto devs = m_midiManager.listDevices();
+            if (!devs.empty()) m_midiManager.openDevice(0);
+        }
         auto events = m_midiManager.pollEvents();
         // Update normalized CC table for shader-parameter MIDI bindings
         for (const auto& ev : events) {
@@ -6489,6 +6500,49 @@ void Application::renderUI() {
                 ImGui::PopStyleColor(3);
             }
         }
+
+        // --- MIDI: device + status, right here in the Audio tab ----------
+        ImGui::Dummy(ImVec2(0, 6));
+        PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/false);
+        {
+            auto mdevs = m_midiManager.listDevices();
+            const char* mlabel = (m_midiManager.isOpen() &&
+                                  m_midiManager.deviceIndex() < (int)mdevs.size())
+                ? mdevs[m_midiManager.deviceIndex()].c_str() : "None";
+            ParamRow::Begin("DEVICE");
+            if (ImGui::BeginCombo("##AudioMIDIDevice", mlabel)) {
+                if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
+                    m_midiManager.closeDevice();
+                    m_midiUserDisconnected = true;
+                }
+                for (int i = 0; i < (int)mdevs.size(); i++) {
+                    bool sel = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
+                    if (ImGui::Selectable(mdevs[i].c_str(), sel)) {
+                        m_midiManager.openDevice(i);
+                        m_midiUserDisconnected = false;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (mdevs.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
+                ImGui::TextWrapped("No MIDI controller detected. Plug one in — it auto-connects.");
+                ImGui::PopStyleColor();
+            } else if (m_midiManager.isOpen()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                ImGui::Text("Connected");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.85f));
+                int seen = (int)m_midiManager.seenCCs().size();
+                ImGui::Text("· %d control%s seen", seen, seen == 1 ? "" : "s");
+                ImGui::PopStyleColor();
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
+            ImGui::TextWrapped("To map a knob: open any parameter's bind menu, pick "
+                               "MIDI, then move the knob — it learns automatically.");
+            ImGui::PopStyleColor();
+        }
     }
     ImGui::End();
     }  // end Audio visibility guard
@@ -6518,11 +6572,13 @@ void Application::renderUI() {
                 // "None" option to disconnect
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                     m_midiManager.closeDevice();
+                    m_midiUserDisconnected = true;   // stop auto-reconnecting
                 }
                 for (int i = 0; i < (int)devices.size(); i++) {
                     bool selected = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
                     if (ImGui::Selectable(devices[i].c_str(), selected)) {
                         m_midiManager.openDevice(i);
+                        m_midiUserDisconnected = false;
                     }
                 }
                 ImGui::EndCombo();
