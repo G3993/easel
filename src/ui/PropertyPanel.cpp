@@ -1046,7 +1046,10 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     static std::unordered_map<uint32_t, bool>   sInit;
     static std::mt19937 rng{std::random_device{}()};
 
-    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.30f; sInit[stateKey] = true; }
+    // Start subtle: low intensity = shallow modulation depth + heavy smoothing
+    // (see the smoothing formula below). Audio reactivity should ease in calm,
+    // not snap on aggressive — users push the slider right when they want more.
+    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.22f; sInit[stateKey] = true; }
     float& intensity = sIntensity[stateKey];
 
     auto buildFromRecipe = [&]() {
@@ -1067,7 +1070,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             ab.signal    = e.sig;
             ab.rangeMin  = rmin;
             ab.rangeMax  = rmax;
-            ab.smoothing = 0.95f - 0.28f * intensity;   // syrupy..less syrupy (never strobey)
+            ab.smoothing = 0.96f - 0.24f * intensity;   // syrupy..less syrupy (never strobey)
             bindings[pp.name] = ab;
         }
         changed = true;
@@ -3273,6 +3276,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 }
                 fluidParam("imageIntensity", "Inject Strength",
                            &fsrc->m_imageIntensity, 0.0f, 1.0f, "%.2f");
+
+                // Reform mode — distort the image with the fluid via an
+                // advected UV field + remap, so it never blurs and melts back
+                // to the sharp original. (Pakata12 / Bruno Imbrizi technique.)
+                ImGui::Checkbox("Reform (melt back)", &fsrc->m_imageReform);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Push the picture's own fluid around — it\n"
+                                      "distorts but stays sharp, then flows back\n"
+                                      "to the original. Reform Speed sets how fast\n"
+                                      "it returns (0 = stays distorted).");
+                if (fsrc->m_imageReform)
+                    fluidParam("reformRate", "Reform Speed",
+                               &fsrc->m_reformRate, 0.0f, 2.0f, "%.2f");
 
                 // Inline create-and-bind shortcut — when no usable layer is
                 // available (or you just want a fresh one), these buttons

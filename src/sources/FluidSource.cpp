@@ -40,22 +40,89 @@ void main(){
     fragColor = vec4(base + splat, 1.0);
 })";
 
-// FS_INJECT — additive dye contribution from an external texture. Runs
-// once per frame against the dye field BEFORE the sim step so the
-// advection pass smears the fresh pixels through the velocity field
-// (the classic "fluid carries the picture" look). uFlipY handles
-// top-down sources (NDI/video) without an explicit CPU flip.
+// FS_SPLAT_IMAGE — dye splat whose COLOUR is sampled from the bound image at
+// the splat's centre, instead of a generated palette colour. This is what
+// makes painting/auto-movement feel like pushing the picture's OWN fluid
+// around rather than smearing rainbow ink over it. uColorScale carries the
+// splat brightness (intensity / audio modulation) so the look still responds.
+// Falloff + additive accumulation match Pavel's canonical splat exactly.
+static const char* FS_SPLAT_IMAGE = R"(#version 330 core
+in vec2 vUv; out vec4 fragColor;
+uniform sampler2D uTarget; uniform sampler2D uImage;
+uniform float aspectRatio; uniform vec2 point; uniform float radius;
+uniform float uFlipY; uniform float uColorScale;
+void main(){
+    vec2 p = vUv - point.xy; p.x *= aspectRatio;
+    float fall = exp(-dot(p,p)/radius);
+    // Sample the image at the splat centre, matching the inject pass's flip.
+    vec2 iv = vec2(point.x, mix(point.y, 1.0 - point.y, uFlipY));
+    vec3 imgCol = texture(uImage, iv).rgb * uColorScale;
+    vec3 base = texture(uTarget, vUv).xyz;
+    fragColor = vec4(base + fall * imgCol, 1.0);
+})";
+
+// ── Image "reform" mode: advect a UV-COORDINATE field, then sample the image
+// through it. The displayed pixels are always the SHARP original image read
+// at warped coordinates — so the picture distorts as you push the fluid but
+// never blurs, and as the coord field relaxes back to identity the image
+// reforms to pristine. (Technique from Pakata12 / Bruno Imbrizi: advect UVs +
+// remap, not colour.)
+
+// Fill the coord field with the identity mapping (each cell = its own uv).
+static const char* FS_COORD_INIT = R"(#version 330 core
+in vec2 vUv; out vec4 fragColor;
+void main(){ fragColor = vec4(vUv, 0.0, 1.0); })";
+
+// Advect the coord field by the velocity, then relax it toward identity so
+// the image eases back home. reform = 0 → stays distorted; higher → reforms.
+static const char* FS_COORD_ADVECT = R"(#version 330 core
+in vec2 vUv; out vec4 fragColor;
+uniform sampler2D uVelocity; uniform sampler2D uCoord;
+uniform vec2 texelSize; uniform float dt; uniform float reform;
+void main(){
+    vec2 vel = texture(uVelocity, vUv).xy;
+    vec2 src = vUv - dt * vel * texelSize;
+    vec2 coord = texture(uCoord, src).xy;
+    coord = mix(coord, vUv, clamp(reform * dt, 0.0, 1.0));
+    fragColor = vec4(coord, 0.0, 1.0);
+})";
+
+// Resolve: write the image, sampled through the (distorted) coord field, into
+// the dye buffer so the rest of the display chain (shading/bloom) runs on it.
+static const char* FS_REMAP = R"(#version 330 core
+in vec2 vUv; out vec4 fragColor;
+uniform sampler2D uCoord; uniform sampler2D uImage; uniform float uFlipY;
+void main(){
+    vec2 c  = texture(uCoord, vUv).xy;
+    vec2 iv = vec2(c.x, mix(c.y, 1.0 - c.y, uFlipY));
+    fragColor = vec4(texture(uImage, iv).rgb, 1.0);
+})";
+
+// FS_INJECT — "over" (normal) composite of an external texture onto the
+// dye field. Runs once per frame BEFORE the sim step so the advection pass
+// smears the fresh pixels through the velocity field (the classic "fluid
+// carries the picture" look). uFlipY handles top-down sources (NDI/video)
+// without an explicit CPU flip.
+//
+// IMPORTANT: this used to be additive (base + img*intensity) and ran every
+// frame, so the image ACCUMULATED — dye climbed past 1.0 and the bloom stage
+// blew the whole canvas to white. A normal "over" lerp re-asserts the image
+// at `uIntensity` opacity each frame instead: the result can never exceed
+// max(dye, image), so it stays bounded no matter how long it runs, while the
+// fluid still carries the picture away between re-stamps. Low intensity =
+// more fluid/blurry motion; high intensity = the image stays crisper.
 static const char* FS_INJECT = R"(#version 330 core
 in vec2 vUv; out vec4 fragColor;
 uniform sampler2D uTarget;    // current dye
 uniform sampler2D uImage;     // bound source texture
-uniform float     uIntensity; // 0..1 per-frame strength
+uniform float     uIntensity; // 0..1 per-frame "over" opacity
 uniform float     uFlipY;     // 1.0 = top-down source, 0.0 = bottom-up
 void main(){
-    vec2  iv  = vec2(vUv.x, mix(vUv.y, 1.0 - vUv.y, uFlipY));
+    vec2  iv   = vec2(vUv.x, mix(vUv.y, 1.0 - vUv.y, uFlipY));
     vec3  base = texture(uTarget, vUv).rgb;
-    vec3  add  = texture(uImage,  iv ).rgb;
-    fragColor  = vec4(base + add * uIntensity, 1.0);
+    vec3  img  = texture(uImage,  iv ).rgb;
+    // "over", not "add" — bounded, never accumulates to white.
+    fragColor  = vec4(mix(base, img, clamp(uIntensity, 0.0, 1.0)), 1.0);
 })";
 
 static const char* FS_ADVECT = R"(#version 330 core
@@ -429,6 +496,7 @@ bool FluidSource::init(int outW, int outH) {
     m_outW = outW; m_outH = outH;
 
     m_progSplat   = compileProgram(VS_SIMPLE, FS_SPLAT);
+    m_progSplatImage = compileProgram(VS_SIMPLE, FS_SPLAT_IMAGE);
     m_progAdvect  = compileProgram(VS_BASE,   FS_ADVECT);
     m_progDiverge = compileProgram(VS_BASE,   FS_DIVERGENCE);
     m_progCurl    = compileProgram(VS_BASE,   FS_CURL);
@@ -444,11 +512,15 @@ bool FluidSource::init(int outW, int outH) {
     m_progSunrays        = compileProgram(VS_SIMPLE, FS_SUNRAYS);
     m_progBlur           = compileProgram(VS_BLUR, FS_BLUR);
     m_progInject         = compileProgram(VS_SIMPLE, FS_INJECT);
+    m_progCoordInit      = compileProgram(VS_SIMPLE, FS_COORD_INIT);
+    m_progCoordAdvect    = compileProgram(VS_BASE,   FS_COORD_ADVECT);
+    m_progRemap          = compileProgram(VS_SIMPLE, FS_REMAP);
     // Display programs compiled lazily per #define combo (displayProgram()).
-    if (!m_progSplat || !m_progAdvect || !m_progDiverge || !m_progCurl ||
+    if (!m_progSplat || !m_progSplatImage || !m_progAdvect || !m_progDiverge || !m_progCurl ||
         !m_progVort || !m_progPressure || !m_progGradSub || !m_progClear ||
         !m_progBloomPrefilter || !m_progBloomBlur || !m_progBloomFinal ||
-        !m_progSunraysMask || !m_progSunrays || !m_progBlur) {
+        !m_progSunraysMask || !m_progSunrays || !m_progBlur ||
+        !m_progCoordInit || !m_progCoordAdvect || !m_progRemap) {
         std::cerr << "[FluidSource] program compile failed" << std::endl;
         return false;
     }
@@ -489,6 +561,11 @@ bool FluidSource::init(int outW, int outH) {
     else
         m_dye    = createDoubleFBO(dw, dh, GL_RGBA8, GL_UNSIGNED_BYTE, GL_LINEAR);
     m_output     = createFBO(m_outW, m_outH, GL_RGBA8, GL_UNSIGNED_BYTE, GL_LINEAR);
+    // Coordinate field for image "reform" mode — stores advected UVs, needs
+    // signed-ish precision + linear filtering for a smooth remap. Dye-res so
+    // the resolved image is full detail.
+    m_coord      = createDoubleFBO(dw, dh, GL_RGBA16F, GL_HALF_FLOAT, GL_LINEAR);
+    m_coordNeedsInit = true;
 
     // ── Bloom: full-res target + halving downsample mip chain ─────────
     {
@@ -618,10 +695,31 @@ void FluidSource::splat(float x, float y, float dx, float dy,
     glUniform1f(glGetUniformLocation(m_progSplat, "radius"), radius);
     glUniform3f(glGetUniformLocation(m_progSplat, "color"), dx, dy, 0.0f);
     blit(m_velocity.write); m_velocity.swap();
-    // dye (pure additive — Pavel's canonical splat)
-    setTex(m_progSplat, "uTarget", m_dye.read.tex, 0);
-    glUniform3f(glGetUniformLocation(m_progSplat, "color"), r, g, b);
-    blit(m_dye.write); m_dye.swap();
+
+    // dye (pure additive — Pavel's canonical splat). When an image is bound,
+    // colour the splat FROM the image at this point so moving the fluid pushes
+    // the picture's own colours around instead of a generated palette.
+    if (m_suppressDyeSplat) {
+        // Reform mode: dye is overwritten by the remap pass — only the velocity
+        // splat above matters, so skip the dye write entirely.
+    } else if (m_image.textureId != 0 && m_progSplatImage) {
+        float scale = std::max(r, std::max(g, b));  // keep intensity/audio response
+        glUseProgram(m_progSplatImage);
+        setTex(m_progSplatImage, "uTarget", m_dye.read.tex,    0);
+        setTex(m_progSplatImage, "uImage",  m_image.textureId, 1);
+        glUniform1f(glGetUniformLocation(m_progSplatImage, "aspectRatio"), aspect);
+        glUniform2f(glGetUniformLocation(m_progSplatImage, "point"), x, y);
+        glUniform1f(glGetUniformLocation(m_progSplatImage, "radius"), radius);
+        glUniform1f(glGetUniformLocation(m_progSplatImage, "uFlipY"),
+                    m_image.flippedV ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(m_progSplatImage, "uColorScale"), scale);
+        blit(m_dye.write); m_dye.swap();
+        glActiveTexture(GL_TEXTURE0);
+    } else {
+        setTex(m_progSplat, "uTarget", m_dye.read.tex, 0);
+        glUniform3f(glGetUniformLocation(m_progSplat, "color"), r, g, b);
+        blit(m_dye.write); m_dye.swap();
+    }
 }
 
 // Inject an external texture into the dye field. Sized to the dye FBO so
@@ -639,6 +737,43 @@ void FluidSource::applyImageInject() {
                 m_image.flippedV ? 1.0f : 0.0f);
     blit(m_dye.write); m_dye.swap();
     // Leave texture unit 0 active so callers don't see a leaked unit 1 binding.
+    glActiveTexture(GL_TEXTURE0);
+}
+
+// ── Image "reform" mode helpers ─────────────────────────────────────────
+// Seed the coord field with the identity mapping (fills both ping-pong sides).
+void FluidSource::initCoordField() {
+    glDisable(GL_BLEND);
+    glUseProgram(m_progCoordInit);
+    blit(m_coord.write); m_coord.swap();
+    blit(m_coord.write); m_coord.swap();
+}
+
+// Carry the coord field along the velocity, relaxing it back toward identity.
+void FluidSource::advectCoord(float dt) {
+    if (dt > 0.016667f) dt = 0.016667f;
+    glDisable(GL_BLEND);
+    float texel[2] = { 1.0f / m_coord.w, 1.0f / m_coord.h };
+    glUseProgram(m_progCoordAdvect);
+    glUniform2fv(glGetUniformLocation(m_progCoordAdvect, "texelSize"), 1, texel);
+    setTex(m_progCoordAdvect, "uVelocity", m_velocity.read.tex, 0);
+    setTex(m_progCoordAdvect, "uCoord",    m_coord.read.tex,    1);
+    glUniform1f(glGetUniformLocation(m_progCoordAdvect, "dt"), dt);
+    glUniform1f(glGetUniformLocation(m_progCoordAdvect, "reform"), m_reformRate);
+    blit(m_coord.write); m_coord.swap();
+    glActiveTexture(GL_TEXTURE0);
+}
+
+// Write the image, sampled through the coord field, into the dye buffer so the
+// normal shading/bloom display path renders the (sharp, warped) picture.
+void FluidSource::resolveRemap() {
+    glDisable(GL_BLEND);
+    glUseProgram(m_progRemap);
+    setTex(m_progRemap, "uCoord", m_coord.read.tex,    0);
+    setTex(m_progRemap, "uImage", m_image.textureId,   1);
+    glUniform1f(glGetUniformLocation(m_progRemap, "uFlipY"),
+                m_image.flippedV ? 1.0f : 0.0f);
+    blit(m_dye.write); m_dye.swap();
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -813,6 +948,7 @@ void FluidSource::applyAudioBindings(float level, float bass, float mid,
         else if (name == "bloomThreshold")      { dst = &m_bloomThreshold;      lo = 0.0f;  hi = 1.5f;  }
         else if (name == "sunraysWeight")       { dst = &m_sunraysWeight;       lo = 0.0f;  hi = 2.0f;  }
         else if (name == "imageIntensity")      { dst = &m_imageIntensity;      lo = 0.0f;  hi = 1.0f;  }
+        else if (name == "reformRate")          { dst = &m_reformRate;          lo = 0.0f;  hi = 2.0f;  }
         if (dst) { if (mapped < lo) mapped = lo; if (mapped > hi) mapped = hi; *dst = mapped; }
     }
 }
@@ -935,23 +1071,41 @@ void FluidSource::update() {
     m_lastTime = now;
     if (dt <= 0.0f) dt = 0.016f;
 
+    // Reform mode replaces the dye with the remapped image every frame, so the
+    // per-splat dye write (and the inject) would be wasted work — skip them and
+    // let the velocity splats just push the coord field around.
+    bool reform = m_imageEnabled && m_imageReform && m_image.textureId != 0;
+    m_suppressDyeSplat = reform;
+
     autoSplats(dt);
     // Drain queued interactive pointer splats (mouse / vision hand). Done
     // here, inside the GL-state-saved region, with a cycling dye color.
     if (!m_pointerSplats.empty()) {
         for (const auto& p : m_pointerSplats) {
-            m_hue = std::fmod(m_hue + 0.0021f, 1.0f);
-            float r, g, b; hsv(m_hue, 1.0f, 1.0f, r, g, b);
+            float r = 1.0f, g = 1.0f, b = 1.0f;
+            if (!reform) {  // colour only matters when we actually paint dye
+                m_hue = std::fmod(m_hue + 0.0021f, 1.0f);
+                hsv(m_hue, 1.0f, 1.0f, r, g, b);
+            }
             float k = m_splatIntensity;
             splat(p.x, p.y, p.dx, p.dy, r * k, g * k, b * k);
         }
         m_pointerSplats.clear();
     }
-    // Optional image inject — adds the bound texture to the dye field
-    // before the sim step, so this frame's advect+dissipate already
-    // begins smearing it through the velocity field.
-    if (m_imageEnabled) applyImageInject();
+    // Optional image inject — over-composites the bound texture into the dye
+    // before the sim step. Skipped in reform mode (the remap supplies the
+    // image instead, sharp and un-blurred).
+    if (m_imageEnabled && !reform) applyImageInject();
     step(dt);
+    // Reform: advect the coordinate field and resolve the image through it,
+    // overwriting the dye with the warped-but-sharp picture for display.
+    if (reform) {
+        if (m_coordNeedsInit) { initCoordField(); m_coordNeedsInit = false; }
+        advectCoord(dt);
+        resolveRemap();
+    } else {
+        m_coordNeedsInit = true;   // re-seed identity next time reform turns on
+    }
     renderToOutput();
 
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -969,6 +1123,7 @@ FluidSource::~FluidSource() {
     destroyFBO(m_velocity.read);  destroyFBO(m_velocity.write);
     destroyFBO(m_dye.read);       destroyFBO(m_dye.write);
     destroyFBO(m_pressure.read);  destroyFBO(m_pressure.write);
+    destroyFBO(m_coord.read);     destroyFBO(m_coord.write);
     destroyFBO(m_divergence);     destroyFBO(m_curl);
     destroyFBO(m_output);
     destroyFBO(m_bloomTarget);

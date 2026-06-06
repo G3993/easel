@@ -36,6 +36,11 @@ public:
     std::vector<glm::vec2>& points() { return m_controlPoints; }
     const std::vector<glm::vec2>& points() const { return m_controlPoints; }
 
+    // Tessellation substeps per control cell for the smooth Catmull-Rom warp
+    // (higher = smoother diagonals between control points). 12 → a 4×4 grid
+    // renders as 36×36 smoothly-curved quads.
+    int m_renderSubsteps = 12;
+
 private:
     int m_cols = 4, m_rows = 4;
     std::vector<glm::vec2> m_controlPoints;

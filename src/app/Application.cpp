@@ -1810,7 +1810,11 @@ void Application::compositeZone(OutputZone& zone) {
     // buffer near ~4K on its long edge: 4K→1×, 1440/1080p→2×, smaller→4×.
     int kWarpSS = 4;
     int longEdge = std::max(zone.width, zone.height);
-    if (longEdge >= 3840)      kWarpSS = 1;
+    // Keep at least 2× even at 4K: a warped/keystoned diagonal still aliases
+    // hard at native 4K (the surface edge no longer falls on the pixel grid),
+    // and 2× → a 4-tap downsample is the difference between crisp and stair-
+    // stepped projector edges. 4K×2 = 33 MP, comfortable on M-series.
+    if (longEdge >= 3840)      kWarpSS = 2;
     else if (longEdge >= 1920) kWarpSS = 2;
     static Framebuffer s_warpSSFBO;
     const int ssW = zone.width  * kWarpSS;
@@ -12617,6 +12621,8 @@ void Application::saveProject(const std::string& path) {
                 // by the Fluid branch in the main loop.
                 fc["imageEnabled"]        = f->m_imageEnabled;
                 fc["imageIntensity"]      = f->m_imageIntensity;
+                fc["imageReform"]         = f->m_imageReform;
+                fc["reformRate"]          = f->m_reformRate;
                 fc["imageSourceLayerId"]  = f->imageSource().sourceLayerId;
                 layerJson["fluidConfig"] = fc;
 
@@ -13230,6 +13236,8 @@ void Application::loadProject(const std::string& path) {
                     // layer id by the Fluid branch in the main loop).
                     src->m_imageEnabled        = fc.value("imageEnabled",   src->m_imageEnabled);
                     src->m_imageIntensity      = fc.value("imageIntensity", src->m_imageIntensity);
+                    src->m_imageReform         = fc.value("imageReform",    src->m_imageReform);
+                    src->m_reformRate          = fc.value("reformRate",     src->m_reformRate);
                     src->imageSource().sourceLayerId =
                         fc.value("imageSourceLayerId",
                                  (uint32_t)src->imageSource().sourceLayerId);

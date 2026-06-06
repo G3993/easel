@@ -32,9 +32,11 @@ struct AudioBinding {
     AudioSignal signal = AudioSignal::None;
     float rangeMin = 0.0f;  // output min (maps to param min by default)
     float rangeMax = 1.0f;  // output max (maps to param max by default)
-    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.7 keeps new
-    // bindings gentle by default (was 0.55, still felt too fast/strobey).
-    float smoothing = 0.7f;
+    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.85 keeps new
+    // bindings calm by default (was 0.7, then 0.55 — both still felt too
+    // fast/strobey the moment audio is enabled). Users wanting punch drag it
+    // down; the common case is "make it smooth," so start there.
+    float smoothing = 0.85f;
     float smoothedValue = 0.0f; // internal follower state
     bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
     // MIDI fields (used when signal == MidiCC)
