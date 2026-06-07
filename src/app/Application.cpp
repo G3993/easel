@@ -3057,6 +3057,36 @@ void Application::renderUI() {
                     if (m_selectedLayer >= m_layerStack.count())
                         m_selectedLayer = m_layerStack.count() - 1;
                 }
+            } else if (msg.address == "/easel/layer/ensure/ndi"
+                       && msg.strings.size() >= 2) {
+                // Agent SDK managed-layer contract: idempotently ensure exactly
+                // one NDI layer for the stable slot key. strings = [slot, source].
+#ifdef HAS_NDI
+                ensureManagedNDILayer(msg.strings[0], msg.strings[1]);
+#else
+                std::cerr << "[OSC] /easel/layer/ensure/ndi ignored: "
+                             "built without HAS_NDI\n";
+#endif
+            } else if (msg.address == "/easel/layer/add/ndi"
+                       && !msg.strings.empty()) {
+                // strings = [source] (plain add) or [source, slot] (managed add,
+                // idempotent by slot — matches the SDK CLI `layer add-ndi`).
+#ifdef HAS_NDI
+                if (msg.strings.size() >= 2 && !msg.strings[1].empty())
+                    ensureManagedNDILayer(msg.strings[1], msg.strings[0]);
+                else
+                    addNDISource(msg.strings[0]);
+#else
+                std::cerr << "[OSC] /easel/layer/add/ndi ignored: "
+                             "built without HAS_NDI\n";
+#endif
+            } else if (msg.address == "/easel/layer/clear-managed") {
+                // Remove every agent-managed layer (non-empty managedKey).
+                clearManagedLayers();
+            } else if (msg.address == "/easel/project/save") {
+                // Persist to the default project path so the agent SDK can read
+                // the file back and confirm an applied route.
+                saveProject(defaultProjectPath());
             } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
                 int zi = msg.ints[0];
                 if (zi >= 0 && zi < (int)m_zones.size()) {
@@ -11997,7 +12027,77 @@ void Application::addNDISource(const std::string& senderName) {
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
 }
+
+void Application::ensureManagedNDILayer(const std::string& slot,
+                                        const std::string& senderName) {
+    if (slot.empty() || senderName.empty()) {
+        std::cerr << "[OSC] ensure/ndi ignored: empty slot or source\n";
+        return;
+    }
+    auto nameForSender = [](const std::string& s) {
+        size_t slash = s.find('/');
+        return std::string("NDI: ")
+             + (slash != std::string::npos ? s.substr(slash + 1) : s);
+    };
+
+    // Idempotent by slot: reuse an existing managed layer for this key.
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != slot) continue;
+        // Already pointed at this sender — nothing to do.
+        if (l->source && l->source->typeName() == "NDI"
+            && l->source->sourcePath() == senderName) {
+            return;
+        }
+        auto source = std::make_shared<NDISource>();
+        if (!source->connect(senderName)) {
+            std::cerr << "[OSC] ensure/ndi: failed to connect NDI source: "
+                      << senderName << std::endl;
+            return;  // leave the existing layer untouched on connect failure
+        }
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        l->source = source;          // releasing the old NDISource disconnects it
+        l->name = nameForSender(senderName);
+        return;
+    }
+
+    // No managed layer for this slot yet — create one, tagged with the key.
+    auto source = std::make_shared<NDISource>();
+    if (!source->connect(senderName)) {
+        std::cerr << "[OSC] ensure/ndi: failed to connect NDI source: "
+                  << senderName << std::endl;
+        return;
+    }
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->managedKey = slot;
+    layer->source = source;
+    layer->name = nameForSender(senderName);
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
 #endif
+
+void Application::clearManagedLayers() {
+    // Remove agent-managed layers (non-empty managedKey) from the top down so
+    // indices stay valid. Mirrors the manual /easel/layer/remove path (undo
+    // snapshot once, drop the timeline track, clamp the selection).
+    bool any = false;
+    for (int i = m_layerStack.count() - 1; i >= 0; i--) {
+        auto& l = m_layerStack[i];
+        if (!l || l->managedKey.empty()) continue;
+        if (!any) {
+            m_undoStack.pushState(m_layerStack, m_selectedLayer);
+            any = true;
+        }
+        uint32_t rid = l->id;
+        m_layerStack.removeLayer(i);
+        if (rid) m_timeline.removeTrackForLayer(rid);
+    }
+    if (any && m_selectedLayer >= m_layerStack.count())
+        m_selectedLayer = m_layerStack.count() - 1;
+}
 
 #ifdef HAS_WHEP
 void Application::addWHEPSource(const std::string& whepUrl) {
@@ -12708,6 +12808,7 @@ void Application::saveProject(const std::string& path) {
             layerJson["shaderHeight"] = layer->shaderHeight;
         }
         if (layer->groupId != 0) layerJson["groupId"] = layer->groupId;
+        if (!layer->managedKey.empty()) layerJson["managedKey"] = layer->managedKey;
 #ifdef HAS_NDI
         layerJson["ndiEnabled"] = layer->ndiEnabled;
 #endif
@@ -13268,6 +13369,7 @@ void Application::loadProject(const std::string& path) {
             auto layer = std::make_shared<Layer>();
             layer->id = layerJson.value("id", (uint32_t)0);
             layer->name = layerJson.value("name", "Layer");
+            layer->managedKey = layerJson.value("managedKey", std::string{});
             layer->visible = layerJson.value("visible", true);
             layer->opacity = layerJson.value("opacity", 1.0f);
             layer->blendMode = (BlendMode)layerJson.value("blendMode", 0);

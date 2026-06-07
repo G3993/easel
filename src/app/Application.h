@@ -399,12 +399,21 @@ private:
     WhisperSpeech m_whisperSpeech;
 #endif
 
+    // Remove all agent-managed layers (those with a non-empty Layer::managedKey).
+    // Backs /easel/layer/clear-managed; not NDI-specific so it links in builds
+    // compiled without HAS_NDI.
+    void clearManagedLayers();
+
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     void addNDISource(const std::string& senderName);
+    // Idempotent agent-driven NDI layer keyed by a stable "slot" (managedKey).
+    // Re-ensuring the same slot reuses the layer and only reconnects when the
+    // sender name changes, so /easel/layer/ensure/ndi never stacks duplicates.
+    void ensureManagedNDILayer(const std::string& slot, const std::string& senderName);
 
     // Wi-Fi / Ethernet NIC pin + cross-device reachability (see NdiNetworkConfig).
     NdiNetworkSettings m_ndiNetwork;             // persisted machine-wide selection

@@ -40,6 +40,10 @@ class Layer {
 public:
     uint32_t id = 0; // stable ID for zone visibility sets
     std::string name = "Layer";
+    // Non-empty when this layer is driven by the agent SDK over OSC
+    // (/easel/layer/ensure/ndi <slot>). The slot is the stable key that makes
+    // ensure idempotent; serialized into the project so it survives reload.
+    std::string managedKey;
     bool visible = true;
     // User-forced hide from the Layer panel eye toggle. Survives Timeline's
     // per-frame visibility reconciliation (which force-sets visible=true while
