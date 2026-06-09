@@ -1807,7 +1807,11 @@ void Application::compositeZone(OutputZone& zone) {
     // buffer near ~4K on its long edge: 4K→1×, 1440/1080p→2×, smaller→4×.
     int kWarpSS = 4;
     int longEdge = std::max(zone.width, zone.height);
-    if (longEdge >= 3840)      kWarpSS = 1;
+    // Keep at least 2× even at 4K: a warped/keystoned diagonal still aliases
+    // hard at native 4K (the surface edge no longer falls on the pixel grid),
+    // and 2× → a 4-tap downsample is the difference between crisp and stair-
+    // stepped projector edges. 4K×2 = 33 MP, comfortable on M-series.
+    if (longEdge >= 3840)      kWarpSS = 2;
     else if (longEdge >= 1920) kWarpSS = 2;
     static Framebuffer s_warpSSFBO;
     const int ssW = zone.width  * kWarpSS;
@@ -2902,6 +2906,17 @@ void Application::renderUI() {
 
     // Process MIDI events
     {
+        // Auto-connect the first available controller (throttled ~1s) so MIDI
+        // "just works" — no need to open it in the MIDI panel first. Skipped if
+        // the user explicitly chose "None".
+        static double s_midiScan = 0.0;
+        double nowT = glfwGetTime();
+        if (!m_midiManager.isOpen() && !m_midiUserDisconnected &&
+            nowT - s_midiScan > 1.0) {
+            s_midiScan = nowT;
+            auto devs = m_midiManager.listDevices();
+            if (!devs.empty()) m_midiManager.openDevice(0);
+        }
         auto events = m_midiManager.pollEvents();
         // Update normalized CC table for shader-parameter MIDI bindings
         for (const auto& ev : events) {
@@ -6728,6 +6743,49 @@ void Application::renderUI() {
                 ImGui::PopStyleColor(3);
             }
         }
+
+        // --- MIDI: device + status, right here in the Audio tab ----------
+        ImGui::Dummy(ImVec2(0, 6));
+        PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/false);
+        {
+            auto mdevs = m_midiManager.listDevices();
+            const char* mlabel = (m_midiManager.isOpen() &&
+                                  m_midiManager.deviceIndex() < (int)mdevs.size())
+                ? mdevs[m_midiManager.deviceIndex()].c_str() : "None";
+            ParamRow::Begin("DEVICE");
+            if (ImGui::BeginCombo("##AudioMIDIDevice", mlabel)) {
+                if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
+                    m_midiManager.closeDevice();
+                    m_midiUserDisconnected = true;
+                }
+                for (int i = 0; i < (int)mdevs.size(); i++) {
+                    bool sel = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
+                    if (ImGui::Selectable(mdevs[i].c_str(), sel)) {
+                        m_midiManager.openDevice(i);
+                        m_midiUserDisconnected = false;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (mdevs.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
+                ImGui::TextWrapped("No MIDI controller detected. Plug one in — it auto-connects.");
+                ImGui::PopStyleColor();
+            } else if (m_midiManager.isOpen()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.22f, 0.82f, 0.52f, 1.0f));
+                ImGui::Text("Connected");
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.85f));
+                int seen = (int)m_midiManager.seenCCs().size();
+                ImGui::Text("· %d control%s seen", seen, seen == 1 ? "" : "s");
+                ImGui::PopStyleColor();
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.7f));
+            ImGui::TextWrapped("To map a knob: open any parameter's bind menu, pick "
+                               "MIDI, then move the knob — it learns automatically.");
+            ImGui::PopStyleColor();
+        }
     }
     ImGui::End();
     }  // end Audio visibility guard
@@ -6757,11 +6815,13 @@ void Application::renderUI() {
                 // "None" option to disconnect
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                     m_midiManager.closeDevice();
+                    m_midiUserDisconnected = true;   // stop auto-reconnecting
                 }
                 for (int i = 0; i < (int)devices.size(); i++) {
                     bool selected = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
                     if (ImGui::Selectable(devices[i].c_str(), selected)) {
                         m_midiManager.openDevice(i);
+                        m_midiUserDisconnected = false;
                     }
                 }
                 ImGui::EndCombo();
@@ -13100,6 +13160,8 @@ void Application::saveProject(const std::string& path) {
                 // by the Fluid branch in the main loop.
                 fc["imageEnabled"]        = f->m_imageEnabled;
                 fc["imageIntensity"]      = f->m_imageIntensity;
+                fc["imageReform"]         = f->m_imageReform;
+                fc["reformRate"]          = f->m_reformRate;
                 fc["imageSourceLayerId"]  = f->imageSource().sourceLayerId;
                 layerJson["fluidConfig"] = fc;
 
@@ -13149,6 +13211,8 @@ void Application::saveProject(const std::string& path) {
                 fc["turbulence"] = f->m_turbulence;
                 fc["forceScale"] = f->m_forceScale;
                 fc["sphereShape"] = f->m_sphereShape;
+                fc["fillAmount"]  = f->m_fillAmount;
+                fc["particleCube"] = f->m_particleCube;
                 // VJ morph (Low/High look snapshots + drive config).
                 fc["vjMode"]         = f->m_vjMode;
                 fc["vjGrab"]         = f->m_vjGrab;
@@ -13726,6 +13790,8 @@ void Application::loadProject(const std::string& path) {
                     // layer id by the Fluid branch in the main loop).
                     src->m_imageEnabled        = fc.value("imageEnabled",   src->m_imageEnabled);
                     src->m_imageIntensity      = fc.value("imageIntensity", src->m_imageIntensity);
+                    src->m_imageReform         = fc.value("imageReform",    src->m_imageReform);
+                    src->m_reformRate          = fc.value("reformRate",     src->m_reformRate);
                     src->imageSource().sourceLayerId =
                         fc.value("imageSourceLayerId",
                                  (uint32_t)src->imageSource().sourceLayerId);
@@ -13788,6 +13854,8 @@ void Application::loadProject(const std::string& path) {
                     src->m_turbulence  = fc.value("turbulence",  src->m_turbulence);
                     src->m_forceScale  = fc.value("forceScale",  src->m_forceScale);
                     src->m_sphereShape = fc.value("sphereShape", src->m_sphereShape);
+                    src->m_fillAmount  = fc.value("fillAmount",  src->m_fillAmount);
+                    src->m_particleCube = fc.value("particleCube", src->m_particleCube);
                     src->m_vjMode           = fc.value("vjMode",         src->m_vjMode);
                     src->m_vjGrab           = fc.value("vjGrab",         src->m_vjGrab);
                     src->m_journeySignal    = fc.value("journeySignal",  src->m_journeySignal);

@@ -283,6 +283,10 @@ private:
     // (zeroed) bus — the panic off-switch that the old "feed zeros" decision
     // provided. The explicit per-param audio-binding system is independent.
     bool m_audioToShaders = true;
+    // Auto-connect the first MIDI controller so it "just works" without opening
+    // it in the MIDI panel. Set true once the user explicitly picks "None",
+    // so we stop forcing a reconnect.
+    bool m_midiUserDisconnected = false;
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;

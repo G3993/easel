@@ -32,10 +32,11 @@ struct AudioBinding {
     AudioSignal signal = AudioSignal::None;
     float rangeMin = 0.0f;  // output min (maps to param min by default)
     float rangeMax = 1.0f;  // output max (maps to param max by default)
-    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.55 is a
-    // deliberately gentler envelope than the legacy fixed attack-8 / release-3
-    // feel, which the user found too aggressive / strobey.
-    float smoothing = 0.55f;
+    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.85 keeps new
+    // bindings calm by default (was 0.7, then 0.55 — both still felt too
+    // fast/strobey the moment audio is enabled). Users wanting punch drag it
+    // down; the common case is "make it smooth," so start there.
+    float smoothing = 0.85f;
     float smoothedValue = 0.0f; // internal follower state
     bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
     // MIDI fields (used when signal == MidiCC)
@@ -52,8 +53,10 @@ struct AudioBinding {
         if (dt > 0.1f)    dt = 0.1f;
         if (!hasSmoothed) { smoothedValue = raw; hasSmoothed = true; }
 
-        constexpr float kAttackFast  = 28.0f, kAttackSlow  = 2.0f;
-        constexpr float kReleaseFast = 14.0f, kReleaseSlow = 0.9f;
+        // Fast ends roughly halved vs the original (28/14) so even a snappy
+        // binding glides rather than strobes — the "way too fast" fix.
+        constexpr float kAttackFast  = 14.0f, kAttackSlow  = 1.5f;
+        constexpr float kReleaseFast = 7.0f,  kReleaseSlow = 0.7f;
         float s = smoothing;
         if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
         float attackRate  = kAttackFast  + (kAttackSlow  - kAttackFast)  * s;

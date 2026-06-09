@@ -98,7 +98,11 @@ public:
     float m_sunraysWeight = 1.0f;        // SUNRAYS_WEIGHT
     // ── Image inject ──────────────────────────────────────────────────
     bool  m_imageEnabled   = false;      // gate (off until host binds a layer)
-    float m_imageIntensity = 0.10f;      // per-frame dye add strength (0..1)
+    float m_imageIntensity = 0.10f;      // per-frame dye "over" strength (0..1)
+    // Reform mode: advect a UV-coord field + remap the image through it so the
+    // picture distorts without blurring and melts back to the sharp original.
+    bool  m_imageReform    = false;      // off = paint/reveal; on = UV-remap
+    float m_reformRate     = 0.40f;      // 0 = stays distorted; higher = reforms
 
 private:
     struct FBO { GLuint fbo = 0, tex = 0; int w = 0, h = 0; };
@@ -127,6 +131,10 @@ private:
     GLuint m_progSplat = 0, m_progAdvect = 0, m_progDiverge = 0,
            m_progCurl = 0, m_progVort = 0, m_progPressure = 0,
            m_progGradSub = 0, m_progClear = 0;
+    GLuint m_progSplatImage = 0;  // dye splat coloured from the bound image
+    GLuint m_progCoordInit = 0, m_progCoordAdvect = 0, m_progRemap = 0; // reform
+    bool   m_suppressDyeSplat = false;  // runtime: skip dye writes in reform
+    bool   m_coordNeedsInit   = true;   // re-seed coord field on next reform
     // Post-processing programs (Pavel-exact bloom/sunrays/display chain).
     GLuint m_progBloomPrefilter = 0, m_progBloomBlur = 0, m_progBloomFinal = 0,
            m_progSunraysMask = 0, m_progSunrays = 0, m_progBlur = 0;
@@ -139,7 +147,7 @@ private:
 
     GLuint m_quadVAO = 0, m_quadVBO = 0;
 
-    DoubleFBO m_velocity, m_dye, m_pressure;
+    DoubleFBO m_velocity, m_dye, m_pressure, m_coord;
     FBO m_divergence, m_curl, m_output;
     // Bloom: destination at BLOOM_RESOLUTION + a downsample mip chain.
     FBO m_bloomTarget;
@@ -167,6 +175,9 @@ private:
     void applyBloom(const FBO& source);          // writes m_bloomTarget
     void applySunrays(const FBO& source);         // writes m_sunraysFbo
     void applyImageInject();                      // adds m_image into m_dye
+    void initCoordField();                        // seed coord field = identity
+    void advectCoord(float dt);                   // carry coords by velocity
+    void resolveRemap();                          // image through coords -> dye
     void blurFBO(FBO& target, FBO& temp, int iterations);
     void renderToOutput();
     void autoSplats(float dt);

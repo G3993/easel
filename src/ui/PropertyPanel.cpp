@@ -903,11 +903,51 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
         dimLabel("SOURCE", kRowLabel, false);
         int sigIdx = (int)ab.signal;
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames)))
+        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames))) {
             ab.signal = (AudioSignal)sigIdx;
+            // Pick MIDI -> connect a controller if needed and ARM LEARN, so the
+            // user can just move a knob and it binds (no extra clicks).
+            if (ab.signal == AudioSignal::MidiCC && midi) {
+                if (!midi->isOpen()) {
+                    auto devs = midi->listDevices();
+                    if (!devs.empty()) midi->openDevice(0);
+                }
+                midi->startLearn();
+            }
+        }
 
         if (ab.signal == AudioSignal::MidiCC) {
             ImGui::Dummy(ImVec2(0, 5));
+            // Dropdown of every control the connected MIDI device has actually
+            // sent — pick a knob/fader instead of typing its CC number.
+            if (midi) {
+                auto ccs = midi->seenCCs();
+                dimLabel("MIDI param", kRowLabel, false);
+                char preview[48];
+                if (ab.midiCC >= 0)
+                    snprintf(preview, sizeof(preview), "Ch%d  CC%d",
+                             ab.midiChannel + 1, ab.midiCC);
+                else
+                    snprintf(preview, sizeof(preview), "%s",
+                             ccs.empty() ? "(move a knob to detect)" : "Pick a control...");
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##midiparam", preview)) {
+                    if (ccs.empty())
+                        ImGui::TextDisabled("No MIDI received yet — move a knob,\nor use MIDI Learn below.");
+                    for (const auto& cc : ccs) {
+                        char lbl[48];
+                        float v = midi->getCCValue(cc.first, cc.second);
+                        snprintf(lbl, sizeof(lbl), "Ch%d  CC%d   (%.0f%%)",
+                                 cc.first + 1, cc.second, v < 0 ? 0.0f : v * 100.0f);
+                        bool sel = (ab.midiCC == cc.second && ab.midiChannel == cc.first);
+                        if (ImGui::Selectable(lbl, sel)) {
+                            ab.midiCC = cc.second; ab.midiChannel = cc.first;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::Dummy(ImVec2(0, 3));
+            }
             dimLabel("MIDI CC", kRowLabel, false);
             ImGui::SetNextItemWidth(70);
             ImGui::InputInt("##cc", &ab.midiCC, 1, 1);
@@ -1006,7 +1046,10 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     static std::unordered_map<uint32_t, bool>   sInit;
     static std::mt19937 rng{std::random_device{}()};
 
-    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.45f; sInit[stateKey] = true; }
+    // Start subtle: low intensity = shallow modulation depth + heavy smoothing
+    // (see the smoothing formula below). Audio reactivity should ease in calm,
+    // not snap on aggressive — users push the slider right when they want more.
+    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.22f; sInit[stateKey] = true; }
     float& intensity = sIntensity[stateKey];
 
     auto buildFromRecipe = [&]() {
@@ -1017,7 +1060,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             if (e.idx < 0 || e.idx >= (int)params.size()) continue;
             const PresetParam& pp = params[e.idx];
             float span = pp.hi - pp.lo; if (span <= 0.0f) continue;
-            float half   = span * (0.12f + 0.60f * intensity) * 0.5f; // subtle..intense
+            float half   = span * (0.08f + 0.42f * intensity) * 0.5f; // subtle..intense
             float center = pp.lo + e.center01 * span;
             float rmin = center - half, rmax = center + half;
             if (rmin < pp.lo) rmin = pp.lo;
@@ -1027,7 +1070,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             ab.signal    = e.sig;
             ab.rangeMin  = rmin;
             ab.rangeMax  = rmax;
-            ab.smoothing = 0.90f - 0.32f * intensity;   // syrupy..snappier
+            ab.smoothing = 0.96f - 0.24f * intensity;   // syrupy..less syrupy (never strobey)
             bindings[pp.name] = ab;
         }
         changed = true;
@@ -3234,6 +3277,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 fluidParam("imageIntensity", "Inject Strength",
                            &fsrc->m_imageIntensity, 0.0f, 1.0f, "%.2f");
 
+                // Reform mode — distort the image with the fluid via an
+                // advected UV field + remap, so it never blurs and melts back
+                // to the sharp original. (Pakata12 / Bruno Imbrizi technique.)
+                ImGui::Checkbox("Reform (melt back)", &fsrc->m_imageReform);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Push the picture's own fluid around — it\n"
+                                      "distorts but stays sharp, then flows back\n"
+                                      "to the original. Reform Speed sets how fast\n"
+                                      "it returns (0 = stays distorted).");
+                if (fsrc->m_imageReform)
+                    fluidParam("reformRate", "Reform Speed",
+                               &fsrc->m_reformRate, 0.0f, 2.0f, "%.2f");
+
                 // Inline create-and-bind shortcut — when no usable layer is
                 // available (or you just want a fresh one), these buttons
                 // trigger the same Add Image/Video/Shader flow Application
@@ -3347,6 +3403,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
 
             sectionBreak();
+            ImGui::TextDisabled("Particles");
+            pillSlider("Fluid Amount", &f3->m_fillAmount, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How much fluid fills the container — more = more\n"
+                                  "particles, fuller. Reseeds as you drag.\n"
+                                  "(For finer detail / max particle count, raise\n"
+                                  "Sim Detail in Quality below.)");
+            f3Param("sphereScale", "Blob Size", &f3->m_sphereScale, 0.05f, 1.5f, "%.2f");
+            ImGui::Checkbox("Cube particles", &f3->m_particleCube);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Render particles as cubes instead of round blobs.");
+
+            sectionBreak();
             ImGui::TextDisabled("Forces");
             f3Param("sphereShape", "Container", &f3->m_sphereShape, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered())
@@ -3428,15 +3497,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     undoNeeded = true;
             }
 
-            ImGui::ColorEdit3("Liquid",  f3->m_deepColor, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Glow",    f3->m_glowColor, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Rim",     f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
+            sectionBreak();
+            ImGui::TextDisabled("Colors");
+            ImGui::ColorEdit3("Liquid",    f3->m_deepColor,    ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Glow",      f3->m_glowColor,    ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("Rim",       f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,        ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom,     ImGuiColorEditFlags_NoInputs);
             f3Param("rim",        "Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
             f3Param("saturation", "Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
-            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,    ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom, ImGuiColorEditFlags_NoInputs);
             f3Param("bgAlpha",    "BG Opacity",  &f3->m_bgAlpha,    0.0f, 1.0f, "%.2f");
-            f3Param("sphereScale","Blob Size",   &f3->m_sphereScale,0.05f,1.5f, "%.2f");
 
             sectionBreak();
             ImGui::TextDisabled("Lighting");

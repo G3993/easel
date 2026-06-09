@@ -1,6 +1,19 @@
 #include "warp/MeshWarp.h"
 #include <imgui.h>
 #include <vector>
+#include <algorithm>
+#include <cmath>
+
+// Uniform Catmull-Rom — interpolates through p1,p2 with smooth tangents from
+// p0,p3. Used to tessellate the warp lattice into a smooth surface.
+static glm::vec2 catmull(const glm::vec2& p0, const glm::vec2& p1,
+                         const glm::vec2& p2, const glm::vec2& p3, float t) {
+    float t2 = t * t, t3 = t2 * t;
+    return 0.5f * ((2.0f * p1)
+                 + (-p0 + p2) * t
+                 + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2
+                 + (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+}
 
 bool MeshWarp::init(int cols, int rows) {
     if (!m_shader.loadFromFiles("shaders/meshwarp.vert", "shaders/passthrough.frag")) {
@@ -74,18 +87,58 @@ void MeshWarp::rebuildMesh() {
 }
 
 void MeshWarp::render(GLuint sourceTexture) {
-    // Update vertex positions from control points
+    // Smoothly tessellate the control lattice with Catmull-Rom interpolation:
+    // each control cell is split into S×S sub-quads whose positions follow a
+    // smooth spline through the control points, so the warped surface curves
+    // instead of faceting linearly at each cell boundary — straight and
+    // diagonal lines stay smooth, not jagged. A regular (unmoved) grid reduces
+    // exactly to the identity mapping, so flat output is unchanged.
+    const int S = std::max(1, m_renderSubsteps);
+    auto cp = [&](int c, int r) -> glm::vec2 {
+        c = std::min(std::max(c, 0), m_cols - 1);
+        r = std::min(std::max(r, 0), m_rows - 1);
+        return m_controlPoints[r * m_cols + c];
+    };
+    // Bicubic Catmull-Rom sample at continuous lattice coords
+    // (gx in [0,cols-1], gy in [0,rows-1]).
+    auto sample = [&](float gx, float gy) -> glm::vec2 {
+        int ix = (int)std::floor(gx); float fx = gx - (float)ix;
+        int iy = (int)std::floor(gy); float fy = gy - (float)iy;
+        glm::vec2 row[4];
+        for (int k = 0; k < 4; k++) {
+            int rr = iy - 1 + k;
+            row[k] = catmull(cp(ix - 1, rr), cp(ix, rr),
+                             cp(ix + 1, rr), cp(ix + 2, rr), fx);
+        }
+        return catmull(row[0], row[1], row[2], row[3], fy);
+    };
+
+    const int FX = (m_cols - 1) * S;   // fine quads across / down
+    const int FY = (m_rows - 1) * S;
+    const int stride = FX + 1;
     std::vector<Vertex> verts;
-    verts.reserve(m_cols * m_rows);
-    for (int r = 0; r < m_rows; r++) {
-        for (int c = 0; c < m_cols; c++) {
-            const auto& p = m_controlPoints[r * m_cols + c];
-            float u = (float)c / (m_cols - 1);
-            float v = (float)r / (m_rows - 1);
+    verts.reserve(stride * (FY + 1));
+    for (int j = 0; j <= FY; j++) {
+        float gy = (float)j / (float)S;
+        float v  = gy / (float)(m_rows - 1);
+        for (int i = 0; i <= FX; i++) {
+            float gx = (float)i / (float)S;
+            float u  = gx / (float)(m_cols - 1);
+            glm::vec2 p = sample(gx, gy);
             verts.push_back({p.x, p.y, u, v});
         }
     }
-    m_mesh.updateVertices(verts);
+    std::vector<unsigned int> indices;
+    indices.reserve(FX * FY * 6);
+    for (int j = 0; j < FY; j++) {
+        for (int i = 0; i < FX; i++) {
+            unsigned int tl = j * stride + i, tr = tl + 1;
+            unsigned int bl = (j + 1) * stride + i, br = bl + 1;
+            indices.push_back(tl); indices.push_back(tr); indices.push_back(br);
+            indices.push_back(tl); indices.push_back(br); indices.push_back(bl);
+        }
+    }
+    m_mesh.upload(verts, indices);
 
     m_shader.use();
     m_shader.setInt("uTexture", 0);
