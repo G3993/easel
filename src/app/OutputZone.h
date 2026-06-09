@@ -35,6 +35,9 @@ struct OutputZone {
     OutputDest outputDest = OutputDest::None;
     int outputMonitor = -1;         // for Fullscreen: which monitor index
     std::string ndiStreamName;      // for NDI: stream name (defaults to zone name)
+    // When true, the NDI sender broadcasts ndiStreamName verbatim (no "Easel - "
+    // prefix) so agent-driven composite feeds get a caller-chosen name.
+    bool rawNdiName = false;
 
 #ifdef HAS_NDI
     NDIOutput ndiOutput;            // per-zone NDI sender

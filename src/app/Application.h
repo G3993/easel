@@ -294,8 +294,13 @@ private:
     // Cmd+0 keyboard shortcuts (handled in renderUI before the Show panel).
     float m_showZoom = 1.0f;
 
-    // Editor fullscreen toggle (F11)
+    // App fullscreen toggle (F11) — borderless, editor UI STAYS visible.
     bool m_editorFullscreen = false;
+    // Presentation mode (Shift+F11) — draws the active zone's OUTPUT
+    // fullscreen with NO editor UI. Kept independent of m_editorFullscreen so
+    // "app fullscreen" (UI visible) and "present output" (UI hidden) are
+    // separate states. Esc steps out of present first, then out of fullscreen.
+    bool m_presentMode = false;
     // Set to true when Esc is pressed in fullscreen — actual exit runs
     // at the TOP of the next frame so AppKit has time to settle the
     // window-style transition without racing the GL/ImGui dock setup.
@@ -403,6 +408,22 @@ private:
     // Backs /easel/layer/clear-managed; not NDI-specific so it links in builds
     // compiled without HAS_NDI.
     void clearManagedLayers();
+    // Idempotent managed shader overlay layer keyed by slot (composited above a
+    // base source). Backs /easel/layer/ensure/shader.
+    void ensureManagedShaderLayer(const std::string& slot, const std::string& shaderPath);
+    // Remove one managed layer by its exact key (drops an overlay/base layer).
+    // Backs /easel/layer/remove-managed.
+    void removeManagedLayer(const std::string& slot);
+    // Set an ISF param on a managed shader layer (by key). Backs /easel/layer/param.
+    void setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg);
+    // Agent composite/bus: find-or-create an Easel output zone, publish it as a
+    // named NDI feed, and assign managed layers to it. Backs /easel/zone/ensure
+    // and /easel/zone/layer.
+    OutputZone* ensureZoneByName(const std::string& name);
+    void ensureZoneNdi(const std::string& zoneName, const std::string& feedName);
+    void addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey);
+    // Tear down a composite zone (stop its NDI feed). Backs /easel/zone/remove.
+    void removeZoneByName(const std::string& zoneName);
 
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;

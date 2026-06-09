@@ -577,10 +577,12 @@ void Application::run() {
             if (m_pendingExitFullscreen) {
                 m_pendingExitFullscreen = false;
                 if (m_editorFullscreen) {
-                    glfwSetWindowMonitor(m_window, nullptr,
-                                         m_savedWindowX, m_savedWindowY,
-                                         m_savedWindowW, m_savedWindowH, 0);
-                    m_editorFullscreen = false;
+                    m_presentMode = false;
+                    // Use the borderless toggle so geometry AND window
+                    // decorations are restored (it set GLFW_DECORATED=false
+                    // on the way in; a raw glfwSetWindowMonitor would leave
+                    // the windowed app borderless).
+                    toggleEditorFullscreen();
                 }
                 continue;
             }
@@ -604,6 +606,11 @@ void Application::run() {
 #endif
 
             if (escEdge && !ImGui::GetIO().WantTextInput) {
+                if (m_presentMode) {
+                    // First Esc out of presentation returns to fullscreen WITH UI.
+                    m_presentMode = false;
+                    continue;
+                }
                 if (m_editorFullscreen) {
                     // Defer one frame — actual exit runs at top of next loop.
                     m_pendingExitFullscreen = true;
@@ -638,42 +645,30 @@ void Application::run() {
             f12WasPressed = f12Now;
         }
 
-        // F11 = toggle editor fullscreen (borderless on current monitor)
+        // F11       = toggle APP fullscreen — borderless, editor UI stays visible.
+        // Shift+F11 = toggle presentation mode — active zone OUTPUT fills the
+        //             screen with NO editor UI (the old F11 behavior). Entering
+        //             present also goes fullscreen if it isn't already.
+        // Esc steps out of present first, then out of fullscreen. F11 routes
+        // through the borderless toggleEditorFullscreen() — same path as the
+        // on-screen "Fullscreen" button — which avoids the exclusive-fullscreen
+        // video-mode-set black flash/stall the old inline path caused.
         {
             static bool f11WasPressed = false;
             bool f11Now = glfwGetKey(m_window, GLFW_KEY_F11) == GLFW_PRESS;
             if (f11Now && !f11WasPressed) {
-                if (!m_editorFullscreen) {
-                    // Save windowed position/size
-                    glfwGetWindowPos(m_window, &m_savedWindowX, &m_savedWindowY);
-                    glfwGetWindowSize(m_window, &m_savedWindowW, &m_savedWindowH);
-
-                    // Find which monitor the window is on
-                    int monCount = 0;
-                    GLFWmonitor** monitors = glfwGetMonitors(&monCount);
-                    GLFWmonitor* best = glfwGetPrimaryMonitor();
-                    int wx, wy;
-                    glfwGetWindowPos(m_window, &wx, &wy);
-                    for (int mi = 0; mi < monCount; mi++) {
-                        int mx, my;
-                        glfwGetMonitorPos(monitors[mi], &mx, &my);
-                        const GLFWvidmode* mode = glfwGetVideoMode(monitors[mi]);
-                        if (wx >= mx && wx < mx + mode->width &&
-                            wy >= my && wy < my + mode->height) {
-                            best = monitors[mi];
-                            break;
-                        }
+                bool shift = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                             glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+                if (shift) {
+                    if (!m_presentMode) {
+                        if (!m_editorFullscreen) toggleEditorFullscreen();
+                        m_presentMode = true;
+                    } else {
+                        m_presentMode = false;  // back to fullscreen WITH UI
                     }
-                    const GLFWvidmode* mode = glfwGetVideoMode(best);
-                    glfwSetWindowMonitor(m_window, best, 0, 0,
-                                         mode->width, mode->height, mode->refreshRate);
-                    m_editorFullscreen = true;
                 } else {
-                    // Restore windowed mode
-                    glfwSetWindowMonitor(m_window, nullptr,
-                                         m_savedWindowX, m_savedWindowY,
-                                         m_savedWindowW, m_savedWindowH, 0);
-                    m_editorFullscreen = false;
+                    m_presentMode = false;       // plain fullscreen always shows UI
+                    toggleEditorFullscreen();
                 }
             }
             f11WasPressed = f11Now;
@@ -873,8 +868,10 @@ void Application::run() {
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        if (m_editorFullscreen) {
-            // Presentation mode: draw active zone output fullscreen, no UI
+        if (m_presentMode) {
+            // Presentation mode: draw active zone output fullscreen, no UI.
+            // (Plain app-fullscreen — m_editorFullscreen — falls through to the
+            // else branch below so the full editor UI renders across the screen.)
             auto& z = activeZone();
             GLuint outTex = z.warpFBO.textureId();
             if (outTex) {
@@ -2234,7 +2231,9 @@ void Application::presentOutputs() {
 #ifdef HAS_NDI
         if (zone.outputDest == OutputDest::NDI) {
             if (!zone.ndiOutput.isActive()) {
-                std::string name = "Easel - " + (zone.ndiStreamName.empty() ? zone.name : zone.ndiStreamName);
+                std::string name = (zone.rawNdiName && !zone.ndiStreamName.empty())
+                    ? zone.ndiStreamName
+                    : ("Easel - " + (zone.ndiStreamName.empty() ? zone.name : zone.ndiStreamName));
                 zone.ndiOutput.create(name);
             }
             if (zone.ndiOutput.isActive()) {
@@ -3087,6 +3086,34 @@ void Application::renderUI() {
                 // Persist to the default project path so the agent SDK can read
                 // the file back and confirm an applied route.
                 saveProject(defaultProjectPath());
+            } else if (msg.address == "/easel/layer/ensure/shader"
+                       && msg.strings.size() >= 2) {
+                // Managed shader overlay layer, keyed by slot. strings = [slot, path].
+                ensureManagedShaderLayer(msg.strings[0], msg.strings[1]);
+            } else if (msg.address == "/easel/layer/remove-managed"
+                       && !msg.strings.empty()) {
+                // Remove one managed layer by its key (drops an overlay/base).
+                removeManagedLayer(msg.strings[0]);
+            } else if (msg.address == "/easel/layer/param"
+                       && msg.strings.size() >= 2) {
+                // Set an ISF param on a managed shader layer by key.
+                // strings = [managedKey, paramName]; value = float/int arg, or
+                // strings[2] for text.
+                setManagedLayerParam(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/zone/ensure"
+                       && msg.strings.size() >= 2) {
+                // Composite/bus: ensure an output zone that publishes a named NDI
+                // feed. strings = [zoneName, feedName].
+                ensureZoneNdi(msg.strings[0], msg.strings[1]);
+            } else if (msg.address == "/easel/zone/layer"
+                       && msg.strings.size() >= 2) {
+                // Add a managed layer (by key) to a zone's composite.
+                // strings = [zoneName, managedKey].
+                addZoneLayerByKey(msg.strings[0], msg.strings[1]);
+            } else if (msg.address == "/easel/zone/remove"
+                       && !msg.strings.empty()) {
+                // Tear down a composite zone (stops its NDI feed).
+                removeZoneByName(msg.strings[0]);
             } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
                 int zi = msg.ints[0];
                 if (zi >= 0 && zi < (int)m_zones.size()) {
@@ -11714,6 +11741,7 @@ void Application::toggleEditorFullscreen() {
         macSetFullscreenPresentation(false); // restore menu bar + Dock
 #endif
         m_editorFullscreen = false;
+        m_presentMode = false;  // present mode only exists while fullscreen
     }
 }
 
@@ -12097,6 +12125,169 @@ void Application::clearManagedLayers() {
     }
     if (any && m_selectedLayer >= m_layerStack.count())
         m_selectedLayer = m_layerStack.count() - 1;
+}
+
+void Application::ensureManagedShaderLayer(const std::string& slot,
+                                           const std::string& shaderPath) {
+    if (slot.empty() || shaderPath.empty()) {
+        std::cerr << "[OSC] ensure/shader ignored: empty slot or path\n";
+        return;
+    }
+    auto basename = [](const std::string& p) {
+        size_t s = p.find_last_of("/\\");
+        return s != std::string::npos ? p.substr(s + 1) : p;
+    };
+    // Voice-native binding: a text shader (ISF 'msg' text input) gets the live
+    // last-words bound so transcript text shows on-shader (mirrors loadShader).
+    auto bindIfText = [this](const std::shared_ptr<Layer>& layer) {
+        if (!layer->source || !layer->source->isShader()) return;
+        auto* sh = static_cast<ShaderSource*>(layer->source.get());
+        for (const auto& inp : sh->inputs()) {
+            if (inp.type == "text" && inp.name == "msg") {
+                m_dataBus.bind(layer->id, "msg", "cue.latest");
+                break;
+            }
+        }
+    };
+
+    // Idempotent by slot: reuse an existing managed layer for this key.
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != slot) continue;
+        if (l->source && l->source->isShader() && l->source->sourcePath() == shaderPath) {
+            return;  // already the right shader
+        }
+        auto src = std::make_shared<ShaderSource>();
+        if (!src->loadFromFile(shaderPath)) {
+            std::cerr << "[OSC] ensure/shader: failed to load shader: " << shaderPath << std::endl;
+            return;
+        }
+        m_shaderPresets.apply(basename(shaderPath), *src);
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        l->source = src;
+        l->name = basename(shaderPath);
+        if (m_shaderClaw.isConnected()) m_shaderClaw.watchSource(shaderPath, src);
+        bindIfText(l);
+        return;
+    }
+
+    // No managed layer for this slot yet — create one on top, tagged with the key.
+    auto src = std::make_shared<ShaderSource>();
+    if (!src->loadFromFile(shaderPath)) {
+        std::cerr << "[OSC] ensure/shader: failed to load shader: " << shaderPath << std::endl;
+        return;
+    }
+    m_shaderPresets.apply(basename(shaderPath), *src);
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->managedKey = slot;
+    layer->source = src;
+    layer->name = basename(shaderPath);
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+    if (m_shaderClaw.isConnected()) m_shaderClaw.watchSource(shaderPath, src);
+    bindIfText(layer);
+}
+
+void Application::removeManagedLayer(const std::string& slot) {
+    if (slot.empty()) return;
+    for (int i = m_layerStack.count() - 1; i >= 0; i--) {
+        auto& l = m_layerStack[i];
+        if (!l || l->managedKey != slot) continue;
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        uint32_t rid = l->id;
+        m_layerStack.removeLayer(i);
+        if (rid) m_timeline.removeTrackForLayer(rid);
+        if (m_selectedLayer >= m_layerStack.count())
+            m_selectedLayer = m_layerStack.count() - 1;
+        return;
+    }
+}
+
+void Application::setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg) {
+    if (key.empty() || name.empty()) return;
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key) continue;
+        if (!l->source || !l->source->isShader()) {
+            std::cerr << "[OSC] layer/param: " << key << " is not a shader layer\n";
+            return;
+        }
+        auto* shader = static_cast<ShaderSource*>(l->source.get());
+        // float -> setFloat (covers float + long/enum, which Easel stores as
+        // float); text -> setText; int -> setBool. Mirrors the index-based path.
+        if (!msg.floats.empty())          shader->setFloat(name, msg.floats[0]);
+        else if (msg.strings.size() >= 3) shader->setText(name, msg.strings[2]);
+        else if (!msg.ints.empty())       shader->setBool(name, msg.ints[0] != 0);
+        return;
+    }
+    std::cerr << "[OSC] layer/param: no managed layer with key " << key << std::endl;
+}
+
+OutputZone* Application::ensureZoneByName(const std::string& name) {
+    for (auto& z : m_zones) {
+        if (z && z->name == name) return z.get();
+    }
+    auto zone = std::make_unique<OutputZone>();
+    zone->name = name;
+    zone->init();
+    OutputZone* ptr = zone.get();
+    m_zones.push_back(std::move(zone));
+    return ptr;
+}
+
+void Application::ensureZoneNdi(const std::string& zoneName, const std::string& feedName) {
+    if (zoneName.empty() || feedName.empty()) {
+        std::cerr << "[OSC] zone/ensure ignored: empty zone or feed\n";
+        return;
+    }
+    OutputZone* z = ensureZoneByName(zoneName);
+    // A feed name is "MACHINE (sender)"; NDI re-adds the machine prefix, so the
+    // local sender must be just the inner part to broadcast the exact feed name.
+    std::string sender = feedName;
+    size_t op = feedName.rfind('(');
+    if (op != std::string::npos) {
+        size_t cp = feedName.find(')', op);
+        if (cp != std::string::npos && cp > op + 1)
+            sender = feedName.substr(op + 1, cp - op - 1);
+    }
+    z->ndiStreamName = sender;
+    z->rawNdiName = true;
+    z->outputDest = OutputDest::NDI;
+}
+
+void Application::addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey) {
+    if (zoneName.empty() || managedKey.empty()) return;
+    OutputZone* z = ensureZoneByName(zoneName);
+    for (auto& l : m_layerStack.layers()) {
+        if (l && l->managedKey == managedKey) {
+            z->showAllLayers = false;
+            z->visibleLayerIds.insert(l->id);
+            return;
+        }
+    }
+    std::cerr << "[OSC] zone/layer: no managed layer with key " << managedKey << std::endl;
+}
+
+void Application::removeZoneByName(const std::string& zoneName) {
+    if (zoneName.empty()) return;
+    for (size_t i = 0; i < m_zones.size(); i++) {
+        if (!m_zones[i] || m_zones[i]->name != zoneName) continue;
+#ifdef HAS_NDI
+        if (m_zones[i]->ndiOutput.isActive()) m_zones[i]->ndiOutput.destroy();
+#endif
+        if (m_zones.size() > 1) {
+            m_zones.erase(m_zones.begin() + i);
+            if (m_activeZone >= (int)m_zones.size()) m_activeZone = (int)m_zones.size() - 1;
+            if (m_activeZone < 0) m_activeZone = 0;
+        } else {
+            // Keep at least one zone; just stop its output.
+            m_zones[i]->outputDest = OutputDest::None;
+            m_zones[i]->visibleLayerIds.clear();
+            m_zones[i]->showAllLayers = true;
+        }
+        return;
+    }
 }
 
 #ifdef HAS_WHEP
