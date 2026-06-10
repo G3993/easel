@@ -372,11 +372,19 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
 // zones are easy to tell apart at a glance. Avoids cyan (project-wide ban)
 // but uses a distinct rainbow set for clarity.
 static ImU32 zoneColor(int idx) {
-    // Currently monochrome — single near-white tint for every zone.
-    // Re-introduce distinct hues here later when an accent palette is
-    // chosen.
-    (void)idx;
-    return IM_COL32(235, 238, 244, 230);
+    // Distinct accent per zone so the visibility dots read as a zone map at
+    // a glance (restored 2026-06-10: the monochrome dots stopped reading as
+    // an indicator at all). Hues match the vibrancy brief above; no cyan
+    // (project-wide ban).
+    static const ImU32 kPalette[] = {
+        IM_COL32(255, 179,  71, 235),  // amber
+        IM_COL32(167, 139, 250, 235),  // violet
+        IM_COL32( 74, 222, 128, 235),  // green
+        IM_COL32(251, 113, 133, 235),  // rose
+        IM_COL32(250, 204,  21, 235),  // yellow
+        IM_COL32(148, 163, 184, 235),  // slate
+    };
+    return kPalette[idx % (int)(sizeof(kPalette) / sizeof(kPalette[0]))];
 }
 
 void LayerPanel::render(LayerStack& stack, int& selectedLayer,
@@ -728,32 +736,28 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImGui::PopID();
         }
 
-        // Zone visibility dots — right-aligned stack sitting ABOVE the
-        // opacity % so both land in the same right cluster.
+        // Zone visibility dots. Two layouts:
+        //  - wide panel: right-aligned horizontal cluster sitting ABOVE the
+        //    opacity % (the original placement);
+        //  - narrow panel (the collapsed thumbnail rail): a vertical stack
+        //    hugging the thumbnail's right edge, so the zone map stays
+        //    first-class even when the cards collapse to bare previews.
         if (zoneCount > 0) {
-            float rowCenterY = rowY + rowHeight * 0.5f;
-            // Upper row of the right cluster — mirrors the name baseline,
-            // a few pixels above the TYPE caption / opacity % line.
-            float dotCy = rowCenterY - 7.0f;
-            // Right-aligned: start from rightInnerEdge and walk LEFTWARD.
-            const float kInsetX      = 0.0f;
-            float rightInnerEdge = listStart.x + panelWidth - kInsetX - LP::kCardPadX;
-            float dotX = rightInnerEdge - kZoneDotR;
-            for (int zi = (int)zones->size() - 1; zi >= 0; zi--) {
+            const bool narrow = panelWidth < 170.0f;
+            // One dot: draw + click-to-toggle, shared by both layouts.
+            auto zoneDot = [&](int zi, ImVec2 center, float r) {
                 auto& z = *(*zones)[zi];
                 bool inZone = z.showAllLayers || z.visibleLayerIds.count(layer->id);
-
-                ImVec2 center(dotX, dotCy);
                 ImU32 col = zoneColor(zi);
                 ImU32 dimCol = IM_COL32((col & 0xFF) / 3, ((col >> 8) & 0xFF) / 3,
                                         ((col >> 16) & 0xFF) / 3, 110);
 
-                if (inZone) draw->AddCircleFilled(center, kZoneDotR, col);
-                else        draw->AddCircle     (center, kZoneDotR, dimCol, 0, 1.2f);
+                if (inZone) draw->AddCircleFilled(center, r, col);
+                else        draw->AddCircle     (center, r, dimCol, 0, 1.2f);
 
                 if (!m_dragActive && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && windowHovered) {
                     float dx = mousePos.x - center.x, dy = mousePos.y - center.y;
-                    if (dx*dx + dy*dy < (kZoneDotR + 4) * (kZoneDotR + 4)) {
+                    if (dx*dx + dy*dy < (r + 4) * (r + 4)) {
                         if (z.showAllLayers) {
                             z.showAllLayers = false;
                             for (int li = 0; li < stack.count(); li++) {
@@ -766,8 +770,44 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                         }
                     }
                 }
+            };
 
-                dotX -= kZoneGap;
+            {
+                // On-thumbnail badge stack — ALWAYS drawn, because in the
+                // docked layout only a thin strip of this panel can be
+                // exposed beside the canvas (the canvas window overlaps the
+                // rest), so any placement to the right of the thumbnail can
+                // be covered. A vertical stack hugging the thumb's left
+                // edge, each dot on a dark backing disc for readability
+                // over bright previews. Gap shrinks if many zones would
+                // overflow the thumb.
+                const float r = kZoneDotR - 0.5f;
+                float gap = 11.0f;
+                if (zoneCount > 1 && (zoneCount - 1) * gap > LP::kThumbW - 10.0f)
+                    gap = (LP::kThumbW - 10.0f) / (float)(zoneCount - 1);
+                float cx = listStart.x + LP::kCardPadX + 7.0f;
+                float totalH = (zoneCount - 1) * gap;
+                float cy = rowY + rowHeight * 0.5f - totalH * 0.5f;
+                for (int zi = 0; zi < (int)zones->size(); zi++) {
+                    draw->AddCircleFilled(ImVec2(cx, cy), r + 2.0f,
+                                          IM_COL32(8, 10, 16, 170));
+                    zoneDot(zi, ImVec2(cx, cy), r);
+                    cy += gap;
+                }
+            }
+            if (!narrow) {
+                float rowCenterY = rowY + rowHeight * 0.5f;
+                // Upper row of the right cluster — mirrors the name baseline,
+                // a few pixels above the TYPE caption / opacity % line.
+                float dotCy = rowCenterY - 7.0f;
+                // Right-aligned: start from rightInnerEdge and walk LEFTWARD.
+                const float kInsetX      = 0.0f;
+                float rightInnerEdge = listStart.x + panelWidth - kInsetX - LP::kCardPadX;
+                float dotX = rightInnerEdge - kZoneDotR;
+                for (int zi = (int)zones->size() - 1; zi >= 0; zi--) {
+                    zoneDot(zi, ImVec2(dotX, dotCy), kZoneDotR);
+                    dotX -= kZoneGap;
+                }
             }
         }
     }
@@ -930,6 +970,35 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                 m_renameJustStarted = true;
                 m_renameIndex = ci;
                 strncpy(m_renameBuf, stack[ci]->name.c_str(), sizeof(m_renameBuf) - 1);
+            }
+            // Per-zone visibility — checkbox per zone for THIS layer. The
+            // popup draws above the dock layout, so this works even when
+            // the panel is collapsed/occluded down to the thumbnail rail.
+            if (zones && zones->size() > 1) {
+                ImGui::Separator();
+                if (ImGui::BeginMenu("Visible in Zones")) {
+                    auto& L = stack[ci];
+                    for (int zi = 0; zi < (int)zones->size(); zi++) {
+                        auto& z = *(*zones)[zi];
+                        bool inZone = z.showAllLayers ||
+                                      z.visibleLayerIds.count(L->id);
+                        if (ImGui::MenuItem(z.name.c_str(), nullptr, inZone)) {
+                            if (z.showAllLayers) {
+                                // Freeze the implicit "all layers" set, then
+                                // toggle this one off.
+                                z.showAllLayers = false;
+                                for (int li = 0; li < stack.count(); li++)
+                                    z.visibleLayerIds.insert(stack[li]->id);
+                                z.visibleLayerIds.erase(L->id);
+                            } else if (inZone) {
+                                z.visibleLayerIds.erase(L->id);
+                            } else {
+                                z.visibleLayerIds.insert(L->id);
+                            }
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Move to Top", nullptr, false, ci < layerCount - 1)) {

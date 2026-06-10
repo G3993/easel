@@ -1,148 +1,43 @@
 {
   "layers": [
     {
-      "audioBindings": [
-        {
-          "param": "forceScale",
-          "rangeMax": 2.2572922706604004,
-          "rangeMin": 0.7362920045852661,
-          "signal": 7,
-          "smoothing": 0.7559999823570251
-        },
-        {
-          "param": "gravity",
-          "rangeMax": 2.7561519145965576,
-          "rangeMin": 1.1961517333984375,
-          "signal": 3,
-          "smoothing": 0.7559999823570251
-        },
-        {
-          "param": "rim",
-          "rangeMax": 0.290691077709198,
-          "rangeMin": 0.680691123008728,
-          "signal": 7,
-          "smoothing": 0.7559999823570251
-        },
-        {
-          "param": "saturation",
-          "rangeMax": 1.7140752077102661,
-          "rangeMin": 0.9340752363204956,
-          "signal": 8,
-          "smoothing": 0.7559999823570251
-        },
-        {
-          "param": "zoom",
-          "rangeMax": 3.622903347015381,
-          "rangeMin": 2.2579030990600586,
-          "signal": 8,
-          "smoothing": 0.7559999823570251
-        }
-      ],
       "audioReactive": false,
       "audioStrength": 0.15000000596046448,
       "blendMode": 0,
       "feather": 0.0,
       "flipH": false,
       "flipV": false,
-      "fluid3dConfig": {
-        "ambient": 0.10000000149011612,
-        "audioIntensity": 0.0,
-        "autoRotate": true,
-        "bgAlpha": 1.0,
-        "bgBottom": [
-          0.019999999552965164,
-          0.029999999329447746,
-          0.05999999865889549
-        ],
-        "bgTop": [
-          0.11999999731779099,
-          0.1599999964237213,
-          0.2800000011920929
-        ],
-        "brightness": 2.5,
-        "deepColor": [
-          0.2199999988079071,
-          0.3490000069141388,
-          1.0
-        ],
-        "forceScale": 0.7362920045852661,
-        "glowColor": [
-          0.41999998688697815,
-          0.3019999861717224,
-          0.9959999918937683
-        ],
-        "gravity": 1.1961517333984375,
-        "imageEnabled": true,
-        "imageMix": 1.0,
-        "imageSourceLayerId": 2,
-        "journeyGain": 1.5,
-        "journeyPosManual": 0.0,
-        "journeySignal": 0,
-        "lightDir": [
-          0.8199999928474426,
-          1.0,
-          0.7020000219345093
-        ],
-        "lightIntensity": 1.0,
-        "lookLow": [
-          0.2199999988079071,
-          0.3490000069141388,
-          1.0,
-          0.41999998688697815,
-          0.3019999861717224,
-          0.9959999918937683,
-          0.6000000238418579,
-          0.8500000238418579,
-          1.0,
-          0.11999999731779099,
-          0.1599999964237213,
-          0.2800000011920929,
-          0.019999999552965164,
-          0.029999999329447746,
-          0.05999999865889549,
-          2.5,
-          1.0,
-          0.10000000149011612,
-          1.0,
-          0.680691123008728,
-          0.9340752363204956,
-          1.0,
-          1.0,
-          2.2579030990600586,
-          1.1961517333984375,
-          0.0,
-          0.0,
-          0.7362920045852661,
-          0.20000000298023224,
-          -0.5
-        ],
-        "renderScale": 1.0,
-        "rim": 0.680691123008728,
-        "rotateSpeed": 0.20000000298023224,
-        "saturation": 0.9340752363204956,
-        "shallowColor": [
-          0.6000000238418579,
-          0.8500000238418579,
-          1.0
-        ],
-        "simRes": 64,
-        "specular": 1.0,
-        "sphereScale": 1.0,
-        "sphereShape": 0.0,
-        "substeps": 1,
-        "tilt": -0.5,
-        "turbulence": 0.0,
-        "vjGrab": false,
-        "vjMode": 0,
-        "vortex": 0.0,
-        "zoom": 2.2579030990600586
+      "fluidConfig": {
+        "autoMovement": true,
+        "autoPattern": 0,
+        "autoRate": 24.0,
+        "autoScale": 0.30000001192092896,
+        "autoSpeed": 1.0,
+        "bloom": true,
+        "bloomIntensity": 0.800000011920929,
+        "bloomSoftKnee": 0.699999988079071,
+        "bloomThreshold": 0.6000000238418579,
+        "curl": 30.0,
+        "densityDissipation": 1.0,
+        "hdrDye": true,
+        "imageEnabled": false,
+        "imageIntensity": 0.10000000149011612,
+        "imageSourceLayerId": 0,
+        "pressure": 0.800000011920929,
+        "pressureIters": 20,
+        "shading": true,
+        "splatIntensity": 0.15000000596046448,
+        "splatRadius": 0.25,
+        "sunrays": true,
+        "sunraysWeight": 1.0,
+        "velocityDissipation": 0.20000000298023224
       },
-      "id": 1,
+      "id": 47,
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
-      "name": "3D Fluid",
-      "ndiEnabled": true,
+      "name": "Fluid Simulation",
+      "ndiEnabled": false,
       "opacity": 1.0,
       "position": [
         0.0,
@@ -153,8 +48,40 @@
         1.0,
         1.0
       ],
-      "sourcePath": "__fluid3d__",
-      "sourceType": "Fluid3D",
+      "sourcePath": "__fluid__",
+      "sourceType": "Fluid",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "transitionDuration": 0.5,
+      "transitionType": 0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 55,
+      "managedKey": "screen1",
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "NDI: DAISYHQ (Easel)",
+      "ndiEnabled": false,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "sourcePath": "DAISYHQ (Easel)",
+      "sourceType": "NDI",
       "tileX": 1.0,
       "tileY": 1.0,
       "transitionDuration": 0.5,
@@ -294,17 +221,17 @@
   ],
   "ndiNetwork": {
     "discoveryServer": "",
-    "enabled": false,
+    "enabled": true,
     "extraIps": "",
-    "interface": "",
-    "interfaceIp": "",
+    "interface": "{DAD89322-084D-47C8-9E3C-17AAE36062E1}",
+    "interfaceIp": "192.168.0.143",
     "useDiscoveryServer": false
   },
   "timeline": {
     "duration": 60.0,
     "lanes": [],
     "loop": false,
-    "nextClipId": 78,
+    "nextClipId": 149,
     "nextLaneId": 1,
     "nextSectionId": 1,
     "nextTransitionId": 1,
@@ -315,13 +242,25 @@
         "clips": [
           {
             "duration": 60.0,
-            "id": 74,
-            "name": "3D Fluid",
+            "id": 133,
+            "name": "Fluid Simulation",
             "startTime": 0.0
           }
         ],
-        "layerId": 1,
-        "name": "3D Fluid"
+        "layerId": 47,
+        "name": "Fluid Simulation"
+      },
+      {
+        "clips": [
+          {
+            "duration": 60.0,
+            "id": 148,
+            "name": "NDI: DAISYHQ (Easel)",
+            "startTime": 0.0
+          }
+        ],
+        "layerId": 55,
+        "name": "NDI: DAISYHQ (Easel)"
       }
     ],
     "transitions": [],
@@ -335,8 +274,8 @@
       "mappingIndex": 0,
       "name": "Main",
       "ndiStreamName": "",
-      "outputDest": 0,
-      "outputMonitor": -1,
+      "outputDest": 1,
+      "outputMonitor": 1,
       "showAllLayers": true,
       "visibleLayerIds": [],
       "width": 3840

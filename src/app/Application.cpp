@@ -1674,10 +1674,22 @@ void Application::compositeAndWarp() {
 }
 
 void Application::compositeZone(OutputZone& zone) {
-    // Filter layers by zone visibility
+    // Filter layers by zone visibility.
+    // "Show all" covers HUMAN-added layers only: agent-managed feed layers
+    // (managedKey set — e.g. the FluxRT layer inside a published bus zone)
+    // are plumbing, and join a zone only via explicit visibleLayerIds
+    // membership. Without this, every managed FluxRT layer leaked into
+    // show-all zones — including the composition that feeds Flux itself
+    // (the 2026-06-10 Flux⇄Easel feedback loop).
     std::vector<std::shared_ptr<Layer>> layers;
     if (zone.showAllLayers) {
-        layers = m_layerStack.layers();
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& L = m_layerStack[i];
+            if (!L) continue;
+            if (L->managedKey.empty() || zone.visibleLayerIds.count(L->id)) {
+                layers.push_back(L);
+            }
+        }
     } else {
         for (int i = 0; i < m_layerStack.count(); i++) {
             if (zone.visibleLayerIds.count(m_layerStack[i]->id)) {
@@ -2234,11 +2246,18 @@ void Application::presentOutputs() {
 
 #ifdef HAS_NDI
         if (zone.outputDest == OutputDest::NDI) {
+            std::string wantName = (zone.rawNdiName && !zone.ndiStreamName.empty())
+                ? zone.ndiStreamName
+                : ("Easel - " + (zone.ndiStreamName.empty() ? zone.name : zone.ndiStreamName));
+            // Recreate on rename — ensureZoneNdi (agent OSC) can flip
+            // rawNdiName/ndiStreamName on a zone whose sender is already
+            // live; without this the new name never reaches the wire.
+            if (zone.ndiOutput.isActive() && zone.ndiActiveName != wantName) {
+                zone.ndiOutput.destroy();
+            }
             if (!zone.ndiOutput.isActive()) {
-                std::string name = (zone.rawNdiName && !zone.ndiStreamName.empty())
-                    ? zone.ndiStreamName
-                    : ("Easel - " + (zone.ndiStreamName.empty() ? zone.name : zone.ndiStreamName));
-                zone.ndiOutput.create(name);
+                zone.ndiOutput.create(wantName);
+                zone.ndiActiveName = wantName;
             }
             if (zone.ndiOutput.isActive()) {
                 renderReadbackFBO(zone);
@@ -2392,9 +2411,16 @@ void Application::presentOutputs() {
     }
 
 #ifdef HAS_NDI
-    // Legacy global NDI output (composition toggle in NDI panel)
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive()) {
-        m_ndiOutput.send(active.readbackFBO.textureId(), active.width, active.height);
+    // Legacy global NDI output (composition toggle in NDI panel).
+    // PINNED to zone 0 ("Main"), never the UI-selected zone: this sender is
+    // the Flux input feed ("Lu"), and its content must not follow editor
+    // tab clicks — selecting a zone that contains a FluxRT layer used to
+    // feed Flux its own output (2026-06-10 feedback loop). Main is the
+    // launch-sequence zone: default shader content only.
+    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty()) {
+        OutputZone& luZone = *m_zones[0];
+        renderReadbackFBO(luZone);
+        m_ndiOutput.send(luZone.readbackFBO.textureId(), luZone.width, luZone.height);
     }
 #endif
 #ifdef HAS_SPOUT
@@ -7056,6 +7082,44 @@ void Application::renderUI() {
                 dl->AddLine(a, b, IM_COL32(255, 80, 80, 230), 2.5f);
             }
 
+            // Zone-visibility badges — one color-coded dot per zone, stacked
+            // down the thumb's left edge on dark backing discs. Filled =
+            // layer renders in that zone; dim ring = hidden there. The
+            // right-click menu below is the editor for the same state.
+            auto railZoneColor = [](int idx) {
+                static const ImU32 pal[] = {
+                    IM_COL32(255, 179,  71, 235),  // amber
+                    IM_COL32(167, 139, 250, 235),  // violet
+                    IM_COL32( 74, 222, 128, 235),  // green
+                    IM_COL32(251, 113, 133, 235),  // rose
+                    IM_COL32(250, 204,  21, 235),  // yellow
+                    IM_COL32(148, 163, 184, 235),  // slate
+                };
+                return pal[idx % (int)(sizeof(pal) / sizeof(pal[0]))];
+            };
+            if (m_zones.size() > 1) {
+                int zc = (int)m_zones.size();
+                float gap = 12.0f;
+                if ((zc - 1) * gap > sz.y - 12.0f)
+                    gap = (sz.y - 12.0f) / (float)(zc - 1);
+                float cy = cur.y + sz.y * 0.5f - (zc - 1) * gap * 0.5f;
+                float cx = cur.x + 8.0f;
+                for (int zi = 0; zi < zc; zi++) {
+                    auto& z = *m_zones[zi];
+                    bool inZone = z.showAllLayers ||
+                                  z.visibleLayerIds.count(layer->id);
+                    ImU32 col = railZoneColor(zi);
+                    ImU32 dim = IM_COL32((col & 0xFF) / 3,
+                                         ((col >> 8) & 0xFF) / 3,
+                                         ((col >> 16) & 0xFF) / 3, 150);
+                    dl->AddCircleFilled(ImVec2(cx, cy), 5.0f,
+                                        IM_COL32(8, 10, 16, 180));
+                    if (inZone) dl->AddCircleFilled(ImVec2(cx, cy), 3.2f, col);
+                    else        dl->AddCircle(ImVec2(cx, cy), 3.2f, dim, 0, 1.3f);
+                    cy += gap;
+                }
+            }
+
             // Hit area. Use the per-item activation event + ImGui's own
             // click-count tracker — both anchored to this specific item, so
             // the drag-drop source we attach after it can't interfere with
@@ -7081,6 +7145,36 @@ void Application::renderUI() {
                     std::cerr << "[LayerThumb] single-click select layer "
                               << i << std::endl;
                 }
+            }
+
+            // Right-click: per-zone visibility menu for THIS thumbnail.
+            // (PushID above scopes the popup id per layer.)
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                ImGui::OpenPopup("RailZoneMenu");
+            if (ImGui::BeginPopup("RailZoneMenu")) {
+                ImGui::TextDisabled("%s", layer->name.c_str());
+                ImGui::Separator();
+                ImGui::TextDisabled("Visible in:");
+                for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+                    auto& z = *m_zones[zi];
+                    bool inZone = z.showAllLayers ||
+                                  z.visibleLayerIds.count(layer->id);
+                    if (ImGui::MenuItem(z.name.c_str(), nullptr, inZone)) {
+                        if (z.showAllLayers) {
+                            // Freeze the implicit all-layers set, then
+                            // toggle this one off.
+                            z.showAllLayers = false;
+                            for (int li = 0; li < m_layerStack.count(); li++)
+                                z.visibleLayerIds.insert(m_layerStack[li]->id);
+                            z.visibleLayerIds.erase(layer->id);
+                        } else if (inZone) {
+                            z.visibleLayerIds.erase(layer->id);
+                        } else {
+                            z.visibleLayerIds.insert(layer->id);
+                        }
+                    }
+                }
+                ImGui::EndPopup();
             }
 
             // Drag source — picking up a thumbnail to reorder.
@@ -13013,6 +13107,7 @@ void Application::saveProject(const std::string& path) {
         zj["outputDest"] = (int)z.outputDest;
         zj["outputMonitor"] = z.outputMonitor;
         zj["ndiStreamName"] = z.ndiStreamName;
+        zj["rawNdiName"] = z.rawNdiName;
 
         zonesJson.push_back(zj);
     }
@@ -13560,6 +13655,7 @@ void Application::loadProject(const std::string& path) {
             z->outputDest = (OutputDest)zj.value("outputDest", 0);
             z->outputMonitor = zj.value("outputMonitor", -1);
             z->ndiStreamName = zj.value("ndiStreamName", std::string(""));
+            z->rawNdiName = zj.value("rawNdiName", false);
 
             m_zones.push_back(std::move(z));
         }

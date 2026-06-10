@@ -38,6 +38,10 @@ struct OutputZone {
     // When true, the NDI sender broadcasts ndiStreamName verbatim (no "Easel - "
     // prefix) so agent-driven composite feeds get a caller-chosen name.
     bool rawNdiName = false;
+    // Name the live NDI sender was created with — compared each frame so a
+    // rename (e.g. agent ensureZoneNdi on an already-live zone) recreates
+    // the sender instead of silently keeping the old wire name.
+    std::string ndiActiveName;
 
 #ifdef HAS_NDI
     NDIOutput ndiOutput;            // per-zone NDI sender
