@@ -11900,6 +11900,14 @@ void Application::toggleEditorFullscreen() {
 }
 
 void Application::registerLayerWithZones(uint32_t layerId) {
+    // Agent-managed feed layers (non-empty managedKey) are plumbing: they join
+    // a zone only via explicit placement (addZoneLayerByKey / the bus-daisy
+    // composite path), never this new-layer auto-insert. Without this, every
+    // managed FluxRT layer leaked into curated zones — including the
+    // composition that feeds Flux itself (the 2026-06-10 feedback loop).
+    for (const auto& l : m_layerStack.layers()) {
+        if (l && l->id == layerId && !l->managedKey.empty()) return;
+    }
     for (auto& z : m_zones) {
         if (!z->showAllLayers) {
             z->visibleLayerIds.insert(layerId);
