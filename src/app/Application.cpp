@@ -3183,6 +3183,35 @@ void Application::renderUI() {
             } else if (msg.address == "/easel/audio/toshaders" && !msg.ints.empty()) {
                 // Global Audio -> Shaders switch (the panic off-switch).
                 m_audioToShaders = (msg.ints[0] != 0);
+#ifdef HAS_FFMPEG
+            } else if (msg.address == "/easel/record/start") {
+                // /easel/record/start [<path>] — headless recording, same code
+                // path as the transport REC button. Optional string overrides
+                // the timestamped recordings/ filename. Idempotent while active.
+                if (!m_recorder.isActive()) {
+                    startRecording(msg.strings.empty() ? std::string{} : msg.strings[0]);
+                }
+            } else if (msg.address == "/easel/record/stop") {
+                if (m_recorder.isActive()) {
+                    m_recorder.stop();
+                    m_timelineExporting = false;
+                }
+            } else if (msg.address == "/easel/rtmp/start" && !msg.strings.empty()) {
+                // /easel/rtmp/start <streamKeyOrUrl> — a bare YouTube stream key
+                // uses the default ingest (start); a full rtmp(s):// URL streams
+                // to a custom ingest (startCustom). Idempotent while active.
+                if (!m_rtmpOutput.isActive()) {
+                    auto& z = activeZone();
+                    const std::string& dest = msg.strings[0];
+                    bool isUrl = dest.rfind("rtmp://", 0) == 0 || dest.rfind("rtmps://", 0) == 0;
+                    bool ok = isUrl
+                        ? m_rtmpOutput.startCustom(dest, z.warpFBO.width(), z.warpFBO.height(), 16, 9, 30)
+                        : m_rtmpOutput.start(dest, z.warpFBO.width(), z.warpFBO.height(), 16, 9, 30);
+                    if (!ok) std::cerr << "[RTMP] OSC stream start failed\n";
+                }
+            } else if (msg.address == "/easel/rtmp/stop") {
+                if (m_rtmpOutput.isActive()) m_rtmpOutput.stop();
+#endif
             } else if (msg.address == "/easel/output/mode" && !msg.ints.empty()) {
                 // /easel/output/mode <0=Independent | 1=Spanned>
                 m_outputMode = (msg.ints[0] != 0) ? OutputMode::Spanned
@@ -7534,20 +7563,24 @@ static int recorderFpsHint(float targetFPS) {
 // .mp4. Records continuously until the user clicks stop — does NOT move the playhead,
 // force playback, or bind to the timeline Work Area. Frame timing is wall-clock VFR,
 // so the file captures whatever rate the app renders at, at correct playback speed.
-void Application::startRecording() {
+void Application::startRecording(const std::string& overridePath) {
 #ifdef HAS_FFMPEG
     if (m_recorder.isActive()) return;
 
-    auto now = std::chrono::system_clock::now();
-    auto t   = std::chrono::system_clock::to_time_t(now);
-    struct tm tm_buf;
+    std::string fname = overridePath;
+    if (fname.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto t   = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_buf;
 #ifdef _WIN32
-    localtime_s(&tm_buf, &t);
+        localtime_s(&tm_buf, &t);
 #else
-    localtime_r(&t, &tm_buf);
+        localtime_r(&t, &tm_buf);
 #endif
-    char fname[160];
-    strftime(fname, sizeof(fname), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
+        char buf[160];
+        strftime(buf, sizeof(buf), "recordings/%Y%m%d_%H%M%S.mp4", &tm_buf);
+        fname = buf;
+    }
 
     auto& zone = activeZone();
     m_recorder.setAudioDevice(m_selectedAudioDevice);
@@ -12638,6 +12671,29 @@ std::string Application::buildPlayJson() {
     // can mirror what voice-native shaders are rendering on the desktop
     // canvas. Additive on the wire — older mobile decoders ignore it.
     play["cueLatest"] = m_dataBus.get("cue.latest");
+
+    // Recording / RTMP status for the /easel/record + /easel/rtmp OSC
+    // surface. Stable fields only (no uptime/dropped-frame counters): they
+    // change continuously and would defeat the 300ms byte-compare dirty
+    // check, turning the publish stream into a constant re-send.
+    {
+        json record;
+#ifdef HAS_FFMPEG
+        record["active"] = m_recorder.isActive();
+        record["path"]   = m_recorder.isActive() ? m_recorder.filePath() : "";
+#else
+        record["active"] = false;
+        record["path"]   = "";
+#endif
+        play["record"] = record;
+        json rtmp;
+#ifdef HAS_FFMPEG
+        rtmp["active"] = m_rtmpOutput.isActive();
+#else
+        rtmp["active"] = false;
+#endif
+        play["rtmp"] = rtmp;
+    }
 
     // Helper: extract the file basename from a shader path so the wire
     // payload stays portable across machines (no /Users/lu/... prefixes).

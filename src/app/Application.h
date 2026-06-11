@@ -496,7 +496,9 @@ private:
     bool   m_timelineExporting = false;   // retained (always false) for legacy UI checks
     double m_timelineExportEnd = 0.0;
     std::string m_timelineExportPath;
-    void   startRecording();
+    // overridePath: empty = timestamped recordings/ default (UI button path);
+    // non-empty = explicit output file (the /easel/record/start OSC trigger).
+    void   startRecording(const std::string& overridePath = "");
 
     // Timeline panel visibility. Toggled via the T key or the transport-bar
     // show/hide button. Defaults to visible so the panel is discoverable.
