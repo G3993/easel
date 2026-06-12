@@ -333,8 +333,11 @@ private:
     double m_splashStartTime = 0.0;
     void   renderSplash();
 
-    // Landing page shown after splash dismisses
+    // Landing page shown after splash dismisses — skipped when the default
+    // project auto-loaded at startup (live/agent workflow restores the show
+    // across restarts; the landing page must not cover it).
     bool m_showLanding = false;
+    bool m_autoLoadedProject = false;
     int  m_landingSubView = 0; // 0=main 1=templates 2=recent
     std::vector<std::string> m_recentProjects;
     void renderLandingPage();

@@ -523,9 +523,18 @@ bool Application::init() {
         }
     }
 
-    // Project is loaded by the user via landing page — skip auto-load on startup.
+    // Auto-load the default project when it exists. The landing page still
+    // covers the blank-start case, but skipping auto-load entirely was a
+    // DATA-LOSS trap for the live/agent workflow: a restart came up blank
+    // and the 30s crash-recovery auto-save then overwrote default.easel
+    // with the blank state, destroying the show project (2026-06-12).
     {
-        if (false) {
+        std::string defaultPath = defaultProjectPath();
+        if (std::filesystem::exists(defaultPath)) {
+            loadProject(defaultPath);
+            m_autoLoadedProject = true;
+            std::cout << "[Easel] Auto-loaded default project" << std::endl;
+        } else {
             std::cout << "[Easel] Starting blank (landing page active)" << std::endl;
         }
     }
@@ -15280,10 +15289,12 @@ void Application::renderSplash() {
     if (m_splashStartTime == 0.0) m_splashStartTime = now;
     double elapsed = now - m_splashStartTime;
 
-    // Auto-dismiss at 1.6s → reveal landing page (instant cut, no fade)
+    // Auto-dismiss at 1.6s → reveal landing page (instant cut, no fade).
+    // Skipped when the default project auto-loaded — the show is already
+    // on canvas and the landing page must not cover it.
     if (elapsed > 1.6) {
         m_showSplash  = false;
-        m_showLanding = true;
+        m_showLanding = !m_autoLoadedProject;
         return;
     }
 
