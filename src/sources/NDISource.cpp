@@ -126,8 +126,22 @@ void NDISource::disconnect() {
     m_height = 0;
 }
 
-void NDISource::update() {
+void NDISource::suspend() {
     if (!m_recv) return;
+    m_resumeName = m_senderName; // disconnect() clears m_senderName
+    disconnect();
+    m_suspended = true;
+}
+
+void NDISource::update() {
+    if (!m_recv) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (m_suspended && !m_resumeName.empty()) {
+            m_suspended = false; // one attempt — sender may be gone
+            connect(m_resumeName);
+        }
+        return;
+    }
 
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return;

@@ -39,7 +39,12 @@ struct WGCCapture::Impl {
     // D3D11
     ComPtr<ID3D11Device>        device;
     ComPtr<ID3D11DeviceContext>  context;
-    ComPtr<ID3D11Texture2D>     stagingTex;
+    // Double-buffered staging: the GPU copy lands in one while the CPU maps
+    // the OTHER (last frame's copy, long since completed), so Map never
+    // blocks the render thread on the GPU. One frame of added latency.
+    ComPtr<ID3D11Texture2D>     stagingTex[2];
+    bool stagingPrimed[2] = {false, false};
+    int stagingWrite = 0;
     int stagingW = 0, stagingH = 0;
 
     // WinRT device wrapper
@@ -51,8 +56,11 @@ struct WGCCapture::Impl {
     ComPtr<ABI_Cap::IGraphicsCaptureSession>        session;
 
     bool ensureStaging(int w, int h) {
-        if (stagingTex && stagingW == w && stagingH == h) return true;
-        stagingTex.Reset();
+        if (stagingTex[0] && stagingTex[1] && stagingW == w && stagingH == h) return true;
+        stagingTex[0].Reset();
+        stagingTex[1].Reset();
+        stagingPrimed[0] = stagingPrimed[1] = false;
+        stagingWrite = 0;
 
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = w;
@@ -64,8 +72,10 @@ struct WGCCapture::Impl {
         desc.Usage = D3D11_USAGE_STAGING;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 
-        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &stagingTex);
-        if (FAILED(hr)) return false;
+        for (int i = 0; i < 2; i++) {
+            HRESULT hr = device->CreateTexture2D(&desc, nullptr, &stagingTex[i]);
+            if (FAILED(hr)) return false;
+        }
         stagingW = w;
         stagingH = h;
         return true;
@@ -353,7 +363,11 @@ bool WGCCapture::update() {
         return false;
     }
 
-    // Copy content region to staging
+    // Copy content region into THIS frame's staging buffer, then map LAST
+    // frame's buffer — its copy completed long ago, so Map returns without
+    // stalling. (The old single-buffer path did an explicit Flush() followed
+    // by a blocking Map(READ): a full GPU sync on the render thread, every
+    // frame.) One frame of added latency.
     D3D11_BOX srcBox;
     srcBox.left = 0;
     srcBox.top = 0;
@@ -361,14 +375,25 @@ bool WGCCapture::update() {
     srcBox.bottom = copyH;
     srcBox.front = 0;
     srcBox.back = 1;
+    const int writeIdx = m_impl->stagingWrite;
     m_impl->context->CopySubresourceRegion(
-        m_impl->stagingTex.Get(), 0, 0, 0, 0,
+        m_impl->stagingTex[writeIdx].Get(), 0, 0, 0, 0,
         frameTex.Get(), 0, &srcBox);
-    m_impl->context->Flush();
+    m_impl->stagingPrimed[writeIdx] = true;
 
-    // Map staging texture and read pixels
+    int readIdx = 1 - writeIdx;
+    m_impl->stagingWrite = readIdx; // next frame writes the one we read now
+    if (!m_impl->stagingPrimed[readIdx]) {
+        // First frame after (re)start, or a resize (ensureStaging recreates
+        // both buffers every frame while a window is being dragged-resized):
+        // read the just-written copy synchronously instead of producing
+        // nothing, so capture doesn't freeze for the whole resize gesture.
+        readIdx = writeIdx;
+        m_impl->context->Flush();
+    }
+
     D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = m_impl->context->Map(m_impl->stagingTex.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    hr = m_impl->context->Map(m_impl->stagingTex[readIdx].Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
         wgcLog("[WGC] Map failed: 0x" + ([&]{ std::ostringstream s; s << std::hex << hr; return s.str(); })());
         return false;
@@ -381,20 +406,21 @@ bool WGCCapture::update() {
         m_pixels.resize(m_width * m_height * 4);
     }
 
-    // Copy pixels: BGRA top-down -> RGBA bottom-up (OpenGL-ready)
+    // Copy pixels: BGRA top-down -> RGBA bottom-up (OpenGL-ready), word-wise
     int dstStride = m_width * 4;
     for (int y = 0; y < m_height; y++) {
-        const uint8_t* srcRow = (const uint8_t*)mapped.pData + y * mapped.RowPitch;
-        uint8_t* dstRow = m_pixels.data() + (m_height - 1 - y) * dstStride;
+        const uint32_t* srcRow = (const uint32_t*)((const uint8_t*)mapped.pData + (size_t)y * mapped.RowPitch);
+        uint32_t* dstRow = (uint32_t*)(m_pixels.data() + (size_t)(m_height - 1 - y) * dstStride);
         for (int x = 0; x < m_width; x++) {
-            dstRow[x * 4 + 0] = srcRow[x * 4 + 2]; // R = B
-            dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G = G
-            dstRow[x * 4 + 2] = srcRow[x * 4 + 0]; // B = R
-            dstRow[x * 4 + 3] = 255;                // A
+            uint32_t px = srcRow[x]; // BGRA in memory = 0xAARRGGBB little-endian
+            dstRow[x] = (px & 0x0000FF00u) |          // G stays
+                        ((px & 0x00FF0000u) >> 16) |  // R -> low byte
+                        ((px & 0x000000FFu) << 16) |  // B -> third byte
+                        0xFF000000u;                  // force opaque alpha
         }
     }
 
-    m_impl->context->Unmap(m_impl->stagingTex.Get(), 0);
+    m_impl->context->Unmap(m_impl->stagingTex[readIdx].Get(), 0);
 
     // Debug: check if pixels are non-zero
     if (frameCount < 5) {

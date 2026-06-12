@@ -47,6 +47,15 @@ private:
     Mesh m_mesh;
     ShaderProgram m_shader;
 
+    // Tessellation cache: the inputs that produced the GPU mesh currently in
+    // m_mesh. render() re-tessellates (and re-uploads) only when these change
+    // — it used to rebuild the whole fine mesh and destroy/recreate the
+    // VAO/VBO/EBO every frame it rendered. Control points are compared by
+    // value because points() hands out a mutable reference (drag UI edits
+    // the vector directly).
+    std::vector<glm::vec2> m_meshedPoints;
+    int m_meshedCols = 0, m_meshedRows = 0, m_meshedSubsteps = 0;
+
     void rebuildMesh();
     glm::vec2 defaultPoint(int col, int row) const;
 };

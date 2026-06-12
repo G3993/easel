@@ -81,10 +81,20 @@ private:
     // between-row transitions run in the same frame.
     Framebuffer m_betweenRowFBO;
 
-    // Lazy-loaded ISF transition shaders, keyed by their file path. Kept alive
-    // across frames so the shader isn't recompiled every time a transition
-    // window is active. Populated on first render that references the path.
+    // Lazy-loaded ISF transition shaders, keyed by their file path. Kept
+    // alive ACROSS transition windows (LRU-capped) so a timeline that fires
+    // the same transition every few minutes doesn't pay a driver compile —
+    // a visible hitch — at every window. Evicted least-recently-used.
     std::map<std::string, std::shared_ptr<ShaderSource>> m_isfTransitions;
+    std::map<std::string, uint64_t> m_isfTransitionUsed; // frame stamps for LRU
+
+    // Frame counter + last-use stamps for the scratch FBO sets so a set whose
+    // feature went unused for a while is released instead of staying resident
+    // (at supersampled resolution) until the zone is deleted.
+    // Groups: 0=effect 1=mask 2=shadow(+loRes) 3=glTransition 4=betweenRow
+    uint64_t m_frame = 0;
+    uint64_t m_scratchUsed[5] = {0, 0, 0, 0, 0};
+    void releaseIdleScratch();
 
     float m_lastTime = 0;
 

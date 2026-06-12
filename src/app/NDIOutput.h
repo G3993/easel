@@ -13,10 +13,10 @@
 // every NDIOutput instance (global + per-zone) shares one config.
 struct NDIOutputSettings {
     enum class Format {
-        UYVY,   // 4:2:2, 16 bpp, NO alpha — default; ~half the wire data of BGRA
-        BGRA,   // 32 bpp incl. alpha — legacy/fallback for alpha-sensitive paths
+        UYVY,   // 4:2:2, 16 bpp, NO alpha — NOT YET IMPLEMENTED (send() falls back to BGRA)
+        BGRA,   // 32 bpp incl. alpha
     };
-    Format format    = Format::UYVY;
+    Format format    = Format::BGRA;
     float  targetFps = 30.0f;   // <= 0 = uncapped (paced only by the render loop)
     int    width     = 0;       // 0 = native source width  (else scale to this)
     int    height    = 0;       // 0 = native source height (else scale to this)

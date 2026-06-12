@@ -8,6 +8,9 @@ void Framebuffer::destroy() {
     if (m_texture) glDeleteTextures(1, &m_texture);
     if (m_depth) glDeleteRenderbuffers(1, &m_depth);
     m_fbo = m_texture = m_depth = 0;
+    // Reset dimensions so size checks after an explicit destroy() see "not
+    // allocated" and recreate instead of rendering into a dead FBO.
+    m_width = m_height = 0;
 }
 
 bool Framebuffer::create(int width, int height, bool withDepth) {

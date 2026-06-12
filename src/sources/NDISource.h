@@ -34,6 +34,10 @@ public:
     void disconnect();
     bool isConnected() const { return m_recv != nullptr; }
 
+    // Tear down the receiver while keeping the sender name; update()
+    // lazily reconnects on the next live frame.
+    void suspend() override;
+
     void update() override;
     GLuint textureId() const override { return m_texture.id(); }
     int width() const override { return m_width; }
@@ -45,6 +49,9 @@ public:
 private:
     NDIlib_recv_instance_t m_recv = nullptr;
     std::string m_senderName;
+    // suspend()/lazy-resume bookkeeping (disconnect() clears m_senderName)
+    bool m_suspended = false;
+    std::string m_resumeName;
     Texture m_texture;
     int m_width = 0;
     int m_height = 0;

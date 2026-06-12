@@ -124,10 +124,23 @@ void WindowCaptureSource::stop() {
     cleanupGDI();
 }
 
+void WindowCaptureSource::suspend() {
+    if (!m_active) return;
+    stop(); // keeps m_hwnd for the lazy resume
+    m_suspended = true;
+}
+
 // ─── Update ──────────────────────────────────────────────────────────
 
 void WindowCaptureSource::update() {
-    if (!m_active || !m_hwnd) return;
+    if (!m_active || !m_hwnd) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (m_suspended && m_hwnd) {
+            m_suspended = false; // one attempt — window may be gone
+            if (IsWindow(m_hwnd)) start(m_hwnd);
+        }
+        return;
+    }
 
     // Check if window still exists
     if (!IsWindow(m_hwnd)) {

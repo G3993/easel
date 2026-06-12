@@ -24,6 +24,7 @@
 #endif
 #include <unordered_map>
 #include <deque>
+#include <future>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -138,6 +139,9 @@ private:
     // Output zones (replaces singular compositor/warp/FBO)
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
+    // Monotonic composite-pass counter — drives idle release of per-zone
+    // scratch FBOs (OutputZone::releaseIdleScratch).
+    uint64_t m_compositeFrame = 0;
     int m_prevActiveZone = 0;
 
     // ── Multi-screen output mode ─────────────────────────────────────
@@ -220,8 +224,9 @@ private:
     Mesh m_quad;
     ShaderProgram m_passthroughShader;
     ShaderProgram m_edgeBlendShader;
-    Framebuffer m_edgeBlendFBO;
-    Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
+    // Scratch FBOs for the post chain (edge blend, mask union, bloom, warp
+    // supersample) live per-zone on OutputZone — sharing them across
+    // mixed-resolution zones caused a destroy/realloc cycle every frame.
     Texture m_testPattern;
     Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
 
@@ -243,9 +248,7 @@ private:
     ShaderProgram m_bloomCompositeShader;
     ShaderProgram m_linearCopyShader;     // bloom copy-back, no ACES
     ShaderProgram m_warpDownsampleShader; // 4-tap explicit-offset SS → 1× downsample
-    Framebuffer   m_bloomBrightFBO;       // half-res, 16F
-    Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
-    Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
+    // Bloom FBOs are per-zone (OutputZone::bloom*) — see scratch FBO note above.
     // Global post bloom OFF by default — it was glowing every layer/shader and
     // reading as a soft haze. Crisp output is the default; flip on (or raise
     // strength) only when a deliberately glowy finish is wanted.
@@ -434,6 +437,9 @@ private:
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
+    // Wire-rate cap applied to ALL NDI senders (global + per-zone) each
+    // frame; <= 0 = uncapped. Live-settable via OSC /easel/ndi/fps.
+    float m_ndiTargetFps = 30.0f;
     void addNDISource(const std::string& senderName);
     // Idempotent agent-driven NDI layer keyed by a stable "slot" (managedKey).
     // Re-ensuring the same slot reuses the layer and only reconnects when the
@@ -566,8 +572,12 @@ private:
     std::string buildPlayJson();
     void        publishPlayIfChanged();
 
-    // Screenshot
+    // Screenshot. The flip + PNG encode runs on a worker thread (one job at
+    // a time) so an externally-triggered capture doesn't freeze the frame.
     void captureScreenshot(const std::string& path);
     void captureWindow(const std::string& path);
+    void writeScreenshotAsync(const std::string& path,
+                              std::vector<uint8_t> pixels, int w, int h);
     void pollScreenshotTrigger();
+    std::future<void> m_screenshotJob;
 };

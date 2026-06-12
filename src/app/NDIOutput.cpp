@@ -72,6 +72,25 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     auto& rt = NDIRuntime::instance();
     if (rt.api()->send_get_no_connections(m_send, 0) == 0) return;
 
+    // Wall-clock fps throttle. Without it every NDI zone read back and
+    // shipped a full BGRA frame at render rate (~500 MB/s of GPU->CPU DMA
+    // per 1080p60 sender) regardless of m_settings.targetFps.
+    if (m_settings.targetFps > 0.0f) {
+        const auto now = std::chrono::steady_clock::now();
+        const std::chrono::duration<double> interval(1.0 / m_settings.targetFps);
+        if (m_haveLastSend) {
+            if (now - m_lastSend < interval) return;
+            // Advance by whole intervals (not to `now`) to keep the cadence
+            // even; resync if we fell more than one interval behind.
+            m_lastSend += std::chrono::duration_cast<
+                std::chrono::steady_clock::duration>(interval);
+            if (now - m_lastSend > interval) m_lastSend = now;
+        } else {
+            m_lastSend = now;
+            m_haveLastSend = true;
+        }
+    }
+
     size_t bytes = (size_t)w * h * 4;
 
     // (Re)allocate the staging buffer + both PBOs on size change / first use.
@@ -118,8 +137,10 @@ void NDIOutput::send(GLuint texture, int w, int h) {
             frame.xres = w;
             frame.yres = h;
             frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-            frame.frame_rate_N = 120000;
-            frame.frame_rate_D = 1001;
+            // Stamp the actual pacing (was hardcoded 119.88fps).
+            const float fps = m_settings.targetFps > 0.0f ? m_settings.targetFps : 60.0f;
+            frame.frame_rate_N = (int)(fps * 1000.0f);
+            frame.frame_rate_D = 1000;
             frame.picture_aspect_ratio = (float)w / (float)h;
             frame.frame_format_type = NDIlib_frame_format_type_progressive;
             frame.p_data = m_pixelBuffer[0].data();

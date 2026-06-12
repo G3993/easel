@@ -1133,7 +1133,9 @@ FluidSource::~FluidSource() {
     GLuint progs[] = { m_progSplat, m_progAdvect, m_progDiverge, m_progCurl,
                        m_progVort, m_progPressure, m_progGradSub, m_progClear,
                        m_progBloomPrefilter, m_progBloomBlur, m_progBloomFinal,
-                       m_progSunraysMask, m_progSunrays, m_progBlur };
+                       m_progSunraysMask, m_progSunrays, m_progBlur,
+                       m_progSplatImage, m_progInject, m_progCoordInit,
+                       m_progCoordAdvect, m_progRemap };
     for (GLuint p : progs) if (p) glDeleteProgram(p);
     for (GLuint p : m_displayPrograms) if (p) glDeleteProgram(p);
 }

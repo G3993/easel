@@ -851,6 +851,13 @@ void Application::run() {
             // The REC button records the live output until the user clicks stop.
         }
 
+        // Park heavy sources (video decode threads, capture devices, NDI
+        // receivers) that are reachable only from undo/redo snapshots —
+        // without this a replaced/deleted layer's source stayed fully live
+        // until 50 newer undo pushes rolled it off. Sources self-revive in
+        // their update() if a restore puts them back in the live stack.
+        m_undoStack.suspendOrphanedSources(m_layerStack);
+
         compositeAndWarp();
         presentOutputs();
 
@@ -1616,11 +1623,12 @@ void Application::updateSources() {
 }
 
 void Application::compositeAndWarp() {
+    m_compositeFrame++;
 #ifdef HAS_OPENCV
     // During scanning, display the scan pattern instead of the normal composite
     if (m_scanner.isScanning()) {
         GLuint patternTex = m_scanner.currentPatternTexture();
-        if (patternTex) {
+        if (patternTex && activeZone().ensureGpu()) {
             activeZone().warpFBO.bind();
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
@@ -1662,18 +1670,47 @@ void Application::compositeAndWarp() {
         }
     }
 
-    // Composite each zone independently
-    for (auto& zonePtr : m_zones) {
-        compositeZone(*zonePtr);
+    // Composite each zone that actually has a consumer this frame. A zone
+    // with no output routing whose texture isn't shown anywhere still burned
+    // a full supersampled composite + warp pass per frame (and zones are
+    // created on demand by agent OSC zone/ensure, so the per-frame cost
+    // ratcheted up across show segments). Consumers:
+    //   - any output routing (Fullscreen / NDI / Spout)
+    //   - the active zone (viewport preview, present mode, global
+    //     NDI/Spout/RTMP/recorder outputs all read activeZone())
+    //   - zone 0 while the legacy global NDI sender is enabled (pinned feed)
+    //   - all zones while a panel that shows every zone's texture is open
+    //     (Properties' Stage Setup section, Stage 3D pre-viz)
+    bool uiShowsAllZones = m_ui.isPanelVisible("Properties") ||
+        (m_ui.isPanelVisible("Stage") &&
+         UIManager::sMode == UIManager::WorkspaceMode::Stage);
+    OutputZone* active = m_zones.empty() ? nullptr : &activeZone();
+    for (int i = 0; i < (int)m_zones.size(); i++) {
+        auto& zone = *m_zones[i];
+        bool needed = uiShowsAllZones || &zone == active ||
+                      zone.outputDest != OutputDest::None;
+#ifdef HAS_NDI
+        if (i == 0 && m_ndiOutputEnabled) needed = true;
+#endif
+        if (needed) compositeZone(zone);
+        zone.releaseIdleScratch(m_compositeFrame);
     }
     // In spanned mode, also composite the wide span canvas (its own
     // compositor / visibility / warp at the user-defined resolution).
     if (m_outputMode == OutputMode::Spanned) {
         compositeZone(ensureSpanZone());
     }
+    // Age the span zone's scratch UNCONDITIONALLY — m_spanZone isn't in
+    // m_zones, so without this a show segment in Spanned mode would strand
+    // its supersample buffer (~132 MB at the default 3840x1080 span) for
+    // the rest of the show after switching back to Independent.
+    if (m_spanZone) {
+        m_spanZone->releaseIdleScratch(m_compositeFrame);
+    }
 }
 
 void Application::compositeZone(OutputZone& zone) {
+    if (!zone.ensureGpu()) return;
     // Filter layers by zone visibility.
     // "Show all" covers HUMAN-added layers only: agent-managed feed layers
     // (managedKey set — e.g. the FluxRT layer inside a published bus zone)
@@ -1763,10 +1800,11 @@ void Application::compositeZone(OutputZone& zone) {
         if (maskValidCount > 0) {
             maskCombinedTex = singleMaskTex;
             if (maskValidCount > 1) {
-                // Union all mask shapes into m_maskPingPongFBO (read later).
-                if (m_maskPingPongFBO.width() != zone.width || m_maskPingPongFBO.height() != zone.height)
-                    m_maskPingPongFBO.create(zone.width, zone.height);
-                m_maskPingPongFBO.bind();
+                // Union all mask shapes into the zone's union scratch (read later).
+                if (zone.maskUnionFBO.width() != zone.width || zone.maskUnionFBO.height() != zone.height)
+                    zone.maskUnionFBO.create(zone.width, zone.height);
+                zone.scratchUsedFrame[3] = m_compositeFrame;
+                zone.maskUnionFBO.bind();
                 glViewport(0, 0, zone.width, zone.height);
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
@@ -1793,7 +1831,7 @@ void Application::compositeZone(OutputZone& zone) {
                 }
                 glDisable(GL_BLEND);
                 Framebuffer::unbind();
-                maskCombinedTex = m_maskPingPongFBO.textureId();
+                maskCombinedTex = zone.maskUnionFBO.textureId();
             }
         }
     }
@@ -1825,14 +1863,18 @@ void Application::compositeZone(OutputZone& zone) {
     // stepped projector edges. 4K×2 = 33 MP, comfortable on M-series.
     if (longEdge >= 3840)      kWarpSS = 2;
     else if (longEdge >= 1920) kWarpSS = 2;
-    static Framebuffer s_warpSSFBO;
+    // Per-zone supersample target. This was a single function-local static
+    // shared by every zone — with two zones of different resolutions the
+    // size check flip-flopped and the (huge, 16F) buffer was destroyed and
+    // reallocated TWICE PER FRAME, indefinitely.
     const int ssW = zone.width  * kWarpSS;
     const int ssH = zone.height * kWarpSS;
-    if (s_warpSSFBO.width() != ssW || s_warpSSFBO.height() != ssH) {
-        s_warpSSFBO.createHalfFloat(ssW, ssH);
+    if (zone.warpSSFBO.width() != ssW || zone.warpSSFBO.height() != ssH) {
+        zone.warpSSFBO.createHalfFloat(ssW, ssH);
     }
+    zone.scratchUsedFrame[0] = m_compositeFrame;
 
-    s_warpSSFBO.bind();
+    zone.warpSSFBO.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1886,7 +1928,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_linearCopyShader.setBool("uFlipV",     false);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_warpSSFBO.textureId());
+    glBindTexture(GL_TEXTURE_2D, zone.warpSSFBO.textureId());
     m_quad.draw();
     Framebuffer::unbind();
 
@@ -1899,18 +1941,19 @@ void Application::compositeZone(OutputZone& zone) {
         const int halfW = std::max(1, zone.width  / 2);
         const int halfH = std::max(1, zone.height / 2);
         // (Re)create FBOs lazily so resize is cheap.
-        if (m_bloomBrightFBO.width() != halfW || m_bloomBrightFBO.height() != halfH) {
-            m_bloomBrightFBO.createHalfFloat(halfW, halfH);
-            m_bloomPingPongFBO[0].createHalfFloat(halfW, halfH);
-            m_bloomPingPongFBO[1].createHalfFloat(halfW, halfH);
+        if (zone.bloomBrightFBO.width() != halfW || zone.bloomBrightFBO.height() != halfH) {
+            zone.bloomBrightFBO.createHalfFloat(halfW, halfH);
+            zone.bloomPingFBO[0].createHalfFloat(halfW, halfH);
+            zone.bloomPingFBO[1].createHalfFloat(halfW, halfH);
         }
-        if (m_bloomCompositeFBO.width() != zone.width ||
-            m_bloomCompositeFBO.height() != zone.height) {
-            m_bloomCompositeFBO.createHalfFloat(zone.width, zone.height);
+        if (zone.bloomCompositeFBO.width() != zone.width ||
+            zone.bloomCompositeFBO.height() != zone.height) {
+            zone.bloomCompositeFBO.createHalfFloat(zone.width, zone.height);
         }
+        zone.scratchUsedFrame[1] = m_compositeFrame;
 
         // ── 1. Bright-pass ───────────────────────────────────────
-        m_bloomBrightFBO.bind();
+        zone.bloomBrightFBO.bind();
         glViewport(0, 0, halfW, halfH);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1929,33 +1972,33 @@ void Application::compositeZone(OutputZone& zone) {
         m_bloomBlurShader.setInt  ("uTexture",  0);
         m_bloomBlurShader.setMat3 ("uTransform", glm::mat3(1.0f));
         m_bloomBlurShader.setBool ("uFlipV",     false);
-        GLuint srcTex = m_bloomBrightFBO.textureId();
+        GLuint srcTex = zone.bloomBrightFBO.textureId();
         int    pp     = 0;
         const int passes = std::max(1, std::min(6, m_bloomBlurPasses));
         for (int i = 0; i < passes; i++) {
             // Horizontal
-            m_bloomPingPongFBO[pp].bind();
+            zone.bloomPingFBO[pp].bind();
             glViewport(0, 0, halfW, halfH);
             glClear(GL_COLOR_BUFFER_BIT);
             m_bloomBlurShader.setVec2("uDirection", glm::vec2(1.0f / (float)halfW, 0.0f));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, srcTex);
             m_quad.draw();
-            srcTex = m_bloomPingPongFBO[pp].textureId();
+            srcTex = zone.bloomPingFBO[pp].textureId();
             pp ^= 1;
             // Vertical
-            m_bloomPingPongFBO[pp].bind();
+            zone.bloomPingFBO[pp].bind();
             glClear(GL_COLOR_BUFFER_BIT);
             m_bloomBlurShader.setVec2("uDirection", glm::vec2(0.0f, 1.0f / (float)halfH));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, srcTex);
             m_quad.draw();
-            srcTex = m_bloomPingPongFBO[pp].textureId();
+            srcTex = zone.bloomPingFBO[pp].textureId();
             pp ^= 1;
         }
 
         // ── 3. Composite ─────────────────────────────────────────
-        m_bloomCompositeFBO.bind();
+        zone.bloomCompositeFBO.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1988,7 +2031,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_linearCopyShader.setMat3 ("uTransform", glm::mat3(1.0f));
         m_linearCopyShader.setBool ("uFlipV",     false);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_bloomCompositeFBO.textureId());
+        glBindTexture(GL_TEXTURE_2D, zone.bloomCompositeFBO.textureId());
         m_quad.draw();
         Framebuffer::unbind();
         glActiveTexture(GL_TEXTURE0);
@@ -1999,11 +2042,12 @@ void Application::compositeZone(OutputZone& zone) {
                                mp->edgeBlendTop > 0 || mp->edgeBlendBottom > 0);
     if (hasEdgeBlend) {
         // Ensure temp FBO matches zone size
-        if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
-            m_edgeBlendFBO.create(zone.width, zone.height);
+        if (zone.postFBO.width() != zone.width || zone.postFBO.height() != zone.height) {
+            zone.postFBO.create(zone.width, zone.height);
         }
+        zone.scratchUsedFrame[2] = m_compositeFrame;
         // Render warpFBO through edge blend shader into temp FBO
-        m_edgeBlendFBO.bind();
+        zone.postFBO.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -2036,7 +2080,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_passthroughShader.setBool("uHasMask", false);
         m_passthroughShader.setBool("uFlipV", false);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
+        glBindTexture(GL_TEXTURE_2D, zone.postFBO.textureId());
         m_quad.draw();
         Framebuffer::unbind();
     }
@@ -2045,9 +2089,10 @@ void Application::compositeZone(OutputZone& zone) {
     // The mask clips in the SAME space the user drew it (over the projected
     // image): what you see is what gets masked. warpFBO -> tmp -> warpFBO.
     if (maskValidCount > 0 && maskCombinedTex) {
-        Framebuffer& tmp = m_edgeBlendFBO; // reuse scratch (edge blend already done)
+        Framebuffer& tmp = zone.postFBO; // reuse scratch (edge blend already done)
         if (tmp.width() != zone.width || tmp.height() != zone.height)
             tmp.create(zone.width, zone.height);
+        zone.scratchUsedFrame[2] = m_compositeFrame;
         tmp.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 0);
@@ -2094,6 +2139,12 @@ void Application::compositeZone(OutputZone& zone) {
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
+    // Created on demand: only NDI/RTMP/recorder readback needs this copy,
+    // so zones never read back don't pay for it.
+    if (zone.readbackFBO.width() != zone.width ||
+        zone.readbackFBO.height() != zone.height) {
+        zone.readbackFBO.create(zone.width, zone.height, false);
+    }
     zone.readbackFBO.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -2164,15 +2215,31 @@ void Application::ensureSpanSliceResources() {
     if ((int)m_spanWarpFBO.size() != n) m_spanWarpFBO.resize(n);
     // Each slice gets its own corner-pin profile in the SEPARATE m_spanMappings
     // store (never m_mappings — the normal mapping UI must not see these).
+    // A slice with no valid profile REUSES slot i — slice reconfiguration
+    // (Slices slider, /easel/span/slices|setup) resets every mappingIndex
+    // to -1, and appending fresh profiles each time orphaned N profiles
+    // (3 shader programs + warp meshes each) per reconfiguration forever.
+    // Reuse also preserves each projector slot's alignment across reconfigs.
     for (int i = 0; i < n; i++) {
         if (m_spanSlices[i].mappingIndex < 0 ||
             m_spanSlices[i].mappingIndex >= (int)m_spanMappings.size()) {
-            auto mp = std::make_unique<MappingProfile>();
-            mp->init();
-            mp->name = "Projector " + std::to_string(i + 1);
-            m_spanSlices[i].mappingIndex = (int)m_spanMappings.size();
-            m_spanMappings.push_back(std::move(mp));
+            if (i < (int)m_spanMappings.size()) {
+                m_spanSlices[i].mappingIndex = i;
+            } else {
+                auto mp = std::make_unique<MappingProfile>();
+                mp->init();
+                mp->name = "Projector " + std::to_string(i + 1);
+                m_spanSlices[i].mappingIndex = (int)m_spanMappings.size();
+                m_spanMappings.push_back(std::move(mp));
+            }
         }
+    }
+    // Trim profiles no slice references anymore (only m_spanSlices ever
+    // indexes m_spanMappings).
+    int maxRef = -1;
+    for (const auto& s : m_spanSlices) maxRef = std::max(maxRef, s.mappingIndex);
+    if ((int)m_spanMappings.size() > maxRef + 1) {
+        m_spanMappings.resize(maxRef + 1);
     }
 }
 
@@ -2187,26 +2254,24 @@ void Application::layoutSpanSlices() {
 }
 
 void Application::presentOutputs() {
-    // Only force a full GPU sync when a zone is actually presented to a
-    // SEPARATE projector GL context (the FBO must be finished before that
-    // context samples it). The old unconditional per-frame glFinish() stalled
-    // the CPU on the GPU every frame — capping FPS (e.g. 24fps) even with an
-    // empty scene and no projector attached. Editor preview + NDI (async)
-    // need no sync here, so skip it in the common case.
-    bool needsSync = false;
-    if (m_outputMode == OutputMode::Spanned) {
-        for (auto& s : m_spanSlices) {
-            if (s.monitor >= 0) { needsSync = true; break; }
-        }
-    } else {
+    // Cross-context sync with projector windows is handled inside
+    // ProjectorOutput::presentCrop via glFenceSync + server-side glWaitSync.
+    // The old approach — glFinish() here whenever any projector was attached
+    // — drained the entire pipeline on the CPU every frame, serializing CPU
+    // and GPU so frame time was their SUM for the whole show.
+
+#ifdef HAS_NDI
+    // Apply the shared NDI wire settings to every sender each frame (cheap)
+    // so /easel/ndi/fps takes effect live on global + per-zone senders.
+    {
+        NDIOutputSettings ndiSettings;
+        ndiSettings.targetFps = m_ndiTargetFps;
+        m_ndiOutput.setSettings(ndiSettings);
         for (auto& zp : m_zones) {
-            if (zp && zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor >= 0) {
-                needsSync = true;
-                break;
-            }
+            if (zp) zp->ndiOutput.setSettings(ndiSettings);
         }
     }
-    if (needsSync) glFinish();
+#endif
 
     // Track which monitor indices are still needed
     std::set<int> neededMonitors;
@@ -2259,7 +2324,9 @@ void Application::presentOutputs() {
                 zone.ndiOutput.create(wantName);
                 zone.ndiActiveName = wantName;
             }
-            if (zone.ndiOutput.isActive()) {
+            // Only render the readback copy when someone is listening —
+            // send() drops the frame anyway when there are no receivers.
+            if (zone.ndiOutput.isActive() && zone.ndiOutput.hasReceivers()) {
                 renderReadbackFBO(zone);
                 zone.ndiOutput.send(zone.readbackFBO.textureId(), zone.width, zone.height);
             }
@@ -2401,7 +2468,8 @@ void Application::presentOutputs() {
     auto& active = activeZone();
     bool needsReadback = false;
 #ifdef HAS_NDI
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive()) needsReadback = true;
+    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && m_ndiOutput.hasReceivers())
+        needsReadback = true;
 #endif
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive() || m_recorder.isActive()) needsReadback = true;
@@ -2417,7 +2485,8 @@ void Application::presentOutputs() {
     // tab clicks — selecting a zone that contains a FluxRT layer used to
     // feed Flux its own output (2026-06-10 feedback loop). Main is the
     // launch-sequence zone: default shader content only.
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty()) {
+    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty() &&
+        m_ndiOutput.hasReceivers()) {
         OutputZone& luZone = *m_zones[0];
         renderReadbackFBO(luZone);
         m_ndiOutput.send(luZone.readbackFBO.textureId(), luZone.width, luZone.height);
@@ -2552,6 +2621,27 @@ void Application::removeZone(int index) {
         zone.spoutOutput.destroy();
     }
 #endif
+
+    // Free the zone's mapping profile (3 shader programs + warp meshes +
+    // mask textures) unless another zone shares it. Erasing shifts later
+    // indices, so re-point every zone past it — zone add/remove cycles used
+    // to strand one profile each.
+    int mi = zone.mappingIndex;
+    if (mi >= 0 && mi < (int)m_mappings.size()) {
+        bool shared = false;
+        for (int i = 0; i < (int)m_zones.size(); i++) {
+            if (i != index && m_zones[i] && m_zones[i]->mappingIndex == mi) {
+                shared = true;
+                break;
+            }
+        }
+        if (!shared) {
+            m_mappings.erase(m_mappings.begin() + mi);
+            for (auto& zp : m_zones) {
+                if (zp && zp->mappingIndex > mi) zp->mappingIndex--;
+            }
+        }
+    }
 
     m_zones.erase(m_zones.begin() + index);
     if (m_activeZone >= (int)m_zones.size()) {
@@ -3250,6 +3340,12 @@ void Application::renderUI() {
                 m_spanSlices = { SpanSlice{ msg.ints[2], 0.0f, 0.5f },
                                  SpanSlice{ msg.ints[3], 0.5f, 1.0f } };
                 m_outputMode = OutputMode::Spanned;
+            } else if (msg.address == "/easel/ndi/fps"
+                       && (!msg.floats.empty() || !msg.ints.empty())) {
+                // /easel/ndi/fps <fps>  — wire-rate cap for ALL NDI senders
+                // (global + per-zone); <= 0 = uncapped (send at render rate).
+                m_ndiTargetFps = !msg.floats.empty() ? msg.floats[0]
+                                                     : (float)msg.ints[0];
             } else if (msg.address == "/easel/clip/remove"
                        && msg.ints.size() >= 2) {
                 // /easel/clip/remove <layerIndex> <clipId>
@@ -4593,6 +4689,18 @@ void Application::renderUI() {
             // Rendered at 160x160 for the gallery grid — bigger than the old
             // 48x48 list cell so thumbnails read even at 2x DPI.
             const int kThumbRes = 160;
+
+            // Evict thumbnails for shaders that left the manifest — Refresh
+            // used to leave stale entries (GPU textures) until Disconnect.
+            if (m_scThumbnails.size() > m_shaderClaw.shaders().size()) {
+                std::unordered_set<std::string> live;
+                for (const auto& sh : m_shaderClaw.shaders()) live.insert(sh.fullPath);
+                for (auto it = m_scThumbnails.begin(); it != m_scThumbnails.end(); ) {
+                    if (!live.count(it->first)) it = m_scThumbnails.erase(it);
+                    else ++it;
+                }
+            }
+
             if (m_scThumbRenderer) {
                 m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
                 m_scThumbRenderer->update();
@@ -4600,20 +4708,28 @@ void Application::renderUI() {
                 if (m_scThumbRenderFrame > 3) {
                     auto& entry = m_scThumbnails[m_scThumbRenderPath];
                     if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                    std::vector<uint8_t> pixels(kThumbRes * kThumbRes * 4);
                     GLint prevFBO;
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
                     GLuint thumbTex = m_scThumbRenderer->textureId();
                     if (thumbTex != 0) {
+                        // GPU-side copy into the cached thumbnail texture.
+                        // (This was a synchronous glReadPixels into a CPU
+                        // vector — a full pipeline drain mid-show — followed
+                        // by a destroy/recreate + re-upload of the texture.)
                         GLuint tempFBO;
                         glGenFramebuffers(1, &tempFBO);
-                        glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
-                        glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
+                        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
+                        if (!entry.texture->id() ||
+                            entry.texture->width() != kThumbRes ||
+                            entry.texture->height() != kThumbRes) {
+                            entry.texture->createEmpty(kThumbRes, kThumbRes);
+                        }
+                        glBindTexture(GL_TEXTURE_2D, entry.texture->id());
+                        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kThumbRes, kThumbRes);
+                        glBindTexture(GL_TEXTURE_2D, 0);
                         glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
                         glDeleteFramebuffers(1, &tempFBO);
-                        entry.texture->createEmpty(kThumbRes, kThumbRes);
-                        entry.texture->updateData(pixels.data(), kThumbRes, kThumbRes);
                         entry.ready = true;
                     }
                     m_scThumbRenderer.reset();
@@ -7277,9 +7393,13 @@ void Application::renderPushFurtherPanel() {
             if (ec) {
                 m_shaderImprover.markError("Couldn't overwrite original shader");
             } else {
-                // Reload any layers already running this shader (so they
-                // update live), then ALWAYS load the improved shader onto the
-                // canvas as a fresh selected layer so the result clearly shows.
+                // Reload any layers already running this shader so they
+                // update live. Only when NO live layer runs it is a fresh
+                // layer loaded — stacking a brand-new full-res shader layer
+                // per accepted candidate made every "Push Further" iteration
+                // permanently add a rendering layer (plus its FBO chain) on
+                // top of the hot-reloaded ones showing the same result.
+                int reloadedLayer = -1;
                 for (int li = 0; li < m_layerStack.count(); li++) {
                     auto& L = m_layerStack[li];
                     if (L && L->source && L->source->isShader() &&
@@ -7287,11 +7407,16 @@ void Application::renderPushFurtherPanel() {
                         std::ifstream f(orig);
                         std::stringstream ss; ss << f.rdbuf();
                         auto sh = std::dynamic_pointer_cast<ShaderSource>(L->source);
-                        if (sh) sh->reload(ss.str());
+                        if (sh && sh->reload(ss.str()) && reloadedLayer < 0)
+                            reloadedLayer = li;
                     }
                 }
                 m_shaderClaw.refreshManifest();
-                loadShader(orig);                 // result appears on canvas
+                if (reloadedLayer >= 0) {
+                    m_selectedLayer = reloadedLayer; // result clearly shows
+                } else {
+                    loadShader(orig);                // result appears on canvas
+                }
                 m_shaderImprover.markDone(orig);
                 std::cerr << "[Improve] done → " << orig << "\n";
             }
@@ -12468,15 +12593,18 @@ void Application::removeZoneByName(const std::string& zoneName) {
     if (zoneName.empty()) return;
     for (size_t i = 0; i < m_zones.size(); i++) {
         if (!m_zones[i] || m_zones[i]->name != zoneName) continue;
-#ifdef HAS_NDI
-        if (m_zones[i]->ndiOutput.isActive()) m_zones[i]->ndiOutput.destroy();
-#endif
         if (m_zones.size() > 1) {
-            m_zones.erase(m_zones.begin() + i);
+            // Full cleanup path (projector, NDI/Spout senders, mapping
+            // profile) — this used to erase directly and strand the zone's
+            // MappingProfile and projector window.
+            removeZone((int)i);
             if (m_activeZone >= (int)m_zones.size()) m_activeZone = (int)m_zones.size() - 1;
             if (m_activeZone < 0) m_activeZone = 0;
         } else {
             // Keep at least one zone; just stop its output.
+#ifdef HAS_NDI
+            if (m_zones[i]->ndiOutput.isActive()) m_zones[i]->ndiOutput.destroy();
+#endif
             m_zones[i]->outputDest = OutputDest::None;
             m_zones[i]->visibleLayerIds.clear();
             m_zones[i]->showAllLayers = true;
@@ -14247,6 +14375,38 @@ void Application::loadProject(const std::string& path) {
     std::cout << "Project loaded: " << path << std::endl;
 }
 
+// Flip + PNG-encode on a worker thread. The encode is the dominant cost of
+// a screenshot (tens to hundreds of ms at show resolutions) and used to run
+// on the render thread — externally triggerable mid-show via the
+// screenshots/.capture file, so each capture froze a frame. At most one job
+// runs at a time; the future's destructor joins at shutdown.
+void Application::writeScreenshotAsync(const std::string& path,
+                                       std::vector<uint8_t> pixels,
+                                       int w, int h) {
+    if (m_screenshotJob.valid()) m_screenshotJob.wait();
+    m_screenshotJob = std::async(std::launch::async,
+        [path, w, h, pixels = std::move(pixels)]() mutable {
+            // Flip vertically (OpenGL has origin at bottom-left)
+            int stride = w * 4;
+            std::vector<uint8_t> row(stride);
+            for (int y = 0; y < h / 2; y++) {
+                uint8_t* top = pixels.data() + y * stride;
+                uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
+                std::memcpy(row.data(), top, stride);
+                std::memcpy(top, bot, stride);
+                std::memcpy(bot, row.data(), stride);
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(
+                std::filesystem::path(path).parent_path(), ec);
+            if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
+                std::cout << "Screenshot saved: " << path << std::endl;
+            } else {
+                std::cerr << "Screenshot failed to write: " << path << std::endl;
+            }
+        });
+}
+
 void Application::captureScreenshot(const std::string& path) {
     auto& zone = activeZone();
     int w = zone.warpFBO.width();
@@ -14256,27 +14416,12 @@ void Application::captureScreenshot(const std::string& path) {
         return;
     }
 
-    std::vector<uint8_t> pixels(w * h * 4);
+    std::vector<uint8_t> pixels((size_t)w * h * 4);
     glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Flip vertically (OpenGL has origin at bottom-left)
-    int stride = w * 4;
-    std::vector<uint8_t> row(stride);
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = pixels.data() + y * stride;
-        uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
-        std::memcpy(row.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, row.data(), stride);
-    }
-
-    if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
-        std::cout << "Screenshot saved: " << path << std::endl;
-    } else {
-        std::cerr << "Screenshot failed to write: " << path << std::endl;
-    }
+    writeScreenshotAsync(path, std::move(pixels), w, h);
 }
 
 void Application::captureWindow(const std::string& path) {
@@ -14284,26 +14429,10 @@ void Application::captureWindow(const std::string& path) {
     int h = m_windowHeight;
     if (w <= 0 || h <= 0) return;
 
-    std::vector<uint8_t> pixels(w * h * 4);
+    std::vector<uint8_t> pixels((size_t)w * h * 4);
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
-    // Flip vertically
-    int stride = w * 4;
-    std::vector<uint8_t> row(stride);
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = pixels.data() + y * stride;
-        uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
-        std::memcpy(row.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, row.data(), stride);
-    }
-
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
-        std::cout << "Window screenshot saved: " << path << std::endl;
-    } else {
-        std::cerr << "Window screenshot failed: " << path << std::endl;
-    }
+    writeScreenshotAsync(path, std::move(pixels), w, h);
 }
 
 void Application::pollScreenshotTrigger() {
