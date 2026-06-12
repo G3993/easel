@@ -5,6 +5,8 @@
 #include <functional>
 #include <unordered_map>
 #include <cstdint>
+#include <algorithm>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -56,6 +58,19 @@ public:
     // Get last received CC value (normalized 0-1). Returns -1 if never received.
     // channel = -1 matches any channel.
     float getCCValue(int channel, int ccNum) const;
+
+    // Every CC the controller has actually sent since the device opened, as
+    // {channel, ccNum} sorted by (channel, cc). Powers the bind dropdown so a
+    // user can pick a knob/fader instead of typing its CC number.
+    std::vector<std::pair<int,int>> seenCCs() const {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        std::vector<std::pair<int,int>> out;
+        out.reserve(m_ccValues.size());
+        for (const auto& kv : m_ccValues)
+            out.push_back({ (kv.first >> 8) & 0xFF, kv.first & 0xFF });
+        std::sort(out.begin(), out.end());
+        return out;
+    }
 
     // Push a parsed MIDI event into the pending queue. Thread-safe; callable from
     // platform read callbacks (e.g. CoreMIDI on macOS).

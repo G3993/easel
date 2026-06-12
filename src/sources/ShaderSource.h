@@ -1,5 +1,6 @@
 #pragma once
 #include "sources/ContentSource.h"
+#include "sources/AudioFeatures.h"
 #include "render/ShaderProgram.h"
 #include "render/Framebuffer.h"
 #include "render/Mesh.h"
@@ -41,6 +42,12 @@ struct ISFInput {
     // named pills instead of a numeric slider when labels are present.
     std::vector<int>         longValues;
     std::vector<std::string> longLabels;
+
+    // Event (button) extras — set from custom ISF JSON fields:
+    //   "MOMENTARY": true  -> press-and-hold; uniform mirrors held state.
+    //   "TARGET": "seed"   -> on tap, randomize the named float param.
+    bool        momentary  = false;
+    std::string eventTarget;
 };
 
 // Ping-pong FBO pair for persistent ISF pass buffers
@@ -71,33 +78,9 @@ struct ImageBinding {
     bool flippedV = false;      // source is top-down (NDI etc.)
 };
 
-// Signal sources for parameter binding
-enum class AudioSignal {
-    None = 0,
-    Level,   // RMS
-    Bass,
-    Mid,
-    High,
-    Beat,    // beat decay (0-1 pulse)
-    MidiCC,  // MIDI control change (uses midiCC/midiChannel fields)
-};
-
-// Per-parameter audio/MIDI binding
-struct AudioBinding {
-    AudioSignal signal = AudioSignal::None;
-    float rangeMin = 0.0f;  // output min (maps to param min by default)
-    float rangeMax = 1.0f;  // output max (maps to param max by default)
-    // 0 = instant (snappy), 1 = very slow (heavy glide). Default 0.55 is a
-    // deliberately gentler envelope than the legacy fixed attack-8 / release-3
-    // feel, which the user found too aggressive / strobey. See
-    // ShaderSource::applyAudioBindings for the dt-based time-constant math.
-    float smoothing = 0.55f;
-    float smoothedValue = 0.0f; // internal follower state
-    bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
-    // MIDI fields (used when signal == MidiCC)
-    int midiCC = -1;        // CC number 0-127, -1 = unassigned
-    int midiChannel = -1;   // MIDI channel 0-15, -1 = any
-};
+// AudioSignal + AudioBinding moved to a shared header so non-shader sources
+// (FluidSource) can reuse the same binding model + follower.
+#include "sources/AudioBinding.h"
 
 class ShaderSource : public ContentSource {
 public:
@@ -105,6 +88,11 @@ public:
 
     // Load from ISF .fs file (optionally with paired .vs)
     bool loadFromFile(const std::string& path);
+
+    // GLSL compile/link error from the last failed load (for Push Further
+    // retry feedback). Empty if the last load succeeded.
+    std::string lastError() const { return m_lastError; }
+    std::string m_lastError;
 
     // Load from raw ISF source code (for live bridge)
     bool loadFromCode(const std::string& isfSource);
@@ -134,6 +122,11 @@ public:
     // Audio state for ISF shaders (Shader-Claw naming convention)
     void setAudioState(float rms, float bass, float mid, float high, GLuint fftTex);
 
+    // New Audio Feature Bus — full per-frame perceptual feature set. Stores the
+    // struct AND mirrors the legacy audioLevel/Bass/Mid/High/FFT fields so old
+    // shaders keep working unchanged.
+    void setAudioFeatures(const AudioFeatures& f);
+
     // Mouse state for interactive shaders (CFD paint, etc.)
     void setMouseState(float x, float y, bool down);
 
@@ -154,7 +147,9 @@ public:
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
     void applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                            float dt, class MIDIManager* midi = nullptr);
+                            float dt, class MIDIManager* midi = nullptr,
+                            float energy = 0.0f, float build = 0.0f, float drop = 0.0f,
+                            float silence = 0.0f, float momentum = 0.5f);
 
     // Resolution (defaults to 1920x1080, can be changed)
     void setResolution(int w, int h);
@@ -209,6 +204,7 @@ private:
     // Audio state cached for upload
     float m_audioRMS = 0, m_audioBass = 0, m_audioMid = 0, m_audioHigh = 0;
     GLuint m_audioFFTTex = 0;
+    AudioFeatures m_af;   // full feature bus (uploaded alongside legacy fields)
 
     // Image input bindings (input name -> external texture)
     std::map<std::string, ImageBinding> m_imageBindings;

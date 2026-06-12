@@ -4,6 +4,29 @@
 #include <GLFW/glfw3native.h>
 #import <Cocoa/Cocoa.h>
 
+// Disable macOS NATIVE (green-button) fullscreen for a GLFW window.
+//
+// Crash root cause: when a projector opens or projectors are switched, macOS
+// pulls another Easel window OUT of native fullscreen. That exit transition
+// (-[_NSExitFullScreenTransitionController ...] → setStyleMask →
+// viewDidChangeBackingProperties) reports a transiently-zero content scale,
+// and GLFW's _glfwInputWindowContentScale() asserts scale>0 → abort()/SIGABRT.
+// It is a hard assert, not a catchable ObjC exception. Marking windows
+// FullScreenNone stops them ever entering native fullscreen, so the crashing
+// transition never runs. Easel has its own borderless fullscreen, so native
+// fullscreen isn't needed.
+void disableNativeFullscreen(GLFWwindow* window) {
+    NSWindow* nsWindow = (NSWindow*)glfwGetCocoaWindow(window);
+    if (!nsWindow) return;
+    @try {
+        NSWindowCollectionBehavior b = [nsWindow collectionBehavior];
+        b &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+        b &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+        b |=  NSWindowCollectionBehaviorFullScreenNone;
+        [nsWindow setCollectionBehavior:b];
+    } @catch (NSException* e) { NSLog(@"[Easel] disableNativeFullscreen: %@", e.reason); }
+}
+
 void makeWindowTrulyBorderless(GLFWwindow* window) {
     NSWindow* nsWindow = (NSWindow*)glfwGetCocoaWindow(window);
     if (!nsWindow) return;
@@ -29,7 +52,9 @@ void makeWindowTrulyBorderless(GLFWwindow* window) {
 
     @try { [nsWindow setHasShadow:NO]; } @catch (NSException*) {}
 
-    @try { [nsWindow setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary]; }
+    // FullScreenNone (not Auxiliary): the projector window must never join a
+    // native fullscreen transition — that path crashes GLFW (see above).
+    @try { [nsWindow setCollectionBehavior:NSWindowCollectionBehaviorFullScreenNone]; }
     @catch (NSException* e) { NSLog(@"[Projector] setCollectionBehavior failed: %@", e.reason); }
 
     @try { [NSMenu setMenuBarVisible:NO]; } @catch (NSException*) {}

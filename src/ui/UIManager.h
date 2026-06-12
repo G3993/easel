@@ -67,12 +67,15 @@ public:
     Workspace workspace() const { return m_workspace; }
     void setWorkspace(Workspace w);
 
-    // Current main-viewport workspace. Three modes — only one is rendered
+    // Current main-viewport workspace. Four modes — only one is rendered
     // per frame, the pill switcher in the secondary nav flips this enum:
-    //   Canvas → 2D compositor + layers/properties/sources/timeline
-    //   Stage  → 3D stage view (projector preview)
-    //   Show   → live-performance focus: timeline + MIDI + audio
-    enum class WorkspaceMode { Canvas, Stage, Show };
+    //   Canvas  → 2D compositor + layers/properties/sources/timeline
+    //   Mapping → 2D output + warp/mask params (projection calibration)
+    //   Stage   → 3D stage view (projector preview)
+    //   Show    → live-performance focus: timeline + MIDI + audio
+    // NOTE: order matters — the nav switcher lists them left→right as
+    // Canvas / Mapping / Stage / Play, so Mapping sits between Canvas and Stage.
+    enum class WorkspaceMode { Canvas, Mapping, Stage, Show };
     static WorkspaceMode sMode;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
@@ -122,6 +125,11 @@ private:
     Workspace m_workspace = Workspace::Canvas;
     float m_workspaceBarHeight = 0.0f;
     const char* m_pendingFocus = nullptr;  // window name to focus next frame
+    const char* m_dockSelectQueue = nullptr; // window to set as dock SelectedTabId at end of frame
+    // Sticky visible-window for the right dock. Updated by pill clicks
+    // (focusPanel / focusSourcesTab) and re-applied to dockNode->VisibleWindow
+    // every frame so ImGui's own dock-update can't override our choice.
+    const char* m_currentRightPanel = "        ###Properties";
     int m_pendingFocusFramesLeft = 0;
     // Seed Begin/End calls in the desired tab order on the next rebuild frame.
     // ImGui locks tab order to the FIRST Begin() call per docked window after
@@ -175,6 +183,35 @@ public:
     // Tabs: ShaderClaw (3 thunderbolts), Etherea (mic), Camera (lens),
     // Capture (window). NDI/Spout keep plain text.
     void drawSourcesTabIcons();
+
+    // Source-tab quick switcher — exposed so the Properties panel can pin
+    // the 4-icon strip (Shader / Mic / Cam / Win) at its top instead of it
+    // only living on the Sources panel. focusSourcesTab() programmatically
+    // activates the matching tab in the Sources dock; activeSourcesTab()
+    // returns which tab is currently selected so callers can highlight.
+    enum class SourceTab { None = 0, Shader, Mic, Cam, Win };
+    void      focusSourcesTab(SourceTab t);
+    SourceTab activeSourcesTab() const;
+
+    // Programmatic tab/window focus — sets a pending-focus string that the
+    // next few frames will apply via SetWindowFocus, the same mechanism the
+    // left rail uses. Pass the full ImGui window name including any padding
+    // (e.g. "        ###Properties" / "        ###Mapping").
+    void focusPanel(const char* windowName);
+
+    // Right-dock pinned nav bar (Properties / Shader / Mic / Cam / Win /
+    // Mapping). Render at the TOP of each right-dock panel's ImGui::Begin
+    // block — `active` controls which pill highlights. With this bar
+    // present in every panel we hide the outer ImGui tab bar.
+    enum class QuickNavTab { None = 0, Properties, Shader, Mic, Music, Cam, Win, Mapping };
+    void renderRightDockNavBar(QuickNavTab active);
+
+    // Singleton accessor — set during init() so panels without a UIManager
+    // member (LayerPanel, WarpEditor) can call renderRightDockNavBar.
+    static UIManager* current() { return s_instance; }
+private:
+    static UIManager* s_instance;
+public:
 
     // Left activity rail — pinned to the left edge of the viewport.
     // Icons toggle which panel (Layers / Sources / Mapping) is the

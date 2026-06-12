@@ -65,7 +65,10 @@ void OSCManager::stopReceiver() {
 }
 
 void OSCManager::receiveLoop() {
-    uint8_t buf[4096];
+    // 64KB — max practical UDP datagram. The Play wire payload + the
+    // M4 long-cue 4KB cap both want comfortably more than the prior 4KB
+    // buffer (which was silently truncating large incoming messages).
+    uint8_t buf[65535];
     while (m_receiving) {
         // Set timeout so we can check m_receiving
         struct timeval tv;

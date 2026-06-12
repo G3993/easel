@@ -72,6 +72,13 @@ void AudioAnalyzer::update(float dt) {
 
     detectBeat(dt);
     smoothBands(dt);
+    computeSpectralFeatures(dt);
+    computeChroma(dt);      // chroma / dominant pitch / major-minor (feeds affect + palette)
+    computeAffect(dt);      // reads previous-frame buildup (DAG)
+    computeStructure(dt);   // computes this-frame buildup
+    computeFlow(dt);
+    computePalette(dt);     // Tier 5 Oklch ramp (uses brightness/arousal/warmth/beat/spread)
+    m_prevBuildup = m_buildup;   // close the DAG
     updateFFTTexture();
 }
 
@@ -353,6 +360,338 @@ void AudioAnalyzer::computeBands() {
         m_rawHighMid = gate(m_rawHighMid);
         m_rawTreble  = gate(m_rawTreble);
     }
+
+    // Response curves: capture the pre-curve input (for the live graph), then
+    // shape each band by its own curve followed by the global master curve.
+    // Defaults are identity, so this is a no-op until the user dials a curve.
+    m_curveInput[CurveBass]    = m_rawBass;
+    m_curveInput[CurveLowMid]  = m_rawLowMid;
+    m_curveInput[CurveHighMid] = m_rawHighMid;
+    m_curveInput[CurveTreble]  = m_rawTreble;
+    m_curveInput[CurveMaster]  = std::max(std::max(m_rawBass, m_rawLowMid),
+                                          std::max(m_rawHighMid, m_rawTreble));
+
+    m_rawBass    = applyAudioCurve(applyAudioCurve(m_rawBass,    m_curves[CurveBass]),    m_curves[CurveMaster]);
+    m_rawLowMid  = applyAudioCurve(applyAudioCurve(m_rawLowMid,  m_curves[CurveLowMid]),  m_curves[CurveMaster]);
+    m_rawHighMid = applyAudioCurve(applyAudioCurve(m_rawHighMid, m_curves[CurveHighMid]), m_curves[CurveMaster]);
+    m_rawTreble  = applyAudioCurve(applyAudioCurve(m_rawTreble,  m_curves[CurveTreble]),  m_curves[CurveMaster]);
+}
+
+// --- Spectral character (Tier 2) + sub/punch (Tier 1 extras) ---
+// One linear pass over the 256-bin magnitude spectrum + a few EMAs. All
+// outputs are normalized 0-1 (tilt is -1..1) and lightly smoothed so they
+// read as natural, not jittery.
+void AudioAnalyzer::computeSpectralFeatures(float dt) {
+    const int kLo = 2;                 // skip DC + bin1 (sub handled separately)
+    const int kHi = std::min(kBins, 220);
+
+    // --- sub-bass (coarse; spectrum resolution can't isolate <90Hz, so this
+    // is an honest bin-1 proxy, high-gained + smoothed) ---
+    float subRaw = std::min(m_spectrum[1] * 60.0f * m_inputGain, 1.0f);
+    m_smoothSub = expSmooth(m_smoothSub, subRaw, subRaw > m_smoothSub ? 30.0f : 8.0f, dt);
+
+    // --- single pass: total energy, centroid numerator, flatness accumulators,
+    //     spectral flux, peak magnitude ---
+    float total = 0.0f, centNum = 0.0f, logSum = 0.0f, flux = 0.0f, peak = 0.0f;
+    int   flatN = 0;
+    for (int i = kLo; i < kHi; i++) {
+        float s = m_spectrum[i];
+        total  += s;
+        centNum += s * (float)i;
+        if (i >= 4 && i < 200) { logSum += std::log(s + 1e-6f); flatN++; }
+        float d = s - m_prevSpec[i];
+        if (d > 0.0f) flux += d;
+        if (s > peak) peak = s;
+    }
+    float invTotal = 1.0f / std::max(total, 1e-6f);
+
+    // --- centroid -> brightness (log2 map ~bin2..bin200) ---
+    float centroidBin = centNum * invTotal;            // in [kLo,kHi]
+    float cNorm = (std::log2(std::max(centroidBin, 1.0f)) - 1.0f) /
+                  (std::log2((float)kHi) - 1.0f);
+    cNorm = std::min(std::max(cNorm, 0.0f), 1.0f);
+    m_brightness = expSmooth(m_brightness, m_agcBright.norm(cNorm, dt), 2.5f, dt);
+
+    // --- spread (std dev around centroid, normalized) ---
+    float var = 0.0f;
+    for (int i = kLo; i < kHi; i++) {
+        float dd = (float)i - centroidBin;
+        var += m_spectrum[i] * dd * dd;
+    }
+    float sd = std::sqrt(var * invTotal) / ((float)kHi / 3.0f);
+    m_spread = expSmooth(m_spread, std::min(sd, 1.0f), 3.0f, dt);
+
+    // --- rolloff (85% cumulative energy bin, log-mapped) ---
+    float cum = 0.0f, target = total * 0.85f; int rollBin = kLo;
+    for (int i = kLo; i < kHi; i++) { cum += m_spectrum[i]; if (cum >= target) { rollBin = i; break; } }
+    float rNorm = (std::log2(std::max((float)rollBin, 1.0f)) - 1.0f) /
+                  (std::log2((float)kHi) - 1.0f);
+    m_rolloff = expSmooth(m_rolloff, std::min(std::max(rNorm, 0.0f), 1.0f), 3.0f, dt);
+
+    // --- flatness (geometric/arithmetic mean) -> noisiness ---
+    float amean = (total > 0 ? (centNum * 0.0f + total) : 0.0f); // (reuse total)
+    float arithMean = total / std::max(1, (kHi - kLo));
+    float geoMean = (flatN > 0) ? std::exp(logSum / flatN) : 0.0f;
+    float flatRaw = (arithMean > 1e-6f) ? std::min(geoMean / arithMean, 1.0f) : 0.0f;
+    (void)amean;
+    m_flatness = expSmooth(m_flatness, m_agcFlat.norm(flatRaw, dt), 4.0f, dt);
+
+    // --- flux -> movement (normalized by slow running floor) ---
+    m_fluxFloor += (flux - m_fluxFloor) * (1.0f - std::exp(-0.5f * dt));
+    float fluxN = m_agcFlux.norm(flux, dt);
+    m_flux = expSmooth(m_flux, fluxN, 6.0f, dt);
+
+    // --- onset: peak-pick flux above an adaptive median, with refractory ---
+    m_onsetMedian += (flux - m_onsetMedian) * (1.0f - std::exp(-1.0f * dt));
+    if (m_beatCooldownOnset > 0.0f) m_beatCooldownOnset -= dt;
+    float onsetTrig = 0.0f;
+    bool aboveFloor = flux > (m_fluxFloor * 2.0f + 1e-4f);
+    if (flux > m_onsetMedian * 1.5f && aboveFloor && m_beatCooldownOnset <= 0.0f) {
+        onsetTrig = 1.0f; m_beatCooldownOnset = 0.06f;        // 60ms refractory
+        m_onsetRate = std::min(m_onsetRate + 1.0f / 8.0f, 1.0f);
+    }
+    m_onset = m_onsetPH.update(onsetTrig, dt, 0.0f, 0.08f);
+    m_onsetRate *= std::exp(-dt / 1.5f);
+
+    // --- tilt: warm(-) vs harsh(+), from smoothed bands ---
+    float lowE = m_smoothBass + m_smoothLowMid;
+    float hiE  = m_smoothHighMid + m_smoothTreble;
+    float tiltRaw = (hiE - lowE) / std::max(hiE + lowE, 1e-4f); // -1..1
+    m_tilt = expSmooth(m_tilt, tiltRaw, 2.0f, dt);
+
+    // --- zcr: sign changes over the time ring buffer ---
+    int zc = 0;
+    for (int i = 1; i < kFFTSize; i++)
+        if ((m_ringBuf[i] >= 0.0f) != (m_ringBuf[i - 1] >= 0.0f)) zc++;
+    float zcrRaw = (float)zc / (float)kFFTSize;           // 0..1 (rarely >0.5)
+    m_zcr = expSmooth(m_zcr, std::min(zcrRaw * 2.0f, 1.0f), 5.0f, dt);
+
+    // --- texture: sustained crispy(1) vs smooth(0) — tilt-shaped, noise-aware ---
+    float texRaw = 0.6f * (0.5f + 0.5f * m_tilt) + 0.4f * m_flatness;
+    m_texture = expSmooth(m_texture, std::min(std::max(texRaw, 0.0f), 1.0f), 4.0f, dt);
+
+    // --- punch: crest factor peak/rms mapped 1..6 -> 0..1, peak-held ---
+    float crest = peak / std::max(m_rawRMS, 1e-3f);
+    float punchRaw = std::min(std::max((crest - 1.0f) / 5.0f, 0.0f), 1.0f);
+    m_punch = m_punchPH.update(punchRaw, dt, 0.05f, 0.12f);
+
+    // snapshot spectrum for next-frame flux
+    std::memcpy(m_prevSpec, m_spectrum, sizeof(m_prevSpec));
+}
+
+// --- Tier 3: affect / mood ---
+// Slow, session-stable scalars derived from Tier 1-2. valence/majorMinor use
+// a chroma-free approximation for now (brightness + consonance proxy); the
+// palette phase upgrades them with real chroma/Krumhansl-Kessler mode.
+void AudioAnalyzer::computeAffect(float dt) {
+    // roughness ~ dissonance proxy (broadband + change). Real Plomp-Levelt
+    // over spectral peaks is a later refinement.
+    float roughRaw = 0.6f * m_flatness + 0.4f * m_flux;
+    m_roughness = expSmooth(m_roughness, std::min(roughRaw, 1.0f), 2.0f, dt);
+
+    // arousal — calm vs energetic
+    float arousalRaw = 0.35f * m_smoothRMS + 0.30f * m_flux + 0.20f * m_smoothTreble + 0.15f * m_punch;
+    m_arousal = expSmooth(m_arousal, std::min(arousalRaw, 1.0f),
+                          arousalRaw > m_arousal ? 8.0f : 1.6f, dt);
+
+    // valence — bright/pleasant vs sad/dark (mode-aware now that chroma exists)
+    float valRaw = 0.35f * m_brightness + 0.25f * (1.0f - m_roughness)
+                 + 0.20f * (0.5f + 0.5f * m_tilt) + 0.20f * m_majorMinor;
+    m_valence = expSmooth(m_valence, std::min(std::max(valRaw, 0.0f), 1.0f),
+                          valRaw > m_valence ? 3.0f : 0.7f, dt);
+
+    // tension — reads PREVIOUS-frame buildup (DAG)
+    float tenRaw = 0.40f * m_roughness + 0.30f * m_prevBuildup + 0.30f * (1.0f - m_valence);
+    m_tension = expSmooth(m_tension, std::min(tenRaw, 1.0f),
+                          tenRaw > m_tension ? 5.0f : 1.25f, dt);
+    m_tension *= (1.0f - 0.7f * m_drop);   // release on the drop
+
+    // warmth — warm/intimate vs cold/airy
+    float warmRaw = 0.50f * m_smoothBass + 0.25f * (1.0f - m_smoothTreble) + 0.25f * (1.0f - m_flatness);
+    m_warmth = expSmooth(m_warmth, std::min(warmRaw, 1.0f), 2.0f, dt);
+
+    // softness — gentle/blurred vs sharp (decorrelated from tension)
+    float softRaw = 0.40f * (1.0f - m_punch) + 0.30f * (1.0f - m_flux) + 0.30f * (1.0f - m_onsetRate);
+    m_softness = expSmooth(m_softness, std::min(std::max(softRaw, 0.0f), 1.0f), 2.5f, dt);
+
+    // charm — "lovely groove" sweet spot (widened gaussian + floor)
+    float g = std::exp(-(m_arousal - 0.5f) * (m_arousal - 0.5f) / (2.0f * 0.35f * 0.35f));
+    m_charm = m_valence * (1.0f - m_tension) * g + 0.05f;
+    if (m_charm > 1.0f) m_charm = 1.0f;
+}
+
+// --- Tier 4: structure / build-up ---
+// Dual-timescale energy EMAs: slow = where the song's been, fast = where it
+// is, fast-slow = where it's going. All causal (no lookahead).
+void AudioAnalyzer::computeStructure(float dt) {
+    // 12 log-spaced bands over the spectrum (assembly / novelty / layers).
+    float total = 0.0f;
+    for (int b = 0; b < 12; b++) {
+        int lo = (int)(2.0f * std::pow((float)kBins / 2.0f, b / 12.0f));
+        int hi = (int)(2.0f * std::pow((float)kBins / 2.0f, (b + 1) / 12.0f));
+        lo = std::max(2, lo); hi = std::min(kBins, std::max(lo + 1, hi));
+        float e = 0; for (int i = lo; i < hi; i++) e += m_spectrum[i];
+        e /= (float)(hi - lo);
+        m_band12[b] = e;
+        total += e;
+        m_band12Slow[b] += (e - m_band12Slow[b]) * (1.0f - std::exp(-0.25f * dt));
+    }
+
+    // energy altitude (normalized by a slowly-decaying running max)
+    float energyRaw = std::log(1.0f + total * 12.0f);
+    m_energyRunMax = std::max(energyRaw, m_energyRunMax * std::exp(-dt / 30.0f));
+    float eNorm = energyRaw / std::max(m_energyRunMax, 1e-3f);
+    m_energyFast += (eNorm - m_energyFast) * (1.0f - std::exp(-dt / 1.0f));
+    m_energySlow += (eNorm - m_energySlow) * (1.0f - std::exp(-dt / 8.0f));
+    m_energy = expSmooth(m_energy, m_energySlow, 0.25f, dt);
+
+    // velocity / acceleration of the altitude (clamped, post-smoothed)
+    float vel = (m_energy - m_prevEnergy) / std::max(dt, 1e-3f);
+    vel = std::min(std::max(vel / 2.0f, -1.0f), 1.0f);
+    m_energyVel = expSmooth(m_energyVel, vel, 2.0f, dt);
+    float acc = (m_energyVel - m_prevEnergyVel) / std::max(dt, 1e-3f);
+    acc = std::min(std::max(acc / 4.0f, -1.0f), 1.0f);
+    m_energyAcc = expSmooth(m_energyAcc, acc, 2.0f, dt);
+    m_prevEnergy = m_energy; m_prevEnergyVel = m_energyVel;
+
+    // buildup — integrate the "rising above baseline" signal, hold, decay
+    float rise = (m_energyFast - m_energySlow) / std::max(m_energySlow, 0.05f);
+    rise = std::min(std::max(rise, 0.0f), 1.0f);
+    rise = 0.6f * rise + 0.4f * m_onsetRate;   // accelerating onsets count too
+    float prevB = m_buildup;
+    m_buildup = std::min(m_buildup * std::exp(-dt / 1.6f) + rise * dt * 2.0f, 1.0f);
+    m_buildupRate = expSmooth(m_buildupRate,
+                              std::min(std::max((m_buildup - prevB) / std::max(dt, 1e-3f), -1.0f), 1.0f),
+                              2.5f, dt);
+
+    // drop — high prior buildup released by a broadband slam
+    float dropTrig = 0.0f;
+    if (m_prevBuildup > 0.5f && m_onset > 0.4f && m_smoothBass > 0.5f) {
+        dropTrig = 1.0f;
+        m_buildup *= 0.2f;   // release
+    }
+    m_drop = m_dropPH.update(dropTrig, dt, 0.0f, 0.8f);
+
+    // novelty — cosine distance of band shape vs its slow average
+    float dot = 0, na = 0, nb = 0;
+    for (int b = 0; b < 12; b++) { dot += m_band12[b]*m_band12Slow[b]; na += m_band12[b]*m_band12[b]; nb += m_band12Slow[b]*m_band12Slow[b]; }
+    float cosSim = (na > 1e-9f && nb > 1e-9f) ? dot / std::sqrt(na * nb) : 1.0f;
+    float novRaw = std::min(std::max(1.0f - cosSim, 0.0f), 1.0f);
+    m_novelty = expSmooth(m_novelty, novRaw, novRaw > m_novelty ? 8.0f : 0.5f, dt);
+
+    // section tracking
+    if (m_sectionCooldown > 0.0f) m_sectionCooldown -= dt;
+    if (m_novelty > 0.4f && m_sectionCooldown <= 0.0f) {
+        m_sectionCount++; m_sectionAge = 0.0f; m_sectionCooldown = 4.0f;
+    }
+    m_sectionPhase = (float)(m_sectionCount % 8) / 8.0f;
+    m_sectionAge = std::min(m_sectionAge + dt / 60.0f, 1.0f);
+
+    // layers — active element count; presence — per-band masks
+    int active = 0;
+    for (int b = 0; b < 12; b++) if (m_band12[b] > m_band12Slow[b] * 1.4f + 1e-4f) active++;
+    float layersRaw = (float)active / 12.0f;
+    m_layers = expSmooth(m_layers, layersRaw, layersRaw > m_layers ? 2.5f : 0.5f, dt);
+    float pres[4] = { m_smoothBass, m_smoothLowMid, m_smoothHighMid, m_smoothTreble };
+    for (int i = 0; i < 4; i++) {
+        float on = pres[i] > 0.12f ? 1.0f : 0.0f;
+        m_presence[i] = expSmooth(m_presence[i], on, on > m_presence[i] ? 2.5f : 0.5f, dt);
+    }
+    m_density = expSmooth(m_density, m_flatness, 2.0f, dt);
+}
+
+// --- Flow: a continuous low-frequency drift vector the whole field can ride ---
+void AudioAnalyzer::computeFlow(float dt) {
+    float tx = (m_smoothBass - m_smoothTreble);          // -1..1
+    float ty = (m_smoothLowMid - m_smoothHighMid);
+    m_flow[0] = expSmooth(m_flow[0], std::min(std::max(tx, -1.0f), 1.0f), 1.25f, dt);
+    m_flow[1] = expSmooth(m_flow[1], std::min(std::max(ty, -1.0f), 1.0f), 1.25f, dt);
+}
+
+// --- Oklch (L, C, hue-radians) -> linear sRGB (Björn Ottosson's Oklab) ---
+static void oklchToLinear(float L, float C, float h, float* out) {
+    float a = C * std::cos(h), b = C * std::sin(h);
+    float l_ = L + 0.3963377774f * a + 0.2158037573f * b;
+    float m_ = L - 0.1055613458f * a - 0.0638541728f * b;
+    float s_ = L - 0.0894841775f * a - 1.2914855480f * b;
+    float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+    float r = +4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+    float g = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+    float bl = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+    out[0] = std::min(std::max(r, 0.0f), 1.0f);
+    out[1] = std::min(std::max(g, 0.0f), 1.0f);
+    out[2] = std::min(std::max(bl, 0.0f), 1.0f);
+}
+
+// --- Tier 5 chroma: fold the spectrum into 12 pitch classes ---
+void AudioAnalyzer::computeChroma(float dt) {
+    if (!m_binToPCInit) {
+        for (int i = 0; i < kBins; i++) {
+            float freq = (float)i * (float)m_sampleRate / (float)kFFTSize;
+            if (freq < 27.5f) { m_binToPC[i] = -1; continue; }       // below A0
+            float midi = 69.0f + 12.0f * std::log2(freq / 440.0f);
+            int pc = ((int)std::lround(midi)) % 12; if (pc < 0) pc += 12;
+            m_binToPC[i] = pc;
+        }
+        m_binToPCInit = true;
+    }
+    float c[12] = {0}; float maxc = 0; int dom = 0;
+    for (int i = 2; i < kBins; i++) { int pc = m_binToPC[i]; if (pc >= 0) c[pc] += m_spectrum[i]; }
+    for (int p = 0; p < 12; p++) { if (c[p] > maxc) { maxc = c[p]; dom = p; } }
+    // L-inf normalize + smooth
+    float inv = maxc > 1e-6f ? 1.0f / maxc : 0.0f;
+    for (int p = 0; p < 12; p++)
+        m_chroma[p] = expSmooth(m_chroma[p], c[p] * inv, 3.0f, dt);
+    m_dominantPitch = (float)dom / 12.0f;
+
+    // major/minor proxy: third above the dominant (major=+4 semis, minor=+3).
+    float majFit = m_chroma[(dom + 4) % 12] + m_chroma[(dom + 7) % 12]; // major 3rd + 5th
+    float minFit = m_chroma[(dom + 3) % 12] + m_chroma[(dom + 7) % 12]; // minor 3rd + 5th
+    float mm = 0.5f + 0.5f * std::tanh(2.0f * (majFit - minFit));
+    m_majorMinor = expSmooth(m_majorMinor, std::min(std::max(mm, 0.0f), 1.0f), 0.6f, dt);
+}
+
+// --- Tier 5 palette: harmonious-by-construction Oklch ramp + accent ---
+void AudioAnalyzer::computePalette(float dt) {
+    const float TWO_PI = 6.28318530718f;
+    // Hue = energy-weighted circular mean of the 12 pitch classes.
+    float sx = 0, sy = 0;
+    for (int p = 0; p < 12; p++) {
+        float ang = (float)p / 12.0f * TWO_PI;
+        sx += m_chroma[p] * std::cos(ang);
+        sy += m_chroma[p] * std::sin(ang);
+    }
+    if (sx == 0 && sy == 0) sx = 1; // default hue when silent
+    // circular-smooth the hue (slerp the sin/cos pair) so it never flickers
+    float k = 1.0f - std::exp(-dt / 1.5f);
+    float mag = std::sqrt(sx * sx + sy * sy); if (mag < 1e-6f) mag = 1;
+    m_hueCos += (sx / mag - m_hueCos) * k;
+    m_hueSin += (sy / mag - m_hueSin) * k;
+    float H = std::atan2(m_hueSin, m_hueCos);
+
+    // chroma dispersion: narrow (analogous) vs wide (triad) palette spread
+    float csum = 0; for (int p = 0; p < 12; p++) csum += m_chroma[p];
+    float disp = (csum > 1e-6f) ? std::min(1.0f - (sx*sx+sy*sy) / (csum*csum), 1.0f) : 0.5f;
+    float offset = (18.0f + (130.0f - 18.0f) * disp) * (TWO_PI / 360.0f);
+
+    float V = m_brightness;
+    float Cbase = 0.02f + (0.16f - 0.02f) * m_arousal;   // capped chroma (harmonious)
+
+    oklchToLinear(0.18f + 0.14f * V, Cbase * 0.6f, H - offset * 0.5f, m_palShadow);
+    oklchToLinear(0.45f + 0.17f * V, Cbase,        H,                 m_palMid);
+    oklchToLinear(0.72f + 0.20f * V, Cbase * 0.8f, H + offset * 0.5f, m_palHigh);
+
+    // accent: onset-pop color, hue circularly smoothed too
+    float accHtarget = H + (60.0f * (TWO_PI / 360.0f)) * m_spread + (20.0f * (TWO_PI/360.0f)) * (m_warmth - 0.5f);
+    float ka = 1.0f - std::exp(-dt / 0.6f);
+    m_accHueCos += (std::cos(accHtarget) - m_accHueCos) * ka;
+    m_accHueSin += (std::sin(accHtarget) - m_accHueSin) * ka;
+    float accH = std::atan2(m_accHueSin, m_accHueCos);
+    float beat = m_beatDecay;
+    oklchToLinear(0.55f + 0.30f * beat, Cbase * (1.0f + 0.8f * beat), accH, m_palAccent);
+
+    m_palTemp = (m_warmth - 0.5f) * 2.0f;                 // -1..1
+    m_palSat  = std::min(std::max(0.2f + 0.6f * m_arousal, 0.0f), 1.0f);
 }
 
 // --- Beat detection ---

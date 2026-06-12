@@ -1,0 +1,22 @@
+{
+  "slug": "connectnumbers_text",
+  "rendered": "/Users/lu/easel/.planning/drops/20260520/connectnumbers_text/rendered.png",
+  "reference": "/Users/lu/Documents/A-List Shaders/connectnumbers_text.jpg",
+  "shader": "/Users/lu/easel/shaders/connectnumbers_text.fs",
+  "numeric": {
+    "histogram_emd": {
+      "L": 0.12056748230224684,
+      "a": 0.01404256694367508,
+      "b": 0.0025634502923977407,
+      "total": 0.045724499846106555
+    },
+    "ssim": 0.7124267191868171,
+    "l_mean_delta": 0.06575225223697628
+  },
+  "axes": null,
+  "total": null,
+  "anti_patterns": {},
+  "rationale": "",
+  "numeric_only": true,
+  "text_legibility": null
+}

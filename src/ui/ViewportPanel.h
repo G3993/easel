@@ -118,6 +118,7 @@ public:
         m_warpDragging = false;
         m_maskDragIndex = -1;
         m_maskDragType = 0;
+        m_maskHitUnderCursor = false;
         m_maskSelectedPoint = -1;
         m_maskSelectedPoints.clear();
         m_maskBoxSelecting = false;
@@ -143,6 +144,12 @@ private:
     bool m_warpDragging = false;
 
     // Mask editing state
+    // Set by renderMaskOverlay every frame: true when a mask point / bezier
+    // handle / closeable first-point sits under the cursor. render() runs
+    // BEFORE renderMaskOverlay, so the warp-corner drag-start consults this
+    // (1-frame-stale, negligible at frame rate) to give mask points priority
+    // when a mask point and a mapping corner overlap under the cursor.
+    bool m_maskHitUnderCursor = false;
     int m_maskDragIndex = -1;
     int m_maskDragType = 0;
     int m_maskSelectedPoint = -1;

@@ -26,6 +26,12 @@ public:
     void destroy();
 
     void present(GLuint texture);
+    // Present a horizontal/vertical sub-rect of the source texture. UV space:
+    // (uOffX,uOffY) is the bottom-left of the slice, (uScaleX,uScaleY) its size.
+    // e.g. left half  = present(t, 0.0, 0.0, 0.5, 1.0)
+    //      right half = present(t, 0.5, 0.0, 0.5, 1.0)
+    void presentCrop(GLuint texture, float uOffX, float uOffY,
+                     float uScaleX, float uScaleY);
 
     void requestClose() { m_closeRequested = true; }
 

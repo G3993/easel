@@ -1,7 +1,11 @@
 #include "ui/UIManager.h"
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <initializer_list>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -52,13 +56,40 @@ static ImFont* addFirstAvailableFont(ImGuiIO& io, const char* const* paths,
     return nullptr;
 }
 
+UIManager* UIManager::s_instance = nullptr;
+
 bool UIManager::init(GLFWwindow* window) {
+    s_instance = this;       // singleton — read by panels w/o a UIManager member
     m_window = window;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
     ImGuiIO& io = ImGui::GetIO();
+
+    // Redirect imgui.ini OUT of the .app bundle. main_mac.mm chdirs into
+    // Contents/Resources/ so relative asset paths resolve, which means
+    // ImGui's default (CWD-relative) imgui.ini gets written *inside the
+    // signed bundle*. Mutating a sealed resource breaks the code signature
+    // ("a sealed resource is missing or invalid"), and Gatekeeper then
+    // intermittently refuses to launch the app from Finder/Dock/open —
+    // looking exactly like a random crash. Persist layout under
+    // ~/Library/Application Support/Easel/ instead so the bundle stays
+    // sealed. Static storage: ImGui keeps the const char* we hand it.
+    static std::string sIniPath;
+    {
+        const char* home = std::getenv("HOME");
+        if (home && *home) {
+            std::filesystem::path dir =
+                std::filesystem::path(home) / "Library" /
+                "Application Support" / "Easel";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            sIniPath = (dir / "imgui.ini").string();
+            io.IniFilename = sIniPath.c_str();
+        }
+    }
+
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     // Any Drag/Slider widget in the app becomes click-to-type — matches the
@@ -330,8 +361,8 @@ static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
     else if (std::strstr(tabName, "###Mapping"))    { kind = Kind::Tex; texIdx = 1; }
     else if (std::strstr(tabName, "###Audio"))      { kind = Kind::Tex; texIdx = 2; }
     else if (std::strstr(tabName, "###MIDI"))       { kind = Kind::Tex; texIdx = 3; }
-    else if (std::strstr(tabName, "###Media"))      { kind = Kind::Tex; texIdx = 4; }
     if (kind == Kind::None) return;
+    if (kind == Kind::Tex && (texIdx < 0 || iconTex[texIdx] == 0)) return;
 
     float tabX0 = tabBar->BarRect.Min.x + tab.Offset;
     float tabX1 = tabX0 + tab.Width;
@@ -378,7 +409,6 @@ static void drawOneTabIcon(ImDrawList* fg, ImGuiTabBar* tabBar,
         else if (texIdx == 1) lucide::vectorSquare(fg, lcx2, lcy2, lsz2, tint);
         else if (texIdx == 2) lucide::audioLines  (fg, lcx2, lcy2, lsz2, tint);
         else if (texIdx == 3) lucide::music       (fg, lcx2, lcy2, lsz2, tint);
-        else if (texIdx == 4) lucide::vhs         (fg, lcx2, lcy2, lsz2, tint);
     }
 }
 
@@ -556,6 +586,172 @@ void UIManager::drawSourcesTabIcons() {
     }
 }
 
+// ─── Source-tab quick switcher (shared by the Sources panel and the
+//     Properties panel's pinned top strip) ─────────────────────────
+//
+// Both lookups walk the Sources dock's tab bar by hunting for the Shaders
+// marker tab (legacy "###ShaderClaw" / current "###Shaders"). The other
+// tabs are matched by their stable "###Name" suffix so the helpers keep
+// working across visual renames.
+// Single source of truth for which source sub-panel is active. The Sources
+// panel no longer wraps its content in an ImGui TabBar — that was leaving a
+// stranded strip of empty (ellipsis) tab buttons after the icon overlay was
+// removed in favour of the pinned right-dock nav. With state stored here,
+// the Sources panel just branches on s_activeSubTab to render the matching
+// section, and the nav-bar pills drive selection by writing this state
+// directly.
+static UIManager::SourceTab s_activeSubTab = UIManager::SourceTab::Shader;
+
+static UIManager::SourceTab kindForTabName(const char* nm) {
+    if (!nm) return UIManager::SourceTab::None;
+    if (std::strstr(nm, "###Shaders") || std::strstr(nm, "###ShaderClaw"))
+        return UIManager::SourceTab::Shader;
+    if (std::strstr(nm, "###Etherea"))   return UIManager::SourceTab::Mic;
+    if (std::strstr(nm, "###Camera"))    return UIManager::SourceTab::Cam;
+    if (std::strstr(nm, "###Display") || std::strstr(nm, "###Capture"))
+        return UIManager::SourceTab::Win;
+    return UIManager::SourceTab::None;
+}
+
+void UIManager::focusSourcesTab(SourceTab t) {
+    if (t == SourceTab::None) return;
+    // Store the selection in the explicit state used by the Sources panel's
+    // content branches. The legacy TabBar lookup is gone — the inner strip
+    // was deleted so it doesn't render empty "..." stubs next to the new
+    // pinned nav.
+    s_activeSubTab = t;
+    // Pull the host Sources window to the front. With NoTabBar on the outer
+    // dock, FocusWindow alone won't switch which docked window is visible —
+    // we must also poke the dock node's SelectedTabId so it picks Sources
+    // as the visible tab.
+    ImGuiWindow* host = ImGui::FindWindowByName("        ###Sources");
+    if (host) ImGui::FocusWindow(host);
+    m_dockSelectQueue   = "        ###Sources";
+    m_currentRightPanel = "        ###Sources";   // sticky — re-applied each frame
+}
+
+void UIManager::focusPanel(const char* windowName) {
+    if (!windowName) return;
+    std::cerr << "[Nav] focusPanel(" << windowName << ")" << std::endl;
+    // Direct focus, NOT the m_pendingFocus queue — that path has a
+    // hardcoded re-focus to Properties that clobbers user-triggered nav.
+    ImGui::SetWindowFocus(windowName);
+    // Queue the SelectedTabId update to apply at end-of-frame, where it's
+    // safe to mutate dock state (avoids mid-render crash).
+    m_dockSelectQueue = windowName;
+    m_currentRightPanel = windowName;  // sticky — re-applied each frame
+}
+
+// 6-pill quick nav: Properties / Shader / Mic / Cam / Win / Mapping.
+// Rendered inside every right-dock panel's Begin block so the user always
+// has navigation regardless of which tab is the visible one. The outer
+// ImGui tab bar is hidden separately.
+void UIManager::renderRightDockNavBar(QuickNavTab active) {
+    const float kBarH = 42.0f;     // 50 → 42 to tighten spacing below the bar
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+    ImGui::BeginChild("##rdNav", ImVec2(0, kBarH), false,
+                      ImGuiWindowFlags_NoScrollbar |
+                      ImGuiWindowFlags_NoScrollWithMouse);
+    const float pillR = 18.0f;
+    const float pillW = pillR * 2.0f;
+    const float gap   = 9.0f;                  // 6 pills (Mapping is its own workspace now)
+    const float groupW = 6.0f * pillW + 5.0f * gap;
+    float availW = ImGui::GetContentRegionAvail().x;
+    float startX = (availW - groupW) * 0.5f;
+    ImGui::SetCursorPosY((kBarH - pillW) * 0.5f);
+    if (startX > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
+
+    using LucideFn = void (*)(ImDrawList*, float, float, float, ImU32, float);
+    auto pill = [&](const char* id, bool isActive, LucideFn icon,
+                    const char* tip, std::function<void()> onClick) {
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton(id, ImVec2(pillW, pillW));
+        bool hov     = ImGui::IsItemHovered();
+        if (hov && tip) ImGui::SetTooltip("%s", tip);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 fill = isActive ? IM_COL32(255, 255, 255, 38)
+                   : hov      ? IM_COL32(255, 255, 255, 22)
+                              : IM_COL32(255, 255, 255, 12);
+        float cx = cur.x + pillR, cy = cur.y + pillR;
+        dl->AddCircleFilled(ImVec2(cx, cy), pillR, fill, 32);
+        ImU32 tint = isActive ? IM_COL32(235, 240, 250, 245)
+                              : IM_COL32(170, 180, 200, 200);
+        icon(dl, cx, cy, 18.0f, tint, 1.6f);
+        if (clicked && onClick) onClick();
+    };
+
+    SourceTab activeSub = activeSourcesTab();
+    // When called with None (the host-level pinned bar), the highlighted pill
+    // must reflect the panel that's ACTUALLY visible — m_currentRightPanel —
+    // not the sub-tab default (which is Shader). Otherwise on launch the
+    // Properties panel shows but the Shader pill reads as selected.
+    if (active == QuickNavTab::None && m_currentRightPanel) {
+        if (std::strstr(m_currentRightPanel, "Properties")) active = QuickNavTab::Properties;
+        else if (std::strstr(m_currentRightPanel, "Mapping")) active = QuickNavTab::Mapping;
+        else if (std::strstr(m_currentRightPanel, "Audio")) active = QuickNavTab::Music;
+        // "Sources" panel keeps active=None so the sub-tab (Shader/Mic/Cam/Win)
+        // drives the highlight below.
+    }
+    bool actProps  = (active == QuickNavTab::Properties);
+    bool actMusic  = (active == QuickNavTab::Music);
+    bool actShader = (active == QuickNavTab::Shader) ||
+                     (active != QuickNavTab::Properties &&
+                      active != QuickNavTab::Mapping &&
+                      activeSub == SourceTab::Shader);
+    bool actMic    = (active == QuickNavTab::Mic) ||
+                     (active != QuickNavTab::Properties &&
+                      active != QuickNavTab::Mapping &&
+                      activeSub == SourceTab::Mic);
+    bool actCam    = (active == QuickNavTab::Cam) ||
+                     (active != QuickNavTab::Properties &&
+                      active != QuickNavTab::Mapping &&
+                      activeSub == SourceTab::Cam);
+    bool actWin    = (active == QuickNavTab::Win) ||
+                     (active != QuickNavTab::Properties &&
+                      active != QuickNavTab::Mapping &&
+                      activeSub == SourceTab::Win);
+
+    pill("##rdProps", actProps, &lucide::sliders, "Parameters",
+         [this]() { focusPanel("        ###Properties"); });
+    ImGui::SameLine(0, gap);
+    pill("##rdShader", actShader, &lucide::zap, "Shaders",
+         [this]() { focusSourcesTab(SourceTab::Shader); });
+    ImGui::SameLine(0, gap);
+    pill("##rdMic", actMic, &lucide::mic, "Voice / Etherea",
+         [this]() { focusSourcesTab(SourceTab::Mic); });
+    ImGui::SameLine(0, gap);
+    pill("##rdMusic", actMusic, &lucide::music, "Music / Audio",
+         [this]() { focusPanel("        ###Audio"); });
+    ImGui::SameLine(0, gap);
+    pill("##rdCam", actCam, &lucide::camera, "Camera",
+         [this]() { focusSourcesTab(SourceTab::Cam); });
+    ImGui::SameLine(0, gap);
+    pill("##rdWin", actWin, &lucide::monitor, "Display / Capture",
+         [this]() { focusSourcesTab(SourceTab::Win); });
+    // Mapping pill removed — Mapping is now its own top-level workspace
+    // (CANVAS · MAPPING · STAGE · PLAY), so it no longer belongs in the
+    // parameters-panel quick-nav.
+
+    // Hairline divider under the bar.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 cmn = ImGui::GetWindowPos();
+    ImVec2 cmx(cmn.x + ImGui::GetWindowSize().x,
+               cmn.y + ImGui::GetWindowSize().y);
+    dl->AddLine(ImVec2(cmn.x, cmx.y - 0.5f),
+                ImVec2(cmx.x, cmx.y - 0.5f),
+                IM_COL32(255, 255, 255, 22), 1.0f);
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+UIManager::SourceTab UIManager::activeSourcesTab() const {
+    // No TabBar lookup anymore — the inner Sources strip was removed
+    // (was rendering as a row of empty ellipsis stubs beneath the new
+    // pinned nav). focusSourcesTab writes here; the Sources panel
+    // branches its content on this value.
+    return s_activeSubTab;
+}
+
 void UIManager::drawInspectorTabIcons() {
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     // Walk both float-panel TabBars. Mapping moved into the LEFT float
@@ -574,6 +770,21 @@ void UIManager::drawInspectorTabIcons() {
         // is always considered visible — it doesn't have a rail toggle.
         if (f == 0 && m_activeLeftPanel == LeftPanel::None) continue;
         ImGuiTabBar* tabBar = node->TabBar;
+        // RIGHT float dock: overpaint the outer tab bar with the host bg
+        // so visually there's only ONE nav surface (the pinned 6-pill bar
+        // inside each panel). The tab bar still exists functionally so
+        // pill-driven ImGui::SetWindowFocus actually switches windows.
+        if (f == 1) {
+            // Match the host K bg (pure black) and extend a few pixels past
+            // the bar bottom so there's no visible seam against the panel
+            // body below.
+            ImU32 bg = IM_COL32(0, 0, 0, 255);
+            fg->AddRectFilled(
+                ImVec2(tabBar->BarRect.Min.x, tabBar->BarRect.Min.y - 2.0f),
+                ImVec2(tabBar->BarRect.Max.x, tabBar->BarRect.Max.y + 4.0f),
+                bg);
+            continue;  // no icons over the hidden bar
+        }
         for (int t = 0; t < tabBar->Tabs.Size; t++) {
             ImGuiTabItem& tab = tabBar->Tabs[t];
             const char* tabName = ImGui::TabBarGetTabName(tabBar, &tab);
@@ -920,11 +1131,39 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     bool modeChanged = (s_lastMode != sMode);
     s_lastMode = sMode;
 
-    if (m_firstFrame || sizeChanged || modeChanged) {
+    bool structuralRebuild = (m_firstFrame || sizeChanged);
+
+    // A mode switch no longer tears down the dock node. The full
+    // DockBuilderRemoveNode + resettle below caused a visible one-frame
+    // "jump" of the canvas and panels on every Canvas↔Mapping↔Stage↔Play
+    // switch (windows briefly un-docked to default size/pos, then snapped
+    // back). Per-mode panel composition is already handled by
+    // isPanelVisible() gating — unsubmitted panels vacate the node on their
+    // own — plus the conditional float hosts, so a mode change only needs to
+    // re-seed the tab order and re-fire the right-rail focus.
+    if (structuralRebuild || modeChanged) {
+        m_seedRightDockTabs = true;
+        // In Stage / Mapping modes, surface Mapping as the active right-rail
+        // tab; otherwise Layers leads the group. Pin the sticky right-dock
+        // selection too so a stale pointer can't re-raise a hidden tab.
+        if (sMode == WorkspaceMode::Stage || sMode == WorkspaceMode::Mapping) {
+            m_pendingFocus = "        ###Mapping";
+            m_currentRightPanel = "        ###Mapping";
+        } else {
+            m_pendingFocus = "Layers";
+            // Reset the sticky right-dock selection back to Parameters —
+            // otherwise it stays pinned to "###Mapping" from a prior
+            // Stage/Mapping visit and the right panel never switches context
+            // when you return to Canvas.
+            m_currentRightPanel = "        ###Properties";
+        }
+        m_pendingFocusFramesLeft = 3;
+    }
+
+    if (structuralRebuild) {
         m_firstFrame = false;
         m_lastDockW = dockSize.x;
         m_lastDockH = dockSize.y;
-        m_seedRightDockTabs = true;
 
         // Always rebuild layout to ensure clean state
         ImGui::DockBuilderRemoveNode(dockspaceId);
@@ -962,9 +1201,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         };
 
         // Center peer tabs — one submits Begin() per frame (gated by sMode).
-        dockAlways("Canvas",   mainId);
-        dockAlways("Stage",    mainId);
-        dockAlways("Show",     mainId);
+        dockAlways("Canvas", mainId);
+        dockAlways("Stage",  mainId);
+        dockAlways("Play",   mainId);
         if (ImGuiDockNode* mn = ImGui::DockBuilderGetNode(mainId)) {
             mn->LocalFlags |= ImGuiDockNodeFlags_HiddenTabBar
                             | ImGuiDockNodeFlags_NoWindowMenuButton;
@@ -995,6 +1234,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // adding CentralNode here trips an ImGui assertion downstream.)
         ImGui::DockBuilderRemoveNode(rightFloatId);
         ImGui::DockBuilderAddNode(rightFloatId, ImGuiDockNodeFlags_DockSpace);
+        // NoTabBar now safe — m_currentRightPanel is re-applied each frame
+        // (see end-of-frame consumer) so ImGui can't flash back to its
+        // default visible window.
+        if (ImGuiDockNode* rn = ImGui::DockBuilderGetNode(rightFloatId)) {
+            rn->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
+        }
 
         // Right float = "Control Panel". User-facing tab order is fixed:
         //   Layers → Properties → Sources → Mapping
@@ -1008,7 +1253,6 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockAlways("        ###Mapping",    rightFloatId);
         dockAlways("        ###Audio",      rightFloatId);
         dockAlways("        ###MIDI",       rightFloatId);
-        dockAlways("        ###Media",      rightFloatId);
         ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
 
         // Right-float dock chrome polish: hide the per-window menu
@@ -1031,22 +1275,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_timelineDockId = timelineDockId;  // 0 — timeline is floating now
         m_leftFloatId    = leftFloatId;
         m_rightFloatId   = rightFloatId;
-        if (m_leftFloatW <= 0.0f) m_leftFloatW = 320.0f;
-        if (m_rightFloatW <= 0.0f) m_rightFloatW = 0.0f;
+        m_leftFloatW     = 320.0f;
+        m_rightFloatW    = 320.0f;
         m_lastTimelineH  = 0.0f;  // floating overlay — no docked strip
-
-        // Two deferred focus passes: Canvas in the big left slot, Layers as
-        // the active tab in the top-right. SetWindowFocus is called every
-        // frame while m_pendingFocusFramesLeft > 0 so both settle correctly.
-        // In Stage mode, surface Mapping (not Properties) as the active
-        // right-rail tab — when the user goes Canvas→Stage they expect to
-        // see the mapping controls front and center for projector calibration.
-        if (sMode == WorkspaceMode::Stage) {
-            m_pendingFocus = "        ###Mapping";
-        } else {
-            m_pendingFocus = "Layers";
-        }
-        m_pendingFocusFramesLeft = 3;
     } else {
         // Track size for change detection even when not rebuilding
         m_lastDockW = dockSize.x;
@@ -1111,17 +1342,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // window sizes. 22% of the window for the typical 1920-wide
         // editor is 420px — close to the previous 360 clamp but with
         // breathing room for full-width labels inside.
-        auto clampRightWidth = [&](float w) {
-            float maxW = std::min(720.0f, std::max(360.0f, dockSize.x - kLeftRailW - 360.0f));
-            float minW = std::min(360.0f, std::max(280.0f, maxW));
-            return std::clamp(w, minW, maxW);
-        };
-        float defaultRightW = std::clamp(dockSize.x * 0.22f, 380.0f, 500.0f);
-        if (m_rightFloatW <= 0.0f) m_rightFloatW = defaultRightW;
-        m_rightFloatW = clampRightWidth(m_rightFloatW);
-        float rightW = m_rightFloatW;
-        float leftW  = std::clamp(dockSize.x * 0.20f, 320.0f, 440.0f);
-        m_leftFloatW = leftW;
+        float leftW  = std::min(420.0f, dockSize.x * 0.24f);
+        float rightW = leftW;
+        // Persist for other UI code that needs to reserve space (e.g. Stage
+        // panel reserves the right column out of its central content width).
+        m_rightFloatW = rightW;
+        m_leftFloatW  = leftW;
 
         ImGuiWindowFlags hostFlags =
             ImGuiWindowFlags_NoTitleBar |
@@ -1150,8 +1376,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         bool rightHasContent = isPanelVisible("Layers")
                             || isPanelVisible("Properties") || isPanelVisible("Mapping")
                             || isPanelVisible("Sources")
-                            || isPanelVisible("Audio")      || isPanelVisible("MIDI")
-                            || isPanelVisible("Timecode");
+                            || isPanelVisible("Audio")      || isPanelVisible("MIDI");
 
         // Left host — shifted right of the activity rail. The +12 matches the
         // kLeftRailInset used by renderLeftRail() so the layer-panel doesn't
@@ -1170,24 +1395,29 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::PopStyleVar();
         }
 
-        // Right sidebar — flush against the right edge, full viewport height
-        // (top to bottom). Timeline and transport pill render on top of it.
-        const float kRightInset = 0.0f;
-        float rightX = viewport->WorkPos.x + dockSize.x - rightW - kRightInset;
-        const float kRightTopReserve = 28.0f;
-        float rightY = viewport->WorkPos.y + kRightTopReserve + m_rightPanelTopOffset;
-        float rightH = std::max(120.0f, viewport->WorkSize.y - kRightTopReserve - m_rightPanelTopOffset);
-        // Expose left edge so timeline + pill can clamp their width.
-        m_rightFloatLeft = rightHasContent ? rightX : (viewport->WorkPos.x + dockSize.x);
+        // Right host — 20px inset from the window's right edge so the
+        // control panel reads as a floating card with breathing room.
+        // (The 56-px right tool rail comment that lived here was stale —
+        // renderRightToolRail() is defined but never invoked, so we
+        // don't need to reserve space for it.)
+        const float kRightInset = 20.0f;
         if (rightHasContent) {
-            ImGui::SetNextWindowPos (ImVec2(rightX, rightY), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(rightW, rightH), ImGuiCond_Always);
+            ImGui::SetNextWindowPos (
+                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kRightInset,
+                       floatY),
+                ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(rightW, floatH), ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-            // Thin light-grey left border so the sidebar reads as a distinct column.
-            const ImU32 K      = IM_COL32(0, 0, 0, 255);
-            const ImU32 kBorder = IM_COL32(180, 185, 200, 55);
-            ImGui::PushStyleColor(ImGuiCol_Border,              kBorder);
+            // Zero vertical item-spacing so the pill bar sits FLUSH against
+            // the DockSpace below — no implicit ~4 px gap between the
+            // BeginChild's bottom and the next widget.
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(0, 0));
+            // Black background for the host AND every internal surface
+            // ImGui paints behind the dock-tab strip (TitleBg* and the
+            // unselected/dimmed Tab fills). Without this the global theme
+            // shows a charcoal grey strip behind the 4 dock tab icons —
+            // visibly distinct from the black panel body below.
+            const ImU32 K = IM_COL32(0, 0, 0, 255);
             ImGui::PushStyleColor(ImGuiCol_WindowBg,            K);
             ImGui::PushStyleColor(ImGuiCol_ChildBg,             K);
             ImGui::PushStyleColor(ImGuiCol_TitleBg,             K);
@@ -1195,54 +1425,48 @@ void UIManager::setupDockspace(float bottomBarHeight) {
             ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed,    K);
             ImGui::PushStyleColor(ImGuiCol_MenuBarBg,           K);
             ImGui::PushStyleColor(ImGuiCol_Tab,                 K);
-            ImGui::PushStyleColor(ImGuiCol_TabHovered,          IM_COL32(255, 255, 255, 18));
+            ImGui::PushStyleColor(ImGuiCol_TabHovered,          K);
+            ImGui::PushStyleColor(ImGuiCol_TabActive,           K);
             ImGui::PushStyleColor(ImGuiCol_TabUnfocused,        K);
-            ImGui::PushStyleColor(ImGuiCol_TabUnfocusedActive,  IM_COL32(255, 255, 255, 18));
+            ImGui::PushStyleColor(ImGuiCol_TabUnfocusedActive,  K);
+            // Kill the lighter "container" bg on combos / buttons / rows
+            // inside docked panels so everything reads as one continuous
+            // black surface. Hover/active keep subtle white tints so the
+            // user can tell controls are interactive.
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,         K);
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,  IM_COL32(255, 255, 255, 14));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive,   IM_COL32(255, 255, 255, 22));
+            ImGui::PushStyleColor(ImGuiCol_Button,          K);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,   IM_COL32(255, 255, 255, 18));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,    IM_COL32(255, 255, 255, 28));
             if (ImGui::Begin("##RightFloatHost", nullptr, hostFlags)) {
+                // Single nav surface — pinned pill bar at the top of the
+                // host, BEFORE the DockSpace. The auto tab bar below it is
+                // still drawn by ImGui (kept for tab-switch machinery) but
+                // overpainted invisibly in drawInspectorTabIcons.
+                // Mapping mode hosts ONLY the Mapping panel, so the pill
+                // switcher would just be a row of dead/duplicate icons —
+                // skip it and let the warp/mask params start at the top.
+                if (sMode != WorkspaceMode::Mapping) {
+                    renderRightDockNavBar(QuickNavTab::None);
+                }
+                // Shrink the auto tab bar's height to ~font height so it
+                // doesn't reserve a visible strip below the pill bar.
+                // FramePadding controls tab height; push y=0 just for the
+                // DockSpace call so other widgets aren't affected.
+                ImGuiStyle& gs = ImGui::GetStyle();
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                    ImVec2(gs.FramePadding.x, 0.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                                    ImVec2(gs.ItemSpacing.x, 0.0f));
                 ImGui::DockSpace(kRightFloatId, ImVec2(0, 0),
                                  ImGuiDockNodeFlags_NoDockingSplit |
                                  ImGuiDockNodeFlags_NoUndocking);
+                ImGui::PopStyleVar(2);
             }
             ImGui::End();
-            ImGui::PopStyleColor(11);
-            ImGui::PopStyleVar(2);
-
-            const float handleW = 10.0f;
-            ImGui::SetNextWindowPos(ImVec2(rightX - handleW * 0.5f, rightY), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(handleW, rightH), ImGuiCond_Always);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
-            ImGuiWindowFlags resizeFlags =
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-                ImGuiWindowFlags_NoNavFocus;
-            if (ImGui::Begin("##RightFloatResizeHandle", nullptr, resizeFlags)) {
-                ImGui::InvisibleButton("##dragRightFloat", ImVec2(handleW, rightH));
-                bool hovered = ImGui::IsItemHovered();
-                bool active = ImGui::IsItemActive();
-                if (hovered || active) {
-                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                }
-                if (active) {
-                    float desired = viewport->WorkPos.x + dockSize.x - ImGui::GetIO().MousePos.x - kRightInset;
-                    m_rightFloatW = clampRightWidth(desired);
-                }
-                if (hovered || active) {
-                    ImU32 lineCol = active ? IM_COL32(255, 255, 255, 120)
-                                           : IM_COL32(255, 255, 255, 70);
-                    ImGui::GetForegroundDrawList()->AddLine(
-                        ImVec2(rightX, rightY),
-                        ImVec2(rightX, rightY + rightH),
-                        lineCol, active ? 2.0f : 1.0f);
-                }
-            }
-            ImGui::End();
-            ImGui::PopStyleColor();
-            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(17);  // 11 K-fills + 3 FrameBg + 3 Button
+            ImGui::PopStyleVar(2);     // WindowPadding + ItemSpacing
         }
     }
 
@@ -1280,7 +1504,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // calling it last means Mapping wins selection in its dock group.
         // In other modes, Layers takes the left, then Properties wins the
         // right group (originally to beat Mapping's early Begin).
-        if (sMode == WorkspaceMode::Stage) {
+        if (sMode == WorkspaceMode::Stage || sMode == WorkspaceMode::Mapping) {
             ImGui::SetWindowFocus(m_pendingFocus);  // "        ###Mapping"
         } else {
             ImGui::SetWindowFocus(m_pendingFocus);  // typically "Layers"
@@ -1293,6 +1517,22 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_pendingFocusFramesLeft--;
         if (m_pendingFocusFramesLeft <= 0) m_pendingFocus = nullptr;
     }
+
+    // End-of-frame: apply queued dock-tab selection. Safe here because we
+    // are between panel renders; doing it inline in the click handler
+    // (which fires from inside another panel's Begin/End) crashed.
+    // Sticky right-dock VisibleWindow — re-applied each frame so ImGui's
+    // own dock update can't flash back to whatever its default tab is.
+    if (m_currentRightPanel) {
+        ImGuiWindow* w = ImGui::FindWindowByName(m_currentRightPanel);
+        if (w && w->DockNode) {
+            w->DockNode->VisibleWindow = w;
+            if (w->DockNode->TabBar) {
+                w->DockNode->TabBar->SelectedTabId = w->TabId;
+            }
+        }
+    }
+    m_dockSelectQueue = nullptr;
 }
 
 void UIManager::setWorkspace(Workspace w) {
@@ -1319,9 +1559,25 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Sources"))    return true;
         if (eq("Mapping"))    return true;
         if (eq("Properties")) return true;
-        if (eq("Media"))      return true;
+        if (eq("Audio"))      return true;  // surfaced via the Music pill
         if (eq("Timeline"))   return true;
         if (eq("Canvas"))     return true;
+        return false;
+
+    case WorkspaceMode::Mapping:
+        // Mapping is 2D projection calibration: it reuses the Canvas
+        // output viewport (so corner-pin / mesh-warp / mask handles draw
+        // on the live composite) with the Mapping panel — warp params +
+        // masks — as the SOLE right-rail panel. Nothing else docks here:
+        // no Properties, Layers, Sources, Audio or MIDI, so the param
+        // panel is pure mapping and the right-dock pill switcher is
+        // suppressed (see renderRightDockNavBar gate). This workspace is
+        // purely about shaping the output onto physical geometry — no
+        // timeline / bottom transport nav here (you're calibrating geometry,
+        // not scrubbing the show), so the only surfaces are the output
+        // viewport and the Mapping panel.
+        if (eq("Canvas"))     return true;
+        if (eq("Mapping"))    return true;
         return false;
 
     case WorkspaceMode::Stage:
@@ -1334,16 +1590,13 @@ bool UIManager::isPanelVisible(const char* title) const {
         return false;
 
     case WorkspaceMode::Show:
-        // Live performance: MIDI + Audio + Timecode on the right, Timeline
-        // at the bottom. No layer editing surfaces.
-        if (eq("Show"))       return true;
+        // Live performance: MIDI + Audio on the right, Timeline at the
+        // bottom. No layer editing surfaces.
+        if (eq("Play"))       return true;
         if (eq("MIDI"))       return true;
         if (eq("Audio"))      return true;
-        if (eq("Timecode"))   return true;
-        if (eq("Media"))      return true;
         if (eq("Timeline"))   return true;
         return false;
-
     }
     return true;
 }
@@ -1402,6 +1655,11 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // Sources / Mapping tabs); the rail no longer hosts a Layers
         // toggle. The floating layer thumbnail strip below is kept so
         // the user can scrub layers visually without opening the panel.
+        // Left rail currently has no icon items (all moved to the right
+        // Control Panel). MSVC rejects a zero-size array (`Item items[] = {}`),
+        // so use a null pointer + explicit count — the draw loop below is
+        // bounded by kRailItems and never dereferences it while empty.
+        const Item* items = nullptr;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float kBtn   = 36.0f;        // circular hit + visual diameter — matches transport pill
         const float kGlyph = 16.0f;        // smaller glyph, generous margin
@@ -1410,13 +1668,14 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& drawExtr
         // cursor down by half of the leftover space so the three icons sit
         // visually centered within the rail's available height.
         const float kThumbReserve = 110.0f;  // approximate space the layer thumbnail callback uses
-        // Rail is empty — all items moved to right-side Control Panel.
-        const Item* items = nullptr;
-        const int  kRailItems = 0;
+        const int  kRailItems = 0;  // see note above — no left-rail icons
         float stackH = (float)kRailItems * kBtn + (float)(kRailItems - 1) * kIconGap;
         float availH = h - kThumbReserve - 24.0f;  // 24 = window padding (12 top + 12 bottom)
         float topSpacer = std::max(0.0f, (availH - stackH) * 0.5f);
-        if (topSpacer > 0) ImGui::Dummy(ImVec2(0, topSpacer));
+        // Only apply icon-stack centering when the icon list is non-empty.
+        // When kRailItems == 0 the drawExtra (layer-thumbnail) callback
+        // owns its own vertical centering and we must not push it down.
+        if (kRailItems > 0 && topSpacer > 0) ImGui::Dummy(ImVec2(0, topSpacer));
         for (int i = 0; i < kRailItems; i++) {
             const Item& it = items[i];
             bool active = (m_activeLeftPanel == it.which);

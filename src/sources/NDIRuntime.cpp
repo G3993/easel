@@ -21,6 +21,11 @@ bool NDIRuntime::init() {
     if (m_initialized) return m_loaded;
     m_initialized = true;
 
+    // Write ndi-config.v1.json + set NDI_CONFIG_DIR BEFORE initialize() reads it.
+    // On the first init this is the default (Auto = all NICs); a later project load
+    // or UI change re-applies via reinitWithSettings().
+    NdiNetworkConfig::applyToEnv(pendingNetworkSettings());
+
     // Dynamically load the NDI library and find the v6_3 load function
     typedef const NDIlib_v6_3* (*NDIlib_v6_3_load_fn)(void);
     NDIlib_v6_3_load_fn loadFn = nullptr;
@@ -99,6 +104,28 @@ void NDIRuntime::shutdown() {
     }
     m_loaded = false;
     m_api = nullptr;
+}
+
+// Process-wide stash of the pending network selection (init() reads it before
+// initialize(); NDISource's finder reads the same value for p_extra_ips).
+static NdiNetworkSettings& pendingNetworkSettingsRef() {
+    static NdiNetworkSettings s;
+    return s;
+}
+
+void NDIRuntime::setPendingNetworkSettings(const NdiNetworkSettings& s) {
+    pendingNetworkSettingsRef() = s;
+}
+
+const NdiNetworkSettings& NDIRuntime::pendingNetworkSettings() {
+    return pendingNetworkSettingsRef();
+}
+
+bool NDIRuntime::reinitWithSettings(const NdiNetworkSettings& s) {
+    shutdown();
+    m_initialized = false;   // allow init() to run again
+    setPendingNetworkSettings(s);
+    return init();
 }
 
 #endif // HAS_NDI

@@ -40,6 +40,10 @@ class Layer {
 public:
     uint32_t id = 0; // stable ID for zone visibility sets
     std::string name = "Layer";
+    // Non-empty when this layer is driven by the agent SDK over OSC
+    // (/easel/layer/ensure/ndi <slot>). The slot is the stable key that makes
+    // ensure idempotent; serialized into the project so it survives reload.
+    std::string managedKey;
     bool visible = true;
     // User-forced hide from the Layer panel eye toggle. Survives Timeline's
     // per-frame visibility reconciliation (which force-sets visible=true while
@@ -109,6 +113,13 @@ public:
 
     // Edge feather (0.0 = hard edge, 0.5 = max soft blend)
     float feather = 0.0f;
+
+    // Voice-control edit mode (ephemeral — not serialized). When true, the
+    // Property panel's shader Parameters section shows an inline voice/audio
+    // source combo per float param. Toggled from the Layer panel's
+    // right-click context menu ("Edit voice control") and the in-panel
+    // "DONE" button.
+    bool voiceControlEdit = false;
 
     // Drop shadow
     bool dropShadowEnabled = false;

@@ -38,6 +38,11 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     ns.titlebarAppearsTransparent = YES;
     ns.titleVisibility = NSWindowTitleHidden;
     ns.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    // Make the green traffic-light button enter NATIVE macOS fullscreen
+    // (hides the Dock + menu bar) instead of just zooming/maximizing the
+    // window. Without this flag GLFW windows default to "zoom" on the green
+    // button. (Option-click still does the old zoom.)
+    ns.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
     // Suppress AppKit's "+" tab-add button and tab-bar overlay that can
     // peek through the chrome row near the traffic-light cluster as a
     // small dark sliver. Easel never opens window tabs, so disallow.

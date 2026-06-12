@@ -9,10 +9,32 @@
 // Consumers (shader text params) bind to a key and receive updates.
 class DataBus {
 public:
+    // Hard cap on distinct keys. A 24/7 install can otherwise leak a key
+    // forever per unique inbound OSC address (Application routes raw OSC
+    // addresses through set()). Once full, only existing keys update.
+    static constexpr size_t kMaxKeys = 4096;
+
     // --- Writers ---
     void set(const std::string& key, const std::string& value) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_values.size() >= kMaxKeys && m_values.find(key) == m_values.end())
+            return;
         m_values[key] = value;
+    }
+
+    // Append `text` to the string at `key` (with separator), bounded to the
+    // last `maxChars` characters. Live transcript accumulators (etherea/cue)
+    // would otherwise grow without limit while the mic runs — the leak that
+    // sinks a permanent installation. Keeps the recent tail (what shaders
+    // showing "recent words" actually want). Locks once; does not call
+    // set()/get() (would deadlock the non-recursive mutex).
+    void appendCapped(const std::string& key, const std::string& text,
+                      const char* sep = " ", size_t maxChars = 16000) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string& v = m_values[key];
+        if (!v.empty() && sep && *sep) v += sep;
+        v += text;
+        if (v.size() > maxChars) v.erase(0, v.size() - maxChars);
     }
 
     std::string get(const std::string& key) const {
@@ -27,6 +49,8 @@ public:
     // numeric live-input route (MIDI CC, OSC).
     void setNum(const std::string& key, float value) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_numbers.size() >= kMaxKeys && m_numbers.find(key) == m_numbers.end())
+            return;
         m_numbers[key] = value;
     }
 

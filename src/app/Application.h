@@ -24,6 +24,7 @@
 #endif
 #include <unordered_map>
 #include <deque>
+#include <future>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -33,7 +34,16 @@
 #include "sources/ShaderSource.h"
 #include "sources/ShaderClawBridge.h"
 #include "sources/ShaderRatings.h"
+#include "sources/ShaderPresets.h"
+#include "sources/ShaderImprover.h"
 #include "sources/ParticleSource.h"
+#include "sources/MovingCompanySource.h"
+#include "sources/FluidSource.h"
+#include "sources/FluidSource3D.h"
+#include "sources/HologramModelSource.h"
+#ifdef __APPLE__
+#include "sources/VisionTracker.h"
+#endif
 
 #ifdef HAS_OPENCV
 #include "scanning/SceneScanner.h"
@@ -59,9 +69,12 @@
 #include "app/ProDJLink.h"
 #include "ui/TimecodePanel.h"
 
+#include "app/NetAdapters.h"
+
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
 #include "app/NDIOutput.h"
+#include "net/NdiNetworkConfig.h"
 #endif
 
 #ifdef HAS_SPOUT
@@ -130,7 +143,76 @@ private:
     // Output zones (replaces singular compositor/warp/FBO)
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
+    // Monotonic composite-pass counter — drives idle release of per-zone
+    // scratch FBOs (OutputZone::releaseIdleScratch).
+    uint64_t m_compositeFrame = 0;
     int m_prevActiveZone = 0;
+
+    // ── Multi-screen output mode ─────────────────────────────────────
+    // Independent: each zone drives its own monitor (the existing path).
+    // Spanned:     one wide "span" canvas is sliced left-to-right across
+    //              several monitors, so a single visual stretches/moves
+    //              across screens. The two are alternatives, toggled live.
+    enum class OutputMode { Independent, Spanned };
+    OutputMode m_outputMode = OutputMode::Independent;
+
+    // The span canvas: its own compositor / warp / layer-visibility at a
+    // user-defined resolution (default 3840x1080 = two side-by-side 1080p
+    // screens). Lazily created the first time spanned mode is used.
+    std::unique_ptr<OutputZone> m_spanZone;
+    int m_spanWidth  = 3840;
+    int m_spanHeight = 1080;
+
+    // Horizontal slices of the span canvas, ordered left-to-right. Each slice
+    // crops the [u0,u1] sub-rect of the (flat) span canvas, warps it through
+    // its OWN mapping profile (independent per-projector corner-pin), then
+    // presents fullscreen on one monitor.
+    struct SpanSlice {
+        int monitor = -1;
+        float u0 = 0.0f;
+        float u1 = 1.0f;
+        int mappingIndex = -1;   // own MappingProfile in m_mappings (-1 until created)
+    };
+    std::vector<SpanSlice> m_spanSlices;
+    // Per-slice GPU targets (parallel to m_spanSlices): cropFBO holds the
+    // projector's flat half, warpFBO the corner-pinned result. Kept out of
+    // SpanSlice so the struct stays copyable.
+    std::vector<Framebuffer> m_spanCropFBO;
+    std::vector<Framebuffer> m_spanWarpFBO;
+    // Per-projector mapping profiles, kept SEPARATE from m_mappings so the
+    // normal Mapping workspace (which enumerates m_mappings) never sees or
+    // touches them. SpanSlice.mappingIndex indexes into this vector.
+    std::vector<std::unique_ptr<MappingProfile>> m_spanMappings;
+
+    OutputZone& ensureSpanZone();   // create + size the span canvas on demand
+    void layoutSpanSlices();        // even left->right split across the slices
+    void ensureSpanSliceResources(); // size per-slice FBOs + mapping profiles
+    // Shared projector create/retry/backoff helper (used by both the
+    // independent per-zone path and the spanned slice path). Returns an
+    // active projector for the monitor, or nullptr if it isn't ready yet.
+    ProjectorOutput* ensureProjector(int monitorIndex);
+    // Target frame-rate cap shown/edited in the Canvas section. 0 = uncapped
+    // (vsync only). >0 sleeps after swap to hold the frame to ~1/target sec.
+    float m_targetFPS = 0.0f;
+    // Last workspace mode observed in renderUI. Used to detect transitions
+    // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
+    // reset show-specific UI state without polling every frame.
+    UIManager::WorkspaceMode m_prevWorkspaceMode = UIManager::WorkspaceMode::Canvas;
+    // glfwGetTime() instant until which the PLAY workspace's PUBLISH
+    // button shows the "Published" confirmation caption. 0 = no flash.
+    double m_publishFlashUntil = 0.0;
+    // M3 — live re-publish. Stable per-process show id (so byte-comparison
+    // of consecutive publishes detects actual content changes, not just a
+    // bumped timestamp). Cached last-sent JSON for the dirty check, and
+    // the next time the dirty check should run.
+    std::string m_showIdStr;
+    std::string m_lastPublishedJson;
+    double      m_nextPublishCheckAt = 0.0;
+    // M7-11 — After an explicit /cue/clear, suppress any background writes
+    // (mic recognizer, cue WS client) to cue.latest for a brief window so
+    // an intentional blank doesn't get clobbered by stray room audio.
+    // 0 = no active suppression.
+    double      m_cueLatestSuppressUntil = 0.0;
     uint32_t m_nextLayerId = 1;
     OutputZone& activeZone() {
         if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
@@ -146,9 +228,21 @@ private:
     Mesh m_quad;
     ShaderProgram m_passthroughShader;
     ShaderProgram m_edgeBlendShader;
-    Framebuffer m_edgeBlendFBO;
-    Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
+    // Scratch FBOs for the post chain (edge blend, mask union, bloom, warp
+    // supersample) live per-zone on OutputZone — sharing them across
+    // mixed-resolution zones caused a destroy/realloc cycle every frame.
     Texture m_testPattern;
+    Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
+
+    // MAPPING-workspace calibration patterns (black & white). In Mapping mode
+    // the warp source is replaced by one of these so the user aligns geometry
+    // to crisp lines instead of live content / the color test pattern. The
+    // active one is chosen via the Mapping panel's Test Pattern dropdown
+    // (WarpEditor::testPatternIndex). Order MUST match kPatternNames there:
+    // 0 Grid, 1 Checkerboard, 2 Crosshair, 3 Concentric Circles, 4 Dots,
+    // 5 Solid White.
+    static constexpr int kMapPatternCount = 6;
+    Texture m_mapPatterns[kMapPatternCount];
 
     // Phase Q v4 — bloom pipeline. Half-res FBOs ping-pong for the
     // separable Gaussian; uCompositeFBO holds the screen-blended
@@ -158,15 +252,19 @@ private:
     ShaderProgram m_bloomCompositeShader;
     ShaderProgram m_linearCopyShader;     // bloom copy-back, no ACES
     ShaderProgram m_warpDownsampleShader; // 4-tap explicit-offset SS → 1× downsample
-    Framebuffer   m_bloomBrightFBO;       // half-res, 16F
-    Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
-    Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
-    bool          m_bloomEnabled   = true;
+    // Bloom FBOs are per-zone (OutputZone::bloom*) — see scratch FBO note above.
+    // Global post bloom OFF by default — it was glowing every layer/shader and
+    // reading as a soft haze. Crisp output is the default; flip on (or raise
+    // strength) only when a deliberately glowy finish is wanted.
+    bool          m_bloomEnabled   = false;
     float         m_bloomThreshold = 0.85f;
     float         m_bloomKnee      = 0.30f;
-    float         m_bloomStrength  = 0.55f;
+    float         m_bloomStrength  = 0.70f;
     float         m_bloomTint      = 0.40f;
     int           m_bloomBlurPasses = 2;  // 1..6 — more = wider, softer halo
+    // Global finish (saturation grade + film grain + dither) applied in the
+    // bloom composite pass — lifts every layer toward an engine/post-stack look.
+    float         m_finishAmount   = 1.0f;
 
     int m_selectedLayer = -1;
     AudioAnalyzer m_audioAnalyzer;
@@ -183,7 +281,21 @@ private:
     StageView m_stageView;
     ProDJLink m_prodjlink;
     TimecodePanel m_timecodePanel;
+#ifdef __APPLE__
+    // MediaPipe-style body/hand/face tracking via Apple Vision. Toggled
+    // from the Camera tab; feeds the DataBus vision.* keys each frame.
+    VisionTracker m_visionTracker;
+#endif
     float m_audioRMS = 0; // backward compat: smoothed audio level
+    // Global "Audio -> Shaders" switch. When true, the full AudioFeatures bus is
+    // fed to every shader's GLSL uniforms; when false, shaders get a neutral
+    // (zeroed) bus — the panic off-switch that the old "feed zeros" decision
+    // provided. The explicit per-param audio-binding system is independent.
+    bool m_audioToShaders = true;
+    // Auto-connect the first MIDI controller so it "just works" without opening
+    // it in the MIDI panel. Set true once the user explicitly picks "None",
+    // so we stop forcing a reconnect.
+    bool m_midiUserDisconnected = false;
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
@@ -196,8 +308,16 @@ private:
     // Cmd+0 keyboard shortcuts (handled in renderUI before the Show panel).
     float m_showZoom = 1.0f;
 
-    // Editor fullscreen toggle (F11)
+    // App fullscreen toggle (F11) — borderless, editor UI STAYS visible.
     bool m_editorFullscreen = false;
+    // Presentation mode (Shift+F11) — draws the active zone's OUTPUT
+    // fullscreen with NO editor UI. Kept independent of m_editorFullscreen so
+    // "app fullscreen" (UI visible) and "present output" (UI hidden) are
+    // separate states. Esc steps out of present first, then out of fullscreen.
+    bool m_presentMode = false;
+    // Set to true when Esc is pressed in fullscreen — actual exit runs
+    // at the TOP of the next frame so AppKit has time to settle the
+    // window-style transition without racing the GL/ImGui dock setup.
     bool m_pendingExitFullscreen = false;
     // Async close — blocking cleanup runs on a background thread while
     // the main thread renders a spinner so the window stays responsive.
@@ -251,6 +371,10 @@ private:
     void addScreenCapture(int monitorIndex);
 #endif
     void addParticles();
+    void addFluid();
+    void addFluid3D();
+    void addHologramModel(const std::string& path = ""); // upload 3D model → glitchy hologram; empty path opens the picker
+    void addMovingCompany();   // F-117 flying through space (mesh source)
 #ifdef HAS_OPENCV
     void addWebcam(int cameraIndex);
 #endif
@@ -267,6 +391,15 @@ private:
 #endif
     ShaderClawBridge m_shaderClaw;
     ShaderRatings    m_shaderRatings;
+    ShaderPresets    m_shaderPresets;
+    ShaderImprover   m_shaderImprover;
+
+    // Push Further (AI shader improve) — styled top-level panel state.
+    bool        m_pushOpen = false;
+    std::string m_pushPath, m_pushTitle, m_pushFile;
+    char        m_pushInstr[512] = {};
+    int         m_pushCombine = 0;   // 0 = none; else index+1 into shaders()
+    void        renderPushFurtherPanel();
 
     // ShaderClaw thumbnail preview (animated on hover)
     std::shared_ptr<ShaderSource> m_scPreview;
@@ -304,12 +437,50 @@ private:
     WhisperSpeech m_whisperSpeech;
 #endif
 
+    // Remove all agent-managed layers (those with a non-empty Layer::managedKey).
+    // Backs /easel/layer/clear-managed; not NDI-specific so it links in builds
+    // compiled without HAS_NDI.
+    void clearManagedLayers();
+    // Idempotent managed shader overlay layer keyed by slot (composited above a
+    // base source). Backs /easel/layer/ensure/shader.
+    void ensureManagedShaderLayer(const std::string& slot, const std::string& shaderPath);
+    // Remove one managed layer by its exact key (drops an overlay/base layer).
+    // Backs /easel/layer/remove-managed.
+    void removeManagedLayer(const std::string& slot);
+    // Set an ISF param on a managed shader layer (by key). Backs /easel/layer/param.
+    void setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg);
+    // Agent composite/bus: find-or-create an Easel output zone, publish it as a
+    // named NDI feed, and assign managed layers to it. Backs /easel/zone/ensure
+    // and /easel/zone/layer.
+    OutputZone* ensureZoneByName(const std::string& name);
+    void ensureZoneNdi(const std::string& zoneName, const std::string& feedName);
+    void addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey);
+    // Tear down a composite zone (stop its NDI feed). Backs /easel/zone/remove.
+    void removeZoneByName(const std::string& zoneName);
+
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
+    // Wire-rate cap applied to ALL NDI senders (global + per-zone) each
+    // frame; <= 0 = uncapped. Live-settable via OSC /easel/ndi/fps.
+    float m_ndiTargetFps = 30.0f;
     void addNDISource(const std::string& senderName, const std::string& senderUrl = "");
+    // Idempotent agent-driven NDI layer keyed by a stable "slot" (managedKey).
+    // Re-ensuring the same slot reuses the layer and only reconnects when the
+    // sender name changes, so /easel/layer/ensure/ndi never stacks duplicates.
+    void ensureManagedNDILayer(const std::string& slot, const std::string& senderName);
+
+    // Wi-Fi / Ethernet NIC pin + cross-device reachability (see NdiNetworkConfig).
+    NdiNetworkSettings m_ndiNetwork;             // persisted machine-wide selection
+    std::vector<NetAdapterInfo> m_netAdapters;   // cached; refreshed on panel open / Refresh
+    std::vector<NdiPeerStatus> m_ndiPeerStatus;  // cached peer reachability
+    double m_ndiPeerStatusLastRefresh = 0.0;
+    bool m_ndiServerUp = false;                  // cached discovery-server :5959 probe
+    double m_ndiServerUpLastRefresh = 0.0;
+    void applyNdiNetworkSettings(bool reinit);   // write config (+ optional NDI re-init)
+    void refreshNdiPeerStatus();                 // re-enumerate adapters + classify peers
 #endif
 
 #ifdef HAS_SPOUT
@@ -327,17 +498,51 @@ private:
 
     int m_selectedAudioDevice = -1; // -1 = default loopback
 
-    // Timeline state — always present so the render loop and UI code can
-    // reference these unconditionally regardless of FFmpeg availability.
+    // Top-edge screen pos of the transport-pill mic button, captured each
+    // frame so ##fp_sound_popup can anchor itself ABOVE the pill (the pill
+    // is flush to the viewport bottom; a downward popup would be clipped).
+    float m_fpSoundBtnTopX = 0.0f;
+    float m_fpSoundBtnTopY = 0.0f;
+
+#ifdef HAS_FFMPEG
+    RTMPOutput m_rtmpOutput;
+    char m_streamKeyBuf[128] = {};
+    int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
+    VideoRecorder m_recorder;
+    std::vector<RecAudioDevice> m_audioDevices;
+    std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
+    void renderTransportBar();
     void renderTimelinePanel();
+    // Phase 5 — floating transport pill at viewport bottom-center. Draws
+    // play/stop/loop + timecode in a single rounded pill that overlays the
+    // canvas, matching reference B's minimal control surface. Independent
+    // of the docked timeline panel which still hosts tracks/audio lane.
     void renderFloatingTransportPill();
+    // Floating REC + LIVE pills at viewport bottom-right — two separate
+    // rounded surfaces matching the reference's split record/broadcast
+    // affordances. Independent of the docked timeline.
     void renderFloatingActionPills();
-    void startTimelineExport();
-    bool   m_timelineExporting = false;
+
+    // Recording is indefinite/live: the REC button records the active zone's
+    // output continuously until the user stops it (no Work-Area auto-stop).
+    bool   m_timelineExporting = false;   // retained (always false) for legacy UI checks
     double m_timelineExportEnd = 0.0;
     std::string m_timelineExportPath;
+    // overridePath: empty = timestamped recordings/ default (UI button path);
+    // non-empty = explicit output file (the /easel/record/start OSC trigger).
+    void   startRecording(const std::string& overridePath = "");
+
+    // Timeline panel visibility. Toggled via the T key or the transport-bar
+    // show/hide button. Defaults to visible so the panel is discoverable.
     bool   m_timelineOpen = true;
-    bool   m_timelineMinimized = false;
+
+    // When true, the timeline renders only its transport row and hides the
+    // ruler / tracks / audio lane / clip inspector. The panel itself remains
+    // docked — drag the dock splitter to shrink to just the transport.
+    // Default: minimized. The transport row is enough for a quick show of
+    // hands during setup, and the tracks pop up on demand (click the "+" on
+    // the timeline tab or press T). Keeps the canvas area maximized on launch.
+    bool   m_timelineMinimized = true;
 
     // ── Single source of truth for the animated timeline geometry ──────────
     // The timeline + bottom transport bar slide up/down as one unit. These
@@ -350,22 +555,13 @@ private:
     //   m_timelineTopY   : screen-space Y of the timeline's top edge — the
     //                      hard bottom limit for the params panel + the
     //                      left-rail layer thumbnails.
-    float  m_timelineAnimT = 1.0f;
+    float  m_timelineAnimT = 0.0f;
     float  m_timelineCurH  = 0.0f;
     float  m_timelineTopY  = 0.0f;
     // Target (fully-open) timeline content height, measured by
     // renderTimelinePanel() and consumed next frame by updateTimelineAnim().
     float  m_timelineTargetH = 220.0f;
     void   updateTimelineAnim();
-
-#ifdef HAS_FFMPEG
-    RTMPOutput m_rtmpOutput;
-    char m_streamKeyBuf[128] = {};
-    int m_streamAspect = 0; // 0=16:9, 1=4:3, 2=16:10, 3=Source
-    VideoRecorder m_recorder;
-    std::vector<RecAudioDevice> m_audioDevices;
-    std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
-    void renderTransportBar();
 
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;
@@ -376,6 +572,8 @@ private:
     float m_audioLevelSmooth = 0.0f, m_audioLevelSmoothL = 0.0f, m_audioLevelSmoothR = 0.0f;
     void updateAudioMeter();
     void cleanupAudioMeter();
+
+    // Old mosaic meter removed — replaced by AudioAnalyzer
 #endif
 
     // File drop handling
@@ -387,8 +585,25 @@ private:
     void saveProject(const std::string& path);
     void loadProject(const std::string& path);
 
-    // Screenshot
+    // Publish the current Show (layers + timeline + markers + BPM) to the
+    // etherea-agent over OSC at /agent/play/publish. The agent caches it and
+    // includes it in every state.snapshot, so paired iPhones mirror the
+    // timeline. Triggered by the File > Publish to Mobile menu item and by
+    // an inbound /easel/play/publish OSC message.
+    void publishPlayToAgent();
+
+    // M3 — Internal helpers for the live re-publish loop. buildPlayJson()
+    // produces the wire payload as a string (no side effects); the per-frame
+    // dirty check sends it only when it differs from the last send.
+    std::string buildPlayJson();
+    void        publishPlayIfChanged();
+
+    // Screenshot. The flip + PNG encode runs on a worker thread (one job at
+    // a time) so an externally-triggered capture doesn't freeze the frame.
     void captureScreenshot(const std::string& path);
     void captureWindow(const std::string& path);
+    void writeScreenshotAsync(const std::string& path,
+                              std::vector<uint8_t> pixels, int w, int h);
     void pollScreenshotTrigger();
+    std::future<void> m_screenshotJob;
 };

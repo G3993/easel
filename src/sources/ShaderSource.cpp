@@ -141,6 +141,11 @@ bool ShaderSource::parseISF(const std::string& source) {
                     // Event trigger — behaves like a momentary bool
                     param.defaultBool = false;
                     param.value = false;
+                    // Optional ISF fields used by PropertyPanel's hit-button:
+                    //   MOMENTARY: press-and-hold mode (uniform mirrors held).
+                    //   TARGET:    on tap, randomize this sibling float param.
+                    param.momentary   = input.value("MOMENTARY", false);
+                    param.eventTarget = input.value("TARGET",    std::string(""));
                 } else if (param.type == "text") {
                     // Text input — Shader-Claw compiles to NAME_0..NAME_N + NAME_len uniforms
                     // Store default text and max length
@@ -298,6 +303,27 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform float audioMid;\n";
     out << "uniform float audioHigh;\n";
 
+    // --- Audio Feature Bus (always declared; see AudioFeatures.h) ----------
+    // Tier 1 — core energy & bands
+    out << "uniform float audioSub, audioLowMid, audioHighMid, audioTreble, audioPunch;\n";
+    out << "uniform float audioBeat, audioBeatPhase, audioBeatPulse, audioBarPhase, audioBPM, audioTempo01;\n";
+    // Tier 2 — spectral character
+    out << "uniform float audioBrightness, audioSpread, audioRolloff, audioFlatness, audioTexture;\n";
+    out << "uniform float audioFlux, audioOnset, audioOnsetRate, audioTilt, audioZCR;\n";
+    // Tier 3 — affect / mood
+    out << "uniform float audioValence, audioArousal, audioTension, audioWarmth, audioSoftness, audioRoughness, audioCharm;\n";
+    out << "uniform vec2  audioMood;\n";
+    // Tier 4 — structure / build-up
+    out << "uniform float audioEnergy, audioEnergyVel, audioEnergyAcc, audioBuildup, audioBuildupRate, audioDrop;\n";
+    out << "uniform float audioNovelty, audioSectionPhase, audioSectionAge, audioLayers, audioDensity;\n";
+    out << "uniform vec4  audioPresence;\n";
+    out << "uniform vec2  audioFlow;\n";
+    // Tier 5 — palette anchors (linear RGB)
+    out << "uniform vec3  audioPalShadow, audioPalMid, audioPalHigh, audioPalAccent;\n";
+    out << "uniform float audioPalTemp, audioPalSat;\n";
+    // Harmony scalars (chroma[] + chroma/occupancy textures land with the palette engine)
+    out << "uniform float audioDominantPitch, audioMajorMinor, audioHCDF;\n";
+
     // Shader-Claw voice reactivity builtins
     if (isfBody.find("_voiceGlitch") != std::string::npos) {
         out << "uniform float _voiceGlitch;\n";
@@ -366,6 +392,23 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     // Redirect gl_FragColor -> FragColor
     out << "#define gl_FragColor FragColor\n";
     out << "\n";
+
+    // --- Audio Feature Bus helpers (auto-injected; see audio-reactive-system.md).
+    // Shared idioms so shaders adopt the bus consistently. Names are audio-
+    // prefixed to avoid colliding with the audioFFT sampler / user symbols.
+    out << "vec3 audioPalette(float t){\n"
+           "  t = clamp(t,0.0,1.0);\n"
+           "  vec3 c = (t<0.5)? mix(audioPalShadow,audioPalMid,t*2.0)\n"
+           "                  : mix(audioPalMid,audioPalHigh,t*2.0-1.0);\n"
+           "  return mix(c, audioPalAccent, audioBeat*smoothstep(0.6,1.0,t)*0.6);\n"
+           "}\n";
+    out << "float audioSpectrum(float f){ return texture(audioFFT, vec2(clamp(f,0.0,1.0),0.5)).r; }\n";
+    out << "float audioKick(){ return audioBeatPulse; }\n";      // bass transient
+    out << "float audioHit(){ return audioOnset; }\n";           // broadband transient
+    out << "float audioBreath(){ return pow(max(audioLevel,0.0),0.6); }\n"; // perceptual loudness
+    out << "float audioAlive(float rest,float drive,float amount){ return rest+drive*amount; }\n"; // living baseline
+    out << "\n";
+
     out << body << "\n";
 
     return out.str();
@@ -522,6 +565,7 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
     }
 
     if (!m_shader.loadFromSource(vertSrc, fragSrc)) {
+        m_lastError = m_shader.lastError();
         std::cerr << "Failed to compile ISF shader" << std::endl;
         {
             FILE* f = fopen("/tmp/etherea_debug.log", "a");
@@ -556,6 +600,7 @@ bool ShaderSource::reload(const std::string& isfSource) {
     ShaderProgram newShader;
     std::string oldRawFrag = m_rawFragment;
     auto oldInputs = m_inputs;
+    auto oldPassBuffers = m_passBuffers;
 
     m_rawFragment = isfSource;
     parseISF(isfSource);
@@ -569,9 +614,13 @@ bool ShaderSource::reload(const std::string& isfSource) {
     }
 
     if (!newShader.loadFromSource(vertSrc, fragSrc)) {
-        // Restore old state
+        // Restore old state. m_passBuffers must roll back too — the next
+        // successful reload compares against it to decide whether the pass
+        // FBOs need rebuilding, and the failed candidate's layout would
+        // make that comparison lie.
         m_rawFragment = oldRawFrag;
         m_inputs = oldInputs;
+        m_passBuffers = oldPassBuffers;
         std::cerr << "Shader reload failed, keeping previous version" << std::endl;
         return false;
     }
@@ -588,6 +637,16 @@ bool ShaderSource::reload(const std::string& isfSource) {
 
     // Swap in the new shader (old one gets destroyed)
     m_shader.loadFromSource(vertSrc, fragSrc);
+
+    // Rebuild the multi-pass ping-pong FBOs when the PASSES layout changed.
+    // Without this, a hot-reload that dropped passes left their half-float
+    // buffers resident AND still dispatched every frame, while added passes
+    // had no storage at all. When the layout is unchanged (the common case —
+    // ShaderImprover mandates pass-union preservation) the buffers are kept
+    // so persistent-pass state survives the reload.
+    if (m_passBuffers != oldPassBuffers) {
+        createPassFBOs();
+    }
     return true;
 }
 
@@ -653,8 +712,12 @@ void ShaderSource::update() {
 
             m_quad.draw();
 
-            // Swap ping-pong for persistent passes
-            if (pass.persistent && pass.ppFBO) {
+            // Swap ping-pong after ANY targeted pass so subsequent passes (and
+            // the final pass) read what this pass just wrote. Previously only
+            // persistent passes swapped, so a plain intermediate TARGET buffer
+            // stayed on the stale read side → later passes sampled an empty
+            // buffer (the black-output bug that blocked multi-pass shaders).
+            if (pass.ppFBO) {
                 pass.ppFBO->swap();
             }
         }
@@ -702,6 +765,69 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     m_shader.setInt("audioFFT", 2);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, m_audioFFTTex ? m_audioFFTTex : 0);
+
+    // --- Audio Feature Bus uploads (legacy audioLevel/Bass/Mid/High above are
+    //     the frozen pipeline; these are the new perceptual features) ---------
+    {
+        const AudioFeatures& f = m_af;
+        // Tier 1
+        m_shader.setFloat("audioSub", f.sub);
+        m_shader.setFloat("audioLowMid", f.lowMid);
+        m_shader.setFloat("audioHighMid", f.highMid);
+        m_shader.setFloat("audioTreble", f.treble);
+        m_shader.setFloat("audioPunch", f.punch);
+        m_shader.setFloat("audioBeat", f.beat);
+        m_shader.setFloat("audioBeatPhase", f.beatPhase);
+        m_shader.setFloat("audioBeatPulse", f.beatPulse);
+        m_shader.setFloat("audioBarPhase", f.barPhase);
+        m_shader.setFloat("audioBPM", f.bpm);
+        m_shader.setFloat("audioTempo01", f.tempo01);
+        // Tier 2
+        m_shader.setFloat("audioBrightness", f.brightness);
+        m_shader.setFloat("audioSpread", f.spread);
+        m_shader.setFloat("audioRolloff", f.rolloff);
+        m_shader.setFloat("audioFlatness", f.flatness);
+        m_shader.setFloat("audioTexture", f.texture);
+        m_shader.setFloat("audioFlux", f.flux);
+        m_shader.setFloat("audioOnset", f.onset);
+        m_shader.setFloat("audioOnsetRate", f.onsetRate);
+        m_shader.setFloat("audioTilt", f.tilt);
+        m_shader.setFloat("audioZCR", f.zcr);
+        // Tier 3
+        m_shader.setFloat("audioValence", f.valence);
+        m_shader.setFloat("audioArousal", f.arousal);
+        m_shader.setFloat("audioTension", f.tension);
+        m_shader.setFloat("audioWarmth", f.warmth);
+        m_shader.setFloat("audioSoftness", f.softness);
+        m_shader.setFloat("audioRoughness", f.roughness);
+        m_shader.setFloat("audioCharm", f.charm);
+        m_shader.setVec2("audioMood", glm::vec2(f.valence, f.arousal));
+        // Tier 4
+        m_shader.setFloat("audioEnergy", f.energy);
+        m_shader.setFloat("audioEnergyVel", f.energyVel);
+        m_shader.setFloat("audioEnergyAcc", f.energyAcc);
+        m_shader.setFloat("audioBuildup", f.buildup);
+        m_shader.setFloat("audioBuildupRate", f.buildupRate);
+        m_shader.setFloat("audioDrop", f.drop);
+        m_shader.setFloat("audioNovelty", f.novelty);
+        m_shader.setFloat("audioSectionPhase", f.sectionPhase);
+        m_shader.setFloat("audioSectionAge", f.sectionAge);
+        m_shader.setFloat("audioLayers", f.layers);
+        m_shader.setFloat("audioDensity", f.density);
+        m_shader.setVec4("audioPresence", glm::vec4(f.presence[0], f.presence[1], f.presence[2], f.presence[3]));
+        m_shader.setVec2("audioFlow", glm::vec2(f.flow[0], f.flow[1]));
+        // Tier 5
+        m_shader.setVec3("audioPalShadow", glm::vec3(f.palShadow[0], f.palShadow[1], f.palShadow[2]));
+        m_shader.setVec3("audioPalMid",    glm::vec3(f.palMid[0], f.palMid[1], f.palMid[2]));
+        m_shader.setVec3("audioPalHigh",   glm::vec3(f.palHigh[0], f.palHigh[1], f.palHigh[2]));
+        m_shader.setVec3("audioPalAccent", glm::vec3(f.palAccent[0], f.palAccent[1], f.palAccent[2]));
+        m_shader.setFloat("audioPalTemp", f.palTemp);
+        m_shader.setFloat("audioPalSat", f.palSat);
+        // Harmony scalars
+        m_shader.setFloat("audioDominantPitch", f.dominantPitch);
+        m_shader.setFloat("audioMajorMinor", f.majorMinor);
+        m_shader.setFloat("audioHCDF", f.hcdf);
+    }
 
     // Font atlas for text shaders
     GLuint fontAtlas = FontAtlas::texture();
@@ -843,7 +969,9 @@ void ShaderSource::unbindImageInput(const std::string& name) {
 }
 
 void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat,
-                                      float dt, MIDIManager* midi) {
+                                      float dt, MIDIManager* midi,
+                                      float energy, float build, float drop,
+                                      float silence, float momentum) {
     // Clamp dt so a stall / first frame can't blow the exponential up. The
     // smoother is time-constant based (frame-rate independent): alpha is
     // derived from a per-second rate and the real frame dt, identical in
@@ -863,6 +991,11 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
             case AudioSignal::Mid:   raw = mid; break;
             case AudioSignal::High:  raw = high; break;
             case AudioSignal::Beat:  raw = beat; break;
+            case AudioSignal::Energy:   raw = energy;   break;
+            case AudioSignal::Build:    raw = build;    break;
+            case AudioSignal::Drop:     raw = drop;     break;
+            case AudioSignal::Silence:  raw = silence;  break;
+            case AudioSignal::Momentum: raw = momentum; break;
             case AudioSignal::MidiCC: {
                 if (midi && binding.midiCC >= 0) {
                     float v = midi->getCCValue(binding.midiChannel, binding.midiCC);
@@ -877,36 +1010,11 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         }
         if (!haveRaw) continue;
 
-        // First sample: latch (no slow ramp-up from 0).
-        if (!binding.hasSmoothed) {
-            binding.smoothedValue = raw;
-            binding.hasSmoothed = true;
-        }
-
-        // --- Frame-rate-independent asymmetric follower ---
-        // `smoothing` (0..1) selects a time constant. We keep the legacy
-        // asymmetric feel (punchy attack, softer release) but scale BOTH
-        // rates by the slider so the user can soften the whole envelope.
-        //  s=0   -> very fast (kAttackFast / kReleaseFast)  ~ legacy-snappy
-        //  s=1   -> very slow (kAttackSlow / kReleaseSlow)  ~ heavy glide
-        // Rates are in 1/seconds; alpha = 1 - exp(-rate*dt) is dt-exact, so
-        // behaviour is identical at 30 / 60 / 144 fps.
-        constexpr float kAttackFast  = 28.0f, kAttackSlow  = 2.0f;
-        constexpr float kReleaseFast = 14.0f, kReleaseSlow = 0.9f;
-        float s = binding.smoothing;
-        if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
-        float attackRate  = kAttackFast  + (kAttackSlow  - kAttackFast)  * s;
-        float releaseRate = kReleaseFast + (kReleaseSlow - kReleaseFast) * s;
-        float rate  = (raw > binding.smoothedValue) ? attackRate : releaseRate;
-        float alpha = 1.0f - std::exp(-rate * dt);
-        binding.smoothedValue += (raw - binding.smoothedValue) * alpha;
-
-        // Map the smoothed 0..1 follower onto the per-binding output range.
-        // [rangeMin, rangeMax] IS the effective depth/strength control for a
-        // shader-param binding (there is no separate per-binding strength;
-        // the legacy default rangeMin=paramMin, rangeMax=paramMax preserves
-        // the original 1:1 mapping for existing projects).
-        float mapped = binding.rangeMin + binding.smoothedValue * (binding.rangeMax - binding.rangeMin);
+        // Frame-rate-independent asymmetric follower + range mapping, now
+        // shared with FluidSource via AudioBinding::follow(). [rangeMin,
+        // rangeMax] IS the effective depth/strength (default rangeMin=paramMin,
+        // rangeMax=paramMax preserves the original 1:1 mapping).
+        float mapped = binding.follow(raw, dt);
 
         // Find the input and set its value
         for (auto& input : m_inputs) {
@@ -925,6 +1033,17 @@ void ShaderSource::setAudioState(float rms, float bass, float mid, float high, G
     m_audioMid = mid;
     m_audioHigh = high;
     m_audioFFTTex = fftTex;
+}
+
+void ShaderSource::setAudioFeatures(const AudioFeatures& f) {
+    m_af = f;
+    // Mirror the legacy fields so old shaders' audioLevel/Bass/Mid/High/FFT
+    // keep their exact prior meaning (audioMid = merged lowMid+highMid).
+    m_audioRMS  = f.level;
+    m_audioBass = f.bass;
+    m_audioMid  = (f.lowMid + f.highMid) * 0.5f;
+    m_audioHigh = f.treble;
+    m_audioFFTTex = f.fftTex;
 }
 
 void ShaderSource::setResolution(int w, int h) {

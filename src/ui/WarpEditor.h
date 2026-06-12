@@ -14,8 +14,14 @@ public:
     bool wantsLoadOBJ() const { return m_wantsLoadOBJ; }
     void clearLoadOBJ() { m_wantsLoadOBJ = false; }
 
+    // Selected MAPPING-mode calibration pattern. Index into the pattern set
+    // generated in Application (Grid / Checkerboard / Crosshair / Circles /
+    // Dots / Solid White). Application reads this to pick the warp source.
+    int  testPatternIndex() const { return m_testPattern; }
+
 private:
     bool m_wantsLoadOBJ = false;
     bool m_renaming = false;
     char m_renameBuf[128] = {};
+    int  m_testPattern = 0;   // default = Grid
 };

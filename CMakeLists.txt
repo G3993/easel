@@ -3,9 +3,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
-    project(Easel VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
+    project(Easel VERSION 0.2.0 LANGUAGES C CXX OBJCXX)
 else()
-    project(Easel VERSION 0.1.0 LANGUAGES C CXX)
+    project(Easel VERSION 0.2.0 LANGUAGES C CXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -126,15 +126,19 @@ if(NOT HAS_NDI)
     list(FILTER SOURCES EXCLUDE REGEX ".*NDI.*")
 endif()
 
-# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg
-if(FFMPEG_FOUND)
+# WHEP (WebRTC-HTTP Egress Protocol) - requires libdatachannel + FFmpeg + OpenSSL.
+# Off by default: libdatachannel/libsrtp need OpenSSL dev libs, which aren't
+# present on this machine. Configure with -DEASEL_ENABLE_WHEP=ON (after
+# installing OpenSSL) to build it.
+option(EASEL_ENABLE_WHEP "Build WHEP/WebRTC source (needs libdatachannel + OpenSSL)" OFF)
+if(FFMPEG_FOUND AND EASEL_ENABLE_WHEP)
     FetchContent_MakeAvailable(libdatachannel)
     set(HAS_WHEP TRUE)
     message(STATUS "WHEP source enabled (libdatachannel + FFmpeg)")
 else()
     set(HAS_WHEP FALSE)
     list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
-    message(STATUS "WHEP source disabled (requires FFmpeg)")
+    message(STATUS "WHEP source disabled (set -DEASEL_ENABLE_WHEP=ON + OpenSSL to enable)")
 endif()
 
 # Platform-specific source exclusions
@@ -198,9 +202,18 @@ if(APPLE)
     set_source_files_properties("${EASEL_DEFAULT_PRESET}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
 
+    # 3D model assets (e.g. the F-117 used by the "Moving Company" source).
+    # Bundled read-only into Resources/assets/models — the source loads them
+    # relative to the chdir'd Resources dir (main_mac.mm).
+    file(GLOB EASEL_MODELS "${CMAKE_SOURCE_DIR}/assets/models/*.glb")
+    foreach(m ${EASEL_MODELS})
+        set_source_files_properties("${m}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/assets/models")
+    endforeach()
+
     add_executable(${PROJECT_NAME} MACOSX_BUNDLE
         ${SOURCES} ${KISS_FFT_SRC}
-        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} "${EASEL_DEFAULT_PRESET}")
+        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} ${EASEL_MODELS} "${EASEL_DEFAULT_PRESET}")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Easel"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.etherealmachine.easel"
@@ -267,10 +280,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw glad glm::glm imgui nlohmann_json::nlohmann_json OpenGL::GL
 )
+# NOTE: zlib ('z') was dropped from the link list — gzipCompress() is stubbed
+# out in this build (no zlib dev libs on Windows). Re-add 'z' (or zlibstatic)
+# here if you reinstate gzip compression. See the note in Application.cpp.
 
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject
+        dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject iphlpapi
     )
 elseif(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -281,6 +297,7 @@ elseif(APPLE)
         "-framework AudioToolbox"
         "-framework CoreMIDI"
         "-framework CoreFoundation"
+        "-framework SystemConfiguration"
         "-framework ScreenCaptureKit"
         "-framework CoreGraphics"
         "-framework CoreMedia"
@@ -289,6 +306,7 @@ elseif(APPLE)
         "-framework Speech"           # SFSpeechRecognizer (push-to-talk)
         "-framework AVFoundation"     # AVAudioEngine for mic capture
         "-framework Metal"            # Phase M.0+ Metal abstraction layer
+        "-framework Vision"           # VisionTracker — hand/face/pose ML
     )
 endif()
 
@@ -472,8 +490,13 @@ if(HAS_WHEP)
 endif()
 
 if(HAS_NDI)
+    # NDIRuntime.cpp/NDISource.cpp now call into NdiNetworkConfig (which uses
+    # NetAdapters), so these test exes must compile + link the new modules and
+    # the nlohmann include path. iphlpapi/ws2_32 auto-link via pragmas in
+    # NetAdapters.cpp; macOS needs SystemConfiguration (added below).
     add_executable(test_ndi_receive
         tests/test_ndi_receive.cpp src/sources/NDIRuntime.cpp src/sources/NDISource.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp
         src/render/Texture.cpp src/render/Framebuffer.cpp src/render/Mesh.cpp src/render/ShaderProgram.cpp
     )
     target_compile_definitions(test_ndi_receive PRIVATE HAS_NDI=1)
@@ -481,20 +504,28 @@ if(HAS_NDI)
         target_compile_definitions(test_ndi_receive PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     target_include_directories(test_ndi_receive PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include ${stb_SOURCE_DIR})
-    target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL)
+    target_link_libraries(test_ndi_receive PRIVATE glfw glad glm::glm OpenGL::GL nlohmann_json::nlohmann_json)
 
-    add_executable(test_ndi_capture tests/test_ndi_capture.cpp src/sources/NDIRuntime.cpp)
+    add_executable(test_ndi_capture tests/test_ndi_capture.cpp src/sources/NDIRuntime.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp)
     target_compile_definitions(test_ndi_capture PRIVATE HAS_NDI=1)
     target_include_directories(test_ndi_capture PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
-    target_link_libraries(test_ndi_capture PRIVATE glfw glad OpenGL::GL)
+    target_link_libraries(test_ndi_capture PRIVATE glfw glad OpenGL::GL nlohmann_json::nlohmann_json)
 
-    add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp)
+    add_executable(test_ndi_list tests/test_ndi_list.cpp src/sources/NDIRuntime.cpp
+        src/net/NdiNetworkConfig.cpp src/app/NetAdapters.cpp)
     target_compile_definitions(test_ndi_list PRIVATE HAS_NDI=1)
     if(WIN32)
         target_compile_definitions(test_ndi_list PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     target_include_directories(test_ndi_list PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDI_DIR}/include)
-    target_link_libraries(test_ndi_list PRIVATE glfw glad OpenGL::GL)
+    target_link_libraries(test_ndi_list PRIVATE glfw glad OpenGL::GL nlohmann_json::nlohmann_json)
+
+    if(APPLE)
+        target_link_libraries(test_ndi_receive PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+        target_link_libraries(test_ndi_capture PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+        target_link_libraries(test_ndi_list    PRIVATE "-framework SystemConfiguration" "-framework CoreFoundation")
+    endif()
 endif()
 
 if(WIN32)

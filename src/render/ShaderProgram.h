@@ -32,6 +32,9 @@ public:
     void use() const;
     GLuint id() const { return m_program; }
 
+    // Last compile/link error log (empty if the last load succeeded).
+    const std::string& lastError() const { return m_lastError; }
+
     void setInt(const std::string& name, int value);
     void setFloat(const std::string& name, float value);
     void setBool(const std::string& name, bool value);
@@ -43,6 +46,7 @@ public:
 
 private:
     GLuint m_program = 0;
+    std::string m_lastError;
     std::unordered_map<std::string, GLint> m_uniformCache;
 
     GLint getUniformLocation(const std::string& name);

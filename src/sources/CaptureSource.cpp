@@ -45,6 +45,7 @@ std::vector<CaptureMonitorInfo> CaptureSource::enumerateMonitors() {
 
 bool CaptureSource::start(int monitorIndex) {
     stop();
+    m_monitorIndex = monitorIndex;
 
     // Create D3D11 device
     D3D_FEATURE_LEVEL featureLevel;
@@ -130,7 +131,7 @@ bool CaptureSource::start(int monitorIndex) {
         return false;
     }
 
-    // Create staging texture for CPU read
+    // Create double-buffered staging textures for CPU read
     D3D11_TEXTURE2D_DESC texDesc = {};
     texDesc.Width = m_width;
     texDesc.Height = m_height;
@@ -141,12 +142,16 @@ bool CaptureSource::start(int monitorIndex) {
     texDesc.Usage = D3D11_USAGE_STAGING;
     texDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 
-    hr = m_device->CreateTexture2D(&texDesc, nullptr, &m_stagingTexture);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create staging texture" << std::endl;
-        cleanup();
-        return false;
+    for (int i = 0; i < 2; i++) {
+        hr = m_device->CreateTexture2D(&texDesc, nullptr, &m_staging[i]);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create staging texture" << std::endl;
+            cleanup();
+            return false;
+        }
     }
+    m_stagingWrite = 0;
+    m_stagingPrimed[0] = m_stagingPrimed[1] = false;
 
     // Allocate pixel buffer (RGBA)
     m_pixelBuffer.resize(m_width * m_height * 4);
@@ -165,13 +170,29 @@ void CaptureSource::stop() {
 
 void CaptureSource::cleanup() {
     if (m_duplication) { m_duplication->Release(); m_duplication = nullptr; }
-    if (m_stagingTexture) { m_stagingTexture->Release(); m_stagingTexture = nullptr; }
+    for (int i = 0; i < 2; i++) {
+        if (m_staging[i]) { m_staging[i]->Release(); m_staging[i] = nullptr; }
+        m_stagingPrimed[i] = false;
+    }
     if (m_context) { m_context->Release(); m_context = nullptr; }
     if (m_device) { m_device->Release(); m_device = nullptr; }
 }
 
+void CaptureSource::suspend() {
+    if (!m_active) return;
+    stop();
+    m_suspended = true;
+}
+
 void CaptureSource::update() {
-    if (!m_active || !m_duplication) return;
+    if (!m_active || !m_duplication) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (m_suspended) {
+            m_suspended = false; // one attempt — monitor may be gone
+            start(m_monitorIndex);
+        }
+        return;
+    }
 
     IDXGIResource* desktopResource = nullptr;
     DXGI_OUTDUPL_FRAME_INFO frameInfo;
@@ -195,32 +216,41 @@ void CaptureSource::update() {
     desktopResource->Release();
 
     if (SUCCEEDED(hr)) {
-        // Copy to staging texture
-        m_context->CopyResource(m_stagingTexture, desktopTexture);
+        // Queue the GPU copy into this frame's staging buffer, then read
+        // back LAST frame's buffer — its copy completed long ago, so Map
+        // returns without stalling the render thread on the GPU. (The old
+        // single-buffer CopyResource + immediate Map(READ) blocked until
+        // the copy finished, a full GPU sync every frame.)
+        m_context->CopyResource(m_staging[m_stagingWrite], desktopTexture);
         desktopTexture->Release();
+        m_stagingPrimed[m_stagingWrite] = true;
 
-        // Map staging texture to read pixels
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        hr = m_context->Map(m_stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
-        if (SUCCEEDED(hr)) {
-            // Convert BGRA to RGBA, flipping vertically for OpenGL
-            const uint8_t* src = (const uint8_t*)mapped.pData;
-            uint8_t* dst = m_pixelBuffer.data();
+        const int readIdx = 1 - m_stagingWrite;
+        m_stagingWrite = readIdx; // next frame writes the one we read now
+        if (m_stagingPrimed[readIdx]) {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            hr = m_context->Map(m_staging[readIdx], 0, D3D11_MAP_READ, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                // Convert BGRA to RGBA word-wise, flipping vertically for OpenGL
+                const uint8_t* src = (const uint8_t*)mapped.pData;
+                uint8_t* dst = m_pixelBuffer.data();
 
-            for (int y = 0; y < m_height; y++) {
-                const uint8_t* srcRow = src + y * mapped.RowPitch;
-                uint8_t* dstRow = dst + (m_height - 1 - y) * m_width * 4;
-                for (int x = 0; x < m_width; x++) {
-                    dstRow[x * 4 + 0] = srcRow[x * 4 + 2]; // R
-                    dstRow[x * 4 + 1] = srcRow[x * 4 + 1]; // G
-                    dstRow[x * 4 + 2] = srcRow[x * 4 + 0]; // B
-                    dstRow[x * 4 + 3] = 255;                // A
+                for (int y = 0; y < m_height; y++) {
+                    const uint32_t* srcRow = (const uint32_t*)(src + (size_t)y * mapped.RowPitch);
+                    uint32_t* dstRow = (uint32_t*)(dst + (size_t)(m_height - 1 - y) * m_width * 4);
+                    for (int x = 0; x < m_width; x++) {
+                        uint32_t px = srcRow[x]; // BGRA in memory = 0xAARRGGBB little-endian
+                        dstRow[x] = (px & 0xFF00FF00u) |          // G + forced A below
+                                    ((px & 0x00FF0000u) >> 16) |  // B->R slot swap
+                                    ((px & 0x000000FFu) << 16);
+                        dstRow[x] |= 0xFF000000u; // force opaque alpha
+                    }
                 }
+
+                m_context->Unmap(m_staging[readIdx], 0);
+
+                m_texture.updateData(m_pixelBuffer.data(), m_width, m_height);
             }
-
-            m_context->Unmap(m_stagingTexture, 0);
-
-            m_texture.updateData(m_pixelBuffer.data(), m_width, m_height);
         }
     }
 

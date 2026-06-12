@@ -4,10 +4,12 @@
 #include <glad/glad.h>
 #include <string>
 #include <vector>
+#include <deque>
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -32,7 +34,9 @@ public:
     void setAudioDevice(int index) { m_selectedAudioDevice = index; }
     int audioDevice() const { return m_selectedAudioDevice; }
 
-    bool start(const std::string& path, int width, int height, int fps = 30);
+    // fps is only a hint now: it feeds gop_size + the framerate metadata. Actual
+    // frame timing is wall-clock VFR, so recording tracks the real render rate.
+    bool start(const std::string& path, int width, int height, int fps = 60);
     void stop();
     bool isActive() const { return m_active; }
 
@@ -42,10 +46,20 @@ public:
     const std::string& filePath() const { return m_path; }
 
 private:
+    // One captured frame handed from the GL thread to the encode thread. Carries
+    // its own size (so a mid-recording zone resize is rescaled, not dropped) and
+    // its wall-clock capture time (so PTS reflects real elapsed time → correct speed).
+    struct RecFrame {
+        std::vector<uint8_t> pixels;
+        int w = 0;
+        int h = 0;
+        int64_t captureUs = 0;
+    };
+
     bool initEncoder(const std::string& path, int width, int height, int fps);
     bool initAudioCapture();
     void encodeThread();
-    void encodeVideoFrame(const uint8_t* rgbaData);
+    void encodeVideoFrame(const RecFrame& f);
     void drainAudio();
     void encodeAudioSamples(const float* data, int numSamples, int channels);
     void cleanup();
@@ -64,8 +78,11 @@ private:
     AVPacket* m_packet = nullptr;
     SwsContext* m_swsCtx = nullptr;
     int64_t m_videoFrameIndex = 0;
-    int m_width = 0, m_height = 0;
+    int m_width = 0, m_height = 0;          // fixed encoder output size (pinned at start)
+    int m_srcW = 0, m_srcH = 0;             // current sws input size (differs after a zone/canvas resize)
     double m_startTime = 0;
+    int64_t m_startPtsUs = 0;               // wall-clock anchor (av_gettime_relative) of the first encoded frame
+    int64_t m_lastVideoPts = -1;            // strictly-monotonic guard for VFR pts (in codec time_base ticks)
 
     // Audio
     AVCodecContext* m_audioCodecCtx = nullptr;
@@ -73,6 +90,7 @@ private:
     AVFrame* m_audioFrame = nullptr;
     SwrContext* m_swrCtx = nullptr;
     int64_t m_audioSamplesWritten = 0;
+    int64_t m_audioStartUs = 0;     // wall-clock anchor for loopback silence-fill
     int m_audioFrameSize = 0;
     std::vector<float> m_audioAccum;
 
@@ -86,11 +104,14 @@ private:
     GLuint m_pbo[2] = {0, 0};
     int m_pboIndex = 0;
     bool m_pboReady = false;
+    int m_prevW = 0, m_prevH = 0;           // size of the frame whose readback was last issued
+    size_t m_pboBytes = 0;                  // current PBO byte size (detects a zone/canvas resize)
 
-    // Frame handoff
-    std::vector<uint8_t> m_readbackBuf;
-    std::vector<uint8_t> m_encodeBuf;
-    bool m_frameReady = false;
+    // Frame handoff — bounded queue of timestamped RGBA frames (true VFR), with a
+    // small pool of recycled pixel buffers to avoid per-frame multi-MB allocations.
+    std::deque<RecFrame> m_frameQueue;
+    std::vector<std::vector<uint8_t>> m_bufPool;
+    size_t m_maxQueue = 8;                  // cap; drop the OLDEST frame under sustained overload
     std::mutex m_mutex;
     std::condition_variable m_cv;
     std::thread m_thread;

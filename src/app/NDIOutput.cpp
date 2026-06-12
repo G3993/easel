@@ -4,10 +4,6 @@
 #include <cstring>
 #include <chrono>
 
-namespace {
-constexpr double kTargetNdiFps = 60.0;
-constexpr double kTargetNdiFrameSeconds = 1.0 / kTargetNdiFps;
-}
 
 NDIOutput::~NDIOutput() {
     destroy();
@@ -84,10 +80,13 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     auto& rt = NDIRuntime::instance();
     if (rt.api()->send_get_no_connections(m_send, 0) == 0) return;
 
+    // Settings-driven wall-clock throttle (default 30fps; <= 0 = uncapped,
+    // live-settable via OSC /easel/ndi/fps).
     const auto now = std::chrono::steady_clock::now();
-    if (m_lastSendAt.time_since_epoch().count() > 0) {
+    if (m_settings.targetFps > 0.0f &&
+        m_lastSendAt.time_since_epoch().count() > 0) {
         const double elapsed = std::chrono::duration<double>(now - m_lastSendAt).count();
-        if (elapsed < kTargetNdiFrameSeconds) return;
+        if (elapsed < 1.0 / m_settings.targetFps) return;
     }
     size_t bytes = (size_t)w * h * 4;
 
@@ -154,7 +153,9 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     frame.xres = w;
     frame.yres = h;
     frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-    frame.frame_rate_N = 60000;
+    // Stamp the actual pacing rather than a fixed 60.
+    const float fps = m_settings.targetFps > 0.0f ? m_settings.targetFps : 60.0f;
+    frame.frame_rate_N = (int)(fps * 1000.0f);
     frame.frame_rate_D = 1000;
     frame.picture_aspect_ratio = (float)w / (float)h;
     frame.frame_format_type = NDIlib_frame_format_type_progressive;

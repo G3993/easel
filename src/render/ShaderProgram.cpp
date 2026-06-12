@@ -28,6 +28,7 @@ bool ShaderProgram::compile(GLuint shader, const std::string& source) {
     if (!success) {
         char log[2048];
         glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+        m_lastError = log;
         std::cerr << "Shader compile error:\n" << log << std::endl;
         // Also log to file for debugging
         {
@@ -51,6 +52,7 @@ bool ShaderProgram::link(GLuint vert, GLuint frag) {
     if (!success) {
         char log[512];
         glGetProgramInfoLog(m_program, 512, nullptr, log);
+        m_lastError = log;
         std::cerr << "Shader link error:\n" << log << std::endl;
         return false;
     }
@@ -58,6 +60,7 @@ bool ShaderProgram::link(GLuint vert, GLuint frag) {
 }
 
 bool ShaderProgram::loadFromSource(const std::string& vertSrc, const std::string& fragSrc) {
+    m_lastError.clear();
     GLuint vert = glCreateShader(GL_VERTEX_SHADER);
     GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
 

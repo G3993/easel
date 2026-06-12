@@ -4,6 +4,7 @@
 #include <CoreMedia/CoreMedia.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
+#import  <AVFoundation/AVFoundation.h>   // AVCaptureDevice — microphone TCC grant
 #include <iostream>
 #include <mutex>
 #include <vector>
@@ -132,6 +133,37 @@ void AudioAnalyzer::initCapture() {
 
     // If a specific capture device is selected, use CoreAudio AudioUnit
     if (m_requestedIsCapture && !m_deviceId.empty()) {
+        // Microphone capture is gated by the macOS microphone TCC grant.
+        // Unlike the ScreenCaptureKit system-audio path below, CoreAudio's HAL
+        // input unit does NOT auto-prompt — it just hands back digital silence
+        // when the grant is missing, so every band reads 0 and nothing reacts.
+        // Request the grant explicitly (mirrors VisionTracker's camera request)
+        // and wait for the user's decision BEFORE opening the unit, so capture
+        // works on the very first grant rather than needing a re-select.
+        AVAuthorizationStatus micStatus =
+            [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+        if (micStatus == AVAuthorizationStatusNotDetermined) {
+            dispatch_semaphore_t permSem = dispatch_semaphore_create(0);
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+                                     completionHandler:^(BOOL granted) {
+                (void)granted;
+                dispatch_semaphore_signal(permSem);
+            }];
+            // Bounded wait — an ignored dialog must not hang the render thread
+            // forever. The wait returns the instant the user answers; 30s only
+            // caps a fully-ignored prompt (re-selecting the device retries).
+            dispatch_semaphore_wait(permSem,
+                dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+            micStatus = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+        }
+        if (micStatus != AVAuthorizationStatusAuthorized) {
+            std::cerr << "[AudioAnalyzer] Microphone permission not granted — enable it "
+                         "in System Settings > Privacy & Security > Microphone, then "
+                         "re-select the mic." << std::endl;
+            cleanupCapture();
+            return;
+        }
+
         AudioDeviceID deviceId = findDeviceByUID(m_deviceId);
         if (deviceId == kAudioObjectUnknown) {
             std::cerr << "[AudioAnalyzer] Device not found: " << m_deviceId << std::endl;

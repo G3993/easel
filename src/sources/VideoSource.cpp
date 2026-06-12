@@ -412,10 +412,44 @@ void VideoSource::seek(double seconds) {
     m_playbackStart = glfwGetTime();
 }
 
+void VideoSource::suspend() {
+    if (!m_running) return;
+    // Live streams: close() joins the decode thread, which can sit blocked
+    // in av_read_frame on a stalled network source with no timeout — that
+    // would freeze the render thread one frame after the layer is deleted.
+    // A pinned live stream also has no resumable position; just leave it
+    // running until the snapshot ages out.
+    if (m_isLive) return;
+    m_resumeTime = m_currentTime;
+    m_resumePlaying = m_playing;
+    close();
+    m_suspended = true;
+}
+
 // ─── Update (main thread) ───────────────────────────────────────────
 
 void VideoSource::update() {
-    if (!m_running) return;
+    if (!m_running) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (!m_suspended || m_path.empty()) return;
+        m_suspended = false; // one attempt — no retry storm if the file is gone
+        const std::string path = m_path;
+        const double t = m_resumeTime;
+        const bool playing = m_resumePlaying;
+        if (!load(path)) return;
+        if (t > 0.0 && !m_isLive) seek(t);
+        if (playing) {
+            play();
+        } else {
+            // load() recreated the GL texture empty — a paused layer would
+            // come back BLACK. Let the decode thread produce one frame at
+            // the seek target, then re-pause. m_playing is set directly so
+            // WASAPI audio never starts for this single frame.
+            m_playing = true;
+            m_resumePausePending = true;
+        }
+        return; // frames start arriving next update
+    }
 
     // Feed decoded audio to WASAPI
     if (m_playing) {
@@ -437,6 +471,10 @@ void VideoSource::update() {
         m_texture.updateData(m_buffers[displayed].data.data(), m_width, m_height, GL_RGBA, GL_UNSIGNED_BYTE);
         m_currentTime = m_buffers[displayed].pts;
         m_buffers[displayed].ready = false;
+        if (m_resumePausePending) {
+            m_playing = false; // direct: audio was never started
+            m_resumePausePending = false;
+        }
     }
 }
 

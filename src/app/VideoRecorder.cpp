@@ -2,6 +2,7 @@
 #include "app/VideoRecorder.h"
 #include <iostream>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
 
 extern "C" {
@@ -12,6 +13,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/time.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/channel_layout.h>
 }
 
@@ -45,7 +47,10 @@ bool VideoRecorder::start(const std::string& path, int width, int height, int fp
     m_stopRequested = false;
     m_active = true;
     m_videoFrameIndex = 0;
+    m_startPtsUs = 0;          // anchored lazily on the first encoded frame
+    m_lastVideoPts = -1;
     m_audioSamplesWritten = 0;
+    m_audioStartUs = 0;        // anchored lazily on the first audio drain
     m_thread = std::thread(&VideoRecorder::encodeThread, this);
     std::cout << "[REC] Recording to: " << path << std::endl;
     return true;
@@ -426,14 +431,20 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
 
     m_videoCodecCtx->width = m_width;
     m_videoCodecCtx->height = m_height;
-    m_videoCodecCtx->time_base = {1, fps};
+    // Fine time_base for true VFR: PTS is wall-clock-derived (1/90000 ticks), NOT a
+    // frame counter, so playback runs at correct speed at whatever rate the app renders.
+    // framerate stays as a hint (max expected rate) feeding gop cadence + metadata.
+    m_videoCodecCtx->time_base = {1, 90000};
     m_videoCodecCtx->framerate = {fps, 1};
     m_videoCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
     m_videoCodecCtx->gop_size = fps * 2;
-    m_videoCodecCtx->max_b_frames = 2;
+    m_videoCodecCtx->max_b_frames = 0;   // no reorder → pts==dts (VFR-safe) + lower latency
     m_videoCodecCtx->bit_rate = 8000000; // 8 Mbps for local recording
 
-    av_opt_set(m_videoCodecCtx->priv_data, "preset", "medium", 0);
+    // Real-time feed: match the live-encode sibling (RTMPOutput) rather than an
+    // offline-transcode config, so the encoder keeps pace with the render rate.
+    av_opt_set(m_videoCodecCtx->priv_data, "preset", "veryfast", 0);
+    av_opt_set(m_videoCodecCtx->priv_data, "tune", "zerolatency", 0);
     av_opt_set(m_videoCodecCtx->priv_data, "profile", "high", 0);
 
     if (m_fmtCtx->oformat->flags & AVFMT_GLOBALHEADER)
@@ -455,7 +466,9 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
     m_videoFrame->height = m_height;
     av_frame_get_buffer(m_videoFrame, 0);
 
-    m_swsCtx = sws_getContext(m_width, m_height, AV_PIX_FMT_RGBA,
+    m_srcW = m_width;
+    m_srcH = m_height;
+    m_swsCtx = sws_getContext(m_srcW, m_srcH, AV_PIX_FMT_RGBA,
                                m_width, m_height, AV_PIX_FMT_YUV420P,
                                SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!m_swsCtx) return false;
@@ -549,21 +562,22 @@ bool VideoRecorder::initEncoder(const std::string& path, int width, int height, 
         return false;
     }
 
-    m_readbackBuf.resize(m_width * m_height * 4);
-    m_encodeBuf.resize(m_width * m_height * 4);
-
     return true;
 }
 
 // ─── GL readback ────────────────────────────────────────────────────
 
 void VideoRecorder::sendFrame(GLuint texture, int w, int h) {
-    if (!m_active || w != m_width || h != m_height) return;
+    // Resize tolerance: never bail on a size change. The recorder is pinned to its
+    // start size while the live zone can be resized (canvas preset, projector native
+    // res, zone switch); bailing here silently killed the recording. Read back
+    // whatever size the zone is now — the encode thread rescales to the fixed size.
+    if (!m_active || w <= 0 || h <= 0) return;
 
     size_t bytes = (size_t)w * h * 4;
 
-    // Create PBOs on first use or size change
-    if (!m_pbo[0] || (int)m_readbackBuf.size() != (int)bytes) {
+    // (Re)create PBOs on first use or whenever the incoming size changes.
+    if (!m_pbo[0] || bytes != m_pboBytes) {
         if (m_pbo[0]) glDeleteBuffers(2, m_pbo);
         glGenBuffers(2, m_pbo);
         for (int i = 0; i < 2; i++) {
@@ -573,7 +587,7 @@ void VideoRecorder::sendFrame(GLuint texture, int w, int h) {
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         m_pboIndex = 0;
         m_pboReady = false;
-        m_readbackBuf.resize(bytes);
+        m_pboBytes = bytes;
     }
 
     int readPBO = m_pboIndex;
@@ -585,21 +599,43 @@ void VideoRecorder::sendFrame(GLuint texture, int w, int h) {
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Map previous PBO (already complete) and hand off to encoder
+    // Map previous PBO (already complete) and push it onto the encode queue.
+    // The mapped PBO holds the frame from the PREVIOUS call, hence m_prevW/m_prevH.
     if (m_pboReady) {
         glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
         void* ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
         if (ptr) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            std::memcpy(m_readbackBuf.data(), ptr, bytes);
-            std::swap(m_readbackBuf, m_encodeBuf);
-            m_frameReady = true;
+            size_t prevBytes = (size_t)m_prevW * m_prevH * 4;
+            int64_t captureUs = av_gettime_relative();
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                // Recycle a pooled buffer to avoid a per-frame multi-MB allocation.
+                std::vector<uint8_t> buf;
+                if (!m_bufPool.empty()) { buf = std::move(m_bufPool.back()); m_bufPool.pop_back(); }
+                buf.resize(prevBytes);
+                std::memcpy(buf.data(), ptr, prevBytes);
+                // Bound the queue: drop the OLDEST frame under sustained overload,
+                // recycling its buffer. Wall-clock PTS keeps playback speed correct
+                // across the gap (it just shows fewer unique frames there).
+                if (m_frameQueue.size() >= m_maxQueue) {
+                    m_bufPool.push_back(std::move(m_frameQueue.front().pixels));
+                    m_frameQueue.pop_front();
+                }
+                RecFrame f;
+                f.w = m_prevW;
+                f.h = m_prevH;
+                f.captureUs = captureUs;
+                f.pixels = std::move(buf);
+                m_frameQueue.push_back(std::move(f));
+            }
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            m_cv.notify_one();
         }
-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-        m_cv.notify_one();
     }
 
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    m_prevW = w;
+    m_prevH = h;
     m_pboIndex = 1 - m_pboIndex;
     m_pboReady = true;
 }
@@ -611,32 +647,54 @@ void VideoRecorder::drainAudio() {
 
 #ifdef _WIN32
     IAudioCaptureClient* capture = (IAudioCaptureClient*)m_captureClient;
+
+    int64_t nowUs = av_gettime_relative();
+    if (m_audioStartUs == 0) m_audioStartUs = nowUs;
+
+    bool gotData = false;
     UINT32 packetLength = 0;
     HRESULT hr = capture->GetNextPacketSize(&packetLength);
-    if (FAILED(hr)) return;
+    if (SUCCEEDED(hr)) {
+        while (packetLength > 0) {
+            BYTE* data = nullptr;
+            UINT32 numFrames = 0;
+            DWORD flags = 0;
 
-    while (packetLength > 0) {
-        BYTE* data = nullptr;
-        UINT32 numFrames = 0;
-        DWORD flags = 0;
+            hr = capture->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
+            if (FAILED(hr)) break;
 
-        hr = capture->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
-        if (FAILED(hr)) break;
+            if (m_audioSamplesWritten == 0 && numFrames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
+                std::cout << "[REC] Audio: first non-silent packet (" << numFrames << " frames)" << std::endl;
+            }
 
-        if (m_audioSamplesWritten == 0 && numFrames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
-            std::cout << "[REC] Audio: first non-silent packet (" << numFrames << " frames)" << std::endl;
+            if (numFrames > 0) gotData = true;
+
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                std::vector<float> silence((size_t)numFrames * m_wasapiChannels, 0.0f);
+                encodeAudioSamples(silence.data(), numFrames, m_wasapiChannels);
+            } else if (data) {
+                encodeAudioSamples((const float*)data, numFrames, m_wasapiChannels);
+            }
+
+            capture->ReleaseBuffer(numFrames);
+            hr = capture->GetNextPacketSize(&packetLength);
+            if (FAILED(hr)) break;
         }
+    }
 
-        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-            std::vector<float> silence(numFrames * m_wasapiChannels, 0.0f);
-            encodeAudioSamples(silence.data(), numFrames, m_wasapiChannels);
-        } else if (data) {
-            encodeAudioSamples((const float*)data, numFrames, m_wasapiChannels);
+    // WASAPI loopback delivers NO packets while the audio engine is idle (nothing
+    // playing). Without this, silent stretches add zero samples, so the audio track
+    // ends up shorter than the video and drifts out of sync — or is empty if the
+    // system was silent the whole time. When no packets arrived this cycle, top up
+    // with silence so the audio timeline keeps pace with wall-clock.
+    if (!gotData && m_wasapiSampleRate > 0 && m_wasapiChannels > 0) {
+        int64_t target  = (nowUs - m_audioStartUs) * (int64_t)m_wasapiSampleRate / 1000000;
+        int64_t deficit = target - m_audioSamplesWritten;
+        if (deficit >= m_wasapiSampleRate / 50) {              // only fill gaps >= ~20ms
+            int n = (int)std::min<int64_t>(deficit, m_wasapiSampleRate); // cap a single fill to 1s
+            std::vector<float> silence((size_t)n * m_wasapiChannels, 0.0f);
+            encodeAudioSamples(silence.data(), n, m_wasapiChannels);
         }
-
-        capture->ReleaseBuffer(numFrames);
-        hr = capture->GetNextPacketSize(&packetLength);
-        if (FAILED(hr)) break;
     }
 #endif
 }
@@ -684,19 +742,46 @@ void VideoRecorder::encodeThread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
 
-    while (!m_stopRequested) {
-        std::unique_lock<std::mutex> lock(m_mutex);
-        m_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
-            return m_frameReady || m_stopRequested.load();
-        });
+    // Pull one frame off the queue (returns false if empty). Encode happens
+    // outside the lock so the GL thread is never blocked on the encoder.
+    auto popFrame = [this](RecFrame& out) {
+        std::lock_guard<std::mutex> g(m_mutex);
+        if (m_frameQueue.empty()) return false;
+        out = std::move(m_frameQueue.front());
+        m_frameQueue.pop_front();
+        return true;
+    };
+    auto recycle = [this](RecFrame& f) {
+        std::lock_guard<std::mutex> g(m_mutex);
+        if (m_bufPool.size() < m_maxQueue + 2) m_bufPool.push_back(std::move(f.pixels));
+    };
 
-        bool hasVideo = m_frameReady;
-        if (hasVideo) m_frameReady = false;
-        lock.unlock();
+    while (!m_stopRequested) {
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_cv.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                return !m_frameQueue.empty() || m_stopRequested.load();
+            });
+        }
 
         // Always drain audio, even on the stop iteration
         drainAudio();
-        if (hasVideo) encodeVideoFrame(m_encodeBuf.data());
+
+        // Drain ALL queued video frames this wakeup (no one-frame-per-wakeup throttle).
+        RecFrame f;
+        while (popFrame(f)) {
+            encodeVideoFrame(f);
+            recycle(f);
+        }
+    }
+
+    // Encode any frames still queued at stop time so the tail isn't lost.
+    {
+        RecFrame f;
+        while (popFrame(f)) {
+            encodeVideoFrame(f);
+            recycle(f);
+        }
     }
 
     // Final audio drain
@@ -732,15 +817,38 @@ void VideoRecorder::encodeThread() {
 #endif
 }
 
-void VideoRecorder::encodeVideoFrame(const uint8_t* rgbaData) {
+void VideoRecorder::encodeVideoFrame(const RecFrame& f) {
+    if (f.w <= 0 || f.h <= 0 || f.pixels.empty()) return;
     av_frame_make_writable(m_videoFrame);
 
-    const uint8_t* srcSlice[1] = { rgbaData };
-    int srcStride[1] = { m_width * 4 };
-    sws_scale(m_swsCtx, srcSlice, srcStride, 0, m_height,
+    // Rebuild the scaler if the incoming frame size changed (zone/canvas resize
+    // mid-recording). We always scale to the fixed encoder size m_width x m_height.
+    if (f.w != m_srcW || f.h != m_srcH || !m_swsCtx) {
+        if (m_swsCtx) sws_freeContext(m_swsCtx);
+        m_srcW = f.w;
+        m_srcH = f.h;
+        m_swsCtx = sws_getContext(m_srcW, m_srcH, AV_PIX_FMT_RGBA,
+                                  m_width, m_height, AV_PIX_FMT_YUV420P,
+                                  SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!m_swsCtx) return;
+    }
+
+    const uint8_t* srcSlice[1] = { f.pixels.data() };
+    int srcStride[1] = { m_srcW * 4 };
+    sws_scale(m_swsCtx, srcSlice, srcStride, 0, m_srcH,
               m_videoFrame->data, m_videoFrame->linesize);
 
-    m_videoFrame->pts = m_videoFrameIndex++;
+    // Wall-clock VFR PTS: stamp each frame at its real elapsed capture time (anchored
+    // on the first frame) so playback runs at true speed and tracks the live render fps.
+    if (m_startPtsUs == 0) m_startPtsUs = f.captureUs;
+    int64_t elapsedUs = f.captureUs - m_startPtsUs;
+    if (elapsedUs < 0) elapsedUs = 0;
+    AVRational usTb = {1, 1000000};
+    int64_t pts = av_rescale_q(elapsedUs, usTb, m_videoCodecCtx->time_base);
+    if (pts <= m_lastVideoPts) pts = m_lastVideoPts + 1; // strictly monotonic
+    m_lastVideoPts = pts;
+    m_videoFrame->pts = pts;
+    m_videoFrameIndex++;
 
     int ret = avcodec_send_frame(m_videoCodecCtx, m_videoFrame);
     while (ret >= 0) {
@@ -788,6 +896,8 @@ void VideoRecorder::cleanup() {
     if (m_pbo[0]) { glDeleteBuffers(2, m_pbo); m_pbo[0] = m_pbo[1] = 0; }
     m_pboReady = false;
     m_pboIndex = 0;
+    m_pboBytes = 0;
+    m_prevW = m_prevH = 0;
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
     if (m_videoFrame) { av_frame_free(&m_videoFrame); }
     if (m_packet) { av_packet_free(&m_packet); }
@@ -798,9 +908,8 @@ void VideoRecorder::cleanup() {
         m_fmtCtx = nullptr;
     }
     m_videoStream = nullptr;
-    m_readbackBuf.clear();
-    m_encodeBuf.clear();
-    m_frameReady = false;
+    m_frameQueue.clear();
+    m_bufPool.clear();
 }
 
 #endif // HAS_FFMPEG

@@ -36,11 +36,25 @@ public:
     std::vector<glm::vec2>& points() { return m_controlPoints; }
     const std::vector<glm::vec2>& points() const { return m_controlPoints; }
 
+    // Tessellation substeps per control cell for the smooth Catmull-Rom warp
+    // (higher = smoother diagonals between control points). 12 → a 4×4 grid
+    // renders as 36×36 smoothly-curved quads.
+    int m_renderSubsteps = 12;
+
 private:
     int m_cols = 4, m_rows = 4;
     std::vector<glm::vec2> m_controlPoints;
     Mesh m_mesh;
     ShaderProgram m_shader;
+
+    // Tessellation cache: the inputs that produced the GPU mesh currently in
+    // m_mesh. render() re-tessellates (and re-uploads) only when these change
+    // — it used to rebuild the whole fine mesh and destroy/recreate the
+    // VAO/VBO/EBO every frame it rendered. Control points are compared by
+    // value because points() hands out a mutable reference (drag UI edits
+    // the vector directly).
+    std::vector<glm::vec2> m_meshedPoints;
+    int m_meshedCols = 0, m_meshedRows = 0, m_meshedSubsteps = 0;
 
     void rebuildMesh();
     glm::vec2 defaultPoint(int col, int row) const;

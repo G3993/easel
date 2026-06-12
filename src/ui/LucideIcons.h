@@ -141,6 +141,33 @@ inline void micOff(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
                 ImVec2(cx + size * 0.45f, cy + size * 0.45f), col, stroke + 0.4f);
 }
 
+// Lucide `eye` — almond outline + pupil. Used for visibility toggles.
+inline void eye(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                float stroke = 1.6f) {
+    // Two opposing arcs form the lens (Lucide 24u: width ~22, height ~12).
+    float u = size / 24.0f;
+    float w = 11.0f * u;   // half-width of the almond
+    float h = 6.0f  * u;   // half-height (lens swell)
+    float r = (w*w + h*h) / (2.0f * h);  // arc radius through tips + apex
+    // Upper arc: centre below, bulging up; lower arc: centre above.
+    dl->PathArcTo(ImVec2(cx, cy + (r - h)), r,
+                  -1.5708f - 0.95f, -1.5708f + 0.95f, 22);
+    dl->PathStroke(col, 0, stroke);
+    dl->PathArcTo(ImVec2(cx, cy - (r - h)), r,
+                  1.5708f - 0.95f, 1.5708f + 0.95f, 22);
+    dl->PathStroke(col, 0, stroke);
+    // Pupil
+    dl->AddCircle(ImVec2(cx, cy), 3.0f * u, col, 18, stroke);
+}
+
+// Lucide `eye-off` — eye + diagonal slash (hidden state).
+inline void eyeOff(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                   float stroke = 1.6f) {
+    eye(dl, cx, cy, size, col, stroke);
+    dl->AddLine(ImVec2(cx - size * 0.46f, cy - size * 0.46f),
+                ImVec2(cx + size * 0.46f, cy + size * 0.46f), col, stroke + 0.4f);
+}
+
 // Lucide `circle-dot` — outer ring + small filled dot. Used for REC.
 inline void circleDot(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
                       float stroke = 1.6f) {

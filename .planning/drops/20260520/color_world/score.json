@@ -1,0 +1,13 @@
+{
+  "slug": "color_world",
+  "rendered": "/Users/lu/easel/.planning/drops/20260520/color_world/rendered.png",
+  "reference": null,
+  "shader": "/Users/lu/easel/shaders/color_world.fs",
+  "numeric": null,
+  "axes": null,
+  "total": null,
+  "anti_patterns": {},
+  "rationale": "no reference image — render-only drop",
+  "numeric_only": true,
+  "render_only": true
+}

@@ -1,5 +1,6 @@
 #ifdef HAS_NDI
 #include "sources/NDISource.h"
+#include "net/NdiNetworkConfig.h"
 #include <iostream>
 #include <cstring>
 #ifdef _WIN32
@@ -19,6 +20,11 @@ bool NDIFinder::create() {
 
     NDIlib_find_create_t findCreate = {};
     findCreate.show_local_sources = true;
+    // Honor manual cross-subnet peer IPs (the same list written to the machine
+    // config) so devices on other subnets are discoverable even when mDNS can't
+    // cross. `extra` must outlive the find_create_v2 call below — it does.
+    std::string extra = NdiNetworkConfig::findExtraIps(NDIRuntime::pendingNetworkSettings());
+    if (!extra.empty()) findCreate.p_extra_ips = extra.c_str();
 
     m_finder = rt.api()->find_create_v2(&findCreate);
     if (!m_finder) {
@@ -126,8 +132,23 @@ void NDISource::disconnect() {
     m_height = 0;
 }
 
-void NDISource::update() {
+void NDISource::suspend() {
     if (!m_recv) return;
+    m_resumeName = m_senderName; // disconnect() clears name + URL
+    m_resumeUrl  = m_senderUrl;
+    disconnect();
+    m_suspended = true;
+}
+
+void NDISource::update() {
+    if (!m_recv) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (m_suspended && !m_resumeName.empty()) {
+            m_suspended = false; // one attempt — sender may be gone
+            connect(m_resumeName, m_resumeUrl);
+        }
+        return;
+    }
 
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return;
