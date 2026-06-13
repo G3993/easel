@@ -191,9 +191,13 @@ private:
     // independent per-zone path and the spanned slice path). Returns an
     // active projector for the monitor, or nullptr if it isn't ready yet.
     ProjectorOutput* ensureProjector(int monitorIndex);
-    // Target frame-rate cap shown/edited in the Canvas section. 0 = uncapped
-    // (vsync only). >0 sleeps after swap to hold the frame to ~1/target sec.
+    // Target frame-rate cap shown/edited in the Canvas section. 0 = vsync
+    // (loop runs at the editor display's refresh). >0 disables vsync and
+    // busy-waits after swap to hold the frame to ~1/target sec.
     float m_targetFPS = 0.0f;
+    // Swap interval currently applied to the main context (-1 = unset). Driven
+    // each frame from m_targetFPS so toggling the Canvas Target flips vsync.
+    int m_appliedSwapInterval = -1;
     // Last workspace mode observed in renderUI. Used to detect transitions
     // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
     // reset show-specific UI state without polling every frame.

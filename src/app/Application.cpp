@@ -218,7 +218,12 @@ bool Application::init() {
     glfwSetDropCallback(m_window, Application::dropCallback);
 
     glfwMakeContextCurrent(m_window);
-    glfwSwapInterval(0); // NDI/output pacing is handled explicitly.
+    // Editor vsync ON by default (see the frame-pacing block in run()): the
+    // loop should run at the display's refresh, not free-run. Output pacing
+    // is independent — NDI throttles itself, the projector present uses a
+    // fence sync on its own context — so editor vsync doesn't gate them.
+    glfwSwapInterval(1);
+    m_appliedSwapInterval = 1;
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD" << std::endl;
@@ -1192,12 +1197,27 @@ void Application::run() {
             }
         }
 
+        // Frame pacing. "Uncapped (vsync)" (m_targetFPS == 0) engages vsync so
+        // the loop runs at the editor display's refresh (~60Hz) instead of
+        // free-running at 300+fps — that surplus was pure wasted GPU and heat,
+        // and stepped GPU sims (the fluid solver's 20 pressure iterations) far
+        // more often than the display could show, with no visual gain (the sim
+        // is wall-clock-dt driven, so its speed is unchanged). An explicit FPS
+        // target turns vsync OFF and busy-waits to that rate below.
+        {
+            int wantInterval = (m_targetFPS > 0.0f) ? 0 : 1;
+            if (wantInterval != m_appliedSwapInterval) {
+                glfwSwapInterval(wantInterval); // main context is current here
+                m_appliedSwapInterval = wantInterval;
+            }
+        }
+
         glfwSwapBuffers(m_window);
         static bool s_maximized = false;
         if (!s_maximized) { glfwMaximizeWindow(m_window); s_maximized = true; }
 
-        // Frame-rate cap (Canvas → Target). 0 = uncapped (vsync only). When
-        // set, busy-wait the remainder of the frame so we hold ~1/target sec.
+        // Explicit FPS target (vsync off above): busy-wait the remainder of the
+        // frame so we hold ~1/target sec.
         if (m_targetFPS > 0.0f) {
             double frameDur = 1.0 / (double)m_targetFPS;
             double remain   = frameDur - (glfwGetTime() - frameStart);
