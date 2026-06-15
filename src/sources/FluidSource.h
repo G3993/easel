@@ -81,8 +81,20 @@ public:
     float m_autoRate = 24.0f;            // auto-splats per second (Easel-native)
     bool  m_autoMovement = true;         // self-animate without input
     // ── Auto-movement presets — the virtual cursor's motion pattern ───
-    enum AutoPattern { Wander = 0, Orbit, Figure8, Pulse, Rain, Spiral };
+    // Sound: audio-reactive — a single orb lives at center, ventures out as
+    // the sound's energy rises (random wander, brighter/denser splats), and
+    // springs back to the middle + dims + fades when it goes quiet. Feels
+    // alive: fast attack on loudness, slow graceful release into stillness.
+    enum AutoPattern { Wander = 0, Orbit, Figure8, Pulse, Rain, Spiral, Sound };
     int   m_autoPattern = Wander;
+    // ── Color palettes — dye color theme the splat hue cycles through ─
+    // Rainbow keeps the legacy full-spectrum HSV sweep; the rest loop a
+    // 4-stop gradient. Custom uses the user-editable stops below.
+    enum ColorPalette { Rainbow = 0, Ocean, Sunset, Neon, Fire, Pastel,
+                        Forest, Mono, Custom };
+    int   m_palette = Rainbow;
+    float m_customStops[4][3] = { {1.0f, 0.2f, 0.5f}, {0.4f, 0.2f, 1.0f},
+                                  {0.1f, 0.8f, 1.0f}, {0.9f, 0.9f, 0.4f} };
     float m_autoSpeed = 1.0f;            // pattern tempo (×base speed)
     float m_autoScale = 0.30f;           // radius / amplitude / spread
     bool  m_shading = true;              // velocity-based shading highlight
@@ -111,13 +123,35 @@ private:
     bool m_ready = false;
     int  m_outW = 1280, m_outH = 720;
     double m_lastTime = 0.0;
-    float  m_autoTimer = 0.0f;
     float  m_hue = 0.0f;
     float  m_splatAccum = 0.0f;   // per-instance splat-rate accumulator
     float  m_autoPhase = 0.0f;    // pattern clock (orbit/figure-8/spiral/rain)
-    // Drifting virtual cursors for continuous motion-driven splats —
-    // mirrors the JS freeform movement pattern (the website default).
-    float m_cx = 0.5f, m_cy = 0.5f, m_cvx = 0.0f, m_cvy = 0.0f;
+    // Drifting virtual cursors ("orbs") for continuous motion-driven splats —
+    // mirrors the JS freeform movement pattern (the website default). Wander
+    // runs two of them, staggered so they re-aim at different moments and
+    // read as two distinct moving orbs.
+    static constexpr int kWanderOrbs = 2;
+    struct WanderOrb { float x, y, vx, vy, timer; };
+    WanderOrb m_orbs[kWanderOrbs] = { {0.35f, 0.5f, 0.0f, 0.0f, 0.0f},
+                                      {0.65f, 0.5f, 0.0f, 0.0f, 0.55f} };
+    unsigned m_orbSplat = 0;      // alternates Wander splats between orbs
+    // ── Sound movement state ──────────────────────────────────────────
+    // Latest audio captured each frame in applyAudioBindings() (independent
+    // of whether any param bindings exist), consumed by the Sound pattern.
+    float m_sndLevel = 0.0f, m_sndEnergy = 0.0f,
+          m_sndSilence = 0.0f, m_sndMomentum = 0.5f;
+    float m_sndDrive = 0.0f;          // smoothed 0..1 loudness drive
+    WanderOrb m_soundOrb = {0.5f, 0.5f, 0.0f, 0.0f, 0.0f};
+    float m_sndTx = 0.5f, m_sndTy = 0.5f;  // current wander target
+    // Slowly-drifting "home" — the blob's center of activity. Strokes radiate
+    // from here (not dead-center) so the whole thing roams the canvas a little;
+    // excursion grows with drive, collapses to the middle when quiet.
+    WanderOrb m_soundHome = {0.5f, 0.5f, 0.0f, 0.0f, 0.0f};
+    float m_sndHomeTx = 0.5f, m_sndHomeTy = 0.5f;
+    // Distance-based stamping trail: last brush position + leftover path
+    // distance, so the Sound brush lays a CONTINUOUS overlapping stroke
+    // (no time-clock stutter) regardless of speed / framerate.
+    float m_sndPrevX = 0.5f, m_sndPrevY = 0.5f, m_sndStampDist = 0.0f;
     std::mt19937 m_rng{12345};
     std::map<std::string, AudioBinding> m_audioBindings;
     // Interactive pointer splats queued from the UI, drained in update().
@@ -182,4 +216,6 @@ private:
     void renderToOutput();
     void autoSplats(float dt);
     void hsv(float h, float s, float v, float& r, float& g, float& b);
+    // Map the cycling phase t [0,1) through the active palette (m_palette).
+    void paletteColor(float t, float& r, float& g, float& b);
 };

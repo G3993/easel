@@ -793,6 +793,56 @@ void FluidSource::hsv(float h, float s, float v, float& r, float& g, float& b) {
     }
 }
 
+void FluidSource::paletteColor(float t, float& r, float& g, float& b) {
+    // Rainbow keeps the legacy full-spectrum HSV sweep. Every other palette
+    // is a 4-stop looped gradient sampled at phase t, so the dye keeps the
+    // same continuous color drift but stays inside the theme.
+    if (m_palette == Rainbow) { hsv(t, 1.0f, 1.0f, r, g, b); return; }
+
+    struct RGB { float r, g, b; };
+    static const RGB kStops[][4] = {
+        // Ocean — deep blue → teal → cyan → seafoam
+        { {0.00f, 0.15f, 0.60f}, {0.00f, 0.50f, 0.80f},
+          {0.10f, 0.90f, 1.00f}, {0.40f, 1.00f, 0.80f} },
+        // Sunset — violet → crimson → orange → gold
+        { {0.45f, 0.10f, 0.55f}, {0.90f, 0.20f, 0.30f},
+          {1.00f, 0.50f, 0.15f}, {1.00f, 0.80f, 0.30f} },
+        // Neon — magenta → electric blue → acid green → hot pink
+        { {1.00f, 0.10f, 0.80f}, {0.20f, 0.40f, 1.00f},
+          {0.10f, 1.00f, 0.50f}, {1.00f, 0.20f, 0.40f} },
+        // Fire — ember red → orange → yellow → white-hot
+        { {0.70f, 0.05f, 0.00f}, {1.00f, 0.35f, 0.00f},
+          {1.00f, 0.80f, 0.10f}, {1.00f, 1.00f, 0.60f} },
+        // Pastel — rose → lavender → mint → powder blue
+        { {1.00f, 0.70f, 0.80f}, {0.80f, 0.70f, 1.00f},
+          {0.70f, 1.00f, 0.85f}, {0.70f, 0.85f, 1.00f} },
+        // Forest — pine → moss → lime → amber
+        { {0.05f, 0.40f, 0.15f}, {0.30f, 0.65f, 0.20f},
+          {0.70f, 0.90f, 0.30f}, {0.85f, 0.70f, 0.25f} },
+        // Mono — white ↔ greys (luminance-only fluid)
+        { {1.00f, 1.00f, 1.00f}, {0.65f, 0.65f, 0.65f},
+          {0.35f, 0.35f, 0.35f}, {0.80f, 0.80f, 0.80f} },
+    };
+
+    RGB s[4];
+    if (m_palette == Custom) {
+        for (int i = 0; i < 4; ++i)
+            s[i] = { m_customStops[i][0], m_customStops[i][1],
+                     m_customStops[i][2] };
+    } else {
+        int p = std::min(std::max(m_palette - 1, 0),
+                         (int)(sizeof(kStops) / sizeof(kStops[0])) - 1);
+        for (int i = 0; i < 4; ++i) s[i] = kStops[p][i];
+    }
+
+    float pos = std::fmod(std::max(t, 0.0f), 1.0f) * 4.0f;
+    int   i0  = (int)pos % 4, i1 = (i0 + 1) % 4;
+    float f   = pos - (float)(int)pos;
+    r = s[i0].r + (s[i1].r - s[i0].r) * f;
+    g = s[i0].g + (s[i1].g - s[i0].g) * f;
+    b = s[i0].b + (s[i1].b - s[i0].b) * f;
+}
+
 void FluidSource::autoSplats(float dt) {
     // Continuous motion-driven splatting — a virtual cursor traces one of
     // several selectable patterns (m_autoPattern) and lays down dye along
@@ -807,31 +857,133 @@ void FluidSource::autoSplats(float dt) {
     const float kForce = 6000.0f;   // SPLAT_FORCE-ish base velocity
 
     // Wander keeps its legacy steering integrator (re-aimed cursor, edge
-    // bounce). The other patterns are evaluated per-splat below.
+    // bounce), now run for each orb. Timers start staggered so the orbs
+    // re-aim at different moments and never move in lockstep.
     if (m_autoPattern == Wander) {
-        m_autoTimer += dt;
-        if (m_autoTimer > 1.1f) {
-            m_autoTimer = 0.0f;
-            float tx = 0.15f + 0.7f * u(m_rng);
-            float ty = 0.15f + 0.7f * u(m_rng);
-            m_cvx = (tx - m_cx) * 1.6f * std::max(0.05f, m_autoSpeed);
-            m_cvy = (ty - m_cy) * 1.6f * std::max(0.05f, m_autoSpeed);
+        for (WanderOrb& o : m_orbs) {
+            o.timer += dt;
+            if (o.timer > 1.1f) {
+                o.timer = 0.0f;
+                float tx = 0.15f + 0.7f * u(m_rng);
+                float ty = 0.15f + 0.7f * u(m_rng);
+                o.vx = (tx - o.x) * 1.6f * std::max(0.05f, m_autoSpeed);
+                o.vy = (ty - o.y) * 1.6f * std::max(0.05f, m_autoSpeed);
+            }
+            o.x += o.vx * dt;
+            o.y += o.vy * dt;
+            if (o.x < 0.05f || o.x > 0.95f) { o.vx = -o.vx; o.x = std::min(0.95f, std::max(0.05f, o.x)); }
+            if (o.y < 0.05f || o.y > 0.95f) { o.vy = -o.vy; o.y = std::min(0.95f, std::max(0.05f, o.y)); }
         }
-        m_cx += m_cvx * dt;
-        m_cy += m_cvy * dt;
-        if (m_cx < 0.05f || m_cx > 0.95f) { m_cvx = -m_cvx; m_cx = std::min(0.95f, std::max(0.05f, m_cx)); }
-        if (m_cy < 0.05f || m_cy > 0.95f) { m_cvy = -m_cvy; m_cy = std::min(0.95f, std::max(0.05f, m_cy)); }
     }
 
-    // Emit roughly m_autoRate splats/sec, distributed across this frame.
-    float interval = (m_autoRate > 0.1f) ? (1.0f / m_autoRate) : 1e9f;
+    // ── Sound pattern: strokes radiating from the center ──────────────
+    // Each stroke STARTS at the middle and sweeps outward, so dye always
+    // emanates from the center (never random locations). Louder = longer,
+    // faster, brighter strokes reaching further out; quiet = tiny dim strokes
+    // that barely leave the middle and fade. Emission is DISTANCE-based (a
+    // stamp every ~half-sigma of travel) so the stroke is one continuous mark,
+    // not a stutter of time-clocked dabs. Handles its own splats + returns.
+    if (m_autoPattern == Sound) {
+        // Smooth energy altitude (NOT peaky RMS) → no per-beat throb. Silence
+        // collapses it so pauses go dim and fade.
+        float loud = std::min(std::max(m_sndEnergy, 0.0f), 1.0f);
+        loud *= (1.0f - 0.9f * m_sndSilence);
+        float tau = (loud > m_sndDrive) ? 0.22f : 0.5f;
+        m_sndDrive += (loud - m_sndDrive) * (1.0f - std::exp(-dt / tau));
+        m_sndDrive = std::min(std::max(m_sndDrive, 0.0f), 1.0f);
+        const float d = m_sndDrive;
+
+        // Stamp spacing ≈ half the splat's Gaussian sigma → overlapping = a
+        // continuous stroke. (splat() uses radius = m_splatRadius/100.)
+        float sigma   = std::sqrt(std::max(m_splatRadius, 0.01f) / 100.0f);
+        float spacing = std::max(sigma * 0.45f, 0.002f);
+        const float spd = std::max(0.05f, m_autoSpeed);
+
+        // Drift the "home" — the blob's center of activity slowly roams a small
+        // region so the whole thing travels the canvas a little. Excursion
+        // grows with drive and collapses to the middle when quiet, so it stays
+        // anchored to the center yet isn't pinned dead-center.
+        WanderOrb& h = m_soundHome;
+        h.timer += dt;
+        float homeReach = 0.02f + 0.07f * d;
+        if (h.timer > 1.7f) {
+            h.timer = 0.0f;
+            float ha  = u(m_rng) * 6.2831853f;
+            float hr  = homeReach * std::sqrt(u(m_rng));   // ~uniform within disk
+            m_sndHomeTx = 0.5f + std::cos(ha) * hr / aspect;
+            m_sndHomeTy = 0.5f + std::sin(ha) * hr;
+        }
+        h.vx += (m_sndHomeTx - h.x) * 1.3f * dt;
+        h.vy += (m_sndHomeTy - h.y) * 1.3f * dt;
+        h.vx *= 0.95f; h.vy *= 0.95f;
+        h.x += h.vx * dt; h.y += h.vy * dt;
+
+        // Start a new outward stroke from HOME when the brush has reached its
+        // outer target (or the stroke has run long enough). On the very first
+        // frame brush==home==target → reached → a fresh stroke is picked.
+        WanderOrb& s = m_soundOrb;
+        s.timer += dt;
+        float reach = m_autoScale * (0.14f + 0.7f * d);
+        float tdx = (s.x - m_sndTx) * aspect, tdy = (s.y - m_sndTy);
+        bool  reached = (tdx * tdx + tdy * tdy) < (0.02f * 0.02f);
+        if (reached || s.timer > (0.9f + 0.6f * (1.0f - d)) / spd) {
+            s.timer = 0.0f;
+            s.x = h.x; s.y = h.y; s.vx = 0.0f; s.vy = 0.0f;
+            float ang = u(m_rng) * 6.2831853f;
+            m_sndTx = std::min(0.95f, std::max(0.05f, h.x + std::cos(ang) * reach / aspect));
+            m_sndTy = std::min(0.95f, std::max(0.05f, h.y + std::sin(ang) * reach));
+            m_sndPrevX = h.x; m_sndPrevY = h.y;  // don't stamp across the reset
+            m_sndStampDist = spacing;             // first stamp lands at home
+        }
+        // Glide outward toward the target (accel + speed scale with drive).
+        float accel = (2.0f + 3.5f * d) * spd;
+        s.vx += (m_sndTx - s.x) * accel * dt;
+        s.vy += (m_sndTy - s.y) * accel * dt;
+        s.vx *= 0.90f; s.vy *= 0.90f;
+        s.x += s.vx * dt; s.y += s.vy * dt;
+
+        // Lay a continuous stroke from last position to here, stamping every
+        // `spacing` of path. Each stamp pushes dye ALONG the outward direction
+        // (so it streaks out from center), with a small perpendicular wobble.
+        float segx = s.x - m_sndPrevX, segy = s.y - m_sndPrevY;
+        float seglen = std::sqrt(segx * segx + segy * segy);
+        if (seglen > 1e-6f) {
+            float dirx = segx / seglen, diry = segy / seglen;
+            float strokeF = kForce * (0.14f + 0.55f * d) * spd;
+            float si = m_splatIntensity * (0.06f + 0.94f * d);
+            m_sndStampDist += seglen;
+            int g2 = 0;
+            while (m_sndStampDist >= spacing && g2++ < 256) {
+                m_sndStampDist -= spacing;
+                float along = seglen - m_sndStampDist;          // prev→stamp distance
+                float sx = m_sndPrevX + dirx * along;
+                float sy = m_sndPrevY + diry * along;
+                m_hue = std::fmod(m_hue + 0.010f, 1.0f);
+                float r, g, b; paletteColor(m_hue, r, g, b);
+                float perp = (u(m_rng) - 0.5f) * kForce * 0.10f;
+                splat(sx, sy,
+                      dirx * strokeF - diry * perp,
+                      diry * strokeF + dirx * perp,
+                      r * si, g * si, b * si);
+            }
+        }
+        m_sndPrevX = s.x; m_sndPrevY = s.y;
+        return;   // Sound pattern emits its own splats above
+    }
+
+    // ── Other patterns: time-clocked emission along the pattern path ──
+    float effRate        = m_autoRate;
+    float intensityScale = 1.0f;
+    // Emit roughly effRate splats/sec, distributed across this frame.
+    float interval = (effRate > 0.1f) ? (1.0f / effRate) : 1e9f;
     m_splatAccum += dt;
     int guard = 0;
     while (m_splatAccum >= interval && guard++ < 8) {
         m_splatAccum -= interval;
         m_hue = std::fmod(m_hue + 0.013f, 1.0f);
-        float r, g, b; hsv(m_hue, 1.0f, 1.0f, r, g, b);
-        r *= m_splatIntensity; g *= m_splatIntensity; b *= m_splatIntensity;
+        float r, g, b; paletteColor(m_hue, r, g, b);
+        float si = m_splatIntensity * intensityScale;
+        r *= si; g *= si; b *= si;
 
         // Position (uv [0,1]) + velocity for this splat, per pattern. The /
         // aspect on x keeps circular paths visually round on a wide canvas.
@@ -881,12 +1033,13 @@ void FluidSource::autoSplats(float dt) {
                 dy = -kForce * (0.5f + m_autoScale * 2.0f);
                 break;
             }
-            default: { // Wander
+            default: { // Wander — splats alternate between the two orbs
+                const WanderOrb& o = m_orbs[m_orbSplat++ % kWanderOrbs];
                 float jx = (u(m_rng) - 0.5f) * 0.04f;
                 float jy = (u(m_rng) - 0.5f) * 0.04f;
-                px = m_cx + jx; py = m_cy + jy;
-                dx = m_cvx * kForce + (u(m_rng) - 0.5f) * 300.0f;
-                dy = m_cvy * kForce + (u(m_rng) - 0.5f) * 300.0f;
+                px = o.x + jx; py = o.y + jy;
+                dx = o.vx * kForce + (u(m_rng) - 0.5f) * 300.0f;
+                dy = o.vy * kForce + (u(m_rng) - 0.5f) * 300.0f;
                 break;
             }
         }
@@ -904,6 +1057,14 @@ void FluidSource::applyAudioBindings(float level, float bass, float mid,
                                      MIDIManager* midi,
                                      float energy, float build, float drop,
                                      float silence, float momentum) {
+    // Capture the live audio FIRST — the Sound movement pattern reads these
+    // directly in autoSplats(), so they must update every frame regardless of
+    // whether the user has wired up any sparkle param bindings below.
+    m_sndLevel    = level;
+    m_sndEnergy   = energy;
+    m_sndSilence  = silence;
+    m_sndMomentum = momentum;
+
     if (m_audioBindings.empty()) return;
     for (auto& [name, b] : m_audioBindings) {
         if (b.signal == AudioSignal::None) continue;
@@ -1085,7 +1246,7 @@ void FluidSource::update() {
             float r = 1.0f, g = 1.0f, b = 1.0f;
             if (!reform) {  // colour only matters when we actually paint dye
                 m_hue = std::fmod(m_hue + 0.0021f, 1.0f);
-                hsv(m_hue, 1.0f, 1.0f, r, g, b);
+                paletteColor(m_hue, r, g, b);
             }
             float k = m_splatIntensity;
             splat(p.x, p.y, p.dx, p.dy, r * k, g * k, b * k);

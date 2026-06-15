@@ -3228,6 +3228,34 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             fluidParam("splatIntensity", "Splat Intensity", &fsrc->m_splatIntensity, 0.1f,  4.0f, "%.2f");
             sectionBreak();
 
+            // Color palette — theme the dye cycles through. Custom exposes
+            // four editable gradient stops the cycle loops over.
+            {
+                static const char* paletteNames[] = {
+                    "Rainbow", "Ocean", "Sunset", "Neon", "Fire",
+                    "Pastel", "Forest", "Mono", "Custom" };
+                dimLabel("PALETTE", kRowLabel, false);
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::Combo("##fluidpalette", &fsrc->m_palette,
+                                 paletteNames, IM_ARRAYSIZE(paletteNames)))
+                    undoNeeded = true;
+                if (fsrc->m_palette == FluidSource::Custom) {
+                    float avail = ImGui::GetContentRegionAvail().x;
+                    float cw = (avail - 18.0f) / 4.0f;
+                    for (int i = 0; i < 4; ++i) {
+                        if (i) ImGui::SameLine(0, 6);
+                        ImGui::PushID(i);
+                        ImGui::SetNextItemWidth(cw);
+                        if (ImGui::ColorEdit3("##stop", fsrc->m_customStops[i],
+                                              ImGuiColorEditFlags_NoInputs |
+                                              ImGuiColorEditFlags_NoLabel))
+                            undoNeeded = true;
+                        ImGui::PopID();
+                    }
+                }
+            }
+            sectionBreak();
+
             // ── Image inject ─────────────────────────────────────────────
             // Pick another layer (image / video / NDI / shader / webcam)
             // and the fluid additively pulls its pixels into the dye field
@@ -3322,11 +3350,17 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             ImGui::Checkbox("Auto Movement", &fsrc->m_autoMovement);
             if (fsrc->m_autoMovement) {
                 static const char* patternNames[] = {
-                    "Wander", "Orbit", "Figure 8", "Pulse", "Rain", "Spiral" };
+                    "Wander", "Orbit", "Figure 8", "Pulse", "Rain", "Spiral",
+                    "Sound" };
                 dimLabel("MOVEMENT", kRowLabel, false);
                 ImGui::SetNextItemWidth(-1);
                 ImGui::Combo("##fluidpattern", &fsrc->m_autoPattern,
                              patternNames, IM_ARRAYSIZE(patternNames));
+                if (fsrc->m_autoPattern == FluidSource::Sound &&
+                    ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Audio-reactive: blob lives at center,\n"
+                                      "ventures out as sound energy rises,\n"
+                                      "dims + settles to the middle when quiet.");
                 fluidParam("autoRate",  "Density", &fsrc->m_autoRate,  0.0f, 60.0f, "%.0f/s");
                 fluidParam("autoSpeed", "Speed",   &fsrc->m_autoSpeed, 0.0f, 4.0f,  "%.2f");
                 fluidParam("autoScale", "Spread",  &fsrc->m_autoScale, 0.0f, 0.5f,  "%.2f");

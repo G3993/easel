@@ -104,6 +104,7 @@ extern std::string openFileDialog_mac(const char* filter);
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
 extern "C" int  EaselMac_IsNativeFullScreen(GLFWwindow*);
 extern "C" void EaselMac_ExitNativeFullScreen(GLFWwindow*);
+extern "C" int  EaselMac_ConsumeZoomFullscreenRequest();
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -673,6 +674,17 @@ void Application::run() {
             }
             f11WasPressed = f11Now;
         }
+
+#ifdef __APPLE__
+        // Green traffic-light button → Easel's borderless app fullscreen (same
+        // path as F11). Native macOS fullscreen stays disabled (it SIGABRTs
+        // when a projector/display change force-exits it), so the green button
+        // is routed here instead of doing a plain window zoom.
+        if (EaselMac_ConsumeZoomFullscreenRequest()) {
+            m_presentMode = false;
+            toggleEditorFullscreen();
+        }
+#endif
 
         int w, h;
         glfwGetFramebufferSize(m_window, &w, &h);
@@ -11926,6 +11938,10 @@ void Application::toggleEditorFullscreen() {
         glfwSetWindowAttrib(m_window, GLFW_DECORATED, GLFW_TRUE);
 #ifdef __APPLE__
         macSetFullscreenPresentation(false); // restore menu bar + Dock
+        // Restoring decorations recreates the standard window buttons with
+        // their default actions — re-unify the title bar so the traffic lights
+        // are re-positioned AND the green button stays bound to fullscreen.
+        EaselMac_UnifyTitleBar(m_window);
 #endif
         m_editorFullscreen = false;
         m_presentMode = false;  // present mode only exists while fullscreen
@@ -13301,6 +13317,15 @@ void Application::saveProject(const std::string& path) {
                 fc["pressureIters"]       = f->m_pressureIters;
                 fc["splatRadius"]         = f->m_splatRadius;
                 fc["splatIntensity"]      = f->m_splatIntensity;
+                fc["palette"]             = f->m_palette;
+                {
+                    json stops = json::array();
+                    for (int i = 0; i < 4; ++i)
+                        stops.push_back({ f->m_customStops[i][0],
+                                          f->m_customStops[i][1],
+                                          f->m_customStops[i][2] });
+                    fc["customStops"] = stops;
+                }
                 fc["autoRate"]            = f->m_autoRate;
                 fc["autoMovement"]        = f->m_autoMovement;
                 fc["autoPattern"]         = f->m_autoPattern;
@@ -13932,6 +13957,13 @@ void Application::loadProject(const std::string& path) {
                     src->m_pressureIters       = fc.value("pressureIters", src->m_pressureIters);
                     src->m_splatRadius         = fc.value("splatRadius", src->m_splatRadius);
                     src->m_splatIntensity      = fc.value("splatIntensity", src->m_splatIntensity);
+                    src->m_palette             = fc.value("palette", src->m_palette);
+                    if (fc.contains("customStops") && fc["customStops"].is_array()) {
+                        const auto& stops = fc["customStops"];
+                        for (int i = 0; i < 4 && i < (int)stops.size(); ++i)
+                            for (int c = 0; c < 3 && c < (int)stops[i].size(); ++c)
+                                src->m_customStops[i][c] = stops[i][c].get<float>();
+                    }
                     src->m_autoRate            = fc.value("autoRate", src->m_autoRate);
                     src->m_autoMovement        = fc.value("autoMovement", src->m_autoMovement);
                     src->m_autoPattern         = fc.value("autoPattern", src->m_autoPattern);

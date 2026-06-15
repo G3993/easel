@@ -13,6 +13,36 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
+// ── Green traffic-light button → Easel's own (borderless) fullscreen ──
+// macOS NATIVE fullscreen is deliberately disabled on the editor window
+// (it SIGABRTs when a projector / display change force-exits it — see
+// ProjectorOutput_mac.mm disableNativeFullscreen). So the green button is
+// re-targeted to set a request flag the app drains each frame, where it runs
+// the same borderless toggleEditorFullscreen() as F11 / the in-app button.
+// Option-clicking the green button still performs the classic zoom/maximize.
+static BOOL gZoomFsRequested = NO;
+
+@interface EaselZoomTarget : NSObject
+@property(assign) NSWindow* win;
+- (void)onZoom:(id)sender;
+@end
+@implementation EaselZoomTarget
+- (void)onZoom:(id)sender {
+    if ([NSEvent modifierFlags] & NSEventModifierFlagOption) {
+        [self.win zoom:sender];        // preserve option-click maximize
+    } else {
+        gZoomFsRequested = YES;        // plain click → Easel fullscreen
+    }
+}
+@end
+static EaselZoomTarget* gZoomTarget = nil;
+
+// Returns 1 (and clears) if the green button was clicked since the last call.
+extern "C" int EaselMac_ConsumeZoomFullscreenRequest() {
+    if (gZoomFsRequested) { gZoomFsRequested = NO; return 1; }
+    return 0;
+}
+
 extern "C" int EaselMac_IsNativeFullScreen(GLFWwindow* window) {
     if (!window) return 0;
     NSWindow* ns = glfwGetCocoaWindow(window);
@@ -62,6 +92,16 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
     NSButton* close = [ns standardWindowButton:NSWindowCloseButton];
     NSButton* mini  = [ns standardWindowButton:NSWindowMiniaturizeButton];
     NSButton* zoom  = [ns standardWindowButton:NSWindowZoomButton];
+    // Re-target the green (zoom) button to Easel's borderless fullscreen. Done
+    // here so it is (re)bound every time this runs — including after exiting
+    // fullscreen, where toggling GLFW_DECORATED recreates the standard buttons
+    // with their default zoom: action.
+    if (zoom) {
+        if (!gZoomTarget) gZoomTarget = [[EaselZoomTarget alloc] init];
+        gZoomTarget.win = ns;
+        zoom.target = gZoomTarget;
+        zoom.action = @selector(onZoom:);
+    }
     for (NSButton* b : {close, mini, zoom}) {
         if (!b) continue;
         NSView* bar = b.superview;
