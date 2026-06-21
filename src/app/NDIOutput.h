@@ -16,7 +16,7 @@ struct NDIOutputSettings {
         BGRA,   // 32 bpp incl. alpha
     };
     Format format    = Format::BGRA;
-    float  targetFps = 30.0f;   // <= 0 = uncapped (paced only by the render loop)
+    float  targetFps = 60.0f;   // <= 0 = uncapped (paced only by the render loop)
     int    width     = 0;       // 0 = native source width  (else scale to this)
     int    height    = 0;       // 0 = native source height (else scale to this)
 };
@@ -44,8 +44,10 @@ private:
     static constexpr int kReadbackSlots = 3;
     GLuint m_pbo[kReadbackSlots] = {0, 0, 0};
     GLsync m_fence[kReadbackSlots] = {nullptr, nullptr, nullptr};
+    GLuint m_readFBO = 0;
     std::vector<uint8_t> m_pixelBuffer;
-    int m_pboIndex = 0;
+    int m_readIndex = 0;
+    int m_pendingReadbacks = 0;
     int m_lastW = 0, m_lastH = 0;
     std::string m_publishedName;
     std::chrono::steady_clock::time_point m_lastSendAt{};

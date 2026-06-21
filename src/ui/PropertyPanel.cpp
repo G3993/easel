@@ -4099,6 +4099,22 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                             ImGui::EndCombo();
                         }
                         ImGui::Dummy(ImVec2(0, 2));
+
+                        // Word-count cap for the rolling FIFO feeds. Only the
+                        // *.recent channels honor it, so the control appears
+                        // only when one is bound. Global (all .recent feeds
+                        // share the cap), live-adjustable.
+                        bool isRecent = currentBinding.size() >= 7 &&
+                            currentBinding.compare(currentBinding.size() - 7, 7, ".recent") == 0;
+                        if (isRecent && speech && speech->recentWordCap) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+                            ImGui::Text("MAX WORDS");
+                            ImGui::PopStyleColor();
+                            ImGui::SetNextItemWidth(-1);
+                            if (ImGui::SliderInt("##recentwords", speech->recentWordCap, 1, 24, "%d words"))
+                                ;
+                            ImGui::Dummy(ImVec2(0, 2));
+                        }
                     }
 
                     if (isBound) {

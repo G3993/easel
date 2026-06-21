@@ -30,6 +30,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -423,8 +424,9 @@ bool Application::init() {
 
     // Etherea client — WebSocket for real-time transcript, SSE for hints
     m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
-        // Update data bus with latest transcript segment
-        m_dataBus.set("etherea.latest", text);
+        // Feeds etherea.latest (full segment), etherea.words (new-words delta),
+        // and etherea.recent (rolling last-N-words FIFO).
+        pushTranscript("etherea", m_ethereaFeed, text, isFinal);
         if (isFinal && !text.empty()) {
             // Accumulate full transcript (bounded — see DataBus::appendCapped).
             m_dataBus.appendCapped("etherea.transcript", text);
@@ -439,7 +441,7 @@ bool Application::init() {
 
     // Cue: parallel realtime cue harness. Pushes transcript + actions into DataBus.
     m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
-        m_dataBus.set("cue.latest", text);
+        pushCueWords(text, isFinal);   // sets cue.latest + cue.words (new-words delta)
         if (isFinal && !text.empty()) {
             m_dataBus.appendCapped("cue.transcript", text);
         }
@@ -2328,13 +2330,16 @@ void Application::compositeZone(OutputZone& zone) {
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
+    renderReadbackFBO(zone, zone.readbackFBO, zone.width, zone.height);
+}
+
+void Application::renderReadbackFBO(OutputZone& zone, Framebuffer& target, int width, int height) {
     // Created on demand: only NDI/RTMP/recorder readback needs this copy,
     // so zones never read back don't pay for it.
-    if (zone.readbackFBO.width() != zone.width ||
-        zone.readbackFBO.height() != zone.height) {
-        zone.readbackFBO.create(zone.width, zone.height, false);
+    if (target.width() != width || target.height() != height) {
+        target.create(width, height, false);
     }
-    zone.readbackFBO.bind();
+    target.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     m_passthroughShader.use();
@@ -2656,10 +2661,6 @@ void Application::presentOutputs() {
     // Global outputs (stream/record) — use active zone
     auto& active = activeZone();
     bool needsReadback = false;
-#ifdef HAS_NDI
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && m_ndiOutput.hasReceivers())
-        needsReadback = true;
-#endif
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive() || m_recorder.isActive()) needsReadback = true;
 #endif
@@ -2677,8 +2678,10 @@ void Application::presentOutputs() {
     if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty() &&
         m_ndiOutput.hasReceivers()) {
         OutputZone& luZone = *m_zones[0];
-        renderReadbackFBO(luZone);
-        m_ndiOutput.send(luZone.readbackFBO.textureId(), luZone.width, luZone.height);
+        constexpr int kFluxInputW = 768;
+        constexpr int kFluxInputH = 432;
+        renderReadbackFBO(luZone, m_ndiFluxInputFBO, kFluxInputW, kFluxInputH);
+        m_ndiOutput.send(m_ndiFluxInputFBO.textureId(), kFluxInputW, kFluxInputH);
     }
 #endif
 #ifdef HAS_SPOUT
@@ -2982,6 +2985,77 @@ void Application::handleVoiceIntent(const easel::voice::VoiceIntent& intent) {
     }
 }
 
+void Application::pushTranscript(const std::string& prefix, TranscriptFeed& feed,
+                                 const std::string& text, bool isFinal) {
+    // <prefix>.latest — full current segment. Unchanged contract: typewriter/
+    // reveal text shaders bind `msg` to this and depend on the whole utterance.
+    m_dataBus.set(prefix + ".latest", text);
+
+    auto splitWords = [](const std::string& s) {
+        std::vector<std::string> out;
+        size_t i = 0, n = s.size();
+        while (i < n) {
+            while (i < n && std::isspace((unsigned char)s[i])) ++i;
+            size_t start = i;
+            while (i < n && !std::isspace((unsigned char)s[i])) ++i;
+            if (i > start) out.push_back(s.substr(start, i - start));
+        }
+        return out;
+    };
+    auto join = [](const std::vector<std::string>& w, size_t from) {
+        std::string s;
+        for (size_t i = from; i < w.size(); ++i) { if (!s.empty()) s += ' '; s += w[i]; }
+        return s;
+    };
+
+    // Empty interim (recognizer silence) — leave the .words/.recent feeds
+    // showing the last words rather than blanking. (Blanking would set
+    // msgAge<0 and hide the text shader between utterances.)
+    if (text.empty()) return;
+
+    std::vector<std::string> cur = splitWords(text);
+
+    // <prefix>.words — only the words newly appended since the previous segment.
+    // WORD-boundary diff (not char): Deepgram interim results grow ("the quick"
+    // -> "the quick brown") AND revise the tail ("I think" -> "I thought");
+    // word diffing emits "thought" not a mid-word "ought". A brand-new utterance
+    // diverges at the first word, so it's (correctly) all-new. Only publish a
+    // non-empty delta so repeats/finals don't blank the shader (msgAge<0).
+    std::vector<std::string> prev = splitWords(feed.prevSegment);
+    size_t common = 0;
+    while (common < prev.size() && common < cur.size() && prev[common] == cur[common])
+        ++common;
+    std::string delta = join(cur, common);
+    if (!delta.empty()) m_dataBus.set(prefix + ".words", delta);
+
+    // <prefix>.recent — a running FIFO of the last m_recentWordCap words that
+    // slides as you speak. Window = committed words (past utterances) + the
+    // current segment's words, trimmed to the last N. Because the current
+    // segment replaces itself each interim, tail revisions never duplicate, and
+    // the feed "keeps up" word-by-word during speech instead of waiting for the
+    // sentence to finalize.
+    int cap = m_recentWordCap > 0 ? m_recentWordCap : (int)cur.size();
+    std::vector<std::string> window = feed.finalWords;
+    window.insert(window.end(), cur.begin(), cur.end());
+    if ((int)window.size() > cap)
+        window.erase(window.begin(), window.end() - cap);
+    m_dataBus.set(prefix + ".recent", join(window, 0));
+
+    if (isFinal) {
+        // Commit the finished utterance into the FIFO history. Bound the
+        // history to a small buffer (>= any sane cap) so memory stays flat over
+        // a long show while still surviving a runtime cap increase.
+        feed.finalWords.insert(feed.finalWords.end(), cur.begin(), cur.end());
+        constexpr size_t kFinalWordsMax = 128;
+        if (feed.finalWords.size() > kFinalWordsMax)
+            feed.finalWords.erase(feed.finalWords.begin(),
+                                  feed.finalWords.end() - kFinalWordsMax);
+        feed.prevSegment.clear();   // next utterance counts as all-new
+    } else {
+        feed.prevSegment = text;    // keep growing this utterance
+    }
+}
+
 void Application::startVoiceRecording() {
 #ifdef __APPLE__
     if (m_voiceListening) return;
@@ -3008,7 +3082,7 @@ void Application::startVoiceRecording() {
         // stops it from racing test writes during the M7 unicode case.
         if (s.empty()) return;
         if (glfwGetTime() >= m_cueLatestSuppressUntil) {
-            m_dataBus.set("cue.latest", s);
+            pushCueWords(s, /*isFinal=*/false);  // interim — emit only new words
         }
     };
     m_voiceRecognizer.onFinal = [this](const std::string& s) {
@@ -3019,7 +3093,7 @@ void Application::startVoiceRecording() {
         m_voiceLastEchoTime = glfwGetTime();
         // Push the final to the DataBus too so it persists in the bubbles
         // after speech stops, and append to the running transcript.
-        m_dataBus.set("cue.latest", s);
+        pushCueWords(s, /*isFinal=*/true);   // closes the utterance for cue.words
         m_dataBus.appendCapped("cue.transcript", s);
         auto intent = easel::voice::parse(s);
         std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
@@ -3410,6 +3484,12 @@ void Application::renderUI() {
                        && msg.strings.size() >= 2) {
                 // Managed shader overlay layer, keyed by slot. strings = [slot, path].
                 ensureManagedShaderLayer(msg.strings[0], msg.strings[1]);
+            } else if (msg.address == "/easel/layer/ensure/fluid"
+                       && !msg.strings.empty()) {
+                // Managed Fluid Simulation layer, keyed by slot. strings = [slot].
+                // The built-in fluid generator as an agent-managed, zone-assignable
+                // layer (so the SDK can stand up a flux-input zone end to end).
+                ensureManagedFluidLayer(msg.strings[0]);
             } else if (msg.address == "/easel/layer/remove-managed"
                        && !msg.strings.empty()) {
                 // Remove one managed layer by its key (drops an overlay/base).
@@ -3434,6 +3514,19 @@ void Application::renderUI() {
                        && !msg.strings.empty()) {
                 // Tear down a composite zone (stops its NDI feed).
                 removeZoneByName(msg.strings[0]);
+            } else if (msg.address == "/easel/zone/output"
+                       && msg.strings.size() >= 2) {
+                // Set a zone's physical output at runtime (the render loop applies
+                // it next frame, exactly like the GUI output combo — no display/NDI
+                // setup needed here). strings = [zoneName, dest, arg3];
+                // dest = none|fullscreen|ndi. For fullscreen the monitor index is
+                // ints[0] if present else atoi(strings[2]); for ndi, strings[2] (if
+                // any) is the feed name. This is the missing OSC verb that lets the
+                // agent route a zone to a projector (Fullscreen+monitor), not just NDI.
+                int mon = !msg.ints.empty() ? msg.ints[0]
+                          : (msg.strings.size() >= 3 ? atoi(msg.strings[2].c_str()) : -1);
+                std::string arg3 = msg.strings.size() >= 3 ? msg.strings[2] : std::string();
+                setZoneOutput(msg.strings[0], msg.strings[1], mon, arg3);
             } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
                 int zi = msg.ints[0];
                 if (zi >= 0 && zi < (int)m_zones.size()) {
@@ -3608,7 +3701,10 @@ void Application::renderUI() {
                 std::string s = msg.strings[0];
                 if (!s.empty()) {
                     if (s.size() > 4096) s.resize(4096);
-                    m_dataBus.set("cue.latest", s);
+                    // Each agent-pushed cue is a complete utterance, so treat
+                    // it as final: cue.words carries the whole new cue (diffed
+                    // against the prior one, then reset).
+                    pushCueWords(s, /*isFinal=*/true);
                     m_cueLatestSuppressUntil = glfwGetTime() + 1.5;
                 }
             } else if (msg.address == "/cue/clear") {
@@ -3619,6 +3715,9 @@ void Application::renderUI() {
                 // ~500ms so an intentional blank doesn't get instantly
                 // overwritten by stray room audio.
                 m_dataBus.set("cue.latest", "");
+                m_dataBus.set("cue.words", "");
+                m_dataBus.set("cue.recent", "");
+                m_cueFeed = TranscriptFeed{};
                 m_cueLatestSuppressUntil = glfwGetTime() + 0.5;
             } else if (msg.address.rfind("/easel/scene/", 0) == 0) {
                 int idx = atoi(msg.address.c_str() + 13);
@@ -4296,6 +4395,7 @@ void Application::renderUI() {
     m_speechState.dataBus = &m_dataBus;
     m_speechState.activeLayerId = selectedLayer ? selectedLayer->id : 0;
     m_speechState.midi = &m_midiManager;
+    m_speechState.recentWordCap = &m_recentWordCap;
 
     // Capture undo snapshot BEFORE the property panel modifies values
     SceneSnapshot preEditSnapshot;
@@ -13331,6 +13431,53 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
     bindIfText(layer);
 }
 
+void Application::ensureManagedFluidLayer(const std::string& slot) {
+    if (slot.empty()) {
+        std::cerr << "[OSC] ensure/fluid ignored: empty slot\n";
+        return;
+    }
+    // Match the active zone's resolution so the sim aspect is correct (as addFluid).
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    auto makeFluid = [&]() -> std::shared_ptr<FluidSource> {
+        auto src = std::make_shared<FluidSource>();
+        if (!src->init(w, h)) {
+            std::cerr << "[OSC] ensure/fluid: FluidSource init failed\n";
+            return nullptr;
+        }
+        return src;
+    };
+    // Idempotent by slot: a managed fluid layer for this key is already what we want.
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != slot) continue;
+        if (l->source && dynamic_cast<FluidSource*>(l->source.get())) {
+            return;  // already a managed fluid layer for this slot
+        }
+        // Slot holds something else — swap in a fresh fluid source.
+        auto src = makeFluid();
+        if (!src) return;
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        l->source = src;
+        l->name = "Fluid Simulation";
+        return;
+    }
+    // No managed layer for this slot yet — create one tagged with the key.
+    auto src = makeFluid();
+    if (!src) return;
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->managedKey = slot;
+    layer->source = src;
+    layer->name = "Fluid Simulation";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
 void Application::removeManagedLayer(const std::string& slot) {
     if (slot.empty()) return;
     for (int i = m_layerStack.count() - 1; i >= 0; i--) {
@@ -13395,6 +13542,48 @@ void Application::ensureZoneNdi(const std::string& zoneName, const std::string& 
     z->ndiStreamName = sender;
     z->rawNdiName = true;
     z->outputDest = OutputDest::NDI;
+}
+
+void Application::setZoneOutput(const std::string& zoneName, const std::string& dest,
+                               int monitor, const std::string& ndiFeedName) {
+    if (zoneName.empty()) {
+        std::cerr << "[OSC] zone/output ignored: empty zone\n";
+        return;
+    }
+    OutputZone* z = ensureZoneByName(zoneName);
+    std::string d = dest;
+    for (auto& c : d) c = (char)tolower((unsigned char)c);
+
+    if (d == "fullscreen" || d == "screen" || d == "monitor") {
+        // 0-based GLFW monitor index. The per-zone routing loop in render() opens/
+        // moves the projector window next frame; ProjectorOutput::create validates
+        // the index and falls back to a secondary monitor if it's the editor's, so
+        // a bad index is non-fatal.
+        z->outputDest = OutputDest::Fullscreen;
+        z->outputMonitor = monitor;
+    } else if (d == "ndi") {
+        // Optional explicit feed name, unwrapped the same way as ensureZoneNdi
+        // ("MACHINE (sender)" -> "sender"); else keep/derive from the zone name.
+        if (!ndiFeedName.empty()) {
+            std::string sender = ndiFeedName;
+            size_t op = ndiFeedName.rfind('(');
+            if (op != std::string::npos) {
+                size_t cp = ndiFeedName.find(')', op);
+                if (cp != std::string::npos && cp > op + 1)
+                    sender = ndiFeedName.substr(op + 1, cp - op - 1);
+            }
+            z->ndiStreamName = sender;
+            z->rawNdiName = true;
+        } else if (z->ndiStreamName.empty()) {
+            z->ndiStreamName = z->name;
+        }
+        z->outputDest = OutputDest::NDI;
+    } else { // "none" / "preview" / unknown -> preview-only
+        z->outputDest = OutputDest::None;
+        z->outputMonitor = -1;
+    }
+    std::cerr << "[OSC] zone/output " << zoneName << " -> " << d
+              << " (monitor " << z->outputMonitor << ")\n";
 }
 
 void Application::addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey) {

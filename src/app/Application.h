@@ -118,6 +118,28 @@ private:
     void renderVoiceCommandBar();
     void startVoiceRecording();
     void stopVoiceRecording();
+    // Per-source rolling transcript state, for the *.recent FIFO + *.words delta.
+    struct TranscriptFeed {
+        std::string prevSegment;              // baseline for the per-event delta
+        std::vector<std::string> finalWords;  // committed words (FIFO history)
+    };
+    // Route a live transcript segment to three DataBus channels under `prefix`
+    // ("cue" or "etherea"):
+    //   <prefix>.latest — full current segment (unchanged contract; the whole
+    //                     growing utterance, for typewriter/reveal text shaders).
+    //   <prefix>.words  — only the words newly appended since the previous
+    //                     segment (per-event delta; mirrors etherea-ai's
+    //                     unprocessed-tail concept).
+    //   <prefix>.recent — a running FIFO of the last m_recentWordCap words that
+    //                     slides as you speak (committed words + current segment,
+    //                     windowed). This is the live "ticker" feed.
+    // `feed` holds per-source state; `isFinal` commits the current segment.
+    void pushTranscript(const std::string& prefix, TranscriptFeed& feed,
+                        const std::string& text, bool isFinal);
+    // Thin Cue-channel wrapper.
+    void pushCueWords(const std::string& text, bool isFinal) {
+        pushTranscript("cue", m_cueFeed, text, isFinal);
+    }
     char m_voiceTextInput[256] = "";
     std::deque<std::string> m_voiceLog;        // last N transcripts (recent first)
     std::string m_voiceLastEcho;               // formatted intent for the pill
@@ -217,6 +239,12 @@ private:
     // an intentional blank doesn't get clobbered by stray room audio.
     // 0 = no active suppression.
     double      m_cueLatestSuppressUntil = 0.0;
+    // Per-source rolling transcript state (delta baseline + FIFO history).
+    // Touched only from the transcript write path.
+    TranscriptFeed m_cueFeed;
+    TranscriptFeed m_ethereaFeed;
+    // Max words shown in the *.recent rolling feed; user-adjustable (>=1).
+    int m_recentWordCap = 7;
     uint32_t m_nextLayerId = 1;
     OutputZone& activeZone() {
         if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
@@ -353,6 +381,7 @@ private:
     void compositeZone(OutputZone& zone);
     void presentOutputs();
     void renderReadbackFBO(OutputZone& zone);
+    void renderReadbackFBO(OutputZone& zone, Framebuffer& target, int width, int height);
     void renderUI();
     void renderMenuBar();
     // Inline brand mark + overflow menu drawn at the start of the workspace
@@ -451,6 +480,10 @@ private:
     // Idempotent managed shader overlay layer keyed by slot (composited above a
     // base source). Backs /easel/layer/ensure/shader.
     void ensureManagedShaderLayer(const std::string& slot, const std::string& shaderPath);
+    // Idempotent managed Fluid Simulation layer keyed by slot. The built-in fluid
+    // generator (addFluid) as an agent-managed, zone-assignable layer. Backs
+    // /easel/layer/ensure/fluid.
+    void ensureManagedFluidLayer(const std::string& slot);
     // Remove one managed layer by its exact key (drops an overlay/base layer).
     // Backs /easel/layer/remove-managed.
     void removeManagedLayer(const std::string& slot);
@@ -461,18 +494,23 @@ private:
     // and /easel/zone/layer.
     OutputZone* ensureZoneByName(const std::string& name);
     void ensureZoneNdi(const std::string& zoneName, const std::string& feedName);
+    // Set a zone's physical output at runtime: None (preview) / Fullscreen+monitor /
+    // NDI[+feed]. Backs /easel/zone/output; the render loop applies it next frame.
+    void setZoneOutput(const std::string& zoneName, const std::string& dest,
+                       int monitor, const std::string& ndiFeedName = std::string());
     void addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey);
     // Tear down a composite zone (stop its NDI feed). Backs /easel/zone/remove.
     void removeZoneByName(const std::string& zoneName);
 
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
+    Framebuffer m_ndiFluxInputFBO;
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
     // Wire-rate cap applied to ALL NDI senders (global + per-zone) each
     // frame; <= 0 = uncapped. Live-settable via OSC /easel/ndi/fps.
-    float m_ndiTargetFps = 30.0f;
+    float m_ndiTargetFps = 60.0f;
     void addNDISource(const std::string& senderName, const std::string& senderUrl = "");
     // Idempotent agent-driven NDI layer keyed by a stable "slot" (managedKey).
     // Re-ensuring the same slot reuses the layer and only reconnects when the
