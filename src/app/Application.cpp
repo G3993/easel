@@ -177,6 +177,14 @@ bool Application::init() {
         return false;
     }
 
+    // EASEL_WINDOW_POS="x,y" pins the editor window — companion to
+    // EASEL_PROJECTOR_RECT on single-head appliances, parking the editor in
+    // the framebuffer region the physical output doesn't scan out.
+    if (const char* wp = getenv("EASEL_WINDOW_POS")) {
+        int wx, wy;
+        if (sscanf(wp, "%d,%d", &wx, &wy) == 2) glfwSetWindowPos(m_window, wx, wy);
+    }
+
 #ifdef __APPLE__
     // Unify the title bar so the ImGui main menu sits alongside the
     // traffic-light buttons (Figma / VS Code style), freeing the row the
@@ -465,7 +473,12 @@ bool Application::init() {
 
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
-    if (m_projectorAutoConnect && m_lastMonitorCount > 1) {
+    if (getenv("EASEL_PROJECTOR_RECT")) {
+        // Pinned projector rect (single-head appliance, see ProjectorOutput):
+        // always open the projector output; no second monitor will ever appear.
+        activeZone().outputDest = OutputDest::Fullscreen;
+        activeZone().outputMonitor = 0;
+    } else if (m_projectorAutoConnect && m_lastMonitorCount > 1) {
         int sec = ProjectorOutput::findSecondaryMonitor(m_window);
         if (sec >= 0) {
             activeZone().outputDest = OutputDest::Fullscreen;
@@ -482,8 +495,9 @@ bool Application::init() {
         // Create persistent finder — it accumulates sources over time via mDNS
         m_ndiFinder.create();
         m_ndiSources = m_ndiFinder.sources();
-        // Auto-start composition output
-        m_ndiOutput.create("Lu");
+        // Auto-start composition output (suppressed on receive-only boxes:
+        // daisy sets EASEL_NO_NDI_OUTPUT=1 so it never advertises NDI senders)
+        if (!getenv("EASEL_NO_NDI_OUTPUT")) m_ndiOutput.create("Lu");
     }
 #endif
 
@@ -697,7 +711,7 @@ void Application::run() {
         // Debounced: GLFW transiently reports different monitor counts while new
         // windows (projectors) are being created. React only after the count has
         // stayed the same for ~1s to avoid nuking zone outputs on spurious blips.
-        if (m_projectorAutoConnect) {
+        if (m_projectorAutoConnect && !getenv("EASEL_PROJECTOR_RECT")) {
             static int s_pendingCount = -1;
             static int s_stableFrames = 0;
             int monitorCount = (int)ProjectorOutput::enumerateMonitors().size();
@@ -2257,7 +2271,7 @@ void Application::presentOutputs() {
         }
 
 #ifdef HAS_NDI
-        if (zone.outputDest == OutputDest::NDI) {
+        if (zone.outputDest == OutputDest::NDI && !getenv("EASEL_NO_NDI_OUTPUT")) {
             std::string wantName = (zone.rawNdiName && !zone.ndiStreamName.empty())
                 ? zone.ndiStreamName
                 : ("Easel - " + (zone.ndiStreamName.empty() ? zone.name : zone.ndiStreamName));

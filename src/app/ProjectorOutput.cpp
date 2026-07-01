@@ -1,9 +1,22 @@
 #include "app/ProjectorOutput.h"
 #include <iostream>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef __APPLE__
 extern void makeWindowTrulyBorderless(GLFWwindow* window);
 #endif
+
+// EASEL_PROJECTOR_RECT="x,y,w,h" pins the projector window to a fixed
+// rectangle of the desktop instead of requiring a second monitor. This is for
+// single-head appliances (e.g. the Jetson): the GPU scans out only the left
+// part of an oversized framebuffer to the physical projector, while the right
+// part holds the editor and is visible only remotely (NoMachine).
+static bool forcedProjectorRect(int& x, int& y, int& w, int& h) {
+    const char* env = getenv("EASEL_PROJECTOR_RECT");
+    if (!env) return false;
+    return sscanf(env, "%d,%d,%d,%d", &x, &y, &w, &h) == 4 && w > 0 && h > 0;
+}
 
 ProjectorOutput::~ProjectorOutput() {
     destroy();
@@ -63,41 +76,50 @@ int ProjectorOutput::findSecondaryMonitor(GLFWwindow* mainWindow) {
 bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     destroy();
 
-    auto monitors = enumerateMonitors();
-    if (monitorIndex < 0 || monitorIndex >= (int)monitors.size()) {
-        std::cerr << "Invalid monitor index " << monitorIndex << std::endl;
-        return false;
-    }
-
-    // Safety: refuse to open on the same monitor as the main window
-    int mainX, mainY;
-    glfwGetWindowPos(mainWindow, &mainX, &mainY);
-    const auto& target = monitors[monitorIndex];
-    if (mainX >= target.x && mainX < target.x + target.width &&
-        mainY >= target.y && mainY < target.y + target.height) {
-        std::cerr << "Refusing to open projector on the same monitor as the editor" << std::endl;
-
-        // Try to find a different monitor instead
-        int alt = findSecondaryMonitor(mainWindow);
-        if (alt < 0) {
-            std::cerr << "No secondary monitor available" << std::endl;
+    int tx, ty, tw, th;
+    if (forcedProjectorRect(tx, ty, tw, th)) {
+        // Pinned-rect mode: no second monitor required, and the same-monitor
+        // safety check doesn't apply (the editor is parked outside the rect).
+        m_monitorIndex = monitorIndex < 0 ? 0 : monitorIndex;
+    } else {
+        auto monitors = enumerateMonitors();
+        if (monitorIndex < 0 || monitorIndex >= (int)monitors.size()) {
+            std::cerr << "Invalid monitor index " << monitorIndex << std::endl;
             return false;
         }
-        monitorIndex = alt;
+
+        // Safety: refuse to open on the same monitor as the main window
+        int mainX, mainY;
+        glfwGetWindowPos(mainWindow, &mainX, &mainY);
+        const auto& target = monitors[monitorIndex];
+        if (mainX >= target.x && mainX < target.x + target.width &&
+            mainY >= target.y && mainY < target.y + target.height) {
+            std::cerr << "Refusing to open projector on the same monitor as the editor" << std::endl;
+
+            // Try to find a different monitor instead
+            int alt = findSecondaryMonitor(mainWindow);
+            if (alt < 0) {
+                std::cerr << "No secondary monitor available" << std::endl;
+                return false;
+            }
+            monitorIndex = alt;
+        }
+
+        const auto& mi = monitors[monitorIndex];
+        m_monitorIndex = monitorIndex;
+        tx = mi.x; ty = mi.y; tw = mi.width; th = mi.height;
     }
 
-    const auto& mi = monitors[monitorIndex];
     m_mainWindow = mainWindow;
-    m_monitorIndex = monitorIndex;
-    m_width = mi.width;
-    m_height = mi.height;
+    m_width = tw;
+    m_height = th;
 
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
     glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
     // NOT floating/always-on-top — that traps users if it opens on the wrong screen
 
-    m_window = glfwCreateWindow(mi.width, mi.height, "Easel Projector", nullptr, mainWindow);
+    m_window = glfwCreateWindow(tw, th, "Easel Projector", nullptr, mainWindow);
 
     // Reset hints immediately
     glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
@@ -108,9 +130,9 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
         return false;
     }
 
-    // Position on the target monitor
-    glfwSetWindowPos(m_window, mi.x, mi.y);
-    glfwSetWindowSize(m_window, mi.width, mi.height);
+    // Position on the target monitor / pinned rect
+    glfwSetWindowPos(m_window, tx, ty);
+    glfwSetWindowSize(m_window, tw, th);
 
 #ifdef __APPLE__
     // Remove macOS title bar / border that can appear even with GLFW_DECORATED=FALSE
@@ -140,8 +162,8 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
 
     glfwMakeContextCurrent(mainWindow);
 
-    std::cout << "Projector opened on monitor " << monitorIndex
-              << " (" << mi.width << "x" << mi.height << ")" << std::endl;
+    std::cout << "Projector opened on monitor " << m_monitorIndex
+              << " (" << tw << "x" << th << " at " << tx << "," << ty << ")" << std::endl;
 
     return true;
 }
