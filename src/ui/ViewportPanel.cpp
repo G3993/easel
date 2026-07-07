@@ -562,6 +562,78 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             }
             ImGui::PopStyleColor(); // combo text color
 
+            // --- Per-zone mic (push-to-talk) ------------------------------
+            // Multi-floor/multi-room installs: each zone can listen to its
+            // own mic instead of the shared global one. Enable configures
+            // + persists; the hold-button is the actual push-to-talk gate
+            // (same transient pushToTalkActive the mobile app / SDK drive
+            // remotely over /easel/zone/mic/ptt).
+            {
+                // Extra left margin (vs. the usual 6-12px between controls)
+                // so this reads as its own labeled cluster, not one more
+                // button tacked onto the OUTPUT row.
+                ImGui::SameLine(0, 20);
+                ImGui::AlignTextToFramePadding();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.85f));
+                ImGui::TextUnformatted("ZONE MIC");
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine(0, 8);
+                bool micOn = az.micEnabled;
+                ImGui::PushStyleColor(ImGuiCol_Button, micOn ? ImVec4(0.20f, 0.45f, 0.85f, 0.55f) : ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, micOn ? ImVec4(0.24f, 0.50f, 0.90f, 0.65f) : ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text, micOn ? ImVec4(0.85f, 0.92f, 1.0f, 1.0f) : ImVec4(0.65f, 0.68f, 0.74f, 1.0f));
+                if (ImGui::Button(micOn ? "Mic: On" : "Mic: Off")) {
+                    az.micEnabled = !az.micEnabled;
+                    if (!az.micEnabled) {
+                        az.pushToTalkActive = false;
+                        az.micAnalyzer.stopCapture();
+                    }
+                }
+                ImGui::PopStyleColor(3);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Give THIS zone its own independent mic input\n"
+                                      "(instead of the shared global one below).\n"
+                                      "Enable it here, then hold PTT to talk —\n"
+                                      "same control the mobile app/SDK drive remotely.");
+                }
+
+                if (az.micEnabled) {
+                    ImGui::SameLine(0, 6);
+                    ImGui::SetNextItemWidth(140.0f);
+                    char micIdBuf[128];
+                    snprintf(micIdBuf, sizeof(micIdBuf), "%s", az.micDeviceId.c_str());
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.06f));
+                    if (ImGui::InputTextWithHint("##ZoneMicDevice", "device id (blank=default)",
+                                                  micIdBuf, sizeof(micIdBuf))) {
+                        az.micDeviceId = micIdBuf;
+                    }
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Capture device id for this zone's mic.\n"
+                                          "Leave blank to use the system default input.");
+                    }
+
+                    ImGui::SameLine(0, 6);
+                    bool held = az.pushToTalkActive;
+                    ImGui::PushStyleColor(ImGuiCol_Button, held ? ImVec4(0.85f, 0.25f, 0.30f, 0.85f) : ImVec4(1, 1, 1, 0.10f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, held ? ImVec4(0.90f, 0.30f, 0.35f, 0.9f) : ImVec4(1, 1, 1, 0.18f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.90f, 0.30f, 0.35f, 0.9f));
+                    ImGui::Button(held ? "\xE2\x97\x8F PTT" : "PTT Hold");
+                    // Hold-to-talk: only touch pushToTalkActive on the actual
+                    // press/release transition (not every idle frame) so this
+                    // local button doesn't fight remote OSC/mobile-app control
+                    // of the same flag when the user isn't touching it here.
+                    if (ImGui::IsItemActivated()) az.pushToTalkActive = true;
+                    if (ImGui::IsItemDeactivated()) az.pushToTalkActive = false;
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered() && !ImGui::IsItemActive()) {
+                        ImGui::SetTooltip("Hold to talk on this zone's mic.\n"
+                                          "Release to stop — momentary, like a walkie-talkie.");
+                    }
+                }
+            }
+
             // MAPPING combo removed — the Mapping inspector tab has its
             // own profile picker; duplicating it here was noise.
             // COMPOSITION moved to a popover on the zone tab (see below).
@@ -730,7 +802,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
 
         // Canvas image previously had a 2-stroke glow + hairline ring
         // around it; removed because it read as an unwanted "work area"
-        // border on top of the already-clear darker letterbox.
+        // border on top of the already-clear darker letterbox. This is a
+        // deliberately much lighter treatment than that — a single subtle
+        // 1px gray line so the canvas edge stays legible against a black or
+        // near-black frame, without reintroducing an obtrusive border.
+        ImGui::GetWindowDrawList()->AddRect(
+            imgMin, imgMax, IM_COL32(255, 255, 255, 28), 0.0f, 0, 1.0f);
+
         ImDrawList* draw = ImGui::GetWindowDrawList();
 
         // Awesome-design: regular dot grid across the entire viewport
@@ -943,6 +1021,16 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 }
             }
 
+            // Right-click a mesh point toggles it between curve (smooth) and
+            // straight (corner): segments touching a corner point render
+            // linear, so you can pin hard edges without losing the curve
+            // elsewhere. Corner points draw as squares, smooth ones as circles.
+            if (warpStartAllowed && meshWarpPtr && warpMode == WarpMode::MeshWarp &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Right) && m_hovered) {
+                int hit = meshWarpPtr->hitTest(mouseNDC);
+                if (hit >= 0) meshWarpPtr->toggleCorner(hit);
+            }
+
             if (m_warpDragging && cornerPinPtr && meshWarpPtr && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 glm::vec2 clamped(std::max(-1.5f, std::min(1.5f, mouseNDC.x)),
                                   std::max(-1.5f, std::min(1.5f, mouseNDC.y)));
@@ -1005,8 +1093,17 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                     ImU32 mwFill = inMaskMode ? kMaskEditFill
                                               : (active ? zAccent(zi) : zPointFill(zi));
                     ImU32 mwRing = inMaskMode ? kMaskEditRing : kPointRing;
-                    draw->AddCircleFilled(p, active ? 6.0f : 4.0f, mwFill, 32);
-                    draw->AddCircle(p, active ? 6.0f : 4.0f, mwRing, 32, 1.2f);
+                    float rad = active ? 6.0f : 4.0f;
+                    // Straight/corner points draw as squares; smooth as circles.
+                    if (meshWarpPtr->isCorner(i)) {
+                        draw->AddRectFilled(ImVec2(p.x - rad, p.y - rad),
+                                            ImVec2(p.x + rad, p.y + rad), mwFill, 1.0f);
+                        draw->AddRect(ImVec2(p.x - rad, p.y - rad),
+                                      ImVec2(p.x + rad, p.y + rad), mwRing, 1.0f, 0, 1.2f);
+                    } else {
+                        draw->AddCircleFilled(p, rad, mwFill, 32);
+                        draw->AddCircle(p, rad, mwRing, 32, 1.2f);
+                    }
                 }
             }
             draw->PopClipRect();  // matches the PushClipRect at the start
@@ -1820,9 +1917,12 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
         const float kPillH       = 28.0f;
         const float kSegGap      = 26.0f;   // breathing room between segments
-        const int   kNumTabs     = 4;
-        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "STAGE", "PLAY"};
-        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Stage, Mode::Show};
+        // Play hidden from the workspace switcher per Lu's request — the
+        // mode/panel code is untouched (still reachable over OSC), just not
+        // exposed as a tab here.
+        const int   kNumTabs     = 3;
+        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "ZONES"};
+        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Zones};
 
         // Each segment = label width. Icons removed — the workspace tabs
         // now read as text-only, mirroring the rest of the nav row's

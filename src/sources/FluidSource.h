@@ -97,6 +97,15 @@ public:
                                   {0.1f, 0.8f, 1.0f}, {0.9f, 0.9f, 0.4f} };
     float m_autoSpeed = 1.0f;            // pattern tempo (×base speed)
     float m_autoScale = 0.30f;           // radius / amplitude / spread
+    // ── Sound movement controls (spawn/unspawn wandering orbs) ────────
+    // A few knobs to dial the audio reactivity in smoothly. All only affect
+    // the Sound pattern; ignored by the geometric presets.
+    float m_sndSensitivity = 1.0f;   // master audio gain          (0..3)
+    float m_sndThreshold   = 0.08f;  // loudness floor to spawn    (0..0.6)
+    float m_sndSmoothing   = 0.5f;   // attack/release smoothing   (0..1)
+    float m_sndBeatKick    = 0.6f;   // beat → spawn burst + kick  (0..2)
+    float m_sndWander      = 0.6f;   // how far/fast orbs roam     (0..1.5)
+    int   m_sndMaxOrbs     = 10;     // live population cap         (1..24)
     bool  m_shading = true;              // velocity-based shading highlight
     // ── Native-only quality (browser falls back to 8-bit / no bloom) ──
     bool  m_hdrDye = true;               // RGBA16F float dye (read at init)
@@ -141,17 +150,23 @@ private:
     float m_sndLevel = 0.0f, m_sndEnergy = 0.0f,
           m_sndSilence = 0.0f, m_sndMomentum = 0.5f;
     float m_sndDrive = 0.0f;          // smoothed 0..1 loudness drive
-    WanderOrb m_soundOrb = {0.5f, 0.5f, 0.0f, 0.0f, 0.0f};
-    float m_sndTx = 0.5f, m_sndTy = 0.5f;  // current wander target
-    // Slowly-drifting "home" — the blob's center of activity. Strokes radiate
-    // from here (not dead-center) so the whole thing roams the canvas a little;
-    // excursion grows with drive, collapses to the middle when quiet.
-    WanderOrb m_soundHome = {0.5f, 0.5f, 0.0f, 0.0f, 0.0f};
-    float m_sndHomeTx = 0.5f, m_sndHomeTy = 0.5f;
-    // Distance-based stamping trail: last brush position + leftover path
-    // distance, so the Sound brush lays a CONTINUOUS overlapping stroke
-    // (no time-clock stutter) regardless of speed / framerate.
-    float m_sndPrevX = 0.5f, m_sndPrevY = 0.5f, m_sndStampDist = 0.0f;
+    float m_sndBeat = 0.0f;           // raw per-frame beat (0..1)
+    float m_sndBeatEnv = 0.0f;        // fast-decaying beat envelope
+    float m_sndBeatEnvPrev = 0.0f;    // last frame's env (rising-edge detect)
+    // Spawn/unspawn wandering-orb pool. Orbs are BORN from audio energy + beats,
+    // roam with momentum, and DIE (fade out) when the sound drops — population
+    // tracks the smoothed drive. Each orb lays a distance-stamped dye trail.
+    struct SoundOrb {
+        float x = 0.5f, y = 0.5f, vx = 0.0f, vy = 0.0f;
+        float tx = 0.5f, ty = 0.5f;     // current wander target
+        float life = 0.0f;              // 0..1 (0 = dead / free slot)
+        float reaim = 0.0f;             // countdown to next wander target
+        float px = 0.5f, py = 0.5f, stamp = 0.0f;   // trail-stamp state
+        bool  active = false;
+    };
+    static constexpr int kSoundOrbs = 24;   // hard ceiling (m_sndMaxOrbs gates live)
+    SoundOrb m_sndOrbs[kSoundOrbs];
+    float m_sndSpawnAccum = 0.0f;     // fractional spawn-budget accumulator
     std::mt19937 m_rng{12345};
     std::map<std::string, AudioBinding> m_audioBindings;
     // Interactive pointer splats queued from the UI, drained in update().

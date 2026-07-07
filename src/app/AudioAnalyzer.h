@@ -105,6 +105,11 @@ public:
     void setDevice(int deviceIdx);
     void setDeviceId(const std::string& id, bool isCapture);
 
+    // Explicitly release the capture device (e.g. push-to-talk released) so
+    // the OS input isn't held open between talk-spurts. The next update()
+    // call after this reopens capture from scratch if a device is set.
+    void stopCapture();
+
     // Opt-in gate for macOS ScreenCaptureKit system-audio capture. macOS
     // triggers a "Screen Recording" TCC prompt the first time SCShareableContent
     // is called; for self-signed dev builds the grant is keyed to the binary's

@@ -75,7 +75,7 @@ public:
     //   Show    → live-performance focus: timeline + MIDI + audio
     // NOTE: order matters — the nav switcher lists them left→right as
     // Canvas / Mapping / Stage / Play, so Mapping sits between Canvas and Stage.
-    enum class WorkspaceMode { Canvas, Mapping, Stage, Show };
+    enum class WorkspaceMode { Canvas, Mapping, Stage, Show, Zones };
     static WorkspaceMode sMode;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec

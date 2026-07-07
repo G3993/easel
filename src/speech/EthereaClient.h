@@ -27,6 +27,11 @@ public:
     bool isRunning() const { return m_running.load(); }
     bool wsConnected() const { return m_wsConnected.load(); }
     bool sseConnected() const { return m_sseConnected.load(); }
+    // Consecutive failed connect attempts (reset to 0 on a successful
+    // connect) — lets the UI tell "still dialing in" apart from "genuinely
+    // can't reach it, retrying with backoff" instead of showing a perpetual,
+    // seemingly-frozen "Connecting…" the whole time Etherea's backend is down.
+    int wsFailedAttempts() const { return m_wsFailedAttempts.load(); }
 
     // Called each frame on main thread — dispatches queued updates
     void poll();
@@ -53,6 +58,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_wsConnected{false};
     std::atomic<bool> m_sseConnected{false};
+    std::atomic<int> m_wsFailedAttempts{0};
 
     std::thread m_wsThread;
     std::thread m_sseThread;

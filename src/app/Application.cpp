@@ -817,6 +817,22 @@ void Application::run() {
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
             m_bpmSync.update(dt);
 
+            // Per-zone push-to-talk mics: multi-floor/multi-room installs can
+            // give each zone its own independent mic input. Capture only runs
+            // while a zone is both mic-enabled AND actively held (push-to-talk),
+            // so the device is opened/closed around each talk-spurt rather than
+            // sitting open for every configured zone all the time.
+            for (auto& zonePtr : m_zones) {
+                OutputZone& z = *zonePtr;
+                if (z.micEnabled && z.pushToTalkActive) {
+                    z.micAnalyzer.setDeviceId(z.micDeviceId, true);
+                    z.micAnalyzer.setWantsSystemAudio(false);
+                    z.micAnalyzer.update(dt);
+                } else {
+                    z.micAnalyzer.stopCapture();
+                }
+            }
+
             // Keep timeline tracks in sync with the layer stack every frame,
             // even when the Timeline panel is hidden. Newly-added layers get
             // a default clip spanning their natural duration so the clip-
@@ -1308,6 +1324,30 @@ void Application::updateSources() {
         }
     }
 
+    // Layers exclusively assigned to a single zone (via that zone's explicit
+    // visibleLayerIds — the per-zone bus/managed-layer convention) get that
+    // zone's own push-to-talk mic feeding their audio uniforms instead of the
+    // shared global bus. A layer visible in more than one zone's explicit list
+    // is ambiguous and stays on the global bus untouched.
+    std::unordered_map<uint32_t, OutputZone*> zoneAudioOwner;
+    {
+        std::set<uint32_t> ambiguous;
+        for (auto& zonePtr : m_zones) {
+            OutputZone& z = *zonePtr;
+            for (uint32_t lid : z.visibleLayerIds) {
+                auto it = zoneAudioOwner.find(lid);
+                if (it == zoneAudioOwner.end()) zoneAudioOwner[lid] = &z;
+                else if (it->second != &z) ambiguous.insert(lid);
+            }
+        }
+        for (uint32_t lid : ambiguous) zoneAudioOwner.erase(lid);
+        // Only keep owners whose mic is actually live right now.
+        for (auto it = zoneAudioOwner.begin(); it != zoneAudioOwner.end(); ) {
+            if (!(it->second->micEnabled && it->second->pushToTalkActive)) it = zoneAudioOwner.erase(it);
+            else ++it;
+        }
+    }
+
     for (int i = 0; i < m_layerStack.count(); i++) {
         auto& layer = m_layerStack[i];
         if (layer->source) {
@@ -1340,10 +1380,17 @@ void Application::updateSources() {
                 // analyzer directly and animates param VALUES. Feeding zeros
                 // neutralizes every `audioReact`-style shader globally without
                 // editing the shader files; they fall back to base visuals.
+                // A layer exclusively owned by one mic-active zone (see
+                // zoneAudioOwner above) reacts to that zone's own push-to-talk
+                // mic instead of the shared global analyzer — both the Audio
+                // Feature Bus below and the per-param bindings after it.
+                auto ownerIt = zoneAudioOwner.find(layer->id);
+                bool hasZoneMic = ownerIt != zoneAudioOwner.end();
+                AudioAnalyzer& a = hasZoneMic ? ownerIt->second->micAnalyzer : m_audioAnalyzer;
+
                 if (m_audioToShaders) {
                     // Assemble the Audio Feature Bus and feed it to the shader.
                     AudioFeatures af;
-                    auto& a = m_audioAnalyzer;
                     af.level   = a.smoothedRMS(); af.sub = a.sub(); af.bass = a.bass();
                     af.lowMid  = a.lowMid(); af.highMid = a.highMid(); af.treble = a.treble();
                     af.punch   = a.punch();
@@ -1379,16 +1426,32 @@ void Application::updateSources() {
                 } else {
                     shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0); // global neutralize
                 }
+                // Per-param "sparkle" bindings read the analyzer directly and
+                // aren't gated by m_audioToShaders. The song-arc signals
+                // (energy/build/drop/silence/momentum) default to the shared
+                // global analyzer computed once above; a zone-owned layer gets
+                // its own zone mic's version of the same signals instead.
+                float sigEnergy = audioSigEnergy, sigBuild = audioSigBuild, sigDrop = audioSigDrop;
+                float sigSilence = audioSigSilence, sigMomentum = audioSigMomentum;
+                if (hasZoneMic) {
+                    sigEnergy = a.energy();
+                    sigBuild = a.buildup();
+                    sigDrop = a.drop();
+                    sigMomentum = std::min(std::max(a.energyVel() * 0.5f + 0.5f, 0.0f), 1.0f);
+                    float r = a.smoothedRMS();
+                    float q = std::min(std::max((r - 0.015f) / (0.070f - 0.015f), 0.0f), 1.0f);
+                    sigSilence = 1.0f - (q * q * (3.0f - 2.0f * q));
+                }
                 shaderSrc->applyAudioBindings(
-                    m_audioAnalyzer.smoothedRMS(),
-                    m_audioAnalyzer.bass(),
-                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
-                    m_audioAnalyzer.treble(),
-                    m_audioAnalyzer.beatDecay(),
+                    a.smoothedRMS(),
+                    a.bass(),
+                    (a.lowMid() + a.highMid()) * 0.5f,
+                    a.treble(),
+                    a.beatDecay(),
                     audioBindDt,
                     &m_midiManager,
-                    audioSigEnergy, audioSigBuild, audioSigDrop,
-                    audioSigSilence, audioSigMomentum
+                    sigEnergy, sigBuild, sigDrop,
+                    sigSilence, sigMomentum
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
@@ -1725,16 +1788,23 @@ void Application::compositeZone(OutputZone& zone) {
     }
 
     {
+        // Zones with an active push-to-talk mic drive their own composite
+        // blend/audio-reactivity from their own AudioAnalyzer instead of the
+        // shared global one — that's the whole point of a per-zone mic.
+        bool useZoneMic = zone.micEnabled && zone.pushToTalkActive;
+        AudioAnalyzer& src = useZoneMic ? zone.micAnalyzer : m_audioAnalyzer;
+
         AudioState audio;
-        audio.rms = m_audioAnalyzer.smoothedRMS();
-        audio.bass = m_audioAnalyzer.bass();
-        audio.lowMid = m_audioAnalyzer.lowMid();
-        audio.highMid = m_audioAnalyzer.highMid();
-        audio.treble = m_audioAnalyzer.treble();
-        audio.beatDecay = m_audioAnalyzer.beatDecay();
-        audio.beatDetected = m_audioAnalyzer.beatDetected();
-        audio.fftTexture = m_audioAnalyzer.fftTexture();
+        audio.rms = src.smoothedRMS();
+        audio.bass = src.bass();
+        audio.lowMid = src.lowMid();
+        audio.highMid = src.highMid();
+        audio.treble = src.treble();
+        audio.beatDecay = src.beatDecay();
+        audio.beatDetected = src.beatDetected();
+        audio.fftTexture = src.fftTexture();
         audio.time = (float)glfwGetTime();
+        // BPM sync stays global — it's a shared musical clock, not a per-mic signal.
         audio.bpm = m_bpmSync.bpm();
         audio.beatPhase = m_bpmSync.beatPhase();
         audio.beatPulse = m_bpmSync.beatPulse();
@@ -3070,6 +3140,7 @@ void Application::renderUI() {
                 if (w == "canvas") UIManager::setMode(UIManager::WorkspaceMode::Canvas);
                 else if (w == "mapping") UIManager::setMode(UIManager::WorkspaceMode::Mapping);
                 else if (w == "stage") UIManager::setMode(UIManager::WorkspaceMode::Stage);
+                else if (w == "zones") UIManager::setMode(UIManager::WorkspaceMode::Zones);
                 else if (w == "play" || w == "show")
                     UIManager::setMode(UIManager::WorkspaceMode::Show);
             } else if (msg.address == "/easel/layer/add" && !msg.strings.empty()) {
@@ -3205,6 +3276,31 @@ void Application::renderUI() {
                     uint32_t lid = m_layerStack[li]->id;
                     if (on) m_zones[zi]->visibleLayerIds.insert(lid);
                     else    m_zones[zi]->visibleLayerIds.erase(lid);
+                }
+            } else if (msg.address == "/easel/zone/mic/enable"
+                       && msg.ints.size() >= 2) {
+                // /easel/zone/mic/enable <zoneIndex> <enabled 0|1> [deviceId string]
+                // Configures whether a zone uses its own independent mic at all;
+                // capture itself only opens while push-to-talk is also active
+                // (see /easel/zone/mic/ptt). Persisted with the project.
+                int zi = msg.ints[0];
+                bool on = msg.ints[1] != 0;
+                if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi]) {
+                    m_zones[zi]->micEnabled = on;
+                    if (!msg.strings.empty()) m_zones[zi]->micDeviceId = msg.strings[0];
+                    if (!on) {
+                        m_zones[zi]->pushToTalkActive = false;
+                        m_zones[zi]->micAnalyzer.stopCapture();
+                    }
+                }
+            } else if (msg.address == "/easel/zone/mic/ptt"
+                       && msg.ints.size() >= 2) {
+                // /easel/zone/mic/ptt <zoneIndex> <down 0|1> — momentary; not
+                // persisted. Sent by the mobile app / SDK on button press/release.
+                int zi = msg.ints[0];
+                bool down = msg.ints[1] != 0;
+                if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi] && m_zones[zi]->micEnabled) {
+                    m_zones[zi]->pushToTalkActive = down;
                 }
             } else if (msg.address == "/easel/audio/toshaders" && !msg.ints.empty()) {
                 // Global Audio -> Shaders switch (the panic off-switch).
@@ -3526,6 +3622,51 @@ void Application::renderUI() {
                                &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings,
                                nullptr,  // inlineSetupSection (Canvas mode doesn't need it)
                                [this]() { renderNavBarPrefix(); });
+        // ── Drag the window by its custom title-bar (the top nav row) ──────
+        // The native macOS title bar is transparent + merged into the content
+        // view (EaselMac_UnifyTitleBar), so the OS no longer gives us a
+        // draggable strip. Re-implement it: pressing an EMPTY part of the nav
+        // row and dragging moves the window, exactly like dragging any other
+        // app's title bar. Interactive nav items (tabs, gear, right cluster)
+        // are skipped via the hover/active checks, and the left inset where
+        // the AppKit traffic-lights live is excluded so their clicks pass
+        // through. Disabled in fullscreen (no title bar to grab, and moving a
+        // borderless-fullscreen window makes no sense).
+        if (!m_editorFullscreen) {
+            ImGuiViewport* mvp = ImGui::GetMainViewport();
+            const float kNavRowH = 28.0f;
+            const float kLeftInset = 78.0f;   // clear the traffic-light cluster
+            ImVec2 navMin(mvp->Pos.x + kLeftInset, mvp->Pos.y);
+            ImVec2 navMax(mvp->Pos.x + mvp->Size.x, mvp->Pos.y + kNavRowH);
+
+            static bool   s_titleDragging = false;
+            static double s_grabOffX = 0.0, s_grabOffY = 0.0;  // cursor pos within window at grab
+
+            bool overEmptyNav =
+                ImGui::IsMouseHoveringRect(navMin, navMax, false) &&
+                !ImGui::IsAnyItemHovered() &&
+                !ImGui::IsAnyItemActive() &&
+                !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+
+            if (!s_titleDragging && overEmptyNav &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                glfwGetCursorPos(m_window, &s_grabOffX, &s_grabOffY);
+                s_titleDragging = true;
+            }
+            if (s_titleDragging) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    // Keep the grabbed point pinned under the cursor: new
+                    // window origin = current screen-cursor − grab offset.
+                    int wx, wy; glfwGetWindowPos(m_window, &wx, &wy);
+                    double cx, cy; glfwGetCursorPos(m_window, &cx, &cy);
+                    glfwSetWindowPos(m_window,
+                                     wx + (int)(cx - s_grabOffX),
+                                     wy + (int)(cy - s_grabOffY));
+                } else {
+                    s_titleDragging = false;
+                }
+            }
+        }
         // Tell UIManager where the canvas image lives at zoom=1 — the
         // BASE bounds, not the zoomed ones, so panning/zooming the canvas
         // doesn't drag the right Control Panel float along with it.
@@ -3704,6 +3845,74 @@ void Application::renderUI() {
                 }
             }
         }
+    }
+
+    // --- Zones control panel (the ZONES workspace tab): every output zone
+    // at a glance. The zone on the main display is highlighted; each card
+    // shows the projector/output routing and the zone's mic input. Clicking
+    // a card makes that zone active (same selection the zone bar drives).
+    if (m_ui.isPanelVisible("Zones")) {
+        ImGui::Begin("        ###Zones");
+        ImDrawList* zdl = ImGui::GetWindowDrawList();
+        for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+            OutputZone& z = *m_zones[zi];
+            bool isMain   = (z.outputDest == OutputDest::Fullscreen) || m_zones.size() == 1;
+            bool isActive = (zi == m_activeZone);
+            ImGui::PushID(zi);
+            float cardW = ImGui::GetContentRegionAvail().x;
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::BeginGroup();
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::Indent(10);
+            ImGui::TextUnformatted(z.name.c_str());
+            if (isMain) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.95f), " MAIN DISPLAY");
+            }
+            ImGui::TextDisabled("%dx%d", z.width, z.height);
+            switch (z.outputDest) {
+            case OutputDest::Fullscreen:
+                ImGui::Text("Output: fullscreen (monitor %d)", z.outputMonitor);
+                break;
+            case OutputDest::NDI:
+                ImGui::Text("Output: NDI \"%s\"",
+                            (z.ndiStreamName.empty() ? z.name : z.ndiStreamName).c_str());
+                break;
+            case OutputDest::Spout:
+                ImGui::TextUnformatted("Output: Spout");
+                break;
+            default:
+                ImGui::TextDisabled("Output: none");
+                break;
+            }
+            if (z.micEnabled) {
+                ImGui::Text("Mic: %s%s",
+                            z.micDeviceId.empty() ? "system default" : z.micDeviceId.c_str(),
+                            z.pushToTalkActive ? "  (LIVE)" : "");
+            } else {
+                ImGui::TextDisabled("Mic: off");
+            }
+            if (z.showAllLayers) ImGui::TextDisabled("Layers: all");
+            else                 ImGui::TextDisabled("Layers: %d shown", (int)z.visibleLayerIds.size());
+            ImGui::Unindent(10);
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::EndGroup();
+            ImVec2 p1 = ImVec2(p0.x + cardW, ImGui::GetItemRectMax().y);
+            // Main display = bright 2px border + subtle fill; the active
+            // (selected) zone gets a mid accent; everything else a hairline.
+            ImU32 border = isMain   ? IM_COL32(255, 255, 255, 220)
+                         : isActive ? IM_COL32(200, 208, 220, 160)
+                                    : IM_COL32(255, 255, 255, 40);
+            if (isMain) zdl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 14), 8.0f);
+            zdl->AddRect(p0, p1, border, 8.0f, 0, isMain ? 2.0f : 1.0f);
+            ImGui::SetCursorScreenPos(p0);
+            if (ImGui::InvisibleButton("##zoneCard", ImVec2(cardW, p1.y - p0.y)))
+                m_activeZone = zi;
+            ImGui::Dummy(ImVec2(0, 8));
+            ImGui::PopID();
+        }
+        if (m_zones.empty()) ImGui::TextDisabled("No zones yet.");
+        ImGui::End();
     }
 
     // --- Masks section (lives inside the Mapping panel as a collapsible
@@ -5675,6 +5884,13 @@ void Application::renderUI() {
                 bool ws  = m_ethereaClient.wsConnected();
                 bool sse = m_ethereaClient.sseConnected();
                 bool fullyConnected = ws && sse;
+                // 2+ failed attempts means it isn't "still dialing in" — it's
+                // genuinely unable to reach Etherea and is retrying with
+                // backoff (up to 60s between tries). Say so plainly instead
+                // of leaving "Connecting…" up indefinitely, which reads as
+                // frozen/broken rather than "retrying."
+                int failedAttempts = m_ethereaClient.wsFailedAttempts();
+                bool cantReach = !ws && !sse && failedAttempts >= 2;
                 ImU32 dotCol = fullyConnected
                     ? IM_COL32(34, 210, 130, 255)        // green
                     : (ws || sse)
@@ -5689,8 +5905,15 @@ void Application::renderUI() {
                 ImGui::AlignTextToFramePadding();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.80f, 0.85f, 0.9f));
                 ImGui::TextUnformatted(fullyConnected ? "Connected"
-                                                       : (ws || sse) ? "Partial" : "Connecting…");
+                                                       : (ws || sse) ? "Partial"
+                                                       : cantReach ? "Can't reach Etherea — retrying…"
+                                                       : "Connecting…");
                 ImGui::PopStyleColor();
+                if (cantReach && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("No response from Etherea's server on this address.\n"
+                                      "Make sure the Etherea/radio stack is running,\n"
+                                      "then Disconnect and Connect again.");
+                }
             }
 
             // Right-aligned Disconnect — neutral pill, not red.
@@ -5715,7 +5938,10 @@ void Application::renderUI() {
 
             std::string transcript = m_ethereaClient.fullTranscript();
             if (!transcript.empty()) {
-                if (transcript.size() > 200) transcript = "..." + transcript.substr(transcript.size() - 197);
+                // Doubled from 200/197 — shows roughly twice the scrollback,
+                // which is the only "height" lever here since this box is
+                // plain wrapped text, not a fixed-size child window.
+                if (transcript.size() > 400) transcript = "..." + transcript.substr(transcript.size() - 397);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 0.9f));
                 ImGui::TextWrapped("%s", transcript.c_str());
                 ImGui::PopStyleColor();
@@ -12918,6 +13144,10 @@ std::string Application::buildPlayJson() {
             case OutputDest::Spout:      zj["outputDest"] = "Spout";      break;
         }
         zj["isActive"] = ((int)zi == m_activeZone);
+        // Per-zone mic — mobile's PTT rail reads these live (enabled = the
+        // zone is configured for its own mic; pushToTalkActive = currently held).
+        zj["micEnabled"] = zp->micEnabled;
+        zj["pushToTalkActive"] = zp->pushToTalkActive;
         easelZonesJson.push_back(zj);
     }
     play["easelZones"] = easelZonesJson;
@@ -13122,6 +13352,9 @@ void Application::saveProject(const std::string& path) {
         json meshPoints = json::array();
         for (const auto& p : m.meshWarp.points()) meshPoints.push_back({p.x, p.y});
         mj["meshWarp"]["points"] = meshPoints;
+        json meshCorners = json::array();
+        for (uint8_t c : m.meshWarp.corners()) meshCorners.push_back((int)c);
+        mj["meshWarp"]["corners"] = meshCorners;   // per-point straight/curve flag
 
         if (m.objMeshWarp.isLoaded()) {
             json objJson;
@@ -13202,6 +13435,11 @@ void Application::saveProject(const std::string& path) {
         zj["outputMonitor"] = z.outputMonitor;
         zj["ndiStreamName"] = z.ndiStreamName;
         zj["rawNdiName"] = z.rawNdiName;
+
+        // Per-zone mic config (push-to-talk activity itself is transient
+        // runtime state and intentionally not persisted).
+        zj["micDeviceId"] = z.micDeviceId;
+        zj["micEnabled"] = z.micEnabled;
 
         zonesJson.push_back(zj);
     }
@@ -13630,6 +13868,13 @@ void Application::loadProject(const std::string& path) {
                     points[i] = {pj[i][0].get<float>(), pj[i][1].get<float>()};
                 }
             }
+            if (mj["meshWarp"].contains("corners")) {
+                auto& corners = m.meshWarp.corners();
+                const auto& cj = mj["meshWarp"]["corners"];
+                for (int i = 0; i < (int)cj.size() && i < (int)corners.size(); i++) {
+                    corners[i] = (uint8_t)cj[i].get<int>();
+                }
+            }
         }
         if (mj.contains("objMesh")) {
             const auto& oj = mj["objMesh"];
@@ -13759,6 +14004,10 @@ void Application::loadProject(const std::string& path) {
             z->outputMonitor = zj.value("outputMonitor", -1);
             z->ndiStreamName = zj.value("ndiStreamName", std::string(""));
             z->rawNdiName = zj.value("rawNdiName", false);
+
+            z->micDeviceId = zj.value("micDeviceId", std::string(""));
+            z->micEnabled = zj.value("micEnabled", false);
+            // pushToTalkActive is transient runtime state — never loaded from disk.
 
             m_zones.push_back(std::move(z));
         }

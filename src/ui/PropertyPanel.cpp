@@ -73,6 +73,12 @@ static constexpr ImU32 kColCtrlBgActive = IM_COL32(255, 255, 255, 48);
 static constexpr ImU32 kColCtrlBorder   = IM_COL32(255, 255, 255, 22);
 static constexpr ImU32 kColAccent       = IM_COL32(232, 150,  70, 255);
 static constexpr ImU32 kColAccentDim    = IM_COL32(232, 150,  70, 200);
+// Main slider's bound-fill only — kept a separate constant from kColAccentDim
+// on purpose: the range sub-slider (rangeSlider) and the bound-icon stay
+// orange (that's still "this is audio-bound"), but the primary value track
+// itself reads as light gray now so the orange is reserved for the range
+// zone, not doubled up on the main bar too.
+static constexpr ImU32 kColBoundFillMain = IM_COL32(200, 205, 212, 210);
 static constexpr ImU32 kColTrackBg      = IM_COL32(255, 255, 255, 14); // slider/track recess (subtle inset of ctrl bg)
 
 // ImVec4 mirrors for the PushStyleColor() call sites. Same values as the
@@ -249,8 +255,9 @@ static bool unifiedSlider(const char* idSuffix, const char* label,
     float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
     if (norm < 0.0f) norm = 0.0f; if (norm > 1.0f) norm = 1.0f;
 
-    // Track bg + fill — EXACT opacity-slider colors (amber fill when accent).
-    ImU32 fillCol = accent ? kColAccentDim
+    // Track bg + fill — light gray when bound (orange lives on the range
+    // zone below instead), plain control-bg otherwise.
+    ImU32 fillCol = accent ? kColBoundFillMain
                            : kColCtrlBgActive;
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
@@ -565,8 +572,9 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
     if (norm < 0.0f) norm = 0.0f; if (norm > 1.0f) norm = 1.0f;
 
-    // Track bg + fill — EXACT opacity colors (amber fill signals a binding).
-    ImU32 fillCol = bound ? kColAccentDim
+    // Track bg + fill — light gray when bound (orange lives on the range
+    // zone below instead), plain control-bg otherwise.
+    ImU32 fillCol = bound ? kColBoundFillMain
                           : kColCtrlBgActive;
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
@@ -3358,12 +3366,46 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                              patternNames, IM_ARRAYSIZE(patternNames));
                 if (fsrc->m_autoPattern == FluidSource::Sound &&
                     ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Audio-reactive: blob lives at center,\n"
-                                      "ventures out as sound energy rises,\n"
-                                      "dims + settles to the middle when quiet.");
-                fluidParam("autoRate",  "Density", &fsrc->m_autoRate,  0.0f, 60.0f, "%.0f/s");
+                    ImGui::SetTooltip("Audio-reactive: orbs SPAWN from sound\n"
+                                      "energy + beats and wander with momentum,\n"
+                                      "then fade out (unspawn) when it goes quiet.");
                 fluidParam("autoSpeed", "Speed",   &fsrc->m_autoSpeed, 0.0f, 4.0f,  "%.2f");
-                fluidParam("autoScale", "Spread",  &fsrc->m_autoScale, 0.0f, 0.5f,  "%.2f");
+                if (fsrc->m_autoPattern == FluidSource::Sound) {
+                    // ── Audio-reactivity controls for the Sound movement ──
+                    fluidParam("sndSensitivity", "Sensitivity",
+                               &fsrc->m_sndSensitivity, 0.0f, 3.0f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Master audio gain — how strongly the\n"
+                                          "music drives the orb population.");
+                    fluidParam("sndThreshold", "Threshold",
+                               &fsrc->m_sndThreshold, 0.0f, 0.6f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Loudness floor before orbs spawn.\n"
+                                          "Higher = only the loud parts trigger.");
+                    fluidParam("sndSmoothing", "Smoothing",
+                               &fsrc->m_sndSmoothing, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Attack/release smoothing of the audio\n"
+                                          "drive. Low = snappy, high = silky.");
+                    fluidParam("sndBeatKick", "Beat Kick",
+                               &fsrc->m_sndBeatKick, 0.0f, 2.0f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How much beats spawn bursts and kick\n"
+                                          "the orbs around.");
+                    fluidParam("sndWander", "Wander",
+                               &fsrc->m_sndWander, 0.0f, 1.5f, "%.2f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How far and freely the orbs roam\n"
+                                          "(also driven by audio momentum).");
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderInt("##sndMaxOrbs", &fsrc->m_sndMaxOrbs, 1, 24, "Max Orbs: %d");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Cap on how many orbs can be alive\n"
+                                          "at full loudness.");
+                } else {
+                    fluidParam("autoRate",  "Density", &fsrc->m_autoRate,  0.0f, 60.0f, "%.0f/s");
+                    fluidParam("autoScale", "Spread",  &fsrc->m_autoScale, 0.0f, 0.5f,  "%.2f");
+                }
             }
             ImGui::Checkbox("Shading", &fsrc->m_shading);
             sectionBreak();

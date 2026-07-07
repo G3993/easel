@@ -30,6 +30,17 @@ struct WSADATA { int dummy; };
 #include <cstring>
 #include <ctime>
 
+// Same fix as EthereaClient: a plain sleep_for() on the reconnect backoff
+// blocks disconnect()'s join() for the remainder of that sleep (up to 60s
+// when Cue's server isn't reachable) — the "Easel takes forever to quit"
+// symptom. Sleep in short slices, re-checking m_running each slice.
+static void interruptibleSleep(std::atomic<bool>& running, int seconds) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    while (running.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 // ─── Logging (mirrors EthereaClient: cue_debug.log) ────────────────────────
 
 static void cueLog(const std::string& msg) {
@@ -327,21 +338,21 @@ void CueClient::wsLoop() {
         std::string portStr = std::to_string(m_port);
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
             cueLog("CueClient WS: DNS failed");
-            std::this_thread::sleep_for(std::chrono::seconds(backoff));
+            interruptibleSleep(m_running, backoff);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
         if (sock == INVALID_SOCKET) {
             freeaddrinfo(result);
-            std::this_thread::sleep_for(std::chrono::seconds(backoff));
+            interruptibleSleep(m_running, backoff);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             cueLog("CueClient WS: connect failed (is Cue server running?)");
             closesocket(sock); freeaddrinfo(result);
-            std::this_thread::sleep_for(std::chrono::seconds(backoff));
+            interruptibleSleep(m_running, backoff);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
@@ -386,7 +397,7 @@ void CueClient::wsLoop() {
         if (response.find("101") == std::string::npos) {
             cueLog("CueClient WS: upgrade failed — " + response.substr(0, 80));
             closesocket(sock);
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            interruptibleSleep(m_running, 3);
             continue;
         }
 
@@ -462,7 +473,7 @@ void CueClient::wsLoop() {
         closesocket(sock);
         if (m_running.load()) {
             cueLog("CueClient WS: disconnected, reconnecting...");
-            std::this_thread::sleep_for(std::chrono::seconds(backoff));
+            interruptibleSleep(m_running, backoff);
             backoff = std::min(backoff * 2, 60);
         }
     }

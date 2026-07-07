@@ -37,6 +37,15 @@ void AudioAnalyzer::setDeviceId(const std::string& id, bool isCapture) {
     m_requestedIsCapture = isCapture;
 }
 
+void AudioAnalyzer::stopCapture() {
+    cleanupCapture();
+    m_deviceIdx = -2; // uninitialized — forces reinit on next update() with a device
+    m_initialized = false;
+    m_captureFailed = false;
+    m_samplesAccumulated = 0;
+    m_ringPos = 0;
+}
+
 void AudioAnalyzer::update(float dt) {
     if (dt <= 0) return;
 

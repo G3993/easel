@@ -166,6 +166,19 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
         if (accentButton("Reset", -1)) {
             meshWarp.resetGrid();
         }
+
+        // Curve / straight points. Each control point is either smooth (a
+        // Catmull-Rom curve runs through it) or a corner (segments touching it
+        // go straight). Right-click a point in the viewport to toggle one;
+        // these set them all at once. Smooth = circle, straight = square.
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::TextWrapped("Right-click a point to toggle curve / straight");
+        ImGui::PopStyleColor();
+        float hw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (accentButton("All Smooth", hw))   meshWarp.setAllCorners(false);
+        ImGui::SameLine();
+        if (accentButton("All Straight", hw)) meshWarp.setAllCorners(true);
     } else if (mapping.warpMode == ViewportPanel::WarpMode::ObjMesh) {
         // Mesh file display
         if (objMeshWarp.isLoaded()) {

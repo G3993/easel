@@ -72,6 +72,25 @@ void NDIOutput::send(GLuint texture, int w, int h) {
     auto& rt = NDIRuntime::instance();
     if (rt.api()->send_get_no_connections(m_send, 0) == 0) return;
 
+    // Crash-on-connect guard. Everything below only runs once a receiver is
+    // connected, so a mismatch here is invisible until someone subscribes —
+    // exactly the reported failure. The caller passes a layer/zone's logical
+    // (w,h), but glGetTexImage below reads the texture's OWN level-0 size into
+    // a PBO we size from (w,h). A per-layer source whose backing texture is a
+    // different size (video re-alloc, downscaled sim) — or not a GL_TEXTURE_2D
+    // at all (rectangle/external/hardware-decode texture) — makes that async
+    // DMA overrun the PBO and fault. Read the texture's real dimensions and
+    // size everything from those; bail safely if it isn't a sized 2D texture.
+    if (!glIsTexture(texture)) return;
+    GLint tw = 0, th = 0;
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,  &tw);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (tw <= 0 || th <= 0) return;   // not a level-0 2D texture — skip, never read
+    w = tw;
+    h = th;
+
     size_t bytes = (size_t)w * h * 4;
 
     // (Re)allocate the staging buffer + both PBOs on size change / first use.
@@ -124,7 +143,10 @@ void NDIOutput::send(GLuint texture, int w, int h) {
             frame.frame_format_type = NDIlib_frame_format_type_progressive;
             frame.p_data = m_pixelBuffer[0].data();
             frame.line_stride_in_bytes = w * 4;
-            rt.api()->send_send_video_v2(m_send, &frame);
+            // Guard the func ptr — older/partially-loaded NDI runtimes can leave
+            // this null (the audio path already guards send_send_audio_v2).
+            if (rt.api()->send_send_video_v2)
+                rt.api()->send_send_video_v2(m_send, &frame);
         }
     }
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);

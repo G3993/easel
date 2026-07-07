@@ -876,98 +876,143 @@ void FluidSource::autoSplats(float dt) {
         }
     }
 
-    // ── Sound pattern: strokes radiating from the center ──────────────
-    // Each stroke STARTS at the middle and sweeps outward, so dye always
-    // emanates from the center (never random locations). Louder = longer,
-    // faster, brighter strokes reaching further out; quiet = tiny dim strokes
-    // that barely leave the middle and fade. Emission is DISTANCE-based (a
-    // stamp every ~half-sigma of travel) so the stroke is one continuous mark,
-    // not a stutter of time-clocked dabs. Handles its own splats + returns.
+    // ── Sound pattern: spawn/unspawn wandering orbs ───────────────────
+    // The canvas is populated by little orbs that are BORN from the music and
+    // DIE when it goes quiet. Population tracks a smoothed loudness "drive";
+    // beats spawn bursts and kick the orbs around; each orb wanders with
+    // momentum and lays a continuous distance-stamped dye trail whose
+    // brightness follows its life and the drive. Six controls (above) dial the
+    // reactivity. Handles its own splats + returns.
     if (m_autoPattern == Sound) {
-        // Smooth energy altitude (NOT peaky RMS) → no per-beat throb. Silence
-        // collapses it so pauses go dim and fade.
-        float loud = std::min(std::max(m_sndEnergy, 0.0f), 1.0f);
-        loud *= (1.0f - 0.9f * m_sndSilence);
-        float tau = (loud > m_sndDrive) ? 0.22f : 0.5f;
-        m_sndDrive += (loud - m_sndDrive) * (1.0f - std::exp(-dt / tau));
-        m_sndDrive = std::min(std::max(m_sndDrive, 0.0f), 1.0f);
+        auto cl = [](float v, float a, float b){ return std::min(std::max(v, a), b); };
+
+        // ---- Smoothed, user-tunable loudness drive ----------------------
+        // Energy altitude (slow) blended with a little instantaneous level, then
+        // gained by Sensitivity and collapsed by silence. Attack/release time-
+        // constants come from Smoothing so the user can make it snappy or silky.
+        float loud = cl((m_sndEnergy * 0.7f + m_sndLevel * 0.3f) * m_sndSensitivity, 0.0f, 1.5f);
+        loud *= (1.0f - 0.85f * m_sndSilence);
+        float atk = 0.04f + 0.30f * m_sndSmoothing;
+        float rel = 0.15f + 1.10f * m_sndSmoothing;
+        float tau = (loud > m_sndDrive) ? atk : rel;
+        m_sndDrive += (loud - m_sndDrive) * (1.0f - std::exp(-dt / std::max(tau, 1e-3f)));
+        m_sndDrive = cl(m_sndDrive, 0.0f, 1.0f);
         const float d = m_sndDrive;
 
-        // Stamp spacing ≈ half the splat's Gaussian sigma → overlapping = a
-        // continuous stroke. (splat() uses radius = m_splatRadius/100.)
+        // Fast-decaying beat envelope + rising-edge for one-shot impulses.
+        m_sndBeatEnv = std::max(m_sndBeatEnv * std::exp(-dt / 0.16f),
+                                m_sndBeat * m_sndSensitivity);
+        float beatE   = cl(m_sndBeatEnv, 0.0f, 1.5f);
+        float beatRise = std::max(0.0f, beatE - m_sndBeatEnvPrev);
+        m_sndBeatEnvPrev = beatE;
+
+        const float spd     = std::max(0.05f, m_autoSpeed);
+        const float mom     = cl(m_sndMomentum, 0.0f, 1.0f);
         float sigma   = std::sqrt(std::max(m_splatRadius, 0.01f) / 100.0f);
-        float spacing = std::max(sigma * 0.45f, 0.002f);
-        const float spd = std::max(0.05f, m_autoSpeed);
+        float spacing = std::max(sigma * 0.5f, 0.0025f);
 
-        // Drift the "home" — the blob's center of activity slowly roams a small
-        // region so the whole thing travels the canvas a little. Excursion
-        // grows with drive and collapses to the middle when quiet, so it stays
-        // anchored to the center yet isn't pinned dead-center.
-        WanderOrb& h = m_soundHome;
-        h.timer += dt;
-        float homeReach = 0.02f + 0.07f * d;
-        if (h.timer > 1.7f) {
-            h.timer = 0.0f;
-            float ha  = u(m_rng) * 6.2831853f;
-            float hr  = homeReach * std::sqrt(u(m_rng));   // ~uniform within disk
-            m_sndHomeTx = 0.5f + std::cos(ha) * hr / aspect;
-            m_sndHomeTy = 0.5f + std::sin(ha) * hr;
+        // ---- Desired population from drive above threshold --------------
+        float over = cl((d - m_sndThreshold) / std::max(1e-3f, 1.0f - m_sndThreshold), 0.0f, 1.0f);
+        int   cap     = std::min(m_sndMaxOrbs, kSoundOrbs);
+        int   desired = (int)std::lround(over * (float)cap);
+        int   activeCount = 0;
+        for (auto& o : m_sndOrbs) if (o.active) activeCount++;
+
+        // ---- Spawn: fill toward desired + beat bursts ------------------
+        float spawnRate = 4.0f * over * spd + 14.0f * beatE * m_sndBeatKick;
+        m_sndSpawnAccum += spawnRate * dt;
+        int budget = (int)m_sndSpawnAccum;
+        m_sndSpawnAccum -= (float)budget;
+        for (int k = 0; k < budget && k < kSoundOrbs; k++) {
+            // Only overshoot `desired` on a beat (those orbs are short-lived pops).
+            if (activeCount >= desired && beatE < 0.20f) break;
+            if (activeCount >= cap) break;
+            int slot = -1;
+            for (int i = 0; i < kSoundOrbs; i++) if (!m_sndOrbs[i].active) { slot = i; break; }
+            if (slot < 0) break;
+            SoundOrb& o = m_sndOrbs[slot];
+            o.active = true;
+            o.life   = 0.0f;                         // fades in
+            // Born near center; spread grows with drive (keeps a center origin).
+            float sa = u(m_rng) * 6.2831853f;
+            float sr = (0.02f + 0.16f * d) * std::sqrt(u(m_rng));
+            o.x = cl(0.5f + std::cos(sa) * sr / aspect, 0.05f, 0.95f);
+            o.y = cl(0.5f + std::sin(sa) * sr, 0.05f, 0.95f);
+            o.px = o.x; o.py = o.y; o.stamp = spacing;
+            float birthKick = 0.04f * (0.5f + beatE);   // small outward birth pop
+            o.vx = std::cos(sa) * birthKick;
+            o.vy = std::sin(sa) * birthKick;
+            o.reaim = 0.0f;
+            activeCount++;
         }
-        h.vx += (m_sndHomeTx - h.x) * 1.3f * dt;
-        h.vy += (m_sndHomeTy - h.y) * 1.3f * dt;
-        h.vx *= 0.95f; h.vy *= 0.95f;
-        h.x += h.vx * dt; h.y += h.vy * dt;
 
-        // Start a new outward stroke from HOME when the brush has reached its
-        // outer target (or the stroke has run long enough). On the very first
-        // frame brush==home==target → reached → a fresh stroke is picked.
-        WanderOrb& s = m_soundOrb;
-        s.timer += dt;
-        float reach = m_autoScale * (0.14f + 0.7f * d);
-        float tdx = (s.x - m_sndTx) * aspect, tdy = (s.y - m_sndTy);
-        bool  reached = (tdx * tdx + tdy * tdy) < (0.02f * 0.02f);
-        if (reached || s.timer > (0.9f + 0.6f * (1.0f - d)) / spd) {
-            s.timer = 0.0f;
-            s.x = h.x; s.y = h.y; s.vx = 0.0f; s.vy = 0.0f;
-            float ang = u(m_rng) * 6.2831853f;
-            m_sndTx = std::min(0.95f, std::max(0.05f, h.x + std::cos(ang) * reach / aspect));
-            m_sndTy = std::min(0.95f, std::max(0.05f, h.y + std::sin(ang) * reach));
-            m_sndPrevX = h.x; m_sndPrevY = h.y;  // don't stamp across the reset
-            m_sndStampDist = spacing;             // first stamp lands at home
-        }
-        // Glide outward toward the target (accel + speed scale with drive).
-        float accel = (2.0f + 3.5f * d) * spd;
-        s.vx += (m_sndTx - s.x) * accel * dt;
-        s.vy += (m_sndTy - s.y) * accel * dt;
-        s.vx *= 0.90f; s.vy *= 0.90f;
-        s.x += s.vx * dt; s.y += s.vy * dt;
+        // ---- Update + emit per orb -------------------------------------
+        // Wander range & glide scale with the Wander knob, drive, and momentum.
+        float wanderRange = 0.10f + (0.50f * m_sndWander) * (0.4f + 0.9f * d + 0.5f * mom);
+        float accel = (1.3f + 3.0f * d) * spd * (0.5f + m_sndWander);
+        float damp  = std::exp(-dt * std::max(0.5f, 4.0f - 1.5f * m_sndWander - 1.5f * mom));
+        for (auto& o : m_sndOrbs) {
+            if (!o.active) continue;
 
-        // Lay a continuous stroke from last position to here, stamping every
-        // `spacing` of path. Each stamp pushes dye ALONG the outward direction
-        // (so it streaks out from center), with a small perpendicular wobble.
-        float segx = s.x - m_sndPrevX, segy = s.y - m_sndPrevY;
-        float seglen = std::sqrt(segx * segx + segy * segy);
-        if (seglen > 1e-6f) {
-            float dirx = segx / seglen, diry = segy / seglen;
-            float strokeF = kForce * (0.14f + 0.55f * d) * spd;
-            float si = m_splatIntensity * (0.06f + 0.94f * d);
-            m_sndStampDist += seglen;
-            int g2 = 0;
-            while (m_sndStampDist >= spacing && g2++ < 256) {
-                m_sndStampDist -= spacing;
-                float along = seglen - m_sndStampDist;          // prev→stamp distance
-                float sx = m_sndPrevX + dirx * along;
-                float sy = m_sndPrevY + diry * along;
-                m_hue = std::fmod(m_hue + 0.010f, 1.0f);
-                float r, g, b; paletteColor(m_hue, r, g, b);
-                float perp = (u(m_rng) - 0.5f) * kForce * 0.10f;
-                splat(sx, sy,
-                      dirx * strokeF - diry * perp,
-                      diry * strokeF + dirx * perp,
-                      r * si, g * si, b * si);
+            // Life: rise to 1, then decay. Lifespan grows with drive so loud
+            // passages sustain a crowd; quiet kills orbs fast (unspawn).
+            float lifespan = 0.35f + 3.0f * d;
+            if (o.life < 1.0f) o.life = std::min(1.0f, o.life + dt / 0.18f);
+            o.life -= dt / lifespan;
+            if (d < m_sndThreshold * 0.5f) o.life -= dt / 0.40f;   // forced fade-out
+            if (o.life <= 0.0f) { o.active = false; o.life = 0.0f; continue; }
+
+            // Wander: re-aim toward a roaming target around the canvas center.
+            o.reaim -= dt;
+            if (o.reaim <= 0.0f) {
+                o.reaim = 0.5f + 0.8f * u(m_rng);
+                float wa = u(m_rng) * 6.2831853f;
+                float wr = wanderRange * std::sqrt(u(m_rng));
+                o.tx = cl(0.5f + std::cos(wa) * wr / aspect, 0.05f, 0.95f);
+                o.ty = cl(0.5f + std::sin(wa) * wr, 0.05f, 0.95f);
             }
+            // Beat impulse — a one-shot random kick on the rising edge of a beat.
+            if (beatRise > 0.05f) {
+                float ba  = u(m_rng) * 6.2831853f;
+                float imp = beatRise * m_sndBeatKick * 0.55f;
+                o.vx += std::cos(ba) * imp;
+                o.vy += std::sin(ba) * imp;
+            }
+            // Steer toward target with momentum, integrate, soft-bounce edges.
+            o.vx += (o.tx - o.x) * accel * dt;
+            o.vy += (o.ty - o.y) * accel * dt;
+            o.vx *= damp; o.vy *= damp;
+            o.x += o.vx * dt; o.y += o.vy * dt;
+            if (o.x < 0.04f || o.x > 0.96f) { o.vx = -o.vx * 0.6f; o.x = cl(o.x, 0.04f, 0.96f); }
+            if (o.y < 0.04f || o.y > 0.96f) { o.vy = -o.vy * 0.6f; o.y = cl(o.y, 0.04f, 0.96f); }
+
+            // Dye trail — distance-stamped so it's continuous regardless of
+            // speed/framerate. Brightness follows the orb's life × drive.
+            float segx = o.x - o.px, segy = o.y - o.py;
+            float seglen = std::sqrt(segx * segx + segy * segy);
+            if (seglen > 1e-6f) {
+                float dirx = segx / seglen, diry = segy / seglen;
+                float vis = o.life * (0.30f + 0.70f * d);
+                float strokeF = kForce * (0.10f + 0.50f * d) * spd;
+                float si = m_splatIntensity * (0.10f + 0.90f * vis);
+                o.stamp += seglen;
+                int g2 = 0;
+                while (o.stamp >= spacing && g2++ < 8) {
+                    o.stamp -= spacing;
+                    float along = seglen - o.stamp;
+                    float sx = o.px + dirx * along;
+                    float sy = o.py + diry * along;
+                    m_hue = std::fmod(m_hue + 0.008f, 1.0f);
+                    float r, g, b; paletteColor(m_hue, r, g, b);
+                    float perp = (u(m_rng) - 0.5f) * kForce * 0.12f;
+                    splat(sx, sy,
+                          dirx * strokeF - diry * perp,
+                          diry * strokeF + dirx * perp,
+                          r * si, g * si, b * si);
+                }
+            }
+            o.px = o.x; o.py = o.y;
         }
-        m_sndPrevX = s.x; m_sndPrevY = s.y;
         return;   // Sound pattern emits its own splats above
     }
 
@@ -1064,6 +1109,7 @@ void FluidSource::applyAudioBindings(float level, float bass, float mid,
     m_sndEnergy   = energy;
     m_sndSilence  = silence;
     m_sndMomentum = momentum;
+    m_sndBeat     = beat;
 
     if (m_audioBindings.empty()) return;
     for (auto& [name, b] : m_audioBindings) {

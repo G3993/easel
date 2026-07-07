@@ -1251,6 +1251,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         dockAlways("        ###Properties", rightFloatId);
         dockAlways("        ###Sources",    rightFloatId);
         dockAlways("        ###Mapping",    rightFloatId);
+        dockAlways("        ###Zones",      rightFloatId);
         dockAlways("        ###Audio",      rightFloatId);
         dockAlways("        ###MIDI",       rightFloatId);
         ImGui::DockBuilderDockWindow("Scene Scanner", rightFloatId);
@@ -1587,6 +1588,14 @@ bool UIManager::isPanelVisible(const char* title) const {
         if (eq("Stage"))      return true;
         if (eq("Properties")) return true;
         if (eq("Timeline"))   return true;
+        return false;
+
+    case WorkspaceMode::Zones:
+        // Zones is the whole-house overview: the live output viewport plus
+        // the Zones control panel (every output zone at a glance — main
+        // display highlighted, projector routing + mic input per zone).
+        if (eq("Canvas"))     return true;
+        if (eq("Zones"))      return true;
         return false;
 
     case WorkspaceMode::Show:

@@ -1,6 +1,7 @@
 #pragma once
 #include "compositing/CompositeEngine.h"
 #include "render/Framebuffer.h"
+#include "app/AudioAnalyzer.h"
 #ifdef HAS_NDI
 #include "app/NDIOutput.h"
 #endif
@@ -42,6 +43,17 @@ struct OutputZone {
     // rename (e.g. agent ensureZoneNdi on an already-live zone) recreates
     // the sender instead of silently keeping the old wire name.
     std::string ndiActiveName;
+
+    // --- Per-zone microphone (push-to-talk) ---------------------------------
+    // Lets multi-floor/multi-room installs give each zone its own independent
+    // live mic input instead of sharing the single global AudioAnalyzer.
+    // micEnabled = the zone is configured to use its own mic (persisted).
+    // pushToTalkActive = the mic is currently gated open (transient runtime
+    // state, driven locally or remotely via OSC/SDK/mobile app — not saved).
+    std::string micDeviceId;        // capture device endpoint id; empty = system default
+    bool micEnabled = false;
+    bool pushToTalkActive = false;
+    AudioAnalyzer micAnalyzer;      // lazily initialized when first enabled
 
 #ifdef HAS_NDI
     NDIOutput ndiOutput;            // per-zone NDI sender

@@ -37,6 +37,7 @@ void MeshWarp::setGridSize(int cols, int rows) {
 
 void MeshWarp::resetGrid() {
     m_controlPoints.resize(m_cols * m_rows);
+    m_corner.assign(m_cols * m_rows, 0);   // all points smooth by default
     for (int r = 0; r < m_rows; r++) {
         for (int c = 0; c < m_cols; c++) {
             m_controlPoints[r * m_cols + c] = defaultPoint(c, r);
@@ -99,18 +100,31 @@ void MeshWarp::render(GLuint sourceTexture) {
         r = std::min(std::max(r, 0), m_rows - 1);
         return m_controlPoints[r * m_cols + c];
     };
+    auto isCorner = [&](int c, int r) -> bool {
+        c = std::min(std::max(c, 0), m_cols - 1);
+        r = std::min(std::max(r, 0), m_rows - 1);
+        int idx = r * m_cols + c;
+        return idx < (int)m_corner.size() && m_corner[idx] != 0;
+    };
     // Bicubic Catmull-Rom sample at continuous lattice coords
-    // (gx in [0,cols-1], gy in [0,rows-1]).
+    // (gx in [0,cols-1], gy in [0,rows-1]). A segment whose either endpoint is
+    // flagged "corner" falls back to a straight (linear) interpolation, so
+    // hard edges stay straight while the rest of the lattice curves smoothly.
     auto sample = [&](float gx, float gy) -> glm::vec2 {
         int ix = (int)std::floor(gx); float fx = gx - (float)ix;
         int iy = (int)std::floor(gy); float fy = gy - (float)iy;
         glm::vec2 row[4];
         for (int k = 0; k < 4; k++) {
             int rr = iy - 1 + k;
-            row[k] = catmull(cp(ix - 1, rr), cp(ix, rr),
-                             cp(ix + 1, rr), cp(ix + 2, rr), fx);
+            row[k] = (isCorner(ix, rr) || isCorner(ix + 1, rr))
+                       ? cp(ix, rr) * (1.0f - fx) + cp(ix + 1, rr) * fx   // straight
+                       : catmull(cp(ix - 1, rr), cp(ix, rr),
+                                 cp(ix + 1, rr), cp(ix + 2, rr), fx);
         }
-        return catmull(row[0], row[1], row[2], row[3], fy);
+        int cc = (fx < 0.5f) ? ix : ix + 1;   // nearest column for the vertical decision
+        return (isCorner(cc, iy) || isCorner(cc, iy + 1))
+                 ? row[1] * (1.0f - fy) + row[2] * fy                     // straight
+                 : catmull(row[0], row[1], row[2], row[3], fy);
     };
 
     const int FX = (m_cols - 1) * S;   // fine quads across / down
@@ -198,21 +212,31 @@ void MeshWarp::drawHandles(const glm::vec2& viewportSize) const {
         }
     }
 
-    // Draw control points
+    // Draw control points — squares for straight/corner points, circles for
+    // smooth (curve) points, so every point's type is visible at a glance.
     for (int i = 0; i < (int)m_controlPoints.size(); i++) {
         ImVec2 p = ndcToScreen(m_controlPoints[i]);
-        draw->AddCircleFilled(p, 5.0f, IM_COL32(100, 200, 255, 255));
-        draw->AddCircle(p, 5.0f, IM_COL32(255, 255, 255, 200), 0, 1.5f);
+        if (isCorner(i)) {
+            draw->AddRectFilled(ImVec2(p.x - 5, p.y - 5), ImVec2(p.x + 5, p.y + 5),
+                                IM_COL32(255, 210, 80, 255), 1.0f);
+            draw->AddRect(ImVec2(p.x - 5, p.y - 5), ImVec2(p.x + 5, p.y + 5),
+                          IM_COL32(255, 255, 255, 220), 1.0f, 0, 1.5f);
+        } else {
+            draw->AddCircleFilled(p, 5.0f, IM_COL32(100, 200, 255, 255));
+            draw->AddCircle(p, 5.0f, IM_COL32(255, 255, 255, 200), 0, 1.5f);
+        }
     }
 }
 
 void MeshWarp::addColumn() {
     int newCols = m_cols + 1;
     std::vector<glm::vec2> newPoints(newCols * m_rows);
+    std::vector<uint8_t>   newCorner(newCols * m_rows, 0);
 
     for (int r = 0; r < m_rows; r++) {
         for (int c = 0; c < m_cols; c++) {
             newPoints[r * newCols + c] = m_controlPoints[r * m_cols + c];
+            newCorner[r * newCols + c] = m_corner[r * m_cols + c];
         }
         // New column: interpolate between last column and edge
         newPoints[r * newCols + m_cols] = defaultPoint(m_cols, r);
@@ -220,6 +244,7 @@ void MeshWarp::addColumn() {
 
     m_cols = newCols;
     m_controlPoints = newPoints;
+    m_corner = newCorner;
     rebuildMesh();
 }
 
@@ -227,25 +252,30 @@ void MeshWarp::removeColumn() {
     if (m_cols <= 2) return;
     int newCols = m_cols - 1;
     std::vector<glm::vec2> newPoints(newCols * m_rows);
+    std::vector<uint8_t>   newCorner(newCols * m_rows, 0);
 
     for (int r = 0; r < m_rows; r++) {
         for (int c = 0; c < newCols; c++) {
             newPoints[r * newCols + c] = m_controlPoints[r * m_cols + c];
+            newCorner[r * newCols + c] = m_corner[r * m_cols + c];
         }
     }
 
     m_cols = newCols;
     m_controlPoints = newPoints;
+    m_corner = newCorner;
     rebuildMesh();
 }
 
 void MeshWarp::addRow() {
     int newRows = m_rows + 1;
     std::vector<glm::vec2> newPoints(m_cols * newRows);
+    std::vector<uint8_t>   newCorner(m_cols * newRows, 0);
 
     for (int r = 0; r < m_rows; r++) {
         for (int c = 0; c < m_cols; c++) {
             newPoints[r * m_cols + c] = m_controlPoints[r * m_cols + c];
+            newCorner[r * m_cols + c] = m_corner[r * m_cols + c];
         }
     }
     for (int c = 0; c < m_cols; c++) {
@@ -254,6 +284,7 @@ void MeshWarp::addRow() {
 
     m_rows = newRows;
     m_controlPoints = newPoints;
+    m_corner = newCorner;
     rebuildMesh();
 }
 
@@ -261,14 +292,17 @@ void MeshWarp::removeRow() {
     if (m_rows <= 2) return;
     int newRows = m_rows - 1;
     std::vector<glm::vec2> newPoints(m_cols * newRows);
+    std::vector<uint8_t>   newCorner(m_cols * newRows, 0);
 
     for (int r = 0; r < newRows; r++) {
         for (int c = 0; c < m_cols; c++) {
             newPoints[r * m_cols + c] = m_controlPoints[r * m_cols + c];
+            newCorner[r * m_cols + c] = m_corner[r * m_cols + c];
         }
     }
 
     m_rows = newRows;
     m_controlPoints = newPoints;
+    m_corner = newCorner;
     rebuildMesh();
 }
