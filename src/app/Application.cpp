@@ -12665,9 +12665,16 @@ void Application::setManagedLayerParam(const std::string& key, const std::string
             return;
         }
         auto* shader = static_cast<ShaderSource*>(l->source.get());
-        // float -> setFloat (covers float + long/enum, which Easel stores as
-        // float); text -> setText; int -> setBool. Mirrors the index-based path.
-        if (!msg.floats.empty())          shader->setFloat(name, msg.floats[0]);
+        // Float count picks the setter: 4 floats -> setColor (RGBA), 2 ->
+        // setPoint2D, 1 -> setFloat (covers float + long/enum, which Easel
+        // stores as float); text -> setText; int -> setBool. Mirrors the
+        // index-based path.
+        if (msg.floats.size() >= 4)
+            shader->setColor(name, glm::vec4(msg.floats[0], msg.floats[1],
+                                             msg.floats[2], msg.floats[3]));
+        else if (msg.floats.size() == 2)
+            shader->setPoint2D(name, glm::vec2(msg.floats[0], msg.floats[1]));
+        else if (!msg.floats.empty())     shader->setFloat(name, msg.floats[0]);
         else if (msg.strings.size() >= 3) shader->setText(name, msg.strings[2]);
         else if (!msg.ints.empty())       shader->setBool(name, msg.ints[0] != 0);
         return;
