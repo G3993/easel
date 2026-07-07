@@ -30,6 +30,7 @@ public:
     bool create(int width, int height, bool withDepth = false);
     bool createHalfFloat(int width, int height);
     void resize(int width, int height);
+    void destroy();
     void bind() const;
     static void unbind();
 
@@ -45,6 +46,4 @@ private:
     int m_width = 0, m_height = 0;
     bool m_hasDepth = false;
     bool m_halfFloat = false;
-
-    void destroy();
 };

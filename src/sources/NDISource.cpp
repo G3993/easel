@@ -84,7 +84,7 @@ NDISource::~NDISource() {
     disconnect();
 }
 
-bool NDISource::connect(const std::string& senderName) {
+bool NDISource::connect(const std::string& senderName, const std::string& senderUrl) {
     disconnect();
 
     auto& rt = NDIRuntime::instance();
@@ -103,13 +103,18 @@ bool NDISource::connect(const std::string& senderName) {
         return false;
     }
 
-    // Connect to the named source
+    // Connect to the exact advertised endpoint when available. On multihomed
+    // networks, name-only connects can resolve through the wrong interface.
     NDIlib_source_t source = {};
     source.p_ndi_name = senderName.c_str();
+    source.p_url_address = senderUrl.empty() ? nullptr : senderUrl.c_str();
     rt.api()->recv_connect(m_recv, &source);
 
     m_senderName = senderName;
-    std::cout << "[NDI] Connected to: " << senderName << std::endl;
+    m_senderUrl = senderUrl;
+    std::cout << "[NDI] Connected to: " << senderName;
+    if (!senderUrl.empty()) std::cout << " @ " << senderUrl;
+    std::cout << std::endl;
     return true;
 }
 
@@ -122,12 +127,28 @@ void NDISource::disconnect() {
         m_recv = nullptr;
     }
     m_senderName.clear();
+    m_senderUrl.clear();
     m_width = 0;
     m_height = 0;
 }
 
-void NDISource::update() {
+void NDISource::suspend() {
     if (!m_recv) return;
+    m_resumeName = m_senderName; // disconnect() clears name + URL
+    m_resumeUrl  = m_senderUrl;
+    disconnect();
+    m_suspended = true;
+}
+
+void NDISource::update() {
+    if (!m_recv) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (m_suspended && !m_resumeName.empty()) {
+            m_suspended = false; // one attempt — sender may be gone
+            connect(m_resumeName, m_resumeUrl);
+        }
+        return;
+    }
 
     auto& rt = NDIRuntime::instance();
     if (!rt.isAvailable()) return;
@@ -161,34 +182,40 @@ void NDISource::update() {
         }
     }
 
-    if (gotVideo && video.p_data) {
-        if (video.xres != m_width || video.yres != m_height) {
-            m_width = video.xres;
-            m_height = video.yres;
-            m_texture.createEmpty(m_width, m_height);
-            m_pixelBuffer.resize(m_width * m_height * 4);
+    if (gotVideo) {
+        // Only upload when there is pixel data; NDI can deliver status/format-only
+        // video frames with p_data == nullptr.
+        if (video.p_data) {
+            if (video.xres != m_width || video.yres != m_height) {
+                m_width = video.xres;
+                m_height = video.yres;
+                m_texture.createEmpty(m_width, m_height);
+                m_pixelBuffer.resize(m_width * m_height * 4);
+            }
+
+            int stride = video.line_stride_in_bytes;
+            if (stride <= 0) stride = m_width * 4;
+            int rowBytes = m_width * 4;
+
+            // Upload to GPU -- skip intermediate copy when stride matches
+            if (stride == rowBytes) {
+                // Direct upload from NDI memory (no CPU copy)
+                glBindTexture(GL_TEXTURE_2D, m_texture.id());
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
+            } else {
+                // Stride mismatch -- use GL_UNPACK_ROW_LENGTH to skip padding
+                glBindTexture(GL_TEXTURE_2D, m_texture.id());
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 4);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
+                                GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            }
         }
 
-        int stride = video.line_stride_in_bytes;
-        if (stride <= 0) stride = m_width * 4;
-        int rowBytes = m_width * 4;
-
-        // Upload to GPU -- skip intermediate copy when stride matches
-        if (stride == rowBytes) {
-            // Direct upload from NDI memory (no CPU copy)
-            glBindTexture(GL_TEXTURE_2D, m_texture.id());
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
-                            GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
-        } else {
-            // Stride mismatch -- use GL_UNPACK_ROW_LENGTH to skip padding
-            glBindTexture(GL_TEXTURE_2D, m_texture.id());
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / 4);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_width, m_height,
-                            GL_RGBA, GL_UNSIGNED_BYTE, video.p_data);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        }
-
+        // Free the held frame regardless of p_data: the SDK requires freeing any
+        // frame returned as type video. Runs exactly once for the final frame.
         rt.api()->recv_free_video_v2(m_recv, &video);
     }
 }

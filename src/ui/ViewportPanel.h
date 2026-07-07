@@ -96,6 +96,19 @@ public:
     float zoom() const { return m_zoom; }
     void  setZoom(float z) { m_zoom = std::max(0.25f, std::min(8.0f, z)); }
     void resetZoom() { m_zoom = 1.0f; m_pan = {0, 0}; }
+    void resetPan()  { m_pan = {0, 0}; }
+
+    // Set the visible region within the panel content area (panel-relative coords).
+    // panelLeft = pixels from panel content origin to the visible area's left edge
+    //             (= kLeftRailW when the left rail overlaps the panel).
+    // width     = width of the visible area (panel width minus left rail and right
+    //             sidebar widths). Pass width=0 to use raw GetContentRegionAvail().
+    // Used for both fit sizing AND centering so the canvas stays within visible chrome.
+    void setVisibleRegion(float panelLeft, float width, float height = 0.0f) {
+        m_visibleLeft = panelLeft;
+        m_visibleContentWidth = width;
+        m_visibleContentHeight = height;
+    }
 
     // Reset ALL drag/interaction state (called on zone switch). Covers every
     // stateful flag so the canvas never gets stuck thinking a drag is in progress
@@ -179,6 +192,9 @@ private:
 
     // Canvas zoom & pan
     float m_zoom = 1.0f;
+    float m_visibleLeft          = 0.0f; // panel-relative X of visible area start
+    float m_visibleContentWidth  = 0.0f; // 0 = use raw avail.x
+    float m_visibleContentHeight = 0.0f; // 0 = use raw avail.y
     glm::vec2 m_pan = {0, 0};
     bool m_panDragging = false;
     glm::vec2 m_panDragStart = {0, 0};

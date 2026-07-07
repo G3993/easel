@@ -13,7 +13,7 @@
     { "NAME": "hatchDensity","LABEL": "Cross-Hatching",  "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 1.0 },
     { "NAME": "paperWarmth", "LABEL": "Paper Warmth",    "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.7 },
     { "NAME": "grain",       "LABEL": "Paper Grain",     "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.55 },
-    { "NAME": "audioReact",  "LABEL": "Audio React",     "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 1.0 }
+    { "NAME": "audioReact",  "LABEL": "Audio React",     "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.0 }
   ]
 }*/
 

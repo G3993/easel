@@ -2,6 +2,8 @@
 #include "app/NDIOutput.h"
 #include <iostream>
 #include <cstring>
+#include <chrono>
+
 
 NDIOutput::~NDIOutput() {
     destroy();
@@ -48,15 +50,26 @@ void NDIOutput::destroy() {
         }
         m_send = nullptr;
     }
-    if (m_pbo[0]) {
-        glDeleteBuffers(2, m_pbo);
-        m_pbo[0] = m_pbo[1] = 0;
+    for (int i = 0; i < kReadbackSlots; ++i) {
+        if (m_fence[i]) {
+            glDeleteSync(m_fence[i]);
+            m_fence[i] = nullptr;
+        }
     }
-    m_pixelBuffer[0].clear();
+    if (m_pbo[0]) {
+        glDeleteBuffers(kReadbackSlots, m_pbo);
+        for (int i = 0; i < kReadbackSlots; ++i) m_pbo[i] = 0;
+    }
+    if (m_readFBO) {
+        glDeleteFramebuffers(1, &m_readFBO);
+        m_readFBO = 0;
+    }
+    m_pixelBuffer.clear();
+    m_readIndex = 0;
+    m_pendingReadbacks = 0;
     m_lastW = 0;
     m_lastH = 0;
-    m_pboIndex = 0;
-    m_pboFilled = 0;
+    m_lastSendAt = {};
 }
 
 bool NDIOutput::hasReceivers() const {
@@ -74,61 +87,108 @@ void NDIOutput::send(GLuint texture, int w, int h) {
 
     size_t bytes = (size_t)w * h * 4;
 
-    // (Re)allocate the staging buffer + both PBOs on size change / first use.
-    // A size change invalidates the previously-filled PBO, so reset the fill
-    // counter to re-prime before we map again.
-    if (w != m_lastW || h != m_lastH || m_pbo[0] == 0) {
-        m_pixelBuffer[0].resize(bytes);
-        if (m_pbo[0] == 0) glGenBuffers(2, m_pbo);
-        for (int i = 0; i < 2; i++) {
+    if (w != m_lastW || h != m_lastH || !m_pbo[0]) {
+        for (int i = 0; i < kReadbackSlots; ++i) {
+            if (m_fence[i]) {
+                glDeleteSync(m_fence[i]);
+                m_fence[i] = nullptr;
+            }
+        }
+        if (m_pbo[0]) glDeleteBuffers(kReadbackSlots, m_pbo);
+        glGenBuffers(kReadbackSlots, m_pbo);
+        for (int i = 0; i < kReadbackSlots; ++i) {
             glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[i]);
             glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
         }
         glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        m_pixelBuffer.resize(bytes);
+        m_readIndex = 0;
+        m_pendingReadbacks = 0;
         m_lastW = w;
         m_lastH = h;
-        m_pboIndex = 0;
-        m_pboFilled = 0;
     }
 
-    const int writeIdx = m_pboIndex;
-    const int readIdx  = (m_pboIndex + 1) & 1;
+    bool hasFrame = false;
+    if (m_pendingReadbacks > 0) {
+        const int mapPBO = m_readIndex;
+        GLenum status = GL_ALREADY_SIGNALED;
+        if (m_fence[mapPBO]) {
+            status = glClientWaitSync(m_fence[mapPBO], 0, 0);
+        }
+        if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) {
+            if (m_fence[mapPBO]) {
+                glDeleteSync(m_fence[mapPBO]);
+                m_fence[mapPBO] = nullptr;
+            }
 
-    // Kick off an ASYNCHRONOUS readback of this frame's texture into writeIdx's
-    // PBO. With a pack buffer bound, glGetTexImage returns immediately (the DMA
-    // proceeds in the background) instead of stalling the CPU on the GPU — no
-    // glFinish needed.
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[writeIdx]);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, (void*)0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    m_pboFilled++;
-
-    // Map the OTHER PBO — filled on the previous frame, so its DMA is already
-    // complete and the map doesn't block. Ship that frame (one frame of
-    // latency, zero render-loop stall). Skip until both PBOs are primed.
-    if (m_pboFilled >= 2) {
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[readIdx]);
-        void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-        if (mapped) {
-            memcpy(m_pixelBuffer[0].data(), mapped, bytes);
-            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-
-            NDIlib_video_frame_v2_t frame = {};
-            frame.xres = w;
-            frame.yres = h;
-            frame.FourCC = NDIlib_FourCC_video_type_BGRA;
-            frame.frame_rate_N = 120000;
-            frame.frame_rate_D = 1001;
-            frame.picture_aspect_ratio = (float)w / (float)h;
-            frame.frame_format_type = NDIlib_frame_format_type_progressive;
-            frame.p_data = m_pixelBuffer[0].data();
-            frame.line_stride_in_bytes = w * 4;
-            rt.api()->send_send_video_v2(m_send, &frame);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[mapPBO]);
+            void* ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+            if (ptr) {
+                std::memcpy(m_pixelBuffer.data(), ptr, bytes);
+                hasFrame = true;
+                glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            }
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            m_readIndex = (m_readIndex + 1) % kReadbackSlots;
+            --m_pendingReadbacks;
         }
     }
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    m_pboIndex = readIdx;  // ping-pong: next frame writes the buffer we just read
+
+    if (hasFrame) {
+        NDIlib_video_frame_v2_t frame = {};
+        frame.xres = w;
+        frame.yres = h;
+        frame.FourCC = NDIlib_FourCC_video_type_BGRA;
+        // Stamp the actual pacing rather than a fixed 60.
+        const float fps = m_settings.targetFps > 0.0f ? m_settings.targetFps : 60.0f;
+        frame.frame_rate_N = (int)(fps * 1000.0f);
+        frame.frame_rate_D = 1000;
+        frame.picture_aspect_ratio = (float)w / (float)h;
+        frame.frame_format_type = NDIlib_frame_format_type_progressive;
+        frame.p_data = m_pixelBuffer.data();
+        frame.line_stride_in_bytes = w * 4;
+
+        rt.api()->send_send_video_v2(m_send, &frame);
+    }
+
+    // Settings-driven wall-clock throttle (default 60fps; <= 0 = uncapped,
+    // live-settable via OSC /easel/ndi/fps). Readiness mapping above runs even
+    // while throttled so completed readbacks do not sit behind the fps gate.
+    const auto now = std::chrono::steady_clock::now();
+    if (m_settings.targetFps > 0.0f &&
+        m_lastSendAt.time_since_epoch().count() > 0) {
+        const double elapsed = std::chrono::duration<double>(now - m_lastSendAt).count();
+        if (elapsed < (1.0 / m_settings.targetFps) * 0.90) return;
+    }
+    if (m_pendingReadbacks >= kReadbackSlots) return;
+
+    if (!m_readFBO) glGenFramebuffers(1, &m_readFBO);
+    const int writePBO = (m_readIndex + m_pendingReadbacks) % kReadbackSlots;
+
+    GLint prevReadFBO = 0;
+    GLint prevPackBuffer = 0;
+    GLint prevReadBuffer = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFBO);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prevPackBuffer);
+    glGetIntegerv(GL_READ_BUFFER, &prevReadBuffer);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_readFBO);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m_pbo[writePBO]);
+        glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        if (m_fence[writePBO]) glDeleteSync(m_fence[writePBO]);
+        m_fence[writePBO] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        glFlush();
+        ++m_pendingReadbacks;
+        m_lastSendAt = now;
+    }
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prevPackBuffer);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevReadFBO);
+    glReadBuffer((GLenum)prevReadBuffer);
+
 }
 
 #endif // HAS_NDI

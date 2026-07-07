@@ -185,6 +185,9 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
     int ret = avcodec_send_packet(m_audioCodecCtx, pkt);
     if (ret < 0) return;
 
+    // Drain all frames produced by this packet; a single send_packet can yield
+    // multiple frames. Always unref each drained frame to avoid leaking decoder
+    // reference buffers.
     while (avcodec_receive_frame(m_audioCodecCtx, frame) == 0) {
         // Resample to output format (float32, stereo/device channels, device sample rate)
         int outSamples = swr_get_out_samples(m_swrCtx, frame->nb_samples);
@@ -193,7 +196,10 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
 
         int converted = swr_convert(m_swrCtx, &outPtr, outSamples,
                                      (const uint8_t**)frame->extended_data, frame->nb_samples);
-        if (converted <= 0) continue;
+        if (converted <= 0) {
+            av_frame_unref(frame);
+            continue;
+        }
 
         // Write to ring buffer
         size_t ringSize = m_audioRing.size();
@@ -204,6 +210,8 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
             wp = (wp + 1) % ringSize;
         }
         m_audioWritePos.store(wp);
+
+        av_frame_unref(frame);
     }
 }
 
@@ -404,10 +412,44 @@ void VideoSource::seek(double seconds) {
     m_playbackStart = glfwGetTime();
 }
 
+void VideoSource::suspend() {
+    if (!m_running) return;
+    // Live streams: close() joins the decode thread, which can sit blocked
+    // in av_read_frame on a stalled network source with no timeout — that
+    // would freeze the render thread one frame after the layer is deleted.
+    // A pinned live stream also has no resumable position; just leave it
+    // running until the snapshot ages out.
+    if (m_isLive) return;
+    m_resumeTime = m_currentTime;
+    m_resumePlaying = m_playing;
+    close();
+    m_suspended = true;
+}
+
 // ─── Update (main thread) ───────────────────────────────────────────
 
 void VideoSource::update() {
-    if (!m_running) return;
+    if (!m_running) {
+        // Lazy resume after suspend(): the source is back in the live stack.
+        if (!m_suspended || m_path.empty()) return;
+        m_suspended = false; // one attempt — no retry storm if the file is gone
+        const std::string path = m_path;
+        const double t = m_resumeTime;
+        const bool playing = m_resumePlaying;
+        if (!load(path)) return;
+        if (t > 0.0 && !m_isLive) seek(t);
+        if (playing) {
+            play();
+        } else {
+            // load() recreated the GL texture empty — a paused layer would
+            // come back BLACK. Let the decode thread produce one frame at
+            // the seek target, then re-pause. m_playing is set directly so
+            // WASAPI audio never starts for this single frame.
+            m_playing = true;
+            m_resumePausePending = true;
+        }
+        return; // frames start arriving next update
+    }
 
     // Feed decoded audio to WASAPI
     if (m_playing) {
@@ -429,6 +471,10 @@ void VideoSource::update() {
         m_texture.updateData(m_buffers[displayed].data.data(), m_width, m_height, GL_RGBA, GL_UNSIGNED_BYTE);
         m_currentTime = m_buffers[displayed].pts;
         m_buffers[displayed].ready = false;
+        if (m_resumePausePending) {
+            m_playing = false; // direct: audio was never started
+            m_resumePausePending = false;
+        }
     }
 }
 
@@ -528,8 +574,17 @@ void VideoSource::decodeLoop() {
 
         if (pkt->stream_index == m_videoStreamIndex) {
             avcodec_send_packet(m_codecCtx, pkt);
-            ret = avcodec_receive_frame(m_codecCtx, frame);
-            if (ret == 0 && !hasPendingVideo) {
+            // Drain all frames produced by this packet; a single send_packet can
+            // yield multiple frames (esp. B-frame streams). Always unref each
+            // drained frame to avoid leaking decoder reference buffers, including
+            // the dropped-frame path when hasPendingVideo is already true.
+            while ((ret = avcodec_receive_frame(m_codecCtx, frame)) == 0) {
+                if (hasPendingVideo) {
+                    // Already have a frame queued; drop this one (still must unref).
+                    av_frame_unref(frame);
+                    continue;
+                }
+
                 // Transfer hardware frame to software if needed (VideoToolbox)
                 AVFrame* swFrame = nullptr;
                 AVFrame* srcFrame = frame;
@@ -539,7 +594,7 @@ void VideoSource::decodeLoop() {
                         srcFrame = swFrame;
                     } else {
                         av_frame_free(&swFrame);
-                        av_packet_unref(pkt);
+                        av_frame_unref(frame);
                         continue;
                     }
                 }
@@ -567,6 +622,8 @@ void VideoSource::decodeLoop() {
                     pendingPts = frame->pts * m_timeBase;
                 }
                 hasPendingVideo = true;
+
+                av_frame_unref(frame);
             }
         } else if (pkt->stream_index == m_audioStreamIndex) {
             decodeAudioPacket(audioFrame, pkt);

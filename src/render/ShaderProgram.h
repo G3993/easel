@@ -3,11 +3,28 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 class ShaderProgram {
 public:
     ShaderProgram() = default;
     ~ShaderProgram();
+
+    ShaderProgram(const ShaderProgram&) = delete;
+    ShaderProgram& operator=(const ShaderProgram&) = delete;
+    ShaderProgram(ShaderProgram&& other) noexcept
+        : m_program(other.m_program), m_uniformCache(std::move(other.m_uniformCache)) {
+        other.m_program = 0;
+    }
+    ShaderProgram& operator=(ShaderProgram&& other) noexcept {
+        if (this != &other) {
+            if (m_program) glDeleteProgram(m_program);
+            m_program = other.m_program;
+            m_uniformCache = std::move(other.m_uniformCache);
+            other.m_program = 0;
+        }
+        return *this;
+    }
 
     bool loadFromFiles(const std::string& vertPath, const std::string& fragPath);
     bool loadFromSource(const std::string& vertSrc, const std::string& fragSrc);

@@ -54,36 +54,10 @@ const glm::vec2& MeshWarp::controlPoint(int col, int row) const {
 }
 
 void MeshWarp::rebuildMesh() {
-    std::vector<Vertex> verts;
-    verts.reserve(m_cols * m_rows);
-
-    for (int r = 0; r < m_rows; r++) {
-        for (int c = 0; c < m_cols; c++) {
-            const auto& p = m_controlPoints[r * m_cols + c];
-            float u = (float)c / (m_cols - 1);
-            float v = (float)r / (m_rows - 1);
-            verts.push_back({p.x, p.y, u, v});
-        }
-    }
-
-    std::vector<unsigned int> indices;
-    indices.reserve((m_cols - 1) * (m_rows - 1) * 6);
-    for (int r = 0; r < m_rows - 1; r++) {
-        for (int c = 0; c < m_cols - 1; c++) {
-            unsigned int tl = r * m_cols + c;
-            unsigned int tr = tl + 1;
-            unsigned int bl = (r + 1) * m_cols + c;
-            unsigned int br = bl + 1;
-            indices.push_back(tl);
-            indices.push_back(tr);
-            indices.push_back(br);
-            indices.push_back(tl);
-            indices.push_back(br);
-            indices.push_back(bl);
-        }
-    }
-
-    m_mesh.upload(verts, indices);
+    // The GPU mesh is owned by render()'s tessellation cache; grid mutations
+    // just invalidate it so the next render re-tessellates and re-uploads.
+    m_meshedPoints.clear();
+    m_meshedCols = m_meshedRows = m_meshedSubsteps = 0;
 }
 
 void MeshWarp::render(GLuint sourceTexture) {
@@ -94,51 +68,72 @@ void MeshWarp::render(GLuint sourceTexture) {
     // diagonal lines stay smooth, not jagged. A regular (unmoved) grid reduces
     // exactly to the identity mapping, so flat output is unchanged.
     const int S = std::max(1, m_renderSubsteps);
-    auto cp = [&](int c, int r) -> glm::vec2 {
-        c = std::min(std::max(c, 0), m_cols - 1);
-        r = std::min(std::max(r, 0), m_rows - 1);
-        return m_controlPoints[r * m_cols + c];
-    };
-    // Bicubic Catmull-Rom sample at continuous lattice coords
-    // (gx in [0,cols-1], gy in [0,rows-1]).
-    auto sample = [&](float gx, float gy) -> glm::vec2 {
-        int ix = (int)std::floor(gx); float fx = gx - (float)ix;
-        int iy = (int)std::floor(gy); float fy = gy - (float)iy;
-        glm::vec2 row[4];
-        for (int k = 0; k < 4; k++) {
-            int rr = iy - 1 + k;
-            row[k] = catmull(cp(ix - 1, rr), cp(ix, rr),
-                             cp(ix + 1, rr), cp(ix + 2, rr), fx);
-        }
-        return catmull(row[0], row[1], row[2], row[3], fy);
-    };
 
-    const int FX = (m_cols - 1) * S;   // fine quads across / down
-    const int FY = (m_rows - 1) * S;
-    const int stride = FX + 1;
-    std::vector<Vertex> verts;
-    verts.reserve(stride * (FY + 1));
-    for (int j = 0; j <= FY; j++) {
-        float gy = (float)j / (float)S;
-        float v  = gy / (float)(m_rows - 1);
-        for (int i = 0; i <= FX; i++) {
-            float gx = (float)i / (float)S;
-            float u  = gx / (float)(m_cols - 1);
-            glm::vec2 p = sample(gx, gy);
-            verts.push_back({p.x, p.y, u, v});
+    // Re-tessellate only when the lattice actually changed (drag, grid
+    // add/remove, substep change). The common steady-state frame skips
+    // straight to the draw — no CPU spline work, no buffer re-upload.
+    const bool dirty = m_meshedCols != m_cols || m_meshedRows != m_rows ||
+                       m_meshedSubsteps != S || m_meshedPoints != m_controlPoints;
+    if (dirty) {
+        auto cp = [&](int c, int r) -> glm::vec2 {
+            c = std::min(std::max(c, 0), m_cols - 1);
+            r = std::min(std::max(r, 0), m_rows - 1);
+            return m_controlPoints[r * m_cols + c];
+        };
+        // Bicubic Catmull-Rom sample at continuous lattice coords
+        // (gx in [0,cols-1], gy in [0,rows-1]).
+        auto sample = [&](float gx, float gy) -> glm::vec2 {
+            int ix = (int)std::floor(gx); float fx = gx - (float)ix;
+            int iy = (int)std::floor(gy); float fy = gy - (float)iy;
+            glm::vec2 row[4];
+            for (int k = 0; k < 4; k++) {
+                int rr = iy - 1 + k;
+                row[k] = catmull(cp(ix - 1, rr), cp(ix, rr),
+                                 cp(ix + 1, rr), cp(ix + 2, rr), fx);
+            }
+            return catmull(row[0], row[1], row[2], row[3], fy);
+        };
+
+        const int FX = (m_cols - 1) * S;   // fine quads across / down
+        const int FY = (m_rows - 1) * S;
+        const int stride = FX + 1;
+        std::vector<Vertex> verts;
+        verts.reserve(stride * (FY + 1));
+        for (int j = 0; j <= FY; j++) {
+            float gy = (float)j / (float)S;
+            float v  = gy / (float)(m_rows - 1);
+            for (int i = 0; i <= FX; i++) {
+                float gx = (float)i / (float)S;
+                float u  = gx / (float)(m_cols - 1);
+                glm::vec2 p = sample(gx, gy);
+                verts.push_back({p.x, p.y, u, v});
+            }
         }
-    }
-    std::vector<unsigned int> indices;
-    indices.reserve(FX * FY * 6);
-    for (int j = 0; j < FY; j++) {
-        for (int i = 0; i < FX; i++) {
-            unsigned int tl = j * stride + i, tr = tl + 1;
-            unsigned int bl = (j + 1) * stride + i, br = bl + 1;
-            indices.push_back(tl); indices.push_back(tr); indices.push_back(br);
-            indices.push_back(tl); indices.push_back(br); indices.push_back(bl);
+
+        // Same topology as the current GPU mesh (only positions moved, the
+        // usual case while dragging a handle) → glBufferSubData in place.
+        // Topology changed (grid size / substeps) → full re-upload.
+        if (m_meshedCols == m_cols && m_meshedRows == m_rows &&
+            m_meshedSubsteps == S && m_mesh.indexCount() == FX * FY * 6) {
+            m_mesh.updateVertices(verts);
+        } else {
+            std::vector<unsigned int> indices;
+            indices.reserve(FX * FY * 6);
+            for (int j = 0; j < FY; j++) {
+                for (int i = 0; i < FX; i++) {
+                    unsigned int tl = j * stride + i, tr = tl + 1;
+                    unsigned int bl = (j + 1) * stride + i, br = bl + 1;
+                    indices.push_back(tl); indices.push_back(tr); indices.push_back(br);
+                    indices.push_back(tl); indices.push_back(br); indices.push_back(bl);
+                }
+            }
+            m_mesh.upload(verts, indices);
         }
+        m_meshedPoints   = m_controlPoints;
+        m_meshedCols     = m_cols;
+        m_meshedRows     = m_rows;
+        m_meshedSubsteps = S;
     }
-    m_mesh.upload(verts, indices);
 
     m_shader.use();
     m_shader.setInt("uTexture", 0);

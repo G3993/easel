@@ -56,6 +56,11 @@ private:
 
     std::thread m_wsThread;
     std::thread m_sseThread;
+    // Live socket handles — stored so disconnect() can closesocket() them
+    // immediately, which unblocks any select()/recv() in progress and lets
+    // the threads exit in <50ms instead of waiting for a timeout to fire.
+    std::atomic<uintptr_t> m_wsSock{(uintptr_t)~0};  // INVALID_SOCKET
+    std::atomic<uintptr_t> m_sseSock{(uintptr_t)~0};
 
     std::string m_baseUrl;
     std::string m_sessionId;

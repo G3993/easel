@@ -24,6 +24,7 @@
 #endif
 #include <unordered_map>
 #include <deque>
+#include <future>
 
 #ifdef _WIN32
 #include "sources/WindowCaptureSource.h"
@@ -65,6 +66,8 @@
 #include "app/MIDIManager.h"
 #include "app/DataBus.h"
 #include "stage/StageView.h"
+#include "app/ProDJLink.h"
+#include "ui/TimecodePanel.h"
 
 #include "app/NetAdapters.h"
 
@@ -90,6 +93,8 @@
 #include <GLFW/glfw3.h>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 class Application {
 public:
@@ -113,6 +118,28 @@ private:
     void renderVoiceCommandBar();
     void startVoiceRecording();
     void stopVoiceRecording();
+    // Per-source rolling transcript state, for the *.recent FIFO + *.words delta.
+    struct TranscriptFeed {
+        std::string prevSegment;              // baseline for the per-event delta
+        std::vector<std::string> finalWords;  // committed words (FIFO history)
+    };
+    // Route a live transcript segment to three DataBus channels under `prefix`
+    // ("cue" or "etherea"):
+    //   <prefix>.latest — full current segment (unchanged contract; the whole
+    //                     growing utterance, for typewriter/reveal text shaders).
+    //   <prefix>.words  — only the words newly appended since the previous
+    //                     segment (per-event delta; mirrors etherea-ai's
+    //                     unprocessed-tail concept).
+    //   <prefix>.recent — a running FIFO of the last m_recentWordCap words that
+    //                     slides as you speak (committed words + current segment,
+    //                     windowed). This is the live "ticker" feed.
+    // `feed` holds per-source state; `isFinal` commits the current segment.
+    void pushTranscript(const std::string& prefix, TranscriptFeed& feed,
+                        const std::string& text, bool isFinal);
+    // Thin Cue-channel wrapper.
+    void pushCueWords(const std::string& text, bool isFinal) {
+        pushTranscript("cue", m_cueFeed, text, isFinal);
+    }
     char m_voiceTextInput[256] = "";
     std::deque<std::string> m_voiceLog;        // last N transcripts (recent first)
     std::string m_voiceLastEcho;               // formatted intent for the pill
@@ -138,6 +165,9 @@ private:
     // Output zones (replaces singular compositor/warp/FBO)
     std::vector<std::unique_ptr<OutputZone>> m_zones;
     int m_activeZone = 0;
+    // Monotonic composite-pass counter — drives idle release of per-zone
+    // scratch FBOs (OutputZone::releaseIdleScratch).
+    uint64_t m_compositeFrame = 0;
     int m_prevActiveZone = 0;
 
     // ── Multi-screen output mode ─────────────────────────────────────
@@ -183,9 +213,13 @@ private:
     // independent per-zone path and the spanned slice path). Returns an
     // active projector for the monitor, or nullptr if it isn't ready yet.
     ProjectorOutput* ensureProjector(int monitorIndex);
-    // Target frame-rate cap shown/edited in the Canvas section. 0 = uncapped
-    // (vsync only). >0 sleeps after swap to hold the frame to ~1/target sec.
+    // Target frame-rate cap shown/edited in the Canvas section. 0 = vsync
+    // (loop runs at the editor display's refresh). >0 disables vsync and
+    // busy-waits after swap to hold the frame to ~1/target sec.
     float m_targetFPS = 0.0f;
+    // Swap interval currently applied to the main context (-1 = unset). Driven
+    // each frame from m_targetFPS so toggling the Canvas Target flips vsync.
+    int m_appliedSwapInterval = -1;
     // Last workspace mode observed in renderUI. Used to detect transitions
     // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
     // reset show-specific UI state without polling every frame.
@@ -205,6 +239,12 @@ private:
     // an intentional blank doesn't get clobbered by stray room audio.
     // 0 = no active suppression.
     double      m_cueLatestSuppressUntil = 0.0;
+    // Per-source rolling transcript state (delta baseline + FIFO history).
+    // Touched only from the transcript write path.
+    TranscriptFeed m_cueFeed;
+    TranscriptFeed m_ethereaFeed;
+    // Max words shown in the *.recent rolling feed; user-adjustable (>=1).
+    int m_recentWordCap = 7;
     uint32_t m_nextLayerId = 1;
     OutputZone& activeZone() {
         if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size())
@@ -220,8 +260,9 @@ private:
     Mesh m_quad;
     ShaderProgram m_passthroughShader;
     ShaderProgram m_edgeBlendShader;
-    Framebuffer m_edgeBlendFBO;
-    Framebuffer m_maskPingPongFBO; // second FBO for multi-mask ping-pong
+    // Scratch FBOs for the post chain (edge blend, mask union, bloom, warp
+    // supersample) live per-zone on OutputZone — sharing them across
+    // mixed-resolution zones caused a destroy/realloc cycle every frame.
     Texture m_testPattern;
     Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
 
@@ -243,9 +284,7 @@ private:
     ShaderProgram m_bloomCompositeShader;
     ShaderProgram m_linearCopyShader;     // bloom copy-back, no ACES
     ShaderProgram m_warpDownsampleShader; // 4-tap explicit-offset SS → 1× downsample
-    Framebuffer   m_bloomBrightFBO;       // half-res, 16F
-    Framebuffer   m_bloomPingPongFBO[2];  // half-res, 16F
-    Framebuffer   m_bloomCompositeFBO;    // full-res, 16F
+    // Bloom FBOs are per-zone (OutputZone::bloom*) — see scratch FBO note above.
     // Global post bloom OFF by default — it was glowing every layer/shader and
     // reading as a soft haze. Crisp output is the default; flip on (or raise
     // strength) only when a deliberately glowy finish is wanted.
@@ -272,6 +311,8 @@ private:
     // Latest normalized MIDI CC values, indexed [channel][cc]. Updated each frame from polled events.
     float m_midiCCValues[16][128] = {};
     StageView m_stageView;
+    ProDJLink m_prodjlink;
+    TimecodePanel m_timecodePanel;
 #ifdef __APPLE__
     // MediaPipe-style body/hand/face tracking via Apple Vision. Toggled
     // from the Camera tab; feeds the DataBus vision.* keys each frame.
@@ -291,6 +332,7 @@ private:
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
     bool m_maskEditMode = false;
+    bool m_showTimecodeWindow = false; // Show-mode: Timecode window visible
 
     // Show-workspace preview zoom. Multiplier applied to the centered
     // live-output preview's height (then width follows aspect). 1.0 = fit
@@ -309,14 +351,37 @@ private:
     // at the TOP of the next frame so AppKit has time to settle the
     // window-style transition without racing the GL/ImGui dock setup.
     bool m_pendingExitFullscreen = false;
+    // Async close — blocking cleanup runs on a background thread while
+    // the main thread renders a spinner so the window stays responsive.
+    std::atomic<bool> m_closing{false};
+    std::atomic<bool> m_closingDone{false};
+    std::atomic<int>  m_closingStep{0};
+    std::thread       m_closingThread;
     int m_savedWindowX = 0, m_savedWindowY = 0;
     int m_savedWindowW = 1280, m_savedWindowH = 720;
+
+    // Splash screen shown immediately on launch
+    bool   m_showSplash = true;
+    double m_splashStartTime = 0.0;
+    void   renderSplash();
+
+    // Landing page shown after splash dismisses — skipped when the default
+    // project auto-loaded at startup (live/agent workflow restores the show
+    // across restarts; the landing page must not cover it).
+    bool m_showLanding = false;
+    bool m_autoLoadedProject = false;
+    int  m_landingSubView = 0; // 0=main 1=templates 2=recent
+    std::vector<std::string> m_recentProjects;
+    void renderLandingPage();
+    void loadRecentProjectsList();
+    void addRecentProject(const std::string& path);
 
     void updateSources();
     void compositeAndWarp();
     void compositeZone(OutputZone& zone);
     void presentOutputs();
     void renderReadbackFBO(OutputZone& zone);
+    void renderReadbackFBO(OutputZone& zone, Framebuffer& target, int width, int height);
     void renderUI();
     void renderMenuBar();
     // Inline brand mark + overflow menu drawn at the start of the workspace
@@ -415,6 +480,10 @@ private:
     // Idempotent managed shader overlay layer keyed by slot (composited above a
     // base source). Backs /easel/layer/ensure/shader.
     void ensureManagedShaderLayer(const std::string& slot, const std::string& shaderPath);
+    // Idempotent managed Fluid Simulation layer keyed by slot. The built-in fluid
+    // generator (addFluid) as an agent-managed, zone-assignable layer. Backs
+    // /easel/layer/ensure/fluid.
+    void ensureManagedFluidLayer(const std::string& slot);
     // Remove one managed layer by its exact key (drops an overlay/base layer).
     // Backs /easel/layer/remove-managed.
     void removeManagedLayer(const std::string& slot);
@@ -425,16 +494,24 @@ private:
     // and /easel/zone/layer.
     OutputZone* ensureZoneByName(const std::string& name);
     void ensureZoneNdi(const std::string& zoneName, const std::string& feedName);
+    // Set a zone's physical output at runtime: None (preview) / Fullscreen+monitor /
+    // NDI[+feed]. Backs /easel/zone/output; the render loop applies it next frame.
+    void setZoneOutput(const std::string& zoneName, const std::string& dest,
+                       int monitor, const std::string& ndiFeedName = std::string());
     void addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey);
     // Tear down a composite zone (stop its NDI feed). Backs /easel/zone/remove.
     void removeZoneByName(const std::string& zoneName);
 
 #ifdef HAS_NDI
     NDIOutput m_ndiOutput;
+    Framebuffer m_ndiFluxInputFBO;
     NDIFinder m_ndiFinder;
     std::vector<NDISenderInfo> m_ndiSources;
     bool m_ndiOutputEnabled = true;
-    void addNDISource(const std::string& senderName);
+    // Wire-rate cap applied to ALL NDI senders (global + per-zone) each
+    // frame; <= 0 = uncapped. Live-settable via OSC /easel/ndi/fps.
+    float m_ndiTargetFps = 60.0f;
+    void addNDISource(const std::string& senderName, const std::string& senderUrl = "");
     // Idempotent agent-driven NDI layer keyed by a stable "slot" (managedKey).
     // Re-ensuring the same slot reuses the layer and only reconnects when the
     // sender name changes, so /easel/layer/ensure/ndi never stacks duplicates.
@@ -566,8 +643,12 @@ private:
     std::string buildPlayJson();
     void        publishPlayIfChanged();
 
-    // Screenshot
+    // Screenshot. The flip + PNG encode runs on a worker thread (one job at
+    // a time) so an externally-triggered capture doesn't freeze the frame.
     void captureScreenshot(const std::string& path);
     void captureWindow(const std::string& path);
+    void writeScreenshotAsync(const std::string& path,
+                              std::vector<uint8_t> pixels, int w, int h);
     void pollScreenshotTrigger();
+    std::future<void> m_screenshotJob;
 };
