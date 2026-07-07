@@ -13012,6 +13012,12 @@ void Application::toggleEditorFullscreen() {
 }
 
 void Application::registerLayerWithZones(uint32_t layerId) {
+    // Scrub ghosts FIRST: zone sets hold raw ids and deleted layers leave
+    // theirs behind, so after a restart resets the id counter a NEW layer can
+    // recycle a ghost id and silently "join" zones it was never placed in —
+    // the 2026-07-07 painting-fx→FLUX-IN feedback loop. A just-created layer
+    // belongs to no zone, so erasing its id everywhere is always correct.
+    for (auto& z : m_zones) z->visibleLayerIds.erase(layerId);
     // Agent-managed feed layers (non-empty managedKey) are plumbing: they join
     // a zone only via explicit placement (addZoneLayerByKey / the bus-daisy
     // composite path), never this new-layer auto-insert. Without this, every
