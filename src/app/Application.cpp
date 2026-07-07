@@ -3526,6 +3526,14 @@ void Application::renderUI() {
                 // strings = [managedKey, paramName]; value = float/int arg, or
                 // strings[2] for text.
                 setManagedLayerParam(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/layer/bind-image"
+                       && msg.strings.size() >= 3) {
+                // Point a managed shader layer's image INPUT at another layer's
+                // texture — the remote twin of the desktop TEXTURE dropdown.
+                // strings = [managedKey, inputName, sourceRef]; sourceRef is a
+                // layer id, a managedKey, or a layer name. The per-frame
+                // bindings refresh keeps the texture id current afterwards.
+                bindManagedLayerImage(msg.strings[0], msg.strings[1], msg.strings[2]);
             } else if (msg.address == "/easel/zone/ensure"
                        && msg.strings.size() >= 2) {
                 // Composite/bus: ensure an output zone that publishes a named NDI
@@ -13533,6 +13541,41 @@ void Application::removeManagedLayer(const std::string& slot) {
             m_selectedLayer = m_layerStack.count() - 1;
         return;
     }
+}
+
+void Application::bindManagedLayerImage(const std::string& key, const std::string& name,
+                                        const std::string& sourceRef) {
+    if (key.empty() || name.empty() || sourceRef.empty()) return;
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key) continue;
+        if (!l->source || !l->source->isShader()) {
+            std::cerr << "[OSC] layer/bind-image: " << key << " is not a shader layer\n";
+            return;
+        }
+        auto* shader = static_cast<ShaderSource*>(l->source.get());
+        uint32_t asId = (uint32_t)atoi(sourceRef.c_str());
+        for (auto& src : m_layerStack.layers()) {
+            if (!src || src->id == l->id || !src->source) continue;
+            bool match = (asId != 0 && src->id == asId)
+                         || src->managedKey == sourceRef
+                         || src->name == sourceRef;
+            if (!match) continue;
+            // Texture id may still be 0 (source warming up) — the per-frame
+            // bindings refresh resolves it from sourceLayerId either way.
+            shader->bindImageInput(name,
+                                   src->source->textureId(),
+                                   src->source->width(),
+                                   src->source->height(),
+                                   src->id,
+                                   src->source->isFlippedV());
+            std::cerr << "[OSC] layer/bind-image: " << key << "." << name
+                      << " <- layer " << src->id << " (" << src->name << ")\n";
+            return;
+        }
+        std::cerr << "[OSC] layer/bind-image: no source layer matches '" << sourceRef << "'\n";
+        return;
+    }
+    std::cerr << "[OSC] layer/bind-image: no managed layer with key " << key << std::endl;
 }
 
 void Application::setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg) {

@@ -489,6 +489,7 @@ private:
     void removeManagedLayer(const std::string& slot);
     // Set an ISF param on a managed shader layer (by key). Backs /easel/layer/param.
     void setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg);
+    void bindManagedLayerImage(const std::string& key, const std::string& name, const std::string& sourceRef);
     // Agent composite/bus: find-or-create an Easel output zone, publish it as a
     // named NDI feed, and assign managed layers to it. Backs /easel/zone/ensure
     // and /easel/zone/layer.
