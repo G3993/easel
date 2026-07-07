@@ -12390,6 +12390,12 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
         m_undoStack.pushState(m_layerStack, m_selectedLayer);
         l->source = src;
         l->name = basename(shaderPath);
+        // A managed-slot swap is a fresh start: voice decay may have driven
+        // the layer's opacity to ~0 while a text shader was bound, and the
+        // stale msg binding keeps doing so for every later shader on this
+        // slot. Reset both; bindIfText re-binds for incoming text shaders.
+        l->opacity = 1.0f;
+        m_dataBus.bind(l->id, "msg", "");
         if (m_shaderClaw.isConnected()) m_shaderClaw.watchSource(shaderPath, src);
         bindIfText(l);
         return;
