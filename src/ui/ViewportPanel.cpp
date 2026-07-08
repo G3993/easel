@@ -136,11 +136,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
     // Skip the whole Canvas render when the workspace is flipped to
     // Stage or Show. Mapping mode REUSES this 2D output viewport (so the
     // corner-pin / mesh-warp / mask handles draw on the live composite),
-    // so it renders here too — only Stage and Show suppress it. Only one
-    // of the central windows submits per frame, so the dock never shows a
-    // tab bar.
+    // and Zones is the whole-house overview (live output + the Zones
+    // control panel), so both render here too — only Stage and Show
+    // suppress it. Only one of the central windows submits per frame, so
+    // the dock never shows a tab bar.
     if (UIManager::sMode != UIManager::WorkspaceMode::Canvas &&
-        UIManager::sMode != UIManager::WorkspaceMode::Mapping) { return; }
+        UIManager::sMode != UIManager::WorkspaceMode::Mapping &&
+        UIManager::sMode != UIManager::WorkspaceMode::Zones) { return; }
     // (Mode-transition Alpha fade removed — it made the panel translucent
     // during the cross-fade which exposed the GL backbuffer underneath as a
     // white flash. Re-introduce only with a non-translucent technique

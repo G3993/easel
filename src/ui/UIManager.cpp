@@ -1149,6 +1149,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         if (sMode == WorkspaceMode::Stage || sMode == WorkspaceMode::Mapping) {
             m_pendingFocus = "        ###Mapping";
             m_currentRightPanel = "        ###Mapping";
+        } else if (sMode == WorkspaceMode::Zones) {
+            // Zones hosts only the Zones panel in the right float — point
+            // the sticky selection at it so the focus re-apply doesn't try
+            // to raise a hidden Layers/Properties tab.
+            m_pendingFocus = "        ###Zones";
+            m_currentRightPanel = "        ###Zones";
         } else {
             m_pendingFocus = "Layers";
             // Reset the sticky right-dock selection back to Parameters —
@@ -1376,7 +1382,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         bool leftHasContent  = false;
         bool rightHasContent = isPanelVisible("Layers")
                             || isPanelVisible("Properties") || isPanelVisible("Mapping")
-                            || isPanelVisible("Sources")
+                            || isPanelVisible("Sources")    || isPanelVisible("Zones")
                             || isPanelVisible("Audio")      || isPanelVisible("MIDI");
 
         // Left host — shifted right of the activity rail. The +12 matches the
@@ -1445,10 +1451,12 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                 // host, BEFORE the DockSpace. The auto tab bar below it is
                 // still drawn by ImGui (kept for tab-switch machinery) but
                 // overpainted invisibly in drawInspectorTabIcons.
-                // Mapping mode hosts ONLY the Mapping panel, so the pill
-                // switcher would just be a row of dead/duplicate icons —
-                // skip it and let the warp/mask params start at the top.
-                if (sMode != WorkspaceMode::Mapping) {
+                // Mapping mode hosts ONLY the Mapping panel (and Zones only
+                // the Zones panel), so the pill switcher would just be a row
+                // of dead/duplicate icons — skip it and let the panel body
+                // start at the top.
+                if (sMode != WorkspaceMode::Mapping &&
+                    sMode != WorkspaceMode::Zones) {
                     renderRightDockNavBar(QuickNavTab::None);
                 }
                 // Shrink the auto tab bar's height to ~font height so it
