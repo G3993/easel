@@ -1,6 +1,43 @@
 {
   "layers": [
     {
+      "audioBindings": [
+        {
+          "param": "autoSpeed",
+          "rangeMax": 1.5466054677963257,
+          "rangeMin": 0.8570054769515991,
+          "signal": 4,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "bloomIntensity",
+          "rangeMax": 0.8143168091773987,
+          "rangeMin": 1.1591167449951172,
+          "signal": 8,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "curl",
+          "rangeMax": 37.88935852050781,
+          "rangeMin": 27.54535675048828,
+          "signal": 8,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "densityDissipation",
+          "rangeMax": 1.9773643016815186,
+          "rangeMin": 2.666964292526245,
+          "signal": 7,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "splatRadius",
+          "rangeMax": 0.8404502272605896,
+          "rangeMin": 1.0904302597045898,
+          "signal": 1,
+          "smoothing": 0.9071999788284302
+        }
+      ],
       "audioReactive": false,
       "audioStrength": 0.15000000596046448,
       "blendMode": 0,
@@ -12,27 +49,29 @@
         "autoPattern": 0,
         "autoRate": 24.0,
         "autoScale": 0.30000001192092896,
-        "autoSpeed": 1.0,
+        "autoSpeed": 0.8570054769515991,
         "bloom": true,
-        "bloomIntensity": 0.800000011920929,
+        "bloomIntensity": 1.1591167449951172,
         "bloomSoftKnee": 0.699999988079071,
         "bloomThreshold": 0.6000000238418579,
-        "curl": 30.0,
-        "densityDissipation": 1.0,
+        "curl": 27.54535675048828,
+        "densityDissipation": 2.666964292526245,
         "hdrDye": true,
         "imageEnabled": false,
         "imageIntensity": 0.10000000149011612,
+        "imageReform": false,
         "imageSourceLayerId": 0,
         "pressure": 0.800000011920929,
         "pressureIters": 20,
+        "reformRate": 0.4000000059604645,
         "shading": true,
         "splatIntensity": 0.15000000596046448,
-        "splatRadius": 0.25,
+        "splatRadius": 1.0904302597045898,
         "sunrays": true,
         "sunraysWeight": 1.0,
         "velocityDissipation": 0.20000000298023224
       },
-      "id": 47,
+      "id": 62,
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
@@ -63,7 +102,152 @@
       "feather": 0.0,
       "flipH": false,
       "flipV": false,
-      "id": 55,
+      "id": 70,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
+      "ndiEnabled": false,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "sourcePath": "DAISYHQ (ETHEREA FluxRT)",
+      "sourceType": "NDI",
+      "sourceUrl": "192.168.1.151:5964",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "transitionDuration": 0.5,
+      "transitionType": 0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 63,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "text_typewriter.fs",
+      "ndiEnabled": false,
+      "opacity": 2.426103310426697e-05,
+      "position": [
+        0.007563531398773193,
+        -0.15080714225769043
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "shaderParams": [
+        {
+          "name": "msg",
+          "type": "text",
+          "value": "WATERCOLOUR PENGUIN EMERGES, SYMBOLIZING PLAYFUL RESILIENCE"
+        },
+        {
+          "name": "fontFamily",
+          "type": "long",
+          "value": 0.0
+        },
+        {
+          "name": "speed",
+          "type": "float",
+          "value": 12.0
+        },
+        {
+          "name": "cursorBlink",
+          "type": "float",
+          "value": 2.0
+        },
+        {
+          "name": "textScale",
+          "type": "float",
+          "value": 0.6710000038146973
+        },
+        {
+          "name": "kerning",
+          "type": "float",
+          "value": 1.0
+        },
+        {
+          "name": "oscSpeed",
+          "type": "float",
+          "value": 0.0
+        },
+        {
+          "name": "oscAmount",
+          "type": "float",
+          "value": 0.0
+        },
+        {
+          "name": "oscSpread",
+          "type": "float",
+          "value": 0.5
+        },
+        {
+          "name": "textColor",
+          "type": "color",
+          "value": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "bgColor",
+          "type": "color",
+          "value": [
+            0.019999999552965164,
+            0.019999999552965164,
+            0.03999999910593033,
+            1.0
+          ]
+        },
+        {
+          "name": "voiceSync",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "name": "transparentBg",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "name": "loop",
+          "type": "bool",
+          "value": false
+        }
+      ],
+      "sourcePath": "C:\\Users\\Daisy\\ShaderClaw3\\shaders/text_typewriter.fs",
+      "sourceType": "Shader",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "transitionDuration": 0.5,
+      "transitionType": 0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 71,
       "managedKey": "screen1",
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
@@ -82,6 +266,38 @@
       ],
       "sourcePath": "DAISYHQ (Easel)",
       "sourceType": "NDI",
+      "tileX": 1.0,
+      "tileY": 1.0,
+      "transitionDuration": 0.5,
+      "transitionType": 0,
+      "visible": true
+    },
+    {
+      "audioReactive": false,
+      "audioStrength": 0.15000000596046448,
+      "blendMode": 0,
+      "feather": 0.0,
+      "flipH": false,
+      "flipV": false,
+      "id": 72,
+      "mosaicDensity": 4.0,
+      "mosaicMode": 0,
+      "mosaicSpin": 0.0,
+      "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
+      "ndiEnabled": false,
+      "opacity": 1.0,
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0.0,
+      "scale": [
+        1.0,
+        1.0
+      ],
+      "sourcePath": "DAISYHQ (ETHEREA FluxRT)",
+      "sourceType": "NDI",
+      "sourceUrl": "192.168.1.151:5964",
       "tileX": 1.0,
       "tileY": 1.0,
       "transitionDuration": 0.5,
@@ -217,21 +433,149 @@
       },
       "name": "Main",
       "warpMode": 0
+    },
+    {
+      "cornerPin": [
+        [
+          -1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          -1.0,
+          1.0
+        ]
+      ],
+      "meshWarp": {
+        "cols": 5,
+        "points": [
+          [
+            -1.0,
+            -1.0
+          ],
+          [
+            -0.5,
+            -1.0
+          ],
+          [
+            0.0,
+            -1.0
+          ],
+          [
+            0.5,
+            -1.0
+          ],
+          [
+            1.0,
+            -1.0
+          ],
+          [
+            -1.0,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            0.0,
+            -0.5
+          ],
+          [
+            0.5,
+            -0.5
+          ],
+          [
+            1.0,
+            -0.5
+          ],
+          [
+            -1.0,
+            0.0
+          ],
+          [
+            -0.5,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.5,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            -1.0,
+            0.5
+          ],
+          [
+            -0.5,
+            0.5
+          ],
+          [
+            0.0,
+            0.5
+          ],
+          [
+            0.5,
+            0.5
+          ],
+          [
+            1.0,
+            0.5
+          ],
+          [
+            -1.0,
+            1.0
+          ],
+          [
+            -0.5,
+            1.0
+          ],
+          [
+            0.0,
+            1.0
+          ],
+          [
+            0.5,
+            1.0
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ],
+        "rows": 5
+      },
+      "name": "Zone 2",
+      "warpMode": 0
     }
   ],
   "ndiNetwork": {
     "discoveryServer": "",
     "enabled": true,
     "extraIps": "",
-    "interface": "{DAD89322-084D-47C8-9E3C-17AAE36062E1}",
-    "interfaceIp": "192.168.0.143",
+    "interface": "{4EF55810-B1B0-40E5-B436-08BF1E78725F}",
+    "interfaceIp": "192.168.1.151",
     "useDiscoveryServer": false
   },
   "timeline": {
     "duration": 60.0,
     "lanes": [],
     "loop": false,
-    "nextClipId": 149,
+    "nextClipId": 188,
     "nextLaneId": 1,
     "nextSectionId": 1,
     "nextTransitionId": 1,
@@ -242,25 +586,61 @@
         "clips": [
           {
             "duration": 60.0,
-            "id": 133,
+            "id": 165,
             "name": "Fluid Simulation",
             "startTime": 0.0
           }
         ],
-        "layerId": 47,
+        "layerId": 62,
         "name": "Fluid Simulation"
       },
       {
         "clips": [
           {
             "duration": 60.0,
-            "id": 148,
+            "id": 166,
+            "name": "text_typewriter.fs",
+            "startTime": 0.0
+          }
+        ],
+        "layerId": 63,
+        "name": "text_typewriter.fs"
+      },
+      {
+        "clips": [
+          {
+            "duration": 60.0,
+            "id": 173,
+            "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
+            "startTime": 0.0
+          }
+        ],
+        "layerId": 70,
+        "name": "NDI: DAISYHQ (ETHEREA FluxRT)"
+      },
+      {
+        "clips": [
+          {
+            "duration": 60.0,
+            "id": 177,
             "name": "NDI: DAISYHQ (Easel)",
             "startTime": 0.0
           }
         ],
-        "layerId": 55,
+        "layerId": 71,
         "name": "NDI: DAISYHQ (Easel)"
+      },
+      {
+        "clips": [
+          {
+            "duration": 60.0,
+            "id": 182,
+            "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
+            "startTime": 0.0
+          }
+        ],
+        "layerId": 72,
+        "name": "NDI: DAISYHQ (ETHEREA FluxRT)"
       }
     ],
     "transitions": [],
@@ -270,15 +650,35 @@
   "version": 2,
   "zones": [
     {
-      "height": 2160,
+      "height": 1080,
       "mappingIndex": 0,
       "name": "Main",
       "ndiStreamName": "",
-      "outputDest": 1,
-      "outputMonitor": 1,
-      "showAllLayers": true,
-      "visibleLayerIds": [],
-      "width": 3840
+      "outputDest": 0,
+      "outputMonitor": -1,
+      "rawNdiName": false,
+      "showAllLayers": false,
+      "visibleLayerIds": [
+        62
+      ],
+      "width": 1920
+    },
+    {
+      "height": 1080,
+      "mappingIndex": 1,
+      "name": "Zone 2",
+      "ndiStreamName": "",
+      "outputDest": 0,
+      "outputMonitor": -1,
+      "rawNdiName": false,
+      "showAllLayers": false,
+      "visibleLayerIds": [
+        62,
+        63,
+        70,
+        72
+      ],
+      "width": 1920
     }
   ]
 }
