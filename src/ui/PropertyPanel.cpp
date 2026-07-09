@@ -59,7 +59,9 @@ static std::string humanizeName(const std::string& s) {
         }
         bool boundary = i > 0 && std::isupper((unsigned char)c) &&
                         !std::isupper((unsigned char)s[i - 1]);
-        if (boundary) out += ' ';
+        // "EASING_TYPE": the underscore already appended a space — don't let
+        // the following capital letter's camel boundary add a second one.
+        if (boundary && !out.empty() && out.back() != ' ') out += ' ';
         out += c;
     }
     return out;
@@ -3670,8 +3672,8 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             // Audio reactivity: a continuous Subtle->Intense slider + Shuffle
             // that auto-binds a random set of params to the music (lives here
             // in VJ now). Shuffle picks new params centred randomly in range.
-            ImGui::Dummy(ImVec2(0, 4));
-            ImGui::TextDisabled("Audio reactivity");
+            // (No local label — audioPresetRow draws its own "Audio
+            // Reactivity" groupHeader now; a TextDisabled here doubled it.)
             {
                 std::vector<PresetParam> pp = {
                     { "brightness",     f3->m_brightness,     0.0f,  6.0f },
