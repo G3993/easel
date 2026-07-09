@@ -16,6 +16,15 @@ struct ISFInput {
     std::string name;
     std::string type; // "float", "color", "bool", "point2D", "text"
 
+    // Optional ISF JSON fields used only for display clarity — never touched
+    // by persistence, audio/image/text bindings, or event-target lookups
+    // (all of those key by `name`, confirmed safe to add without migration).
+    //   "LABEL": human-readable param name, shown instead of the raw NAME.
+    //   "GROUP": clusters params under a subtle sub-header in the panel;
+    //            empty = ungrouped (renders exactly as before this field existed).
+    std::string label;
+    std::string group;
+
     // Current value (variant for type safety)
     std::variant<float, glm::vec4, bool, glm::vec2, std::string> value;
 

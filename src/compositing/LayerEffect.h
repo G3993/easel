@@ -1,4 +1,5 @@
 #pragma once
+#include "app/EaselAudio.h"
 #include <string>
 
 enum class EffectType {
@@ -68,4 +69,7 @@ struct LayerEffect {
     // modulated = base + audioAmount * band. Reuses CompositeEngine::m_audio.
     int   audioSignal = -1;     // -1=off, 0=bass, 1=mid, 2=treble, 3=beat
     float audioAmount = 0.0f;   // modulation depth (0-1, scaled per effect)
+    // EaselAudio conditioning (visual-binding preset 10/500ms) — per-effect
+    // mods previously had no smoothing. Runtime-only state, not serialized.
+    easelaudio::Conditioner audioCond{easelaudio::ConditionerParams::visualBinding()};
 };

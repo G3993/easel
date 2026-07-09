@@ -1,5 +1,6 @@
 #pragma once
 #include "render/Texture.h"
+#include "app/EaselAudio.h"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -184,6 +185,34 @@ public:
     float beatDecay() const { return m_beatDecay; }
     bool beatDetected() const { return m_beatThisFrame; }
 
+    // --- EaselAudio v1: temperament matrix (Synesthesia taxonomy) ---------
+    // Hit = dual-follower onset (AD 10ms/350ms), Presence = slow macro
+    // envelope (1.5s/4s), Time = monotonic clock += dt*band (UNCLAMPED —
+    // use as a time source; pauses in silence, can never jitter).
+    float bassHit() const  { return m_hitOut[0]; }
+    float midHit() const   { return m_hitOut[1]; }
+    float highHit() const  { return m_hitOut[2]; }
+    float bassPresence() const  { return m_presOut[0]; }
+    float midPresence() const   { return m_presOut[1]; }
+    float highPresence() const  { return m_presOut[2]; }
+    float levelPresence() const { return m_presOut[3]; }   // full-mix presence
+    float bassTime() const  { return m_timeClock[0]; }
+    float midTime() const   { return m_timeClock[1]; }
+    float highTime() const  { return m_timeClock[2]; }
+    float levelTime() const { return m_timeClock[3]; }
+
+    // --- EaselAudio v1: detected tempo (autocorrelation, 50-220 BPM) ------
+    // Phase-locks the app BPMSync clock via Application; tap/OSC override.
+    float detectedBPM() const           { return m_tempo.bpm; }
+    float detectedBPMConfidence() const { return m_tempo.confidence; }
+
+    // --- EaselAudio v1: tier-1 pseudo-stems (LR band split + causal median
+    // HPSS — see computeStems). AGC'd + stem-conditioned (extra release). ---
+    enum Stem { StemBass = 0, StemDrums, StemMelody, StemAir, StemVocal, StemCount };
+    float stem(int s) const         { return m_stemOut[s]; }
+    float stemHit(int s) const      { return m_stemHitOut[s]; }
+    float stemPresence(int s) const { return m_stemPresOut[s]; }
+
     // FFT texture (128x1 GL_R8, power spectrum normalized 0-255)
     GLuint fftTexture() const { return m_fftTex.id(); }
 
@@ -260,10 +289,28 @@ private:
 
     // FFT output (power spectrum, 256 bins)
     float m_spectrum[kBins] = {};
+    bool  m_specDirty = false;   // set by runFFT, consumed by computeStems
 
-    // Raw band energies (before smoothing)
+    // Cached kiss_fft config — allocated once, reused every frame
+    // (was alloc/freed per runFFT call). Opaque to avoid kiss_fft.h here.
+    void* m_fftCfg = nullptr;
+
+    // Pre-AGC band energies (linear, manual gains applied) — the
+    // self-normalizing detectors (beat, Hits) feed on these so they stay
+    // level-independent; the AGC'd 0-1 values below are what shaders see.
+    float m_bandE[4] = {0, 0, 0, 0};   // bass/lowMid/highMid/treble
+    float m_rmsLin = 0;                // linear RMS (pre-AGC, post-inputGain)
+
+    // Raw band energies (post-AGC + gate + curves, before temporal smoothing)
     float m_rawBass = 0, m_rawLowMid = 0, m_rawHighMid = 0, m_rawTreble = 0;
     float m_rawRMS = 0;
+
+    // dB-domain AGC per band (EaselAudio §3) — replaces the old fixed magic
+    // gains 60/100/200/400x and the 4x mic seed. Default ON; the user Gain
+    // sliders remain as a defeatable manual trim applied before the AGC.
+    easelaudio::DbAGC m_bandAgc[4];
+    easelaudio::DbAGC m_rmsAgc;
+    easelaudio::DbAGC m_subAgc;
 
     // User gains
     float m_inputGain = 1.0f;   // master input multiplier (applied to RMS + bands)
@@ -290,12 +337,47 @@ private:
     float m_smoothBass = 0, m_smoothLowMid = 0, m_smoothHighMid = 0, m_smoothTreble = 0;
     float m_smoothRMS = 0;
 
-    // Beat detection
+    // Beat detection — dual fast/slow follower crossing on the PRE-AGC
+    // bass-weighted energy (self-normalizing; replaced the naive
+    // energy-vs-1.4x-rolling-average trigger). Cooldown + decay semantics
+    // of beatDecay()/beatDetected() are unchanged.
     float m_beatDecay = 0;
     bool m_beatThisFrame = false;
-    float m_energyHistory[32] = {};
-    int m_energyHistoryPos = 0;
+    float m_beatFast = 0, m_beatSlow = 0;
     float m_beatCooldown = 0; // seconds remaining
+
+    // --- EaselAudio v1 state ------------------------------------------------
+    // Temperament matrix: [0]=bass [1]=mid [2]=high ([3]=mix for pres/time)
+    easelaudio::HitDetector m_hitDet[3];
+    easelaudio::PresenceEnv m_presEnv[4];
+    float m_hitOut[3]  = {0, 0, 0};
+    float m_presOut[4] = {0, 0, 0, 0};
+    float m_timeClock[4] = {0, 0, 0, 0};   // unclamped integrated clocks
+
+    // Tempo
+    easelaudio::TempoTracker m_tempo;
+    float m_fluxNorm = 0;   // unsmoothed AGC-normalized flux (onset strength)
+
+    // Pseudo-stems: causal median HPSS over a 31-frame magnitude-spectrum
+    // history + soft band split. Energies are pre-AGC; outputs conditioned
+    // with the stem role preset (+50% release vs mix bands).
+    static constexpr int kHPSSFrames = 31;
+    static constexpr int kHPSSKernel = 31;   // frequency-median kernel
+    float m_specHist[kHPSSFrames][kBins] = {};
+    int   m_specHistPos = 0;
+    int   m_specHistCount = 0;
+    float m_stemE[StemCount] = {0, 0, 0, 0, 0};      // pre-AGC energies
+    float m_vocalFluxGate = 0;
+    float m_vocalFluxAvg = 1e-4f;                    // running normalizer
+    float m_lastVocalFlux = 0;                       // 2-6kHz positive flux
+    easelaudio::DbAGC       m_stemAgc[StemCount];
+    easelaudio::Conditioner m_stemCond[StemCount];
+    easelaudio::HitDetector m_stemHitDet[StemCount];
+    easelaudio::PresenceEnv m_stemPresEnv[StemCount];
+    float m_stemOut[StemCount]     = {0, 0, 0, 0, 0};
+    float m_stemHitOut[StemCount]  = {0, 0, 0, 0, 0};
+    float m_stemPresOut[StemCount] = {0, 0, 0, 0, 0};
+    bool  m_stemInit = false;
 
     // FFT texture
     Texture m_fftTex;
@@ -369,6 +451,9 @@ private:
 
     void runFFT();
     void computeBands();
+    void conditionBands(float dt);          // dB AGC + gate + curves (every frame)
+    void computeTemperaments(float dt);     // Hit/Presence/Time matrix + tempo feed
+    void computeStems(float dt);            // tier-1 pseudo-stems (HPSS + bands)
     void computeSpectralFeatures(float dt); // Tier 2 + sub/punch over m_spectrum
     void computeAffect(float dt);           // Tier 3 valence/arousal/tension/...
     void computeStructure(float dt);        // Tier 4 energy/buildup/drop/section/layers

@@ -71,8 +71,10 @@ bool ShaderSource::parseISF(const std::string& source) {
         if (j.contains("INPUTS") && j["INPUTS"].is_array()) {
             for (const auto& input : j["INPUTS"]) {
                 ISFInput param;
-                param.name = input.value("NAME", "");
-                param.type = input.value("TYPE", "float");
+                param.name  = input.value("NAME", "");
+                param.type  = input.value("TYPE", "float");
+                param.label = input.value("LABEL", "");
+                param.group = input.value("GROUP", "");
 
                 if (param.type == "float") {
                     param.minVal = input.contains("MIN") ? jsonToFloat(input["MIN"], 0.0f) : 0.0f;
@@ -323,6 +325,20 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform float audioPalTemp, audioPalSat;\n";
     // Harmony scalars (chroma[] + chroma/occupancy textures land with the palette engine)
     out << "uniform float audioDominantPitch, audioMajorMinor, audioHCDF;\n";
+    // ── EaselAudio v1 (spec/easel_audio_bus.json) ─────────────────────
+    // Temperament matrix — Hit / Presence / Time per band + mix.
+    // (audioLevelPresence: the schema's mix "audioPresence" name is already
+    // taken by the vec4 per-band presence uniform above — nothing renamed.)
+    out << "uniform float audioBassHit, audioMidHit, audioHighHit;\n";
+    out << "uniform float audioBassPresence, audioMidPresence, audioHighPresence, audioLevelPresence;\n";
+    out << "uniform float audioBassTime, audioMidTime, audioHighTime, audioTime;\n";
+    // Rhythm bus — detected tempo confidence + multi-beat phase ramps + eased one-shots
+    out << "uniform float audioBPMConfidence, audioPhase2, audioPhase4, audioPhase8, audioPhase16;\n";
+    out << "uniform float audioOnBeat, audioToggleOnBeat;\n";
+    // Tier-1 pseudo-stems (band split + causal median HPSS) + temperaments
+    out << "uniform float stemBass, stemDrums, stemMelody, stemAir, stemVocal;\n";
+    out << "uniform float stemBassHit, stemDrumsHit, stemMelodyHit, stemAirHit, stemVocalHit;\n";
+    out << "uniform float stemBassPresence, stemDrumsPresence, stemMelodyPresence, stemAirPresence, stemVocalPresence;\n";
 
     // Shader-Claw voice reactivity builtins
     if (isfBody.find("_voiceGlitch") != std::string::npos) {
@@ -812,6 +828,42 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
         m_shader.setFloat("audioDominantPitch", f.dominantPitch);
         m_shader.setFloat("audioMajorMinor", f.majorMinor);
         m_shader.setFloat("audioHCDF", f.hcdf);
+        // ── EaselAudio v1 — temperament matrix ─────────────────────────
+        m_shader.setFloat("audioBassHit", f.bassHit);
+        m_shader.setFloat("audioMidHit", f.midHit);
+        m_shader.setFloat("audioHighHit", f.highHit);
+        m_shader.setFloat("audioBassPresence", f.bassPresence);
+        m_shader.setFloat("audioMidPresence", f.midPresence);
+        m_shader.setFloat("audioHighPresence", f.highPresence);
+        m_shader.setFloat("audioLevelPresence", f.levelPresence);
+        m_shader.setFloat("audioBassTime", f.bassTime);
+        m_shader.setFloat("audioMidTime", f.midTime);
+        m_shader.setFloat("audioHighTime", f.highTime);
+        m_shader.setFloat("audioTime", f.levelTime);
+        // Rhythm bus
+        m_shader.setFloat("audioBPMConfidence", f.bpmConfidence);
+        m_shader.setFloat("audioPhase2", f.phase2);
+        m_shader.setFloat("audioPhase4", f.phase4);
+        m_shader.setFloat("audioPhase8", f.phase8);
+        m_shader.setFloat("audioPhase16", f.phase16);
+        m_shader.setFloat("audioOnBeat", f.onBeat);
+        m_shader.setFloat("audioToggleOnBeat", f.toggleOnBeat);
+        // Pseudo-stems + temperaments
+        m_shader.setFloat("stemBass", f.stemBass);
+        m_shader.setFloat("stemDrums", f.stemDrums);
+        m_shader.setFloat("stemMelody", f.stemMelody);
+        m_shader.setFloat("stemAir", f.stemAir);
+        m_shader.setFloat("stemVocal", f.stemVocal);
+        m_shader.setFloat("stemBassHit", f.stemBassHit);
+        m_shader.setFloat("stemDrumsHit", f.stemDrumsHit);
+        m_shader.setFloat("stemMelodyHit", f.stemMelodyHit);
+        m_shader.setFloat("stemAirHit", f.stemAirHit);
+        m_shader.setFloat("stemVocalHit", f.stemVocalHit);
+        m_shader.setFloat("stemBassPresence", f.stemBassPresence);
+        m_shader.setFloat("stemDrumsPresence", f.stemDrumsPresence);
+        m_shader.setFloat("stemMelodyPresence", f.stemMelodyPresence);
+        m_shader.setFloat("stemAirPresence", f.stemAirPresence);
+        m_shader.setFloat("stemVocalPresence", f.stemVocalPresence);
     }
 
     // Font atlas for text shaders

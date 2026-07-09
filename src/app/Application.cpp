@@ -771,21 +771,15 @@ void Application::run() {
                 // Legacy single-device mode
                 m_audioAnalyzer.setDevice(m_selectedAudioDevice);
 #ifdef HAS_FFMPEG
-                // Mic input is far quieter than system-audio loopback (which is
-                // the full digital signal), so the band scaling tuned for
-                // loopback leaves a mic barely registering at 1.0× gain — the
-                // audio-reactivity presets then look dead. On a *transition* to
-                // a capture device, seed a sensible mic input gain so reactivity
-                // "just works" like system audio; on a transition back to
-                // loopback, restore unity. Only fires on device change, so it
-                // never fights the user's manual Gain slider afterwards.
+                // Mic-vs-loopback level differences are handled by the
+                // analyzer's dB-domain AGC now (EaselAudio §3), so device
+                // changes just reset the manual trim to unity — the old 4x
+                // mic seed is gone. The Gain slider remains a pure manual
+                // trim in front of the AGC.
                 {
                     static int sGainAppliedFor = -999;
                     if (m_selectedAudioDevice != sGainAppliedFor) {
-                        bool toMic = (m_selectedAudioDevice >= 0 &&
-                                      m_selectedAudioDevice < (int)m_audioDevices.size() &&
-                                      m_audioDevices[m_selectedAudioDevice].isCapture);
-                        m_audioAnalyzer.inputGain() = toMic ? 4.0f : 1.0f;
+                        m_audioAnalyzer.inputGain() = 1.0f;
                         sGainAppliedFor = m_selectedAudioDevice;
                     }
                 }
@@ -815,7 +809,94 @@ void Application::run() {
             }
             m_audioAnalyzer.update(dt);
             m_audioRMS = m_audioAnalyzer.smoothedRMS();
+            // EaselAudio: the detected tempo (autocorrelation + confidence)
+            // phase-locks the BPMSync clock; tap tempo and OSC /easel/bpm
+            // remain overrides. Detected onsets pull the phase (light PLL).
+            m_bpmSync.feedDetected(m_audioAnalyzer.detectedBPM(),
+                                   m_audioAnalyzer.detectedBPMConfidence());
+            if (m_audioAnalyzer.beatDetected()) {
+                m_bpmSync.beatHint(m_audioAnalyzer.detectedBPMConfidence());
+            }
             m_bpmSync.update(dt);
+
+            // ── EaselAudio → agent-SDK telemetry (spec §6, SDK issue 12) ──
+            // Emit each bus float as OSC /easel/audio/<uniformName> toward
+            // the SDK listener (send target set in init: 127.0.0.1:9001) at
+            // ~20Hz — delivery decoupled from render rate. UDP fire-and-
+            // forget: costs nothing when nobody listens.
+            {
+                static float sBusEmitAcc = 1.0f;   // emit immediately on start
+                sBusEmitAcc += dt;
+                constexpr float kBusEmitPeriod = 0.05f;   // 20 Hz
+                if (sBusEmitAcc >= kBusEmitPeriod) {
+                    sBusEmitAcc = std::fmod(sBusEmitAcc, kBusEmitPeriod);
+                    AudioAnalyzer& a = m_audioAnalyzer;
+                    auto emit = [&](const char* name, float v) {
+                        m_oscManager.sendFloat(std::string("/easel/audio/") + name, v);
+                    };
+                    // Core (legacy quartet + existing bus — AGC'd)
+                    emit("audioLevel", a.smoothedRMS());
+                    emit("audioBass", a.bass());
+                    emit("audioMid", (a.lowMid() + a.highMid()) * 0.5f);
+                    emit("audioHigh", a.treble());
+                    emit("audioSub", a.sub());
+                    emit("audioTreble", a.treble());
+                    emit("audioEnergy", a.energy());
+                    emit("audioBrightness", a.brightness());
+                    // Events
+                    emit("audioPunch", a.punch());
+                    emit("audioBeatPulse", m_bpmSync.beatPulse());
+                    emit("audioOnset", a.onset());
+                    emit("audioBeat", a.beatDecay());
+                    // Temperament matrix
+                    emit("audioBassHit", a.bassHit());
+                    emit("audioMidHit", a.midHit());
+                    emit("audioHighHit", a.highHit());
+                    emit("audioBassPresence", a.bassPresence());
+                    emit("audioMidPresence", a.midPresence());
+                    emit("audioHighPresence", a.highPresence());
+                    // Schema name for the mix presence is audioPresence; the
+                    // GLSL uniform is audioLevelPresence (vec4 name clash) —
+                    // emit both so schema-driven and shader-driven listeners
+                    // each find their key.
+                    emit("audioPresence", a.levelPresence());
+                    emit("audioLevelPresence", a.levelPresence());
+                    emit("audioBassTime", a.bassTime());
+                    emit("audioMidTime", a.midTime());
+                    emit("audioHighTime", a.highTime());
+                    emit("audioTime", a.levelTime());
+                    // Rhythm bus
+                    {
+                        bool manual = m_bpmSync.source() == BPMSync::Source::Manual;
+                        float conf = manual ? 1.0f : a.detectedBPMConfidence();
+                        emit("audioBPM", m_bpmSync.bpm());
+                        emit("audioBPMConfidence", conf);
+                        emit("audioBeatPhase", m_bpmSync.beatPhase());
+                        emit("audioBarPhase", m_bpmSync.barPhase());
+                        emit("audioPhase2", m_bpmSync.phaseN(2));
+                        emit("audioPhase4", m_bpmSync.phaseN(4));
+                        emit("audioPhase8", m_bpmSync.phaseN(8));
+                        emit("audioPhase16", m_bpmSync.phaseN(16));
+                        float t = std::min(std::max((conf - 0.25f) / 0.20f, 0.0f), 1.0f);
+                        float lock01 = t * t * (3.0f - 2.0f * t);
+                        emit("audioOnBeat", m_bpmSync.onBeat() * lock01 + a.onset() * (1.0f - lock01));
+                        emit("audioToggleOnBeat", m_bpmSync.toggleOnBeat());
+                    }
+                    // Tier-1 pseudo-stems + temperaments
+                    static const char* kStemNames[AudioAnalyzer::StemCount] = {
+                        "stemBass", "stemDrums", "stemMelody", "stemAir", "stemVocal" };
+                    static const char* kStemHitNames[AudioAnalyzer::StemCount] = {
+                        "stemBassHit", "stemDrumsHit", "stemMelodyHit", "stemAirHit", "stemVocalHit" };
+                    static const char* kStemPresNames[AudioAnalyzer::StemCount] = {
+                        "stemBassPresence", "stemDrumsPresence", "stemMelodyPresence",
+                        "stemAirPresence", "stemVocalPresence" };
+                    for (int s = 0; s < AudioAnalyzer::StemCount; s++) {
+                        emit(kStemNames[s], a.stem(s));
+                        emit(kStemHitNames[s], a.stemHit(s));
+                        emit(kStemPresNames[s], a.stemPresence(s));
+                    }
+                }
+            }
 
             // Per-zone push-to-talk mics: multi-floor/multi-room installs can
             // give each zone its own independent mic input. Capture only runs
@@ -1422,6 +1503,45 @@ void Application::updateSources() {
                     af.dominantPitch = a.dominantPitch(); af.majorMinor = a.majorMinor();
                     for (int ci = 0; ci < 12; ci++) af.chroma[ci] = a.chroma()[ci];
                     af.fftTex = a.fftTexture();
+                    // ── EaselAudio v1 — temperament matrix ─────────────
+                    af.bassHit = a.bassHit(); af.midHit = a.midHit(); af.highHit = a.highHit();
+                    af.bassPresence = a.bassPresence(); af.midPresence = a.midPresence();
+                    af.highPresence = a.highPresence(); af.levelPresence = a.levelPresence();
+                    af.bassTime = a.bassTime(); af.midTime = a.midTime();
+                    af.highTime = a.highTime(); af.levelTime = a.levelTime();
+                    // Rhythm bus: confidence is 1 when the user set/tapped a
+                    // tempo (manual override), otherwise the detected tempo's
+                    // confidence. Below 0.4 confidence the beat one-shot
+                    // falls back to the level-driven onset (Synesthesia rule).
+                    {
+                        bool manual = m_bpmSync.source() == BPMSync::Source::Manual;
+                        float conf = manual ? 1.0f : a.detectedBPMConfidence();
+                        af.bpmConfidence = conf;
+                        af.phase2  = m_bpmSync.phaseN(2);
+                        af.phase4  = m_bpmSync.phaseN(4);
+                        af.phase8  = m_bpmSync.phaseN(8);
+                        af.phase16 = m_bpmSync.phaseN(16);
+                        float t = std::min(std::max((conf - 0.25f) / 0.20f, 0.0f), 1.0f);
+                        float lock01 = t * t * (3.0f - 2.0f * t);   // smoothstep 0.25..0.45
+                        af.onBeat = m_bpmSync.onBeat() * lock01 + a.onset() * (1.0f - lock01);
+                        af.toggleOnBeat = m_bpmSync.toggleOnBeat();
+                    }
+                    // Tier-1 pseudo-stems + temperaments
+                    af.stemBass   = a.stem(AudioAnalyzer::StemBass);
+                    af.stemDrums  = a.stem(AudioAnalyzer::StemDrums);
+                    af.stemMelody = a.stem(AudioAnalyzer::StemMelody);
+                    af.stemAir    = a.stem(AudioAnalyzer::StemAir);
+                    af.stemVocal  = a.stem(AudioAnalyzer::StemVocal);
+                    af.stemBassHit   = a.stemHit(AudioAnalyzer::StemBass);
+                    af.stemDrumsHit  = a.stemHit(AudioAnalyzer::StemDrums);
+                    af.stemMelodyHit = a.stemHit(AudioAnalyzer::StemMelody);
+                    af.stemAirHit    = a.stemHit(AudioAnalyzer::StemAir);
+                    af.stemVocalHit  = a.stemHit(AudioAnalyzer::StemVocal);
+                    af.stemBassPresence   = a.stemPresence(AudioAnalyzer::StemBass);
+                    af.stemDrumsPresence  = a.stemPresence(AudioAnalyzer::StemDrums);
+                    af.stemMelodyPresence = a.stemPresence(AudioAnalyzer::StemMelody);
+                    af.stemAirPresence    = a.stemPresence(AudioAnalyzer::StemAir);
+                    af.stemVocalPresence  = a.stemPresence(AudioAnalyzer::StemVocal);
                     shaderSrc->setAudioFeatures(af);
                 } else {
                     shaderSrc->setAudioState(0.0f, 0.0f, 0.0f, 0.0f, 0); // global neutralize
@@ -13539,6 +13659,7 @@ void Application::saveProject(const std::string& path) {
                         abj["rangeMin"] = ab.rangeMin;
                         abj["rangeMax"] = ab.rangeMax;
                         abj["smoothing"] = ab.smoothing;
+                        if (ab.character != 0.0f) abj["character"] = ab.character;
                         if (ab.signal == AudioSignal::MidiCC) {
                             abj["midiCC"] = ab.midiCC;
                             abj["midiChannel"] = ab.midiChannel;
@@ -13619,6 +13740,7 @@ void Application::saveProject(const std::string& path) {
                         abj["rangeMin"]  = ab.rangeMin;
                         abj["rangeMax"]  = ab.rangeMax;
                         abj["smoothing"] = ab.smoothing;
+                        if (ab.character != 0.0f) abj["character"] = ab.character;
                         if (ab.signal == AudioSignal::MidiCC) {
                             abj["midiCC"]      = ab.midiCC;
                             abj["midiChannel"] = ab.midiChannel;
@@ -13692,6 +13814,7 @@ void Application::saveProject(const std::string& path) {
                         abj["rangeMin"]  = ab.rangeMin;
                         abj["rangeMax"]  = ab.rangeMax;
                         abj["smoothing"] = ab.smoothing;
+                        if (ab.character != 0.0f) abj["character"] = ab.character;
                         if (ab.signal == AudioSignal::MidiCC) {
                             abj["midiCC"]      = ab.midiCC;
                             abj["midiChannel"] = ab.midiChannel;
@@ -14206,6 +14329,7 @@ void Application::loadProject(const std::string& path) {
                             // Missing in pre-smoothing-upgrade projects → use
                             // the new gentler default (struct default 0.55).
                             ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.character = abj.value("character", 0.0f);
                             ab.midiCC = abj.value("midiCC", -1);
                             ab.midiChannel = abj.value("midiChannel", -1);
                             src->audioBindings()[abj.value("param", "")] = ab;
@@ -14272,6 +14396,7 @@ void Application::loadProject(const std::string& path) {
                             ab.rangeMin = abj.value("rangeMin", 0.0f);
                             ab.rangeMax = abj.value("rangeMax", 1.0f);
                             ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.character = abj.value("character", 0.0f);
                             ab.midiCC = abj.value("midiCC", -1);
                             ab.midiChannel = abj.value("midiChannel", -1);
                             src->audioBindings()[abj.value("param", "")] = ab;
@@ -14363,6 +14488,7 @@ void Application::loadProject(const std::string& path) {
                             ab.rangeMin = abj.value("rangeMin", 0.0f);
                             ab.rangeMax = abj.value("rangeMax", 1.0f);
                             ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.character = abj.value("character", 0.0f);
                             ab.midiCC = abj.value("midiCC", -1);
                             ab.midiChannel = abj.value("midiChannel", -1);
                             src->audioBindings()[abj.value("param", "")] = ab;

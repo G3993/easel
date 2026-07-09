@@ -194,9 +194,11 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
             default: return 0.0f;
         }
     };
-    auto fxAudioMod = [&](const LayerEffect& f) -> float {
+    // EaselAudio conditioning (visual-binding preset 10ms/500ms): per-effect
+    // mods previously read the raw band unsmoothed.
+    auto fxAudioMod = [&](LayerEffect& f) -> float {
         if (f.audioSignal < 0 || f.audioAmount <= 0.0f) return 0.0f;
-        return f.audioAmount * audioBand(f.audioSignal);
+        return f.audioAmount * f.audioCond.process(audioBand(f.audioSignal), m_dt);
     };
 
     for (auto& fx : layer->effects) {
@@ -396,6 +398,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     float dt = m_audio.time - m_lastTime;
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
     m_lastTime = m_audio.time;
+    m_dt = dt;  // shared with applyEffects / binding conditioners
 
     // Prune per-layer / per-path GPU caches to what's still live. Without
     // this, feedback FBOs (full-canvas, one per layer ID) and lazily-compiled
@@ -500,7 +503,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         glm::vec2 savedPos = layer->position;
         glm::vec2 savedScale = layer->scale;
         float savedRot = layer->rotation;
-        for (const auto& ab : layer->audioBindings) {
+        for (auto& ab : layer->audioBindings) {
             if (ab.target == Layer::AudioTarget::None) continue;
             float sig = 0;
             switch (ab.signal) {
@@ -509,6 +512,10 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 case 2: sig = m_audio.treble; break;
                 case 3: sig = m_audio.beatDecay; break;
             }
+            // EaselAudio conditioning (visual-binding preset 10ms/500ms):
+            // these transform mods previously followed the raw band with no
+            // smoothing at all, so position/scale/rotation strobed per-frame.
+            sig = ab.cond.process(sig, m_dt);
             float mod = sig * ab.strength;
             switch (ab.target) {
                 case Layer::AudioTarget::Opacity: effectiveOpacity *= (1.0f - ab.strength + ab.strength * sig); break;

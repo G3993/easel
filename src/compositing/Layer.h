@@ -1,6 +1,7 @@
 #pragma once
 #include "compositing/BlendMode.h"
 #include "compositing/LayerEffect.h"
+#include "app/EaselAudio.h"
 #include "compositing/MaskPath.h"
 #include "sources/ContentSource.h"
 #include "render/Texture.h"
@@ -159,6 +160,10 @@ public:
         AudioTarget target = AudioTarget::None;
         int signal = 0;       // 0=bass, 1=mid, 2=high, 3=beat
         float strength = 0.5f; // how much to modulate
+        // EaselAudio conditioning (visual-binding preset 10/500ms) — these
+        // transform bindings previously had NO smoothing at all and snapped
+        // per-frame. Runtime-only state, not serialized.
+        easelaudio::Conditioner cond{easelaudio::ConditionerParams::visualBinding()};
     };
     std::vector<AudioBinding> audioBindings;
 

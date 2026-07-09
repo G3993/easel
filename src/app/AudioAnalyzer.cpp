@@ -26,6 +26,10 @@ static void initHannWindow() {
 
 AudioAnalyzer::~AudioAnalyzer() {
     cleanupCapture();
+    if (m_fftCfg) {
+        kiss_fft_free(m_fftCfg);
+        m_fftCfg = nullptr;
+    }
 }
 
 void AudioAnalyzer::setDevice(int deviceIdx) {
@@ -79,8 +83,11 @@ void AudioAnalyzer::update(float dt) {
         m_samplesAccumulated = 0;
     }
 
+    conditionBands(dt);       // dB-domain AGC + gate + response curves
     detectBeat(dt);
     smoothBands(dt);
+    computeTemperaments(dt);  // Hit / Presence / Time matrix + tempo feed
+    computeStems(dt);         // tier-1 pseudo-stems (HPSS + band split)
     computeSpectralFeatures(dt);
     computeChroma(dt);      // chroma / dominant pitch / major-minor (feeds affect + palette)
     computeAffect(dt);      // reads previous-frame buildup (DAG)
@@ -286,7 +293,13 @@ void AudioAnalyzer::feedSamples(const float* mono, int count) {
 
 void AudioAnalyzer::runFFT() {
     initHannWindow();
-    kiss_fft_cfg cfg = kiss_fft_alloc(kFFTSize, 0, nullptr, nullptr);
+    // Cached kiss_fft config — allocated once, reused every call
+    // (previously alloc/freed per frame).
+    kiss_fft_cfg cfg = (kiss_fft_cfg)m_fftCfg;
+    if (!cfg) {
+        cfg = kiss_fft_alloc(kFFTSize, 0, nullptr, nullptr);
+        m_fftCfg = cfg;
+    }
     if (!cfg) return;
 
     kiss_fft_cpx in[kFFTSize];
@@ -310,17 +323,17 @@ void AudioAnalyzer::runFFT() {
         float mag = std::sqrt(out[i].r * out[i].r + out[i].i * out[i].i);
         m_spectrum[i] = std::min(mag * normFactor, 1.0f);
     }
+    m_specDirty = true;   // new spectrum for the HPSS/stem pass
 
-    kiss_fft_free(cfg);
-
-    // Compute RMS from raw samples
+    // Compute RMS from raw samples — kept LINEAR (pre-AGC) here; the 0-1
+    // normalized value shaders see comes out of the dB-domain AGC in
+    // conditionBands(). The legacy 2x factor is preserved so crest/punch
+    // computations keep their historical scaling.
     float sumSq = 0;
     for (int i = 0; i < kFFTSize; i++) {
         sumSq += m_ringBuf[i] * m_ringBuf[i];
     }
-    m_rawRMS = std::sqrt(sumSq / kFFTSize);
-    // Clamp to 0-1 (typically peaks around 0.5 for loud audio)
-    m_rawRMS = std::min(m_rawRMS * 2.0f * m_inputGain, 1.0f);
+    m_rmsLin = std::min(std::sqrt(sumSq / kFFTSize) * 2.0f * m_inputGain, 1.0f);
 }
 
 // --- Band computation ---
@@ -347,43 +360,180 @@ void AudioAnalyzer::computeBands() {
     for (int i = 43; i < std::min(kBins, 129); i++) treble += m_spectrum[i];
     treble /= trebleCount;
 
-    // Scale each band to useful 0-1 range
-    // Using magnitude spectrum (linear), so gains are higher than power-based.
-    // Tuned for typical system audio at moderate listening volume.
-    // User gains: master m_inputGain + per-band trim.
+    // Store PRE-AGC linear band energies. The user gains (master + per-band
+    // trim) apply here — they are the defeatable "manual gain" stage in
+    // front of the automatic gain control. The old fixed magic gains
+    // (60/100/200/400x) are gone: normalization now happens in the
+    // dB-domain AGC in conditionBands() (EaselAudio spec §3).
     float masterG = m_inputGain;
-    m_rawBass    = std::min(bass    * 60.0f  * masterG * m_bassGain,    1.0f);
-    m_rawLowMid  = std::min(lowMid  * 100.0f * masterG * m_lowMidGain,  1.0f);
-    m_rawHighMid = std::min(highMid * 200.0f * masterG * m_highMidGain, 1.0f);
-    m_rawTreble  = std::min(treble  * 400.0f * masterG * m_trebleGain,  1.0f);
+    m_bandE[0] = bass    * masterG * m_bassGain;
+    m_bandE[1] = lowMid  * masterG * m_lowMidGain;
+    m_bandE[2] = highMid * masterG * m_highMidGain;
+    m_bandE[3] = treble  * masterG * m_trebleGain;
+}
 
-    // Noise gate: values below threshold collapse to 0
+// --- Band conditioning: dB AGC + gate + response curves (every frame) ---
+// Per band: norm = clamp((dB - noiseFloor) / range, 0, 1) with the -60 dB
+// noise floor doubling as the silence gate and `range` auto-tracked
+// fast-grow (0.1s) / slow-shrink (60s) so there's no pumping. Runs every
+// frame (not just on FFT frames) so the range tracking stays dt-derived.
+void AudioAnalyzer::conditionBands(float dt) {
+    float b[4];
+    for (int i = 0; i < 4; i++) b[i] = m_bandAgc[i].norm(m_bandE[i], dt);
+    m_rawRMS = m_rmsAgc.norm(m_rmsLin, dt);
+
+    // Noise gate: values below threshold collapse to 0 (user control,
+    // unchanged semantics — now applied to the AGC'd 0-1 values)
     if (m_noiseGate > 0.0f) {
         auto gate = [&](float v) {
             if (v < m_noiseGate) return 0.0f;
             // Rescale remaining range to 0-1 for smooth transition
             return (v - m_noiseGate) / std::max(0.001f, 1.0f - m_noiseGate);
         };
-        m_rawBass    = gate(m_rawBass);
-        m_rawLowMid  = gate(m_rawLowMid);
-        m_rawHighMid = gate(m_rawHighMid);
-        m_rawTreble  = gate(m_rawTreble);
+        for (int i = 0; i < 4; i++) b[i] = gate(b[i]);
     }
 
     // Response curves: capture the pre-curve input (for the live graph), then
     // shape each band by its own curve followed by the global master curve.
     // Defaults are identity, so this is a no-op until the user dials a curve.
-    m_curveInput[CurveBass]    = m_rawBass;
-    m_curveInput[CurveLowMid]  = m_rawLowMid;
-    m_curveInput[CurveHighMid] = m_rawHighMid;
-    m_curveInput[CurveTreble]  = m_rawTreble;
-    m_curveInput[CurveMaster]  = std::max(std::max(m_rawBass, m_rawLowMid),
-                                          std::max(m_rawHighMid, m_rawTreble));
+    m_curveInput[CurveBass]    = b[0];
+    m_curveInput[CurveLowMid]  = b[1];
+    m_curveInput[CurveHighMid] = b[2];
+    m_curveInput[CurveTreble]  = b[3];
+    m_curveInput[CurveMaster]  = std::max(std::max(b[0], b[1]),
+                                          std::max(b[2], b[3]));
 
-    m_rawBass    = applyAudioCurve(applyAudioCurve(m_rawBass,    m_curves[CurveBass]),    m_curves[CurveMaster]);
-    m_rawLowMid  = applyAudioCurve(applyAudioCurve(m_rawLowMid,  m_curves[CurveLowMid]),  m_curves[CurveMaster]);
-    m_rawHighMid = applyAudioCurve(applyAudioCurve(m_rawHighMid, m_curves[CurveHighMid]), m_curves[CurveMaster]);
-    m_rawTreble  = applyAudioCurve(applyAudioCurve(m_rawTreble,  m_curves[CurveTreble]),  m_curves[CurveMaster]);
+    m_rawBass    = applyAudioCurve(applyAudioCurve(b[0], m_curves[CurveBass]),    m_curves[CurveMaster]);
+    m_rawLowMid  = applyAudioCurve(applyAudioCurve(b[1], m_curves[CurveLowMid]),  m_curves[CurveMaster]);
+    m_rawHighMid = applyAudioCurve(applyAudioCurve(b[2], m_curves[CurveHighMid]), m_curves[CurveMaster]);
+    m_rawTreble  = applyAudioCurve(applyAudioCurve(b[3], m_curves[CurveTreble]),  m_curves[CurveMaster]);
+}
+
+// --- EaselAudio v1: temperament matrix + tempo feed ---------------------
+// Hit  — dual-follower onset per band, fed PRE-AGC energy (self-normalizing).
+// Presence — slow macro envelope (1.5s/4s) of the AGC'd band.
+// Time — monotonic clock += dt * band (the value shaders see), unclamped.
+void AudioAnalyzer::computeTemperaments(float dt) {
+    float pre[3] = { m_bandE[0], (m_bandE[1] + m_bandE[2]) * 0.5f, m_bandE[3] };
+    for (int i = 0; i < 3; i++) m_hitOut[i] = m_hitDet[i].update(pre[i], dt);
+
+    float post[4] = { m_rawBass, (m_rawLowMid + m_rawHighMid) * 0.5f,
+                      m_rawTreble, m_rawRMS };
+    for (int i = 0; i < 4; i++) m_presOut[i] = m_presEnv[i].update(post[i], dt);
+
+    m_timeClock[0] += dt * m_smoothBass;
+    m_timeClock[1] += dt * (m_smoothLowMid + m_smoothHighMid) * 0.5f;
+    m_timeClock[2] += dt * m_smoothTreble;
+    m_timeClock[3] += dt * m_smoothRMS;
+
+    // Tempo: autocorrelation over the onset-strength envelope (normalized
+    // spectral flux from the previous frame's spectral pass).
+    m_tempo.feed(m_fluxNorm, dt);
+}
+
+// --- EaselAudio v1: tier-1 pseudo-stems ----------------------------------
+// Zero-ML instant stems (spec §1.4): band split + causal median-filter HPSS
+// (past-only kernel, power 2.0, margin 2.5; one FFT-hop latency).
+//   stemBass   — sub+low band level (kick body + bassline)
+//   stemDrums  — HPSS percussive level (all-band transients)
+//   stemMelody — harmonic minus sub (tonal body ~190Hz-2k)
+//   stemAir    — >2k harmonic wash (pads / cymbals)
+//   stemVocal  — 2-6kHz harmonic x spectral-flux gate (vocal approximation)
+// Note: the "Linkwitz-Riley" split of the spec is realized spectrally (band
+// sums on the magnitude spectrum) — equivalent for level extraction at this
+// FFT size; crossover edges land on the nearest bins (~94Hz resolution).
+// Per-stem conditioning: stem role preset = +50% release vs mix bands
+// (mask-flutter guard); stemDrumsHit runs a lower threshold (bleed-free).
+void AudioAnalyzer::computeStems(float dt) {
+    if (!m_stemInit) {
+        for (int s = 0; s < StemCount; s++) {
+            m_stemCond[s].p = easelaudio::ConditionerParams::stem();
+            m_stemHitDet[s].threshMul = (s == StemDrums) ? 1.08f : 1.15f;
+        }
+        m_stemInit = true;
+    }
+
+    if (m_specDirty) {
+        m_specDirty = false;
+
+        // Push current spectrum into the causal history ring
+        std::memcpy(m_specHist[m_specHistPos], m_spectrum, sizeof(m_spectrum));
+        int cur = m_specHistPos;
+        m_specHistPos = (m_specHistPos + 1) % kHPSSFrames;
+        if (m_specHistCount < kHPSSFrames) m_specHistCount++;
+
+        const float binHz = (float)m_sampleRate / (float)kFFTSize;
+        const int kHi = std::min(kBins, 220);
+        int bBassHi   = std::max(2, (int)(200.0f / binHz) + 1);              // sub+low
+        int bMelodyHi = std::min(kHi - 2, std::max(bBassHi + 1, (int)(2000.0f / binHz) + 1));
+        int bVocalHi  = std::min(kHi, (int)(6000.0f / binHz) + 1);
+
+        // Causal median HPSS (past-only): H = median across TIME per bin
+        // (harmonic estimate), P = median across FREQUENCY per bin
+        // (percussive estimate), then soft Wiener masks p=2 margin=2.5.
+        float H[kBins], P[kBins];
+        const int n = m_specHistCount;
+        for (int i = 1; i < kHi; i++) {
+            float tmp[kHPSSFrames];
+            for (int f = 0; f < n; f++) tmp[f] = m_specHist[f][i];
+            std::nth_element(tmp, tmp + n / 2, tmp + n);
+            H[i] = tmp[n / 2];
+        }
+        const float* S = m_specHist[cur];
+        for (int i = 1; i < kHi; i++) {
+            float tmp[kHPSSKernel];
+            int lo = std::max(1, i - kHPSSKernel / 2);
+            int hi = std::min(kHi, lo + kHPSSKernel);
+            lo = std::max(1, hi - kHPSSKernel);
+            int m = hi - lo;
+            for (int j = 0; j < m; j++) tmp[j] = S[lo + j];
+            std::nth_element(tmp, tmp + m / 2, tmp + m);
+            P[i] = tmp[m / 2];
+        }
+
+        const float margin2 = 2.5f * 2.5f;   // margin^2 for the power-2 masks
+        float bassE = 0, drumsE = 0, melodyE = 0, airE = 0, vocalE = 0, vFlux = 0;
+        int prev = (cur - 1 + kHPSSFrames) % kHPSSFrames;
+        for (int i = 1; i < kHi; i++) {
+            float h2 = H[i] * H[i], p2 = P[i] * P[i];
+            float mh = h2 / (h2 + margin2 * p2 + 1e-12f);
+            float mp = p2 / (p2 + margin2 * h2 + 1e-12f);
+            float sh = S[i] * mh, sp = S[i] * mp;
+            drumsE += sp;
+            if (i < bBassHi)        bassE   += S[i];
+            else if (i < bMelodyHi) melodyE += sh;
+            else                    airE    += sh;
+            if (i >= bMelodyHi && i < bVocalHi) {
+                vocalE += sh;
+                if (m_specHistCount > 1) {
+                    float d = S[i] - m_specHist[prev][i];
+                    if (d > 0.0f) vFlux += d;
+                }
+            }
+        }
+        // Mean-normalize per band width so the AGCs see comparable levels
+        m_stemE[StemBass]   = bassE   / (float)std::max(1, bBassHi - 1);
+        m_stemE[StemDrums]  = drumsE  / (float)std::max(1, kHi - 1);
+        m_stemE[StemMelody] = melodyE / (float)std::max(1, bMelodyHi - bBassHi);
+        m_stemE[StemAir]    = airE    / (float)std::max(1, kHi - bMelodyHi);
+        m_stemE[StemVocal]  = vocalE  / (float)std::max(1, bVocalHi - bMelodyHi);
+        m_lastVocalFlux     = vFlux   / (float)std::max(1, bVocalHi - bMelodyHi);
+    }
+
+    // Vocal presence gate: movement (flux) in the 2-6k band relative to its
+    // own running average — a steady synth pad doesn't read as a vocal.
+    m_vocalFluxAvg += (m_lastVocalFlux - m_vocalFluxAvg) * easelaudio::k1(dt, 2.0f);
+    float g = m_lastVocalFlux / std::max(m_vocalFluxAvg, 1e-6f);
+    float gateT = easelaudio::clamp01((g - 0.5f) / 1.2f);
+    m_vocalFluxGate += (gateT - m_vocalFluxGate) * easelaudio::k1(dt, 0.25f);
+
+    for (int s = 0; s < StemCount; s++) {
+        float e = m_stemE[s] * (s == StemVocal ? m_vocalFluxGate : 1.0f);
+        float norm = m_stemAgc[s].norm(e * m_inputGain, dt);
+        m_stemOut[s]     = m_stemCond[s].process(norm, dt);
+        m_stemHitOut[s]  = m_stemHitDet[s].update(e, dt);   // pre-AGC (self-norm)
+        m_stemPresOut[s] = m_stemPresEnv[s].update(m_stemOut[s], dt);
+    }
 }
 
 // --- Spectral character (Tier 2) + sub/punch (Tier 1 extras) ---
@@ -395,8 +545,8 @@ void AudioAnalyzer::computeSpectralFeatures(float dt) {
     const int kHi = std::min(kBins, 220);
 
     // --- sub-bass (coarse; spectrum resolution can't isolate <90Hz, so this
-    // is an honest bin-1 proxy, high-gained + smoothed) ---
-    float subRaw = std::min(m_spectrum[1] * 60.0f * m_inputGain, 1.0f);
+    // is an honest bin-1 proxy — dB-AGC'd instead of the old fixed 60x) ---
+    float subRaw = m_subAgc.norm(m_spectrum[1] * m_inputGain, dt);
     m_smoothSub = expSmooth(m_smoothSub, subRaw, subRaw > m_smoothSub ? 30.0f : 8.0f, dt);
 
     // --- single pass: total energy, centroid numerator, flatness accumulators,
@@ -448,6 +598,7 @@ void AudioAnalyzer::computeSpectralFeatures(float dt) {
     // --- flux -> movement (normalized by slow running floor) ---
     m_fluxFloor += (flux - m_fluxFloor) * (1.0f - std::exp(-0.5f * dt));
     float fluxN = m_agcFlux.norm(flux, dt);
+    m_fluxNorm = fluxN;   // unsmoothed onset strength for the tempo tracker
     m_flux = expSmooth(m_flux, fluxN, 6.0f, dt);
 
     // --- onset: peak-pick flux above an adaptive median, with refractory ---
@@ -480,7 +631,8 @@ void AudioAnalyzer::computeSpectralFeatures(float dt) {
     m_texture = expSmooth(m_texture, std::min(std::max(texRaw, 0.0f), 1.0f), 4.0f, dt);
 
     // --- punch: crest factor peak/rms mapped 1..6 -> 0..1, peak-held ---
-    float crest = peak / std::max(m_rawRMS, 1e-3f);
+    // (uses the LINEAR rms — m_rawRMS is AGC-normalized now)
+    float crest = peak / std::max(m_rmsLin, 1e-3f);
     float punchRaw = std::min(std::max((crest - 1.0f) / 5.0f, 0.0f), 1.0f);
     m_punch = m_punchPH.update(punchRaw, dt, 0.05f, 0.12f);
 
@@ -713,23 +865,17 @@ void AudioAnalyzer::detectBeat(float dt) {
         m_beatCooldown -= dt;
     }
 
-    // Current energy (bass-weighted)
-    float energy = m_rawBass * 0.7f + m_rawLowMid * 0.3f;
+    // Dual fast/slow follower crossing (Ableton AnalysisGrabber pattern) on
+    // the PRE-AGC bass-weighted energy — self-normalizing, no absolute
+    // threshold (replaced the naive energy-vs-1.4x-rolling-average trigger).
+    float energy = m_bandE[0] * 0.7f + m_bandE[1] * 0.3f;
+    m_beatFast += (energy - m_beatFast) * easelaudio::k1(dt, 0.025f);
+    m_beatSlow += (energy - m_beatSlow) * easelaudio::k1(dt, 0.35f);
 
-    // Rolling average
-    float avg = 0;
-    for (int i = 0; i < 32; i++) avg += m_energyHistory[i];
-    avg /= 32.0f;
-
-    // Store current energy
-    m_energyHistory[m_energyHistoryPos] = energy;
-    m_energyHistoryPos = (m_energyHistoryPos + 1) % 32;
-
-    // Beat detected if energy > 1.4x rolling average and cooldown expired
-    if (energy > avg * 1.4f + 0.05f && m_beatCooldown <= 0) {
+    if (m_beatFast > m_beatSlow * 1.30f + 1e-4f && m_beatCooldown <= 0) {
         m_beatThisFrame = true;
         m_beatDecay = 1.0f;
-        m_beatCooldown = 0.15f; // 150ms minimum between beats
+        m_beatCooldown = 0.15f; // 150ms minimum between beats (unchanged)
     }
 
     // Exponential decay (~85ms half-life)

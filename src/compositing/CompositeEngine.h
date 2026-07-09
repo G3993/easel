@@ -87,6 +87,7 @@ private:
     std::map<std::string, std::shared_ptr<ShaderSource>> m_isfTransitions;
 
     float m_lastTime = 0;
+    float m_dt = 1.0f / 60.0f;  // per-frame delta for binding conditioners
 
     void clear();
     void setAudioUniforms(ShaderProgram& shader, float audioStrength);

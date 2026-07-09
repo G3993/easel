@@ -83,4 +83,28 @@ struct AudioFeatures {
     GLuint fftTex = 0;       // 128x1 R8 spectrum
     GLuint chromaTex = 0;    // 12x1 chroma (0 until palette engine lands)
     GLuint occupancyTex = 0; // 12x1 per-band occupancy
+
+    // ── EaselAudio v1 (additive — spec/easel_audio_bus.json) ──────────
+    // Temperament matrix: Hit (dual-follower onset, AD 10ms/350ms),
+    // Presence (slow macro envelope 1.5s/4s), Time (monotonic clock
+    // += dt*band — UNCLAMPED, pauses in silence, never jitters).
+    float bassHit = 0, midHit = 0, highHit = 0;
+    float bassPresence = 0, midPresence = 0, highPresence = 0;
+    float levelPresence = 0;  // mix presence (uniform audioLevelPresence —
+                              // schema's "audioPresence" name is taken by the
+                              // existing vec4 per-band presence uniform)
+    float bassTime = 0, midTime = 0, highTime = 0;
+    float levelTime = 0;      // uniform audioTime (mix clock)
+
+    // Rhythm bus (detected tempo phase-locks BPMSync; tap/OSC override)
+    float bpmConfidence = 0;  // <0.4 → beat-locked signals fall back to level
+    float phase2 = 0, phase4 = 0, phase8 = 0, phase16 = 0; // multi-beat ramps
+    float onBeat = 0;         // logistic-eased one-shot (~120ms)
+    float toggleOnBeat = 0;   // eased 0/1 flip each beat
+
+    // Tier-1 pseudo-stems (LR-style band split + causal median HPSS)
+    float stemBass = 0, stemDrums = 0, stemMelody = 0, stemAir = 0, stemVocal = 0;
+    float stemBassHit = 0, stemDrumsHit = 0, stemMelodyHit = 0, stemAirHit = 0, stemVocalHit = 0;
+    float stemBassPresence = 0, stemDrumsPresence = 0, stemMelodyPresence = 0,
+          stemAirPresence = 0, stemVocalPresence = 0;
 };

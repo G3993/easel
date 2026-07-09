@@ -1,4 +1,5 @@
 #pragma once
+#include "app/EaselAudio.h"
 #include <cmath>
 
 // Shared audio/MIDI parameter-binding types. Originally defined inside
@@ -37,33 +38,44 @@ struct AudioBinding {
     // fast/strobey the moment audio is enabled). Users wanting punch drag it
     // down; the common case is "make it smooth," so start there.
     float smoothing = 0.85f;
-    float smoothedValue = 0.0f; // internal follower state
+    // EaselAudio character: -1 = extra smooth … +1 = spiky/chopped.
+    // 0 = NEUTRAL = the exact legacy feel (existing projects load with 0, so
+    // nothing changes until the user touches the new Character control).
+    float character = 0.0f;
+    float smoothedValue = 0.0f; // internal follower state (0-1, pre-range-map)
     bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
     // MIDI fields (used when signal == MidiCC)
     int midiCC = -1;        // CC number 0-127, -1 = unassigned
     int midiChannel = -1;   // MIDI channel 0-15, -1 = any
 
+    // Shared EaselAudio conditioning block (gate→attack→hold→release→
+    // hard-change→character→remap→micro-slew). The legacy smoothing slider
+    // maps onto its attack/release taus with the SAME rate curve as the old
+    // inline follower, so a binding with character 0 behaves identically.
+    easelaudio::Conditioner cond;
+
     // Frame-rate-independent asymmetric follower (punchy attack, softer
-    // release), then map the smoothed 0..1 value onto [rangeMin, rangeMax].
+    // release), then map the conditioned 0..1 value onto [rangeMin, rangeMax].
     // `raw` is the 0..1 signal sample; returns the mapped output value (the
-    // caller clamps it to the destination parameter's own range). Identical
-    // math to the original ShaderSource::applyAudioBindings inline follower.
+    // caller clamps it to the destination parameter's own range).
     float follow(float raw, float dt) {
         if (!(dt > 0.0f)) dt = 1.0f / 60.0f;
         if (dt > 0.1f)    dt = 0.1f;
-        if (!hasSmoothed) { smoothedValue = raw; hasSmoothed = true; }
 
-        // Fast ends roughly halved vs the original (28/14) so even a snappy
-        // binding glides rather than strobes — the "way too fast" fix.
+        // Legacy smoothing-slider → rate mapping (fast ends roughly halved
+        // vs the original 28/14 so even a snappy binding glides rather than
+        // strobes — the "way too fast" fix). Unchanged math, now expressed
+        // as the conditioning block's attack/release taus.
         constexpr float kAttackFast  = 14.0f, kAttackSlow  = 1.5f;
         constexpr float kReleaseFast = 7.0f,  kReleaseSlow = 0.7f;
         float s = smoothing;
         if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
-        float attackRate  = kAttackFast  + (kAttackSlow  - kAttackFast)  * s;
-        float releaseRate = kReleaseFast + (kReleaseSlow - kReleaseFast) * s;
-        float rate  = (raw > smoothedValue) ? attackRate : releaseRate;
-        float alpha = 1.0f - std::exp(-rate * dt);
-        smoothedValue += (raw - smoothedValue) * alpha;
+        cond.p.setRates(kAttackFast  + (kAttackSlow  - kAttackFast)  * s,
+                        kReleaseFast + (kReleaseSlow - kReleaseFast) * s);
+        cond.p.character = character;
+
+        if (!hasSmoothed) { cond.reset(); hasSmoothed = true; }
+        smoothedValue = cond.process(raw, dt);
 
         return rangeMin + smoothedValue * (rangeMax - rangeMin);
     }

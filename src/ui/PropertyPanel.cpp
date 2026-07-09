@@ -43,6 +43,38 @@ static std::string upperLabel(const std::string& s) {
     return out;
 }
 
+// Insert a space at camelCase/snake_case/kebab-case word boundaries so a raw
+// ISF NAME (no "LABEL" in the shader JSON) reads as words once upperLabel()
+// uppercases it — e.g. "danceSpeed" -> "dance Speed" -> "DANCE SPEED" instead
+// of the old unspaced "DANCESPEED". Case is irrelevant here since upperLabel
+// wipes it right after; this only decides where the boundaries go.
+static std::string humanizeName(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '_' || c == '-') {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            continue;
+        }
+        bool boundary = i > 0 && std::isupper((unsigned char)c) &&
+                        !std::isupper((unsigned char)s[i - 1]);
+        if (boundary) out += ' ';
+        out += c;
+    }
+    return out;
+}
+
+// Single source of truth for a shader param's display label: prefer the
+// ISF JSON "LABEL" (already human-written and spaced) and fall back to a
+// humanized NAME — never the raw camelCase NAME. Every call site that used
+// to do `upperLabel(input.name)` now does `inputDisplayLabel(input)`.
+static std::string inputDisplayLabel(const ISFInput& input) {
+    const std::string& base = !input.label.empty() ? input.label
+                                                     : humanizeName(input.name);
+    return upperLabel(base);
+}
+
 // --- Semantic palette ------------------------------------------------------
 // ONE source of truth for every chrome color in the layer parameters panel.
 // The screenshot showed too many slightly-different tones serving the SAME
@@ -181,6 +213,20 @@ static void thinSep() {
     ImGui::Dummy(ImVec2(0, 4));
 }
 
+// Subtle cluster label for a run of shader params sharing the same ISF
+// "GROUP" — a thin separator + dim small-caps text, NOT a collapsible
+// section (no chevron, not interactive). Renders once per distinct GROUP
+// value as inputs are iterated in display order (same-group entries are
+// expected to be contiguous). Params without a GROUP never trigger this,
+// so ungrouped shaders render exactly as before this feature existed.
+static void groupHeader(const char* label) {
+    thinSep();
+    ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+    ImGui::TextUnformatted(upperLabel(label).c_str());
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, kStepY));
+}
+
 static bool accentBtn(const char* label, float w = 0) {
     ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
@@ -213,11 +259,15 @@ static bool accentBtn(const char* label, float w = 0) {
 static bool unifiedSlider(const char* idSuffix, const char* label,
                           float* v, float lo, float hi,
                           const char* fmt, bool accent = false,
-                          bool* outActivated = nullptr) {
+                          bool* outActivated = nullptr,
+                          float width = 0.0f) {
     ImGui::PushID(idSuffix);
     // Leading gap — identical to every other row helper.
     ImGui::Dummy(ImVec2(0, kRowGapY));
-    float w = ImGui::GetContentRegionAvail().x;
+    // width > 0 lets a caller fit two sliders side by side on one row
+    // (e.g. Reactivity + Character); default 0 keeps every other call
+    // site's original full-content-region sizing unchanged.
+    float w = width > 0.0f ? width : ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH  = ImGui::GetFontSize();
     // Canonical OPACITY-slider geometry: 6px pill track, r=7 circle thumb.
@@ -453,11 +503,13 @@ static int pillGroup(const char* id, const char* const* labels, int count, int c
 // Soft pill slider: label-left, value-right, thin pill track, circular handle.
 // Draws on its own row, full width. Shift to snap to 0.05.
 static bool pillSlider(const char* label, float* v, float lo, float hi,
-                       const char* fmt = "%.2f") {
+                       const char* fmt = "%.2f", float width = 0.0f) {
     // Thin wrapper — routes straight through the one canonical slider so it
     // looks/sizes IDENTICALLY to the OPACITY slider (same track, same real
     // circular thumb, same colors, same fine continuous resolution).
-    return unifiedSlider(label, label, v, lo, hi, fmt);
+    // width > 0 renders at that fixed width instead of the full row (used to
+    // sit two pill sliders side by side, e.g. Reactivity + Character).
+    return unifiedSlider(label, label, v, lo, hi, fmt, false, nullptr, width);
 }
 
 // Draw a solid filled lightning-bolt glyph inside a square at (cx, cy) with
@@ -1012,6 +1064,13 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
             ImGui::Dummy(ImVec2(0, 6));
             dimLabel("SMOOTHING", kRowLabel, false);
             pillSlider("Amount", &ab.smoothing, 0.0f, 1.0f, "%.2f");
+            ImGui::Dummy(ImVec2(0, 6));
+            dimLabel("CHARACTER", kRowLabel, false);
+            pillSlider("Smooth / Chopped", &ab.character, -1.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Envelope character: left = extra-smooth glide,\n"
+                                  "right = spiky/chopped (fast edges, hard-change\n"
+                                  "bypass). 0 = neutral (classic feel).");
         }
 
         ImGui::PopStyleColor(3);
@@ -1026,6 +1085,16 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
 // value, and range. Shader params and FluidSource members both reduce to this.
 struct PresetParam { std::string name; float cur, lo, hi; };
 
+// Map the user-facing Character knob (-1 smooth … +1 chopped, DEFAULT -0.5
+// per the EaselAudio spec) onto the conditioning block's character so the
+// default knob position lands on conditioner-neutral 0 — i.e. exactly
+// today's felt behavior. Pushing left of default adds extra syrup; right
+// of default speeds the envelope and arms the hard-change bypass.
+static float characterKnobToConditioner(float k) {
+    if (k <= -0.5f) return (k + 0.5f) * 2.0f;   // -1 … -0.5  →  -1 … 0
+    return (k + 0.5f) / 1.5f;                    // -0.5 … +1  →   0 … +1
+}
+
 // (Audio reactivity is now a continuous Intensity slider + Shuffle — see
 // audioPresetRow below — instead of discrete Subtle/Medium/Intense presets.)
 
@@ -1036,9 +1105,18 @@ struct PresetParam { std::string name; float cur, lo, hi; };
 // highlights and toggles off; the re-roll icon picks a fresh random set at the
 // same intensity. `stateKey` (the layer id) tracks the active preset. Returns
 // true when bindings changed.
+// Which piece(s) of the Audio Reactivity block to render this call. Split so
+// a caller with its own per-shader "Audio Reactivity"-GROUP params can
+// interleave them BETWEEN the knobs and the Shuffle/Off buttons — the whole
+// thing then reads as one section: header, Reactivity, Character, [this
+// shader's own audio-linked params], Shuffle/Off at the bottom. Callers with
+// no such params (Fluid/3D Fluid, or a shader with none) just use Full.
+enum class AudioPresetPart { Full, KnobsOnly, ButtonsOnly };
+
 static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
                            const std::vector<PresetParam>& params,
-                           uint32_t stateKey) {
+                           uint32_t stateKey,
+                           AudioPresetPart part = AudioPresetPart::Full) {
     bool changed = false;
 
     // Per-layer state: a random "recipe" (which params, which signals, and a
@@ -1051,14 +1129,22 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     struct Recipe   { std::vector<RecipeE> e; bool has = false; };
     static std::unordered_map<uint32_t, Recipe> sRecipe;
     static std::unordered_map<uint32_t, float>  sIntensity;
+    static std::unordered_map<uint32_t, float>  sCharacter;
     static std::unordered_map<uint32_t, bool>   sInit;
     static std::mt19937 rng{std::random_device{}()};
 
     // Start subtle: low intensity = shallow modulation depth + heavy smoothing
     // (see the smoothing formula below). Audio reactivity should ease in calm,
     // not snap on aggressive — users push the slider right when they want more.
-    if (!sInit[stateKey]) { sIntensity[stateKey] = 0.22f; sInit[stateKey] = true; }
+    // Character defaults to -0.5 (smooth side) = conditioner-neutral = the
+    // classic feel; only touching the knob changes anything (EaselAudio §2).
+    if (!sInit[stateKey]) {
+        sIntensity[stateKey] = 0.22f;
+        sCharacter[stateKey] = -0.5f;
+        sInit[stateKey] = true;
+    }
     float& intensity = sIntensity[stateKey];
+    float& charKnob  = sCharacter[stateKey];
 
     auto buildFromRecipe = [&]() {
         Recipe& r = sRecipe[stateKey];
@@ -1079,6 +1165,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             ab.rangeMin  = rmin;
             ab.rangeMax  = rmax;
             ab.smoothing = 0.96f - 0.24f * intensity;   // syrupy..less syrupy (never strobey)
+            ab.character = characterKnobToConditioner(charKnob); // bus-wide 2nd knob
             bindings[pp.name] = ab;
         }
         changed = true;
@@ -1124,37 +1211,70 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         if (r.has) sRecipe[stateKey] = r;
     }
 
-    // ── UI: Intensity slider (Subtle -> Intense) + Shuffle + Off ────────────
-    if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f")) {
-        if (intensity < 0.0f) intensity = 0.0f; else if (intensity > 1.0f) intensity = 1.0f;
-        // Touching the slider with nothing bound yet auto-picks a set, so it
-        // always DOES something (no need to hit Shuffle first to see motion).
-        if (sRecipe[stateKey].has) buildFromRecipe();
-        else shuffle();
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("How hard the music moves the params, live:\n"
-                          "Subtle (left) -> Intense (right).\n"
-                          "Shuffle picks WHICH params react.");
+    if (part != AudioPresetPart::ButtonsOnly) {
+        // ── Section header + Intensity slider (Subtle -> Intense) ──────────
+        // Same visual family as the per-param GROUP sub-headers — this block
+        // reads as one "Audio Reactivity" section: header, Reactivity,
+        // Character, then (for shader layers) this shader's own audio-linked
+        // params, then Shuffle/Off at the very bottom.
+        groupHeader("Audio Reactivity");
 
-    bool hasSet = sRecipe[stateKey].has && !bindings.empty();
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
-    float avail = ImGui::GetContentRegionAvail().x;
-    float gap   = ImGui::GetStyle().ItemSpacing.x;
-    float bW    = (avail - gap) * 0.5f;
-    if (ImGui::Button("Shuffle", ImVec2(bW, 28))) shuffle();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Pick a fresh random set of params to react —\n"
-                          "each centred randomly in its range, so it moves\n"
-                          "both up AND down, not always up.");
-    ImGui::SameLine();
-    if (ImGui::Button(hasSet ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
-        bindings.clear(); sRecipe[stateKey] = Recipe{}; changed = true;
+        // Full width, like every other param row (a half-width side-by-side
+        // pairing was tried and looked wrong — each slider read as cramped
+        // rather than clearer, so both stay full width, simply stacked).
+        if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f")) {
+            if (intensity < 0.0f) intensity = 0.0f; else if (intensity > 1.0f) intensity = 1.0f;
+            // Touching the slider with nothing bound yet auto-picks a set, so
+            // it always DOES something (no need to hit Shuffle first to see
+            // motion).
+            if (sRecipe[stateKey].has) buildFromRecipe();
+            else shuffle();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How hard the music moves the params, live:\n"
+                              "Subtle (left) -> Intense (right).\n"
+                              "Shuffle picks WHICH params react.");
+
+        // ── Character knob (EaselAudio 2-knob simple path) ──────────────────
+        // Smooth (left) ↔ Chopped (right); default -0.5 = the classic feel.
+        // Macro-maps onto the shared conditioning block bus-wide (every binding
+        // in this layer's recipe gets the same character).
+        if (pillSlider("Character", &charKnob, -1.0f, 1.0f, "%.2f")) {
+            if (charKnob < -1.0f) charKnob = -1.0f; else if (charKnob > 1.0f) charKnob = 1.0f;
+            if (sRecipe[stateKey].has) buildFromRecipe();
+            else {
+                // No recipe yet — retint any existing manual bindings in place.
+                float c = characterKnobToConditioner(charKnob);
+                for (auto& [n, ab] : bindings) ab.character = c;
+                changed = changed || !bindings.empty();
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Envelope character, bus-wide:\n"
+                              "Smooth (left) -> Chopped (right).\n"
+                              "Default sits at the classic syrupy feel.");
     }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Turn audio reactivity off (clear the auto-bindings).");
-    ImGui::PopStyleVar();
-    ImGui::Dummy(ImVec2(0, 4));
+
+    if (part != AudioPresetPart::KnobsOnly) {
+        bool hasSet = sRecipe[stateKey].has && !bindings.empty();
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+        float avail = ImGui::GetContentRegionAvail().x;
+        float gap   = ImGui::GetStyle().ItemSpacing.x;
+        float bW    = (avail - gap) * 0.5f;
+        if (ImGui::Button("Shuffle", ImVec2(bW, 28))) shuffle();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pick a fresh random set of params to react —\n"
+                              "each centred randomly in its range, so it moves\n"
+                              "both up AND down, not always up.");
+        ImGui::SameLine();
+        if (ImGui::Button(hasSet ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
+            bindings.clear(); sRecipe[stateKey] = Recipe{}; changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Turn audio reactivity off (clear the auto-bindings).");
+        ImGui::PopStyleVar();
+        ImGui::Dummy(ImVec2(0, 4));
+    }
     return changed;
 }
 
@@ -3880,20 +4000,34 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
             // == Audio Reactivity presets — shared row (see audioPresetRow) ==
             // Builds the bindable-param list from this shader's float inputs
-            // (minus audio-plumbing) and renders the [Subtle][Medium][Intense]
-            // [re-roll] row. Same control the Fluid section uses.
-            {
-                std::vector<PresetParam> pp;
-                for (const auto& in : inputs) {
-                    if (in.type != "float") continue;
-                    if (in.name.find("audio") != std::string::npos ||
-                        in.name.find("Audio") != std::string::npos) continue;
-                    pp.push_back({ in.name, std::get<float>(in.value),
-                                   in.minVal, in.maxVal });
-                }
-                if (audioPresetRow(shaderSrc->audioBindings(), pp, layer->id))
-                    undoNeeded = true;
+            // (minus audio-plumbing) and renders the header + Reactivity/
+            // Character knobs. Same control the Fluid section uses. Rendered
+            // in two parts (KnobsOnly here, ButtonsOnly further down) so this
+            // shader's own "Audio Reactivity"-GROUP params can render BETWEEN
+            // them — the whole thing then reads as one section: header,
+            // knobs, this shader's audio-linked params, Shuffle/Off at the
+            // bottom.
+            bool hasAudioGroup = false;
+            for (const auto& in : inputs)
+                if (in.group == "Audio Reactivity") { hasAudioGroup = true; break; }
+
+            std::vector<PresetParam> pp;
+            for (const auto& in : inputs) {
+                if (in.type != "float") continue;
+                if (in.name.find("audio") != std::string::npos ||
+                    in.name.find("Audio") != std::string::npos) continue;
+                pp.push_back({ in.name, std::get<float>(in.value),
+                               in.minVal, in.maxVal });
             }
+            if (audioPresetRow(shaderSrc->audioBindings(), pp, layer->id,
+                               AudioPresetPart::KnobsOnly))
+                undoNeeded = true;
+            // No audio-linked params of its own — nothing to wait for, so
+            // Shuffle/Off render immediately (identical to the old behavior).
+            if (!hasAudioGroup &&
+                audioPresetRow(shaderSrc->audioBindings(), pp, layer->id,
+                               AudioPresetPart::ButtonsOnly))
+                undoNeeded = true;
 
             // EASING_TYPE is relocated to the BOTTOM of the parameter rows
             // (still inside the Parameters area, before Transition/Drop
@@ -3905,28 +4039,63 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             std::vector<int> paramOrder;
             paramOrder.reserve(inputs.size());
             int easingIdx = -1;
-            // Pass 1: image-type inputs first — they're the "Add your own
-            // texture" selector and should always sit at the top so users
-            // see it before scrolling through sliders/dropdowns.
+            // Pass 0: this shader's own "Audio Reactivity" GROUP members go
+            // first — they render directly beneath the master Reactivity/
+            // Character knobs (audioPresetRow, just above), so every
+            // audio-facing control on the panel clusters in one place.
             for (int i = 0; i < (int)inputs.size(); i++) {
+                if (inputs[i].group == "Audio Reactivity") paramOrder.push_back(i);
+            }
+            // Pass 1: image-type inputs next — they're the "Add your own
+            // texture" selector and should sit near the top so users see it
+            // before scrolling through sliders/dropdowns.
+            for (int i = 0; i < (int)inputs.size(); i++) {
+                if (inputs[i].group == "Audio Reactivity") continue;
                 if (inputs[i].type == "image") paramOrder.push_back(i);
             }
             // Pass 2: everything else (except EASING_TYPE which goes last).
             for (int i = 0; i < (int)inputs.size(); i++) {
+                if (inputs[i].group == "Audio Reactivity") continue;
                 if (inputs[i].type == "image") continue;
                 if (inputs[i].name == "EASING_TYPE") { easingIdx = i; continue; }
                 paramOrder.push_back(i);
             }
             if (easingIdx >= 0) paramOrder.push_back(easingIdx);
 
+            // The "Audio Reactivity" header already printed above (as part
+            // of the KnobsOnly call) — seed lastGroup so the loop doesn't
+            // print it a second time for this shader's own audio-linked
+            // params, which Pass 0 guarantees render first/contiguous.
+            std::string lastGroup = hasAudioGroup ? "Audio Reactivity" : "";
+            bool audioButtonsRendered = !hasAudioGroup; // already rendered above if no group
+
             for (int oi = 0; oi < (int)paramOrder.size(); oi++) {
                 int i = paramOrder[oi];
                 auto& input = inputs[i];
+
+                // The moment we leave the Audio Reactivity cluster (or reach
+                // the end of it), drop Shuffle/Off right there — before the
+                // consumed/hidden-name skips below, so a consumed or hidden
+                // item can't delay the transition past where it visually
+                // belongs. Checked ahead of both continues on purpose.
+                if (!audioButtonsRendered && input.group != "Audio Reactivity") {
+                    if (audioPresetRow(shaderSrc->audioBindings(), pp, layer->id,
+                                       AudioPresetPart::ButtonsOnly))
+                        undoNeeded = true;
+                    audioButtonsRendered = true;
+                }
+
                 if (consumedInputs.count(input.name)) continue;
                 // Baked-in audio reactivity removed — hide the now-inert
                 // `audioReact` slider (shaders no longer receive live audio
                 // uniforms; use the "Audio Reactivity On" button instead).
                 if (input.name == "audioReact") continue;
+
+                if (!input.group.empty() && input.group != lastGroup) {
+                    groupHeader(input.group.c_str());
+                    lastGroup = input.group;
+                }
+
                 ImGui::PushID(i + 10000);
 
                 if (input.type == "float") {
@@ -3942,7 +4111,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     else if (range < 1.0f)   fmt = "%.3f";
 
                     float v = std::get<float>(input.value);
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     ParamSliderResult ps = paramSlider("##val", lblUp.c_str(),
                                                       &v, input.minVal, input.maxVal,
                                                       isBound, fmt);
@@ -4001,14 +4170,14 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     }
                 } else if (input.type == "color") {
                     glm::vec4 c = std::get<glm::vec4>(input.value);
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     if (paramColorRow("##col", lblUp.c_str(), &c)) {
                         input.value = c;
                         undoNeeded = true;
                     }
                 } else if (input.type == "bool") {
                     bool b = std::get<bool>(input.value);
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     if (paramToggleRow("##bool", lblUp.c_str(), &b)) {
                         input.value = b;
                         undoNeeded = true;
@@ -4020,7 +4189,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     //     (release returns to normal). Used for GLITCH HIT.
                     //   - default tap   → on click, randomize a TARGET float
                     //     param. Used for NEW GLITCH to cycle through seeds.
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     ImGui::Dummy(ImVec2(0, kRowGapY));
                     ImVec4 accent = input.momentary
                         ? ImVec4(0.96f, 0.42f, 0.18f, 1.0f)
@@ -4072,7 +4241,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // Two stacked paramSliders (X / Y) keeps the clean
                     // label-top, pill-track-below rhythm.
                     glm::vec2 p = std::get<glm::vec2>(input.value);
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     std::string labelX = lblUp + "  X";
                     std::string labelY = lblUp + "  Y";
                     auto rx = paramSlider("##px", labelX.c_str(), &p.x,
@@ -4090,7 +4259,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     int iv = (int)v;
                     if (!input.longLabels.empty()) {
                         ImGui::Dummy(ImVec2(0, kRowGapY));
-                        std::string lblUp = upperLabel(input.name);
+                        std::string lblUp = inputDisplayLabel(input);
 
                         int cur = iv;
                         if (cur < 0) cur = 0;
@@ -4130,7 +4299,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         ImGui::Dummy(ImVec2(0, kRowPadY));
                     } else {
                         float fv = (float)iv;
-                        std::string lblUp = upperLabel(input.name);
+                        std::string lblUp = inputDisplayLabel(input);
                         auto r = paramSlider("##val", lblUp.c_str(),
                                              &fv, input.minVal, input.maxVal,
                                              false, "%.0f");
@@ -4142,7 +4311,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     int maxLen = (int)input.maxVal;
                     if (maxLen <= 0) maxLen = 12;
 
-                    std::string lblUp = upperLabel(input.name);
+                    std::string lblUp = inputDisplayLabel(input);
                     ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
                     ImGui::Text("%s", lblUp.c_str());
                     ImGui::PopStyleColor();
@@ -4268,7 +4437,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     };
                     std::string imgLabelStorage = isGenericImageName(input.name)
                                                   ? std::string("TEXTURE")
-                                                  : upperLabel(input.name);
+                                                  : inputDisplayLabel(input);
                     const char* displayLabel = imgLabelStorage.c_str();
 
                     auto& bindings = shaderSrc->imageBindings();
@@ -4315,6 +4484,14 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
                 ImGui::PopID();
             }
+
+            // Audio-Reactivity-grouped params were the LAST (or only) group
+            // in the list — the in-loop transition above never fired, so
+            // Shuffle/Off never rendered. Do it now, right after them.
+            if (!audioButtonsRendered &&
+                audioPresetRow(shaderSrc->audioBindings(), pp, layer->id,
+                               AudioPresetPart::ButtonsOnly))
+                undoNeeded = true;
 
             // (The standalone "+ Add Effect" trailer was removed — adding
             // effects now lives entirely in the BLEND dropdown gallery's
