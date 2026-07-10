@@ -13,6 +13,7 @@
 #include "sources/WindowCaptureSource_mac.h"
 #endif
 #include "sources/ShaderSource.h"
+#include "sources/AudioPresetEngine.h"
 #ifdef HAS_NDI
 #include "sources/NDIRuntime.h"
 #include "sources/NDISource.h"
@@ -3358,6 +3359,13 @@ void Application::renderUI() {
                 // strings = [managedKey, paramName]; value = float/int arg, or
                 // strings[2] for text.
                 setManagedLayerParam(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/layer/audiopreset"
+                       && msg.strings.size() >= 2) {
+                // Master audio-reactivity recipe on a managed layer — the
+                // remote face of the PropertyPanel's Reactivity/Character/
+                // Shuffle/Off row. strings = [managedKey, command]; command ∈
+                // intensity|character (floats[0] = value), shuffle, off.
+                setManagedLayerAudioPreset(msg.strings[0], msg.strings[1], msg);
             } else if (msg.address == "/easel/zone/ensure"
                        && msg.strings.size() >= 2) {
                 // Composite/bus: ensure an output zone that publishes a named NDI
@@ -12800,6 +12808,94 @@ void Application::setManagedLayerParam(const std::string& key, const std::string
         return;
     }
     std::cerr << "[OSC] layer/param: no managed layer with key " << key << std::endl;
+}
+
+void Application::setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg) {
+    if (key.empty() || command.empty()) return;
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key || !l->source) continue;
+
+        // Bindable-param list + bindings map, per source type — the same
+        // lists the PropertyPanel builds for its audioPresetRow, so the
+        // remote recipe modulates exactly what the desktop row would.
+        std::vector<AudioPresetEngine::Param> pp;
+        std::map<std::string, AudioBinding>* bindings = nullptr;
+        const std::string type = l->source->typeName();
+        if (l->source->isShader()) {
+            auto* shader = static_cast<ShaderSource*>(l->source.get());
+            bindings = &shader->audioBindings();
+            for (const auto& in : shader->inputs()) {
+                if (in.type != "float") continue;
+                if (in.name.find("audio") != std::string::npos ||
+                    in.name.find("Audio") != std::string::npos) continue;
+                pp.push_back({ in.name, std::get<float>(in.value),
+                               in.minVal, in.maxVal });
+            }
+        } else if (type == "Fluid") {
+            auto* f = static_cast<FluidSource*>(l->source.get());
+            bindings = &f->audioBindings();
+            pp = {
+                { "curl",               f->m_curlAmount,         0.0f,  60.0f },
+                { "splatRadius",        f->m_splatRadius,        0.05f, 1.5f  },
+                { "splatIntensity",     f->m_splatIntensity,     0.1f,  4.0f  },
+                { "densityDissipation", f->m_densityDissipation, 0.0f,  4.0f  },
+                { "autoSpeed",          f->m_autoSpeed,          0.0f,  4.0f  },
+                { "autoScale",          f->m_autoScale,          0.0f,  0.5f  },
+                { "bloomIntensity",     f->m_bloomIntensity,     0.0f,  2.0f  },
+                { "sunraysWeight",      f->m_sunraysWeight,      0.0f,  2.0f  },
+            };
+        } else if (type == "Fluid3D") {
+            auto* f3 = static_cast<FluidSource3D*>(l->source.get());
+            bindings = &f3->audioBindings();
+            pp = {
+                { "brightness",     f3->m_brightness,     0.0f,  6.0f },
+                { "rotateSpeed",    f3->m_rotateSpeed,    0.0f,  2.0f },
+                { "tilt",           f3->m_tilt,          -1.57f, 1.57f },
+                { "zoom",           f3->m_zoom,           0.5f,  4.0f },
+                { "gravity",        f3->m_gravity,        0.0f,  4.0f },
+                { "vortex",         f3->m_vortex,         0.0f,  3.0f },
+                { "turbulence",     f3->m_turbulence,     0.0f,  2.0f },
+                { "forceScale",     f3->m_forceScale,     0.1f,  4.0f },
+                { "sphereScale",    f3->m_sphereScale,    0.05f, 1.5f },
+                { "ambient",        f3->m_ambient,        0.0f,  1.0f },
+                { "specular",       f3->m_specular,       0.0f,  3.0f },
+                { "rim",            f3->m_rim,            0.0f,  1.0f },
+                { "saturation",     f3->m_saturation,     0.0f,  2.0f },
+                { "lightIntensity", f3->m_lightIntensity, 0.0f,  3.0f },
+            };
+        } else {
+            std::cerr << "[OSC] layer/audiopreset: " << key
+                      << " has no audio-bindable source (" << type << ")\n";
+            return;
+        }
+
+        // A reloaded project has bindings but no recipe — adopt them first so
+        // a remote knob re-scales the existing motion instead of discarding it.
+        AudioPresetEngine::adoptExisting(*bindings, pp, l->id);
+        AudioPresetEngine::State& st = AudioPresetEngine::stateFor(l->id);
+
+        if (command == "intensity" && !msg.floats.empty()) {
+            float v = msg.floats[0];
+            st.intensity = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            // Same contract as the panel slider: with nothing bound yet the
+            // knob auto-picks a set, so it always DOES something.
+            if (!AudioPresetEngine::rebuild(*bindings, pp, l->id))
+                AudioPresetEngine::shuffle(*bindings, pp, l->id);
+        } else if (command == "character" && !msg.floats.empty()) {
+            float v = msg.floats[0];
+            st.character = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+            if (!AudioPresetEngine::rebuild(*bindings, pp, l->id))
+                AudioPresetEngine::retintCharacter(*bindings, l->id);
+        } else if (command == "shuffle") {
+            AudioPresetEngine::shuffle(*bindings, pp, l->id);
+        } else if (command == "off") {
+            AudioPresetEngine::off(*bindings, l->id);
+        } else {
+            std::cerr << "[OSC] layer/audiopreset: unknown command " << command << std::endl;
+        }
+        return;
+    }
+    std::cerr << "[OSC] layer/audiopreset: no managed layer with key " << key << std::endl;
 }
 
 OutputZone* Application::ensureZoneByName(const std::string& name) {

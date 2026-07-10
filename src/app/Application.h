@@ -420,6 +420,10 @@ private:
     void removeManagedLayer(const std::string& slot);
     // Set an ISF param on a managed shader layer (by key). Backs /easel/layer/param.
     void setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg);
+    // Drive the master audio-reactivity recipe on a managed layer (by key) —
+    // the remote face of the PropertyPanel Reactivity/Character/Shuffle/Off
+    // row, via AudioPresetEngine. Backs /easel/layer/audiopreset.
+    void setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg);
     // Agent composite/bus: find-or-create an Easel output zone, publish it as a
     // named NDI feed, and assign managed layers to it. Backs /easel/zone/ensure
     // and /easel/zone/layer.

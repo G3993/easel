@@ -11,6 +11,7 @@
 #include "compositing/LayerStack.h"
 #include "app/OutputZone.h"
 #include "ui/LayerPanel.h"
+#include "sources/AudioPresetEngine.h"
 #include "sources/ShaderSource.h"
 #include "sources/VideoSource.h"
 #include "sources/ParticleSource.h"
@@ -1085,17 +1086,11 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
 
 // One bindable parameter for the audio-reactivity preset row: its id, current
 // value, and range. Shader params and FluidSource members both reduce to this.
-struct PresetParam { std::string name; float cur, lo, hi; };
+using PresetParam = AudioPresetEngine::Param;
 
-// Map the user-facing Character knob (-1 smooth … +1 chopped, DEFAULT -0.5
-// per the EaselAudio spec) onto the conditioning block's character so the
-// default knob position lands on conditioner-neutral 0 — i.e. exactly
-// today's felt behavior. Pushing left of default adds extra syrup; right
-// of default speeds the envelope and arms the hard-change bypass.
-static float characterKnobToConditioner(float k) {
-    if (k <= -0.5f) return (k + 0.5f) * 2.0f;   // -1 … -0.5  →  -1 … 0
-    return (k + 0.5f) / 1.5f;                    // -0.5 … +1  →   0 … +1
-}
+// (Character-knob → conditioner mapping and the whole per-layer recipe/
+// intensity/character state live in AudioPresetEngine now, shared with the
+// OSC remote path — see sources/AudioPresetEngine.h.)
 
 // (Audio reactivity is now a continuous Intensity slider + Shuffle — see
 // audioPresetRow below — instead of discrete Subtle/Medium/Intense presets.)
@@ -1121,97 +1116,23 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
                            AudioPresetPart part = AudioPresetPart::Full) {
     bool changed = false;
 
-    // Per-layer state: a random "recipe" (which params, which signals, and a
-    // random CENTER for each) plus a continuous intensity. The recipe lets the
-    // Intensity slider re-scale modulation depth LIVE without re-randomizing,
-    // and makes Shuffle pick a genuinely new set whose motion is CENTRED in
-    // each param's range (so it moves both ways — no longer anchored to the
-    // current value and always drifting upward).
-    struct RecipeE { int idx; AudioSignal sig; float center01; bool invert; };
-    struct Recipe   { std::vector<RecipeE> e; bool has = false; };
-    static std::unordered_map<uint32_t, Recipe> sRecipe;
-    static std::unordered_map<uint32_t, float>  sIntensity;
-    static std::unordered_map<uint32_t, float>  sCharacter;
-    static std::unordered_map<uint32_t, bool>   sInit;
-    static std::mt19937 rng{std::random_device{}()};
-
-    // Start subtle: low intensity = shallow modulation depth + heavy smoothing
-    // (see the smoothing formula below). Audio reactivity should ease in calm,
-    // not snap on aggressive — users push the slider right when they want more.
-    // Character defaults to -0.5 (smooth side) = conditioner-neutral = the
-    // classic feel; only touching the knob changes anything (EaselAudio §2).
-    if (!sInit[stateKey]) {
-        sIntensity[stateKey] = 0.22f;
-        sCharacter[stateKey] = -0.5f;
-        sInit[stateKey] = true;
-    }
-    float& intensity = sIntensity[stateKey];
-    float& charKnob  = sCharacter[stateKey];
+    // Per-layer state (recipe + the two knobs) lives in AudioPresetEngine,
+    // shared with the OSC remote path so mobile's Audio Reactivity controls
+    // drive the exact same state this row displays.
+    AudioPresetEngine::State& st = AudioPresetEngine::stateFor(stateKey);
+    float& intensity = st.intensity;
+    float& charKnob  = st.character;
 
     auto buildFromRecipe = [&]() {
-        Recipe& r = sRecipe[stateKey];
-        if (!r.has) return;
-        bindings.clear();
-        for (auto& e : r.e) {
-            if (e.idx < 0 || e.idx >= (int)params.size()) continue;
-            const PresetParam& pp = params[e.idx];
-            float span = pp.hi - pp.lo; if (span <= 0.0f) continue;
-            float half   = span * (0.08f + 0.42f * intensity) * 0.5f; // subtle..intense
-            float center = pp.lo + e.center01 * span;
-            float rmin = center - half, rmax = center + half;
-            if (rmin < pp.lo) rmin = pp.lo;
-            if (rmax > pp.hi) rmax = pp.hi;
-            if (e.invert) { float t = rmin; rmin = rmax; rmax = t; } // loud -> down
-            AudioBinding ab;
-            ab.signal    = e.sig;
-            ab.rangeMin  = rmin;
-            ab.rangeMax  = rmax;
-            ab.smoothing = 0.96f - 0.24f * intensity;   // syrupy..less syrupy (never strobey)
-            ab.character = characterKnobToConditioner(charKnob); // bus-wide 2nd knob
-            bindings[pp.name] = ab;
-        }
-        changed = true;
+        if (AudioPresetEngine::rebuild(bindings, params, stateKey)) changed = true;
     };
-
     auto shuffle = [&]() {
-        Recipe r; r.has = true;
-        std::vector<int> idx;
-        for (int i = 0; i < (int)params.size(); i++) idx.push_back(i);
-        std::shuffle(idx.begin(), idx.end(), rng);
-        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-        // Continuous drivers (skip the impulse/inverted Drop/Silence/Momentum).
-        const AudioSignal cs[] = { AudioSignal::Level, AudioSignal::Bass,
-                                   AudioSignal::Mid,   AudioSignal::High,
-                                   AudioSignal::Energy, AudioSignal::Build };
-        int n = std::min(5, (int)idx.size());
-        for (int j = 0; j < n; j++) {
-            RecipeE e;
-            e.idx      = idx[j];
-            e.sig      = cs[rng() % 6];
-            e.center01 = 0.25f + 0.50f * u01(rng);   // random centre, room both ways
-            e.invert   = (rng() % 2 == 0);           // ~half fall as energy rises
-            r.e.push_back(e);
-        }
-        sRecipe[stateKey] = r;
-        buildFromRecipe();
+        if (AudioPresetEngine::shuffle(bindings, params, stateKey)) changed = true;
     };
 
     // After a project reload the bindings persist but the recipe is gone —
     // derive one from the existing bindings so the slider can still re-scale.
-    if (!sRecipe[stateKey].has) {
-        Recipe r;
-        for (int i = 0; i < (int)params.size(); i++) {
-            auto it = bindings.find(params[i].name);
-            if (it == bindings.end() || it->second.signal == AudioSignal::None) continue;
-            float span = params[i].hi - params[i].lo; if (span <= 0.0f) continue;
-            float center = 0.5f * (it->second.rangeMin + it->second.rangeMax);
-            RecipeE e; e.idx = i; e.sig = it->second.signal;
-            e.center01 = (center - params[i].lo) / span;
-            e.invert   = (it->second.rangeMin > it->second.rangeMax);
-            r.e.push_back(e); r.has = true;
-        }
-        if (r.has) sRecipe[stateKey] = r;
-    }
+    AudioPresetEngine::adoptExisting(bindings, params, stateKey);
 
     if (part != AudioPresetPart::ButtonsOnly) {
         // ── Section header + Intensity slider (Subtle -> Intense) ──────────
@@ -1229,7 +1150,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             // Touching the slider with nothing bound yet auto-picks a set, so
             // it always DOES something (no need to hit Shuffle first to see
             // motion).
-            if (sRecipe[stateKey].has) buildFromRecipe();
+            if (st.recipe.has) buildFromRecipe();
             else shuffle();
         }
         if (ImGui::IsItemHovered())
@@ -1243,12 +1164,10 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         // in this layer's recipe gets the same character).
         if (pillSlider("Character", &charKnob, -1.0f, 1.0f, "%.2f")) {
             if (charKnob < -1.0f) charKnob = -1.0f; else if (charKnob > 1.0f) charKnob = 1.0f;
-            if (sRecipe[stateKey].has) buildFromRecipe();
+            if (st.recipe.has) buildFromRecipe();
             else {
                 // No recipe yet — retint any existing manual bindings in place.
-                float c = characterKnobToConditioner(charKnob);
-                for (auto& [n, ab] : bindings) ab.character = c;
-                changed = changed || !bindings.empty();
+                changed = AudioPresetEngine::retintCharacter(bindings, stateKey) || changed;
             }
         }
         if (ImGui::IsItemHovered())
@@ -1258,7 +1177,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     }
 
     if (part != AudioPresetPart::KnobsOnly) {
-        bool hasSet = sRecipe[stateKey].has && !bindings.empty();
+        bool hasSet = st.recipe.has && !bindings.empty();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
         float avail = ImGui::GetContentRegionAvail().x;
         float gap   = ImGui::GetStyle().ItemSpacing.x;
@@ -1270,7 +1189,7 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
                               "both up AND down, not always up.");
         ImGui::SameLine();
         if (ImGui::Button(hasSet ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
-            bindings.clear(); sRecipe[stateKey] = Recipe{}; changed = true;
+            if (AudioPresetEngine::off(bindings, stateKey)) changed = true;
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Turn audio reactivity off (clear the auto-bindings).");
