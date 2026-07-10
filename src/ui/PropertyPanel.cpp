@@ -1162,7 +1162,9 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         // Smooth (left) ↔ Chopped (right); default -0.5 = the classic feel.
         // Macro-maps onto the shared conditioning block bus-wide (every binding
         // in this layer's recipe gets the same character).
-        if (pillSlider("Character", &charKnob, -1.0f, 1.0f, "%.2f")) {
+        // "Punch" (was "Character" — too abstract): left = smooth glide,
+        // right = snappy chop. Same knob, same wire value.
+        if (pillSlider("Punch", &charKnob, -1.0f, 1.0f, "%.2f")) {
             if (charKnob < -1.0f) charKnob = -1.0f; else if (charKnob > 1.0f) charKnob = 1.0f;
             if (st.recipe.has) buildFromRecipe();
             else {
@@ -1171,8 +1173,8 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
             }
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Envelope character, bus-wide:\n"
-                              "Smooth (left) -> Chopped (right).\n"
+            ImGui::SetTooltip("How hard each hit lands, bus-wide:\n"
+                              "Smooth glide (left) -> snappy chop (right).\n"
                               "Default sits at the classic syrupy feel.");
     }
 
