@@ -919,19 +919,22 @@ static bool rangeSlider(const char* id, const char* label,
         changed = true;
     }
 
-    // Tall pill track, NEUTRAL selected span (mobile's monochrome palette —
-    // no orange), two solid thumbs riding INSIDE the pill.
+    // Tall pill track + a quiet lighter BAND for the selected range. No ball
+    // thumbs — the band itself is the affordance. Slim rounded edge caps mark
+    // the draggable ends, brightening on hover/drag. Minimal, monochrome.
+    bool hovered = ImGui::IsItemHovered();
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
                       kColTallTrack, trackH * 0.5f);
     dl->AddRectFilled(ImVec2(toX(*lo), trackY), ImVec2(toX(*hi), trackY + trackH),
                       kColRangeSpan, trackH * 0.5f);
+    ImU32 capCol = (active || hovered) ? IM_COL32(255, 255, 255, 235)
+                                       : IM_COL32(255, 255, 255, 150);
     for (float hv : { *lo, *hi }) {
-        float hx = toX(hv), hy = trackY + trackH * 0.5f;
-        dl->AddCircleFilled(ImVec2(hx, hy), handleR,
-                            active ? IM_COL32(255, 255, 255, 255)
-                                   : kColValue);
-        dl->AddCircle(ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
+        float hx = toX(hv);
+        dl->AddRectFilled(ImVec2(hx - 1.5f, trackY + 3.5f),
+                          ImVec2(hx + 1.5f, trackY + trackH - 3.5f),
+                          capCol, 1.5f);
     }
 
     // Live driven-value marker — clean tone-colored tick inside the pill,
