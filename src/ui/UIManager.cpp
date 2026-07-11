@@ -845,9 +845,15 @@ void UIManager::applyTheme(float dpiScale) {
     // Disabled alpha for "on dark" contexts
     s.DisabledAlpha     = 0.45f;
 
-    // Anti-aliasing
+    // Anti-aliasing + arc quality. The default circle tessellation error
+    // (0.30px) shows visible facets on the tall pill sliders' 7-9px corner
+    // arcs — they read as "pixelated" next to the mobile app's buttery
+    // rounded rects. 0.10px keeps every arc smooth at retina scale for a
+    // negligible vertex cost.
     s.AntiAliasedLines  = true;
     s.AntiAliasedFill   = true;
+    s.CircleTessellationMaxError = 0.10f;
+    s.CurveTessellationTol       = 0.75f;
 
     // --- Color Palette — strict monochrome ramp ---
     // Background: near-black canvas with micro luminance steps. NO blue,

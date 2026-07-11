@@ -106,8 +106,11 @@ static constexpr ImU32 kColCtrlBg       = IM_COL32(255, 255, 255, 16);
 static constexpr ImU32 kColCtrlBgHover  = IM_COL32(255, 255, 255, 32);
 static constexpr ImU32 kColCtrlBgActive = IM_COL32(255, 255, 255, 48);
 static constexpr ImU32 kColCtrlBorder   = IM_COL32(255, 255, 255, 22);
-static constexpr ImU32 kColAccent       = IM_COL32(232, 150,  70, 255);
-static constexpr ImU32 kColAccentDim    = IM_COL32(232, 150,  70, 200);
+// Monochrome accent (user directive 2026-07-11): the panel accent is WHITE,
+// matching the mobile sheet and the app-wide "white-with-alpha for every
+// accent" palette in UIManager — no amber/orange anywhere in the panel.
+static constexpr ImU32 kColAccent       = IM_COL32(255, 255, 255, 255);
+static constexpr ImU32 kColAccentDim    = IM_COL32(255, 255, 255, 150);
 // Main slider's bound-fill only — kept a separate constant from kColAccentDim
 // on purpose: the range sub-slider (rangeSlider) and the bound-icon stay
 // orange (that's still "this is audio-bound"), but the primary value track
@@ -133,7 +136,7 @@ static const ImVec4 kColHeaderV   = ImVec4(0.969f, 0.976f, 0.996f, 1.0f);   // =
 static const ImVec4 kColCtrlBgV       = ImVec4(1.0f, 1.0f, 1.0f, 0.063f);  // == kColCtrlBg
 static const ImVec4 kColCtrlBgHoverV  = ImVec4(1.0f, 1.0f, 1.0f, 0.125f);  // == kColCtrlBgHover
 static const ImVec4 kColCtrlBgActiveV = ImVec4(1.0f, 1.0f, 1.0f, 0.188f);  // == kColCtrlBgActive
-static const ImVec4 kColAccentV       = ImVec4(0.910f, 0.588f, 0.275f, 1.0f); // == kColAccent
+static const ImVec4 kColAccentV       = ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // == kColAccent (white)
 // Destructive/danger stays its own role (red) — semantically distinct from
 // the neutral chrome, intentionally NOT collapsed into the palette.
 static const ImVec4 kColDanger    = ImVec4(0.85f, 0.30f, 0.32f, 1.0f);
@@ -556,25 +559,14 @@ static void drawBolt(ImDrawList* dl, float cx, float cy, float s, ImU32 col) {
     dl->AddConvexPolyFilled(pts, 7, col);
 }
 
-// Audio-signal "tone" colors — the live marker on a bound slider is tinted by
-// WHICH signal drives it (bass reads warm/rose, highs cool/sky, beat violet…),
-// so a glance at a dancing panel says what's moving each param. MIDI stays
-// neutral slate: it isn't an audio tone.
+// Live-marker color for a bound slider. This was per-signal tone colors
+// (bass rose, mid green, …) for one day; the user's monochrome directive
+// (2026-07-11, "accent colors should be white") flattened it to pure white —
+// matching the mobile sheet. The per-signal plumbing (a liveCol argument on
+// paramSlider/rangeSlider) is kept so tones can return as an option later.
 static ImU32 signalToneColor(AudioSignal s) {
-    switch (s) {
-        case AudioSignal::Level:    return IM_COL32(255, 196,  64, 255); // amber
-        case AudioSignal::Bass:     return IM_COL32(251, 113, 133, 255); // rose
-        case AudioSignal::Mid:      return IM_COL32( 74, 222, 128, 255); // green
-        case AudioSignal::High:     return IM_COL32( 96, 205, 255, 255); // sky
-        case AudioSignal::Beat:     return IM_COL32(167, 139, 250, 255); // violet
-        case AudioSignal::MidiCC:   return IM_COL32(148, 163, 184, 255); // slate
-        case AudioSignal::Energy:   return IM_COL32(250, 204,  21, 255); // yellow
-        case AudioSignal::Build:    return IM_COL32(253, 164,  96, 255); // orange
-        case AudioSignal::Drop:     return IM_COL32(255,  99,  99, 255); // red
-        case AudioSignal::Silence:  return IM_COL32(125, 211, 252, 255); // ice
-        case AudioSignal::Momentum: return IM_COL32(232, 121, 249, 255); // fuchsia
-        default:                    return kColAccent;
-    }
+    (void)s;
+    return IM_COL32(255, 255, 255, 255);
 }
 
 // Parameter row styled after the reference UI: muted label (top-left) + right-aligned
@@ -702,6 +694,11 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
         if (lv < lo) lv = lo; else if (lv > hi) lv = hi;
         float lnorm = (hi > lo) ? (lv - lo) / (hi - lo) : 0.0f;
         float lx = rowStart.x + inset + (w - inset * 2.0f) * lnorm;
+        // Dark backing keeps the white tick readable when it rides over the
+        // white thumb.
+        dl->AddRectFilled(ImVec2(lx - 2.25f, trackY + 1.75f),
+                          ImVec2(lx + 2.25f, trackY + trackH - 1.75f),
+                          IM_COL32(0, 0, 0, 150), 2.0f);
         dl->AddRectFilled(ImVec2(lx - 1.25f, trackY + 2.5f),
                           ImVec2(lx + 1.25f, trackY + trackH - 2.5f),
                           lc, 1.25f);
@@ -944,6 +941,9 @@ static bool rangeSlider(const char* id, const char* label,
         float lv = *liveVal;
         if (lv < absLo) lv = absLo; else if (lv > absHi) lv = absHi;
         float lx = toX(lv);
+        dl->AddRectFilled(ImVec2(lx - 2.25f, trackY + 1.75f),
+                          ImVec2(lx + 2.25f, trackY + trackH - 1.75f),
+                          IM_COL32(0, 0, 0, 150), 2.0f);
         dl->AddRectFilled(ImVec2(lx - 1.25f, trackY + 2.5f),
                           ImVec2(lx + 1.25f, trackY + trackH - 2.5f),
                           lc, 1.25f);
