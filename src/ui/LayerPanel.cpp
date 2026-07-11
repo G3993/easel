@@ -997,6 +997,13 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                             }
                         }
                     }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Show in All Zones"))
+                        showLayerInAllZones(*zones, L->id);
+                    if (ImGui::MenuItem("Solo Across All Zones"))
+                        soloLayerAcrossZones(*zones, L->id);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("One look everywhere — every zone renders\nonly this layer, so the whole house matches.");
                     ImGui::EndMenu();
                 }
             }

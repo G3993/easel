@@ -536,6 +536,27 @@ static void drawBolt(ImDrawList* dl, float cx, float cy, float s, ImU32 col) {
     dl->AddConvexPolyFilled(pts, 7, col);
 }
 
+// Audio-signal "tone" colors — the live marker on a bound slider is tinted by
+// WHICH signal drives it (bass reads warm/rose, highs cool/sky, beat violet…),
+// so a glance at a dancing panel says what's moving each param. MIDI stays
+// neutral slate: it isn't an audio tone.
+static ImU32 signalToneColor(AudioSignal s) {
+    switch (s) {
+        case AudioSignal::Level:    return IM_COL32(255, 196,  64, 255); // amber
+        case AudioSignal::Bass:     return IM_COL32(251, 113, 133, 255); // rose
+        case AudioSignal::Mid:      return IM_COL32( 74, 222, 128, 255); // green
+        case AudioSignal::High:     return IM_COL32( 96, 205, 255, 255); // sky
+        case AudioSignal::Beat:     return IM_COL32(167, 139, 250, 255); // violet
+        case AudioSignal::MidiCC:   return IM_COL32(148, 163, 184, 255); // slate
+        case AudioSignal::Energy:   return IM_COL32(250, 204,  21, 255); // yellow
+        case AudioSignal::Build:    return IM_COL32(253, 164,  96, 255); // orange
+        case AudioSignal::Drop:     return IM_COL32(255,  99,  99, 255); // red
+        case AudioSignal::Silence:  return IM_COL32(125, 211, 252, 255); // ice
+        case AudioSignal::Momentum: return IM_COL32(232, 121, 249, 255); // fuchsia
+        default:                    return kColAccent;
+    }
+}
+
 // Parameter row styled after the reference UI: muted label (top-left) + right-aligned
 // value on the label row, a full-width pill track with circular handle below. A small
 // lightning-bolt icon sits at the very left — click it to open the binding menu so the
@@ -547,9 +568,15 @@ struct ParamSliderResult {
     bool activated    = false; // drag just started — for undo snapshots
     ImVec2 boltPos    = ImVec2(0, 0); // screen pos of the sparkle (popup anchor)
 };
+// `liveVal` (optional, nullptr to disable): the binding's CURRENT audio-driven
+// value in [lo, hi], rendered as a thin tone-colored caret + triangle riding
+// the track in real time (same idiom as rangeSlider's live marker). `liveCol`
+// tints it by the driving signal (see signalToneColor); 0 falls back to amber.
 static ParamSliderResult paramSlider(const char* id, const char* label, float* v,
                                      float lo, float hi, bool bound,
-                                     const char* fmt = "%.2f") {
+                                     const char* fmt = "%.2f",
+                                     const float* liveVal = nullptr,
+                                     ImU32 liveCol = 0) {
     ParamSliderResult r;
     ImGui::PushID(id);
     // Shared rhythm: leading gap = kRowGapY (identical to pillSlider /
@@ -583,7 +610,7 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                               : kColCtrlBg;
     dl->AddRectFilled(bMin, bMax, bgCol, 4.0f);
 
-    ImU32 boltCol = bound       ? kColAccent
+    ImU32 boltCol = bound       ? (liveCol ? liveCol : kColAccent)
                   : boltHovered ? kColValue
                                 : kColLabel;
     lucide::sparkles(dl,
@@ -644,6 +671,23 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
                                            : kColValue;
     dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
     dl->AddCircle      (ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
+
+    // Live audio-driven marker — thin tone-colored caret + triangle riding
+    // the track at the binding's current driven value, drawn ON TOP of the
+    // thumb so the audio stays visible even when it sits under the knob.
+    if (liveVal) {
+        ImU32 lc = liveCol ? liveCol : kColAccent;
+        float lv = *liveVal;
+        if (lv < lo) lv = lo; else if (lv > hi) lv = hi;
+        float lnorm = (hi > lo) ? (lv - lo) / (hi - lo) : 0.0f;
+        float lx = rowStart.x + w * lnorm;
+        dl->AddLine(ImVec2(lx, trackY - 3.0f),
+                    ImVec2(lx, trackY + trackH + 3.0f), lc, 1.75f);
+        float ty = trackY - 3.0f;
+        dl->AddTriangleFilled(ImVec2(lx - 4.0f, ty - 5.0f),
+                              ImVec2(lx + 4.0f, ty - 5.0f),
+                              ImVec2(lx, ty), lc);
+    }
 
     // Bottom breathing room = kRowPadY — identical to every other row helper.
     ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
@@ -808,7 +852,8 @@ static DragPairResult dragPair2(const char* idA, const char* labelA, float* a, D
 // in real time. Read-only; never mutated.
 static bool rangeSlider(const char* id, const char* label,
                         float* lo, float* hi, float absLo, float absHi,
-                        const float* liveVal = nullptr) {
+                        const float* liveVal = nullptr,
+                        ImU32 liveCol = 0) {
     ImGui::PushID(id);
     ImGui::Dummy(ImVec2(0, kRowGapY));
     float w = ImGui::GetContentRegionAvail().x;
@@ -872,14 +917,15 @@ static bool rangeSlider(const char* id, const char* label,
     // Live driven-value marker — thin bright caret + triangle, on top of the
     // round thumbs, using the same amber accent as the selected-span fill.
     if (liveVal) {
+        ImU32 lc = liveCol ? liveCol : kColAccent;
         float lv = *liveVal;
         if (lv < absLo) lv = absLo; else if (lv > absHi) lv = absHi;
         float lx = toX(lv);
         dl->AddLine(ImVec2(lx, trackY - 3.0f), ImVec2(lx, trackY + trackH + 3.0f),
-                    kColAccent, 1.75f);
+                    lc, 1.75f);
         float ty = trackY - 3.0f;
         dl->AddTriangleFilled(ImVec2(lx - 4.0f, ty - 5.0f), ImVec2(lx + 4.0f, ty - 5.0f),
-                              ImVec2(lx, ty), kColAccent);
+                              ImVec2(lx, ty), lc);
     }
 
     ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
@@ -1179,18 +1225,36 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     }
 
     if (part != AudioPresetPart::KnobsOnly) {
-        bool hasSet = st.recipe.has && !bindings.empty();
+        // On / Shuffle / Off — On is LIT (amber) while reactivity is live so
+        // the on/off state reads at a glance. On restores the exact set Off
+        // stashed (a true toggle); the very first On shuffles a fresh set.
+        bool isOn = st.recipe.has && !bindings.empty();
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
         float avail = ImGui::GetContentRegionAvail().x;
         float gap   = ImGui::GetStyle().ItemSpacing.x;
-        float bW    = (avail - gap) * 0.5f;
+        float bW    = (avail - gap * 2.0f) / 3.0f;
+        if (isOn) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.91f, 0.59f, 0.27f, 0.32f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.91f, 0.59f, 0.27f, 0.44f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.91f, 0.59f, 0.27f, 0.58f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 0.87f, 0.66f, 1.0f));
+        }
+        if (ImGui::Button("On", ImVec2(bW, 28))) {
+            if (AudioPresetEngine::on(bindings, params, stateKey)) changed = true;
+        }
+        if (isOn) ImGui::PopStyleColor(4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(isOn ? "Audio reactivity is ON (lit)."
+                                   : "Turn audio reactivity on — brings back the\n"
+                                     "same set Off cleared (or picks one first time).");
+        ImGui::SameLine();
         if (ImGui::Button("Shuffle", ImVec2(bW, 28))) shuffle();
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Pick a fresh random set of params to react —\n"
                               "each centred randomly in its range, so it moves\n"
                               "both up AND down, not always up.");
         ImGui::SameLine();
-        if (ImGui::Button(hasSet ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
+        if (ImGui::Button(isOn ? "Off" : "Off##disabled", ImVec2(bW, 28))) {
             if (AudioPresetEngine::off(bindings, stateKey)) changed = true;
         }
         if (ImGui::IsItemHovered())
@@ -3223,8 +3287,21 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 bool isBound = (bit != bindings.end() &&
                                 bit->second.signal != AudioSignal::None);
                 ImGui::PushID(pid);
+                // Live tone-colored marker on the main slider (see the shader
+                // float path) — the binding's current driven value in [lo,hi].
+                float liveDriven = 0.0f;
+                const float* livePtr = nullptr;
+                ImU32 tone = 0;
+                if (isBound) {
+                    const AudioBinding& lab = bit->second;
+                    liveDriven = lab.rangeMin +
+                        lab.smoothedValue * (lab.rangeMax - lab.rangeMin);
+                    liveDriven = std::max(lo, std::min(hi, liveDriven));
+                    livePtr = &liveDriven;
+                    tone = signalToneColor(lab.signal);
+                }
                 ParamSliderResult ps = paramSlider("##fp", label, v, lo, hi,
-                                                   isBound, fmt);
+                                                   isBound, fmt, livePtr, tone);
                 if (ps.activated) undoNeeded = true;
                 if (ps.openBindMenu) ImGui::OpenPopup("##fbind");
                 audioBindPopup("##fbind", label, bindings, pid, lo, hi,
@@ -3232,12 +3309,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 // Bound → inline draggable min/max range (matches shaders).
                 if (isBound) {
                     AudioBinding& abr = bindings[pid];
-                    float liveDriven = abr.rangeMin +
+                    float liveRng = abr.rangeMin +
                         abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
                     ImGui::Indent(14.0f);
                     if (rangeSlider("##finrng", "range",
                                     &abr.rangeMin, &abr.rangeMax, lo, hi,
-                                    &liveDriven))
+                                    &liveRng, tone))
                         undoNeeded = true;
                     ImGui::Unindent(14.0f);
                 }
@@ -3493,20 +3570,33 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 bool isBound = (bit != bindings.end() &&
                                 bit->second.signal != AudioSignal::None);
                 ImGui::PushID(pid);
+                // Live tone-colored marker on the main slider (see the shader
+                // float path) — the binding's current driven value in [lo,hi].
+                float liveDriven = 0.0f;
+                const float* livePtr = nullptr;
+                ImU32 tone = 0;
+                if (isBound) {
+                    const AudioBinding& lab = bit->second;
+                    liveDriven = lab.rangeMin +
+                        lab.smoothedValue * (lab.rangeMax - lab.rangeMin);
+                    liveDriven = std::max(lo, std::min(hi, liveDriven));
+                    livePtr = &liveDriven;
+                    tone = signalToneColor(lab.signal);
+                }
                 ParamSliderResult ps = paramSlider("##f3", label, v, lo, hi,
-                                                   isBound, fmt);
+                                                   isBound, fmt, livePtr, tone);
                 if (ps.activated) undoNeeded = true;
                 if (ps.openBindMenu) ImGui::OpenPopup("##f3bind");
                 audioBindPopup("##f3bind", label, bindings, pid, lo, hi,
                                midi, ps.boltPos);
                 if (isBound) {
                     AudioBinding& abr = bindings[pid];
-                    float liveDriven = abr.rangeMin +
+                    float liveRng = abr.rangeMin +
                         abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
                     ImGui::Indent(14.0f);
                     if (rangeSlider("##f3rng", "range",
                                     &abr.rangeMin, &abr.rangeMax, lo, hi,
-                                    &liveDriven))
+                                    &liveRng, tone))
                         undoNeeded = true;
                     ImGui::Unindent(14.0f);
                 }
@@ -4035,9 +4125,25 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
                     float v = std::get<float>(input.value);
                     std::string lblUp = inputDisplayLabel(input);
+                    // Live audio-driven marker on the main slider: the
+                    // binding's smoothed 0..1 follower mapped onto its
+                    // [rangeMin, rangeMax] (exactly what applyAudioBindings
+                    // writes each frame), tone-colored by the driving signal.
+                    float liveDriven = 0.0f;
+                    const float* livePtr = nullptr;
+                    ImU32 tone = 0;
+                    if (isBound) {
+                        const AudioBinding& lab = bit->second;
+                        liveDriven = lab.rangeMin +
+                            lab.smoothedValue * (lab.rangeMax - lab.rangeMin);
+                        liveDriven = std::max(input.minVal,
+                                     std::min(input.maxVal, liveDriven));
+                        livePtr = &liveDriven;
+                        tone = signalToneColor(lab.signal);
+                    }
                     ParamSliderResult ps = paramSlider("##val", lblUp.c_str(),
                                                       &v, input.minVal, input.maxVal,
-                                                      isBound, fmt);
+                                                      isBound, fmt, livePtr, tone);
                     if (ps.changed) input.value = v;
                     if (ps.activated) undoNeeded = true;
                     if (ps.openBindMenu) ImGui::OpenPopup("##audiobind");
@@ -4053,12 +4159,13 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     // popup. The slider above shows the live driven value.
                     if (isBound) {
                         AudioBinding& abr = bindings[input.name];
-                        float liveDriven = abr.rangeMin +
+                        float liveRng = abr.rangeMin +
                             abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
                         ImGui::Indent(14.0f);
                         if (rangeSlider("##inrng", "range",
                                         &abr.rangeMin, &abr.rangeMax,
-                                        input.minVal, input.maxVal, &liveDriven))
+                                        input.minVal, input.maxVal, &liveRng,
+                                        tone))
                             undoNeeded = true;
                         ImGui::Unindent(14.0f);
                     }

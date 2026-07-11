@@ -3405,6 +3405,19 @@ void Application::renderUI() {
                     if (on) m_zones[zi]->visibleLayerIds.insert(lid);
                     else    m_zones[zi]->visibleLayerIds.erase(lid);
                 }
+            } else if (msg.address == "/easel/layer/allzones"
+                       && !msg.ints.empty()) {
+                // /easel/layer/allzones <layerIndex> [solo 0|1]
+                // Push one layer to every zone. solo=1 → each zone renders
+                // ONLY this layer (the whole house matches); solo=0/absent →
+                // the layer simply joins every zone's composite.
+                int li = msg.ints[0];
+                bool solo = msg.ints.size() >= 2 && msg.ints[1] != 0;
+                if (li >= 0 && li < m_layerStack.count() && m_layerStack[li]) {
+                    uint32_t lid = m_layerStack[li]->id;
+                    if (solo) soloLayerAcrossZones(m_zones, lid);
+                    else      showLayerInAllZones(m_zones, lid);
+                }
             } else if (msg.address == "/easel/zone/mic/enable"
                        && msg.ints.size() >= 2) {
                 // /easel/zone/mic/enable <zoneIndex> <enabled 0|1> [deviceId string]
@@ -7583,6 +7596,13 @@ void Application::renderUI() {
                         }
                     }
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Show in All Zones"))
+                    showLayerInAllZones(m_zones, layer->id);
+                if (ImGui::MenuItem("Solo Across All Zones"))
+                    soloLayerAcrossZones(m_zones, layer->id);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("One look everywhere — every zone renders\nonly this layer, so the whole house matches.");
                 ImGui::EndPopup();
             }
 
@@ -12888,6 +12908,10 @@ void Application::setManagedLayerAudioPreset(const std::string& key, const std::
                 AudioPresetEngine::retintCharacter(*bindings, l->id);
         } else if (command == "shuffle") {
             AudioPresetEngine::shuffle(*bindings, pp, l->id);
+        } else if (command == "on") {
+            // Mirror of the panel's On button: restore the set off() stashed,
+            // or shuffle a fresh one the first time.
+            AudioPresetEngine::on(*bindings, pp, l->id);
         } else if (command == "off") {
             AudioPresetEngine::off(*bindings, l->id);
         } else {

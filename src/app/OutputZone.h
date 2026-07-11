@@ -11,6 +11,8 @@
 #include <string>
 #include <set>
 #include <cstdint>
+#include <vector>
+#include <memory>
 
 enum class OutputDest { None, Fullscreen, NDI, Spout };
 
@@ -66,3 +68,29 @@ struct OutputZone {
     bool init();
     void resize(int w, int h);
 };
+
+// "One look everywhere" helpers — shared by the layer zone menus (LayerPanel
+// card menu, the viewport thumbnail rail) and the /easel/layer/allzones OSC
+// handler, so one layer can be pushed to the whole house in a single gesture.
+//
+// showLayerInAllZones: the layer joins every zone's composite. Zones already
+// showing all layers include it implicitly; zones with an explicit set gain it.
+inline void showLayerInAllZones(std::vector<std::unique_ptr<OutputZone>>& zones,
+                                uint32_t layerId) {
+    for (auto& z : zones) {
+        if (!z) continue;
+        if (!z->showAllLayers) z->visibleLayerIds.insert(layerId);
+    }
+}
+
+// soloLayerAcrossZones: every zone renders ONLY this layer — all outputs in
+// the house show the same content.
+inline void soloLayerAcrossZones(std::vector<std::unique_ptr<OutputZone>>& zones,
+                                 uint32_t layerId) {
+    for (auto& z : zones) {
+        if (!z) continue;
+        z->showAllLayers = false;
+        z->visibleLayerIds.clear();
+        z->visibleLayerIds.insert(layerId);
+    }
+}

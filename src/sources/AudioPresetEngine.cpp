@@ -92,9 +92,21 @@ bool retintCharacter(std::map<std::string, AudioBinding>& bindings, uint32_t lay
 bool off(std::map<std::string, AudioBinding>& bindings, uint32_t layerId) {
     State& st = sState[layerId];
     bool had = st.recipe.has || !bindings.empty();
+    if (st.recipe.has) st.lastRecipe = st.recipe; // let on() restore this set
     bindings.clear();
     st.recipe = Recipe{};
     return had;
+}
+
+bool on(std::map<std::string, AudioBinding>& bindings,
+        const std::vector<Param>& params, uint32_t layerId) {
+    State& st = sState[layerId];
+    if (st.recipe.has && !bindings.empty()) return false; // already on
+    if (st.lastRecipe.has) {
+        st.recipe = st.lastRecipe;                        // same set as before Off
+        return rebuild(bindings, params, layerId);
+    }
+    return shuffle(bindings, params, layerId);            // first-ever On
 }
 
 } // namespace AudioPresetEngine

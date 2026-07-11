@@ -23,6 +23,9 @@ struct Recipe { std::vector<RecipeEntry> e; bool has = false; };
 
 struct State {
     Recipe recipe;
+    // Off stashes the recipe here so On can restore the SAME set — On/Off is
+    // a true toggle, not "Off then re-roll".
+    Recipe lastRecipe;
     // Start subtle: low intensity = shallow modulation + heavy smoothing.
     // Character default -0.5 = conditioner-neutral = the classic feel.
     float intensity = 0.22f;
@@ -56,7 +59,14 @@ void adoptExisting(const std::map<std::string, AudioBinding>& bindings,
 // the no-recipe path of the Character knob. Returns true if any changed.
 bool retintCharacter(std::map<std::string, AudioBinding>& bindings, uint32_t layerId);
 
-// Clear bindings + recipe. Returns true when there was anything to clear.
+// Clear bindings + recipe (stashing the recipe for on()). Returns true when
+// there was anything to clear.
 bool off(std::map<std::string, AudioBinding>& bindings, uint32_t layerId);
+
+// Turn audio reactivity ON: restore the recipe stashed by off() (same set),
+// or shuffle a fresh one if this layer never had a recipe. No-op (returns
+// false) when already on. The panel's On button + OSC 'on' command.
+bool on(std::map<std::string, AudioBinding>& bindings,
+        const std::vector<Param>& params, uint32_t layerId);
 
 } // namespace AudioPresetEngine
