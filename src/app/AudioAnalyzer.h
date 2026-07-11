@@ -322,16 +322,24 @@ private:
 
     // Response curves [CurveMaster, Bass, LowMid, HighMid, Treble] and the
     // captured pre-curve input per target (for the live graph dot).
-    AudioCurve m_curves[CurveCount];
+    // Default = the "Ambient" preset on EVERY band (user rule 2026-07-11):
+    // very slow floaty glide that lifts quiet detail. Must match the Ambient
+    // row in kAudioCurvePresets above.
+    AudioCurve m_curves[CurveCount] = {
+        { 0.00f, 1.00f, 0.85f, 0.20f },   // Master
+        { 0.00f, 1.00f, 0.85f, 0.20f },   // Bass
+        { 0.00f, 1.00f, 0.85f, 0.20f },   // LowMid
+        { 0.00f, 1.00f, 0.85f, 0.20f },   // HighMid
+        { 0.00f, 1.00f, 0.85f, 0.20f },   // Treble
+    };
     float      m_curveInput[CurveCount] = {0, 0, 0, 0, 0};
 
-    // Default smoothing rates — chosen so a typical reactive shader gets
-    // a punchy attack but a soft release that doesn't strobe on every
-    // beat. Mutable via smoothAttack() / smoothRelease() accessors.
-    // Gentler defaults so audio reactivity glides instead of strobing on every
-    // beat — was 8/3, which read as "way too fast" when working with shaders.
-    float m_smoothAttackRate  = 4.5f;
-    float m_smoothReleaseRate = 1.8f;
+    // Default smoothing rates = the Ambient preset's envelope (attack 3.0,
+    // release 0.8): audio reactivity glides instead of strobing. Mutable via
+    // smoothAttack() / smoothRelease() accessors (history: 8/3 → 4.5/1.8 →
+    // Ambient-by-default).
+    float m_smoothAttackRate  = 3.0f;
+    float m_smoothReleaseRate = 0.8f;
 
     // Smoothed values
     float m_smoothBass = 0, m_smoothLowMid = 0, m_smoothHighMid = 0, m_smoothTreble = 0;

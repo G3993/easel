@@ -6787,9 +6787,11 @@ void Application::renderUI() {
 
         ImGui::Dummy(ImVec2(0, 4));
 
-        // --- Big 4-band meters (Bass / LowMid / HighMid / Treble) ---
+        // --- SIGNAL — one group: the four band meters side by side, each
+        // with ITS gain directly beneath it (meter + name + gain read as one
+        // unit per band), then the master strip and the smoothness envelope.
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Levels");
+        ImGui::Text("Signal");
         ImGui::PopStyleColor();
 
         {
@@ -6799,12 +6801,12 @@ void Application::renderUI() {
             ImVec2 origin = ImGui::GetCursorScreenPos();
             ImDrawList* draw = ImGui::GetWindowDrawList();
 
-            struct BandInfo { const char* name; float level; ImU32 color; };
+            struct BandInfo { const char* name; float level; ImU32 color; float* gain; };
             BandInfo bands[4] = {
-                { "BASS", m_audioAnalyzer.bass(),    IM_COL32(220, 60, 60, 230) },
-                { "LOW",  m_audioAnalyzer.lowMid(),  IM_COL32(230, 150, 30, 230) },
-                { "HI",   m_audioAnalyzer.highMid(), IM_COL32(60, 200, 90, 230) },
-                { "TREB", m_audioAnalyzer.treble(),  IM_COL32(30, 200, 220, 230) },
+                { "BASS", m_audioAnalyzer.bass(),    IM_COL32(220, 60, 60, 230),  &m_audioAnalyzer.bassGain() },
+                { "LOW",  m_audioAnalyzer.lowMid(),  IM_COL32(230, 150, 30, 230), &m_audioAnalyzer.lowMidGain() },
+                { "HI",   m_audioAnalyzer.highMid(), IM_COL32(60, 200, 90, 230),  &m_audioAnalyzer.highMidGain() },
+                { "TREB", m_audioAnalyzer.treble(),  IM_COL32(30, 200, 220, 230), &m_audioAnalyzer.trebleGain() },
             };
 
             for (int b = 0; b < 4; b++) {
@@ -6832,7 +6834,22 @@ void Application::renderUI() {
                 draw->AddText(ImVec2(x0 + (bandW - vts.x) * 0.5f, origin.y + 2),
                               IM_COL32(220, 230, 245, 200), vbuf);
             }
-            ImGui::Dummy(ImVec2(avail, barH + ImGui::GetFontSize() + 6));
+
+            // Per-band gain drags, one under each meter column.
+            float gy = origin.y + barH + ImGui::GetFontSize() + 6.0f;
+            for (int b = 0; b < 4; b++) {
+                float x0 = origin.x + b * (bandW + 3.0f);
+                ImGui::SetCursorScreenPos(ImVec2(x0, gy));
+                ImGui::SetNextItemWidth(bandW);
+                ImGui::PushID(b + 7100);
+                ImGui::DragFloat("##bandGain", bands[b].gain,
+                                 0.01f, 0.0f, 5.0f, "%.2fx");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s gain", bands[b].name);
+                ImGui::PopID();
+            }
+            ImGui::SetCursorScreenPos(
+                ImVec2(origin.x, gy + ImGui::GetFrameHeight() + 6.0f));
         }
 
         // --- RMS + Beat indicator ---
@@ -6860,14 +6877,9 @@ void Application::renderUI() {
 
         ImGui::Dummy(ImVec2(0, 6));
 
-        // --- Gain controls ---
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
-        ImGui::Text("Gain");
-        ImGui::PopStyleColor();
-
-        // Labeled gain rows — label in a fixed left column, slider fills
-        // the remainder. Previously the label rendered AFTER the slider
-        // (ImGui default) and got clipped off the panel's right edge.
+        // Rest of the SIGNAL group: master strip (input gain + gate), then
+        // the smoothness envelope right next to the meters it shapes.
+        // Per-band gains moved under their meters above — no "Gain" section.
         auto gainRow = [](const char* label, const char* id, float* v,
                            float minV, float maxV, const char* fmt) {
             ImGui::AlignTextToFramePadding();
@@ -6878,24 +6890,11 @@ void Application::renderUI() {
             ImGui::SetNextItemWidth(-1);
             ImGui::SliderFloat(id, v, minV, maxV, fmt);
         };
-        gainRow("Input",  "##masterGain", &m_audioAnalyzer.inputGain(),   0.0f, 10.0f, "%.2fx");
-        gainRow("Bass",   "##bGain",      &m_audioAnalyzer.bassGain(),    0.0f,  5.0f, "%.2fx");
-        gainRow("Low",    "##lmGain",     &m_audioAnalyzer.lowMidGain(),  0.0f,  5.0f, "%.2fx");
-        gainRow("High",   "##hmGain",     &m_audioAnalyzer.highMidGain(), 0.0f,  5.0f, "%.2fx");
-        gainRow("Treble", "##tGain",      &m_audioAnalyzer.trebleGain(),  0.0f,  5.0f, "%.2fx");
-
-        ImGui::Dummy(ImVec2(0, 4));
-        gainRow("Gate", "##nGate", &m_audioAnalyzer.noiseGate(), 0.0f, 0.5f, "%.2f");
-
-        // ── Smoothness ────────────────────────────────────────────────────
-        // Asymmetric envelope on every audio band the shaders read.
-        // Attack = how fast a rising audio peak hits the shader uniform.
-        // Release = how fast it falls back. Lower = more glide / smoother;
-        // higher = snappier / more reactive. Defaults (8 / 3) keep punchy
-        // beats while softening the decay so reactive shaders don't
-        // strobe — drag Release down further for a syrupy feel.
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::SeparatorText("Smoothness");
+        gainRow("Input", "##masterGain", &m_audioAnalyzer.inputGain(), 0.0f, 10.0f, "%.2fx");
+        gainRow("Gate",  "##nGate",      &m_audioAnalyzer.noiseGate(), 0.0f,  0.5f, "%.2f");
+        // Smoothness — the asymmetric envelope on every band the shaders
+        // read. Attack = how fast a rising peak lands; Release = how fast it
+        // falls back. Lower = more glide.
         gainRow("Attack",  "##audAttack",  &m_audioAnalyzer.smoothAttack(),  0.5f, 30.0f, "%.1f /s");
         gainRow("Release", "##audRelease", &m_audioAnalyzer.smoothRelease(), 0.5f, 30.0f, "%.1f /s");
 
@@ -6918,8 +6917,16 @@ void Application::renderUI() {
         // the temporal envelope, not just the transfer shape. Smoothing is
         // shared by every band; only the curve is per-band.
         {
-            static int presetSel = -1;          // -1 = "Custom" (none applied yet)
-            static bool applyAllBands = false;   // off = only the selected band
+            // Default = Ambient on all bands (matches the analyzer's boot
+            // defaults in AudioAnalyzer.h — user rule 2026-07-11). Looked up
+            // by name so reordering the preset table can't break it.
+            static int presetSel = []() {
+                for (int p = 0; p < kAudioCurvePresetCount; p++)
+                    if (strcmp(kAudioCurvePresets[p].name, "Ambient") == 0)
+                        return p;
+                return -1;
+            }();
+            static bool applyAllBands = true;    // off = only the selected band
             const char* preview = (presetSel >= 0 && presetSel < kAudioCurvePresetCount)
                                       ? kAudioCurvePresets[presetSel].name
                                       : "Custom…";
