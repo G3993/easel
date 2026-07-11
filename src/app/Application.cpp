@@ -5037,7 +5037,7 @@ void Application::renderUI() {
                     } else {
                         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
-                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f)); // white, visible (2026-07-11)
                     }
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
                     if (ImGui::Button(label, ImVec2(0, 0))) s_scSubTab = idx;
@@ -5063,7 +5063,7 @@ void Application::renderUI() {
                     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
-                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f)); // white, visible (2026-07-11)
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
                     if (ImGui::Button(reloadLbl) && m_shaderClaw.isConnected()) {
                         m_shaderClaw.refreshManifest();
@@ -5088,7 +5088,7 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
-                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f)); // white, visible (2026-07-11)
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
                 if (ImGui::Button(importLbl)) {
                     std::string picked = openFileDialog("Fragment shader\0*.fs;*.frag;*.glsl\0\0");
@@ -5162,6 +5162,104 @@ void Application::renderUI() {
 
                 ImGui::Dummy(ImVec2(0, 6));
             }
+
+            // ─── Destination: where a clicked shader goes ────────────────
+            // Quiet Apple-style row: dim caps label + a rounded white-text
+            // dropdown listing Whole House and every zone. Click a tile and
+            // the shader lands exactly there — Whole House layers it into
+            // every zone; a named zone gets it exclusively.
+            static int s_addDestZone = -1;   // -1 = Whole House, else zone idx
+            if (s_addDestZone >= (int)m_zones.size()) s_addDestZone = -1;
+            {
+                ImGui::AlignTextToFramePadding();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
+                ImGui::TextUnformatted("ADD TO");
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 10);
+                const char* destPreview = "Whole House";
+                if (s_addDestZone >= 0 && m_zones[s_addDestZone])
+                    destPreview = m_zones[s_addDestZone]->name.c_str();
+                ImGui::SetNextItemWidth(-1);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(1, 1, 1, 0.18f));
+                ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
+                if (ImGui::BeginCombo("##shaderAddDest", destPreview)) {
+                    if (ImGui::Selectable("Whole House", s_addDestZone < 0))
+                        s_addDestZone = -1;
+                    for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+                        if (!m_zones[zi]) continue;
+                        ImGui::PushID(zi);
+                        if (ImGui::Selectable(m_zones[zi]->name.c_str(),
+                                              s_addDestZone == zi))
+                            s_addDestZone = zi;
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopStyleColor(4);
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Where a clicked shader is added.\n"
+                                      "Whole House = every zone; a named zone\n"
+                                      "gets the shader exclusively.");
+                ImGui::Dummy(ImVec2(0, 6));
+            }
+
+            // Place a layer so it renders ONLY in one zone: freeze implicit
+            // all-layer zones, pull the layer out everywhere, then set it.
+            // Shared by the destination dropdown and the tile ... menu.
+            auto placeInZoneOnly = [&](uint32_t lid, int zi) {
+                if (zi < 0 || zi >= (int)m_zones.size() || !m_zones[zi]) return;
+                for (auto& zz : m_zones) {
+                    if (!zz) continue;
+                    if (zz->showAllLayers) {
+                        zz->showAllLayers = false;
+                        for (int li = 0; li < m_layerStack.count(); li++)
+                            zz->visibleLayerIds.insert(m_layerStack[li]->id);
+                    }
+                    zz->visibleLayerIds.erase(lid);
+                }
+                m_zones[zi]->visibleLayerIds.insert(lid);
+            };
+            // Add a shader routed to the current destination.
+            auto addShaderRouted = [&](const std::string& fullPath) {
+                int before = m_layerStack.count();
+                loadShader(fullPath);
+                if (m_layerStack.count() > before && s_addDestZone >= 0)
+                    placeInZoneOnly(m_layerStack[m_layerStack.count() - 1]->id,
+                                    s_addDestZone);
+            };
+            // Retag a shader's gallery group (VFX/Text/3D) in the manifest.
+            auto setShaderGroup = [&](const std::string& file, const char* group) {
+                namespace fs = std::filesystem;
+                try {
+                    fs::path manifestPath =
+                        fs::path(m_shaderClaw.shadersDir()) / "manifest.json";
+                    if (!fs::exists(manifestPath)) return;
+                    nlohmann::json manifest = nlohmann::json::array();
+                    { std::ifstream mf(manifestPath); if (mf) mf >> manifest; }
+                    if (!manifest.is_array()) return;
+                    for (auto& e : manifest) {
+                        if (e.value("file", std::string()) != file) continue;
+                        nlohmann::json cats = nlohmann::json::array();
+                        for (auto& c : e.value("categories", nlohmann::json::array()))
+                            if (c != "Text" && c != "3D") cats.push_back(c);
+                        if (strcmp(group, "Text") == 0) cats.push_back("Text");
+                        if (strcmp(group, "3D") == 0)   cats.push_back("3D");
+                        e["categories"] = cats;
+                        break;
+                    }
+                    std::ofstream out(manifestPath);
+                    out << manifest.dump(2, ' ', false,
+                            nlohmann::json::error_handler_t::replace);
+                    out.close();
+                    m_shaderClaw.refreshManifest();
+                } catch (const std::exception& e) {
+                    std::cerr << "[ShaderClaw] Group retag failed: " << e.what() << "\n";
+                }
+            };
 
             // ─── Gallery grid ───────────────────────────────────────────
             // Big thumbnail tiles laid out in a responsive grid (auto-sizes
@@ -5629,27 +5727,31 @@ void Application::renderUI() {
                             if (!m_zones[zi]) continue;
                             ImGui::PushID(zi);
                             if (ImGui::MenuItem(m_zones[zi]->name.c_str())) {
+                                int before = m_layerStack.count();
                                 loadShader(shader.fullPath);
-                                if (m_layerStack.count() > 0) {
-                                    uint32_t lid =
-                                        m_layerStack[m_layerStack.count() - 1]->id;
-                                    // Visible ONLY in the chosen zone: freeze
-                                    // implicit all-layer zones, pull the new
-                                    // layer out everywhere, then place it.
-                                    for (auto& zz : m_zones) {
-                                        if (!zz) continue;
-                                        if (zz->showAllLayers) {
-                                            zz->showAllLayers = false;
-                                            for (int li = 0; li < m_layerStack.count(); li++)
-                                                zz->visibleLayerIds.insert(m_layerStack[li]->id);
-                                        }
-                                        zz->visibleLayerIds.erase(lid);
-                                    }
-                                    m_zones[zi]->visibleLayerIds.insert(lid);
-                                }
+                                if (m_layerStack.count() > before)
+                                    placeInZoneOnly(
+                                        m_layerStack[m_layerStack.count() - 1]->id, zi);
                             }
                             ImGui::PopID();
                         }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::Separator();
+                    // Gallery group retag — moves the shader between the
+                    // VFX / Text / 3D sub-tabs (rewrites manifest categories).
+                    if (ImGui::BeginMenu("Group")) {
+                        bool isText = false, is3D = false;
+                        for (const auto& c : shader.categories) {
+                            if (c == "Text") isText = true;
+                            if (c == "3D")   is3D   = true;
+                        }
+                        if (ImGui::MenuItem("VFX",  nullptr, !isText && !is3D))
+                            setShaderGroup(shader.file, "VFX");
+                        if (ImGui::MenuItem("Text", nullptr, isText))
+                            setShaderGroup(shader.file, "Text");
+                        if (ImGui::MenuItem("3D",   nullptr, is3D))
+                            setShaderGroup(shader.file, "3D");
                         ImGui::EndMenu();
                     }
                     ImGui::Separator();
@@ -5743,7 +5845,7 @@ void Application::renderUI() {
                     ImGui::EndPopup();
                 }
 
-                if (clicked) loadShader(shader.fullPath);
+                if (clicked) addShaderRouted(shader.fullPath);
 
                 ImGui::PopID();
             }
@@ -6110,7 +6212,7 @@ void Application::renderUI() {
             ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.22f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.78f, 0.80f, 0.85f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f)); // white, visible (2026-07-11)
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
             if (ImGui::Button("Disconnect", ImVec2(discW, 0))) {
                 m_ethereaClient.disconnect();
