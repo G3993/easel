@@ -116,6 +116,15 @@ static constexpr ImU32 kColAccentDim    = IM_COL32(232, 150,  70, 200);
 static constexpr ImU32 kColBoundFillMain = IM_COL32(200, 205, 212, 210);
 static constexpr ImU32 kColTrackBg      = IM_COL32(255, 255, 255, 14); // slider/track recess (subtle inset of ctrl bg)
 
+// Mobile-matched slider geometry (EaselMobile control sheet): every value
+// slider is a TALL rounded pill with the white thumb riding INSIDE the pill,
+// not a thin line with an outboard circle. One knob height panel-wide.
+static constexpr float kTallTrackH  = 18.0f;                     // pill height
+static constexpr float kThumbInset  = 2.5f;                      // thumb gap inside the pill
+static constexpr ImU32 kColTallTrack = IM_COL32(255, 255, 255, 18); // pill body
+static constexpr ImU32 kColTallFill  = IM_COL32(255, 255, 255, 26); // leading fill (subtle)
+static constexpr ImU32 kColRangeSpan = IM_COL32(255, 255, 255, 56); // range row's selected span (neutral, mobile palette)
+
 // ImVec4 mirrors for the PushStyleColor() call sites. Same values as the
 // ImU32 constants above — one palette, two encodings, no new numbers.
 static const ImVec4 kColLabelV    = ImVec4(0.588f, 0.620f, 0.675f, 0.902f); // == kColLabel
@@ -263,7 +272,8 @@ static bool unifiedSlider(const char* idSuffix, const char* label,
                           float* v, float lo, float hi,
                           const char* fmt, bool accent = false,
                           bool* outActivated = nullptr,
-                          float width = 0.0f) {
+                          float width = 0.0f,
+                          const char* valueOverride = nullptr) {
     ImGui::PushID(idSuffix);
     // Leading gap — identical to every other row helper.
     ImGui::Dummy(ImVec2(0, kRowGapY));
@@ -273,24 +283,29 @@ static bool unifiedSlider(const char* idSuffix, const char* label,
     float w = width > 0.0f ? width : ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH  = ImGui::GetFontSize();
-    // Canonical OPACITY-slider geometry: 6px pill track, r=7 circle thumb.
-    const float trackH  = 6.0f;
-    const float handleR = 7.0f;
+    // Canonical slider geometry — matched to EaselMobile's control sheet:
+    // a TALL rounded pill track with the white thumb riding INSIDE it,
+    // instead of the old thin 6px line + oversized outboard circle.
+    const float trackH  = kTallTrackH;
+    const float handleR = trackH * 0.5f - kThumbInset;
     float rowH = labelH + kLabelGapY + trackH;
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    // Dim label (left) + bright value (right) on the label row.
+    // Mobile hierarchy: BRIGHT label (left) + dim value (right).
+    // valueOverride swaps the numeric readout for a semantic word
+    // ("Subtle" / "Chopped"), mirroring the mobile sheet.
     char valbuf[32]; snprintf(valbuf, sizeof(valbuf), fmt, *v);
-    ImVec2 valSize = ImGui::CalcTextSize(valbuf);
-    dl->AddText(rowStart, kColLabel, label);
+    const char* valTxt = valueOverride ? valueOverride : valbuf;
+    ImVec2 valSize = ImGui::CalcTextSize(valTxt);
+    dl->AddText(rowStart, kColValue, label);
     dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
-                kColValue, valbuf);
+                kColLabel, valTxt);
 
     // Full-width track hit zone — wide ⇒ many sub-steps ⇒ fine resolution.
     float trackY = rowStart.y + labelH + kLabelGapY;
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 7.0f));
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 4.0f));
     bool pressed = ImGui::InvisibleButton("##uslider_track",
-                                          ImVec2(w, trackH + 14.0f));
+                                          ImVec2(w, trackH + 8.0f));
     bool active  = ImGui::IsItemActive();
     bool hovered = ImGui::IsItemHovered();
     if (ImGui::IsItemActivated() && outActivated) *outActivated = true;
@@ -308,19 +323,20 @@ static bool unifiedSlider(const char* idSuffix, const char* label,
     float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
     if (norm < 0.0f) norm = 0.0f; if (norm > 1.0f) norm = 1.0f;
 
-    // Track bg + fill — light gray when bound (orange lives on the range
-    // zone below instead), plain control-bg otherwise.
-    ImU32 fillCol = accent ? kColBoundFillMain
-                           : kColCtrlBgActive;
+    // Tall pill track + subtle leading fill — mobile's monochrome palette
+    // (bound state reads from the sparkle + range row, not a tinted fill).
+    // The thumb travels inset so it never pokes outside the pill.
+    (void)accent;
+    ImU32 fillCol = kColTallFill;
+    float inset = handleR + kThumbInset;
+    float hx = rowStart.x + inset + (w - inset * 2.0f) * norm;
+    float hy = trackY + trackH * 0.5f;
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
-                      kColTrackBg, trackH * 0.5f);
+                      kColTallTrack, trackH * 0.5f);
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
-                      ImVec2(rowStart.x + w * norm + 0.5f, trackY + trackH),
+                      ImVec2(hx + inset, trackY + trackH),
                       fillCol, trackH * 0.5f);
-    // Real solid circular thumb + thin dark outline — the opacity handle.
-    float hx = rowStart.x + w * norm;
-    float hy = trackY + trackH * 0.5f;
     ImU32 handleCol = (active || hovered) ? IM_COL32(255, 255, 255, 255)
                                           : kColValue;
     dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
@@ -506,13 +522,17 @@ static int pillGroup(const char* id, const char* const* labels, int count, int c
 // Soft pill slider: label-left, value-right, thin pill track, circular handle.
 // Draws on its own row, full width. Shift to snap to 0.05.
 static bool pillSlider(const char* label, float* v, float lo, float hi,
-                       const char* fmt = "%.2f", float width = 0.0f) {
+                       const char* fmt = "%.2f", float width = 0.0f,
+                       const char* valueOverride = nullptr) {
     // Thin wrapper — routes straight through the one canonical slider so it
     // looks/sizes IDENTICALLY to the OPACITY slider (same track, same real
     // circular thumb, same colors, same fine continuous resolution).
     // width > 0 renders at that fixed width instead of the full row (used to
     // sit two pill sliders side by side, e.g. Reactivity + Character).
-    return unifiedSlider(label, label, v, lo, hi, fmt, false, nullptr, width);
+    // valueOverride swaps the numeric readout for a semantic word
+    // ("Subtle"/"Chopped") — the mobile sheet's vocabulary.
+    return unifiedSlider(label, label, v, lo, hi, fmt, false, nullptr, width,
+                         valueOverride);
 }
 
 // Draw a solid filled lightning-bolt glyph inside a square at (cx, cy) with
@@ -587,10 +607,10 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     r.boltPos = ImVec2(rowStart.x - 2.0f, rowStart.y); // anchor for bind popup
     float labelH  = ImGui::GetFontSize();
-    // CANONICAL OPACITY-slider geometry — identical to unifiedSlider /
-    // pillSlider / the inline opacity track (6px pill, r=7 circle thumb).
-    const float trackH  = 6.0f;
-    const float handleR = 7.0f;
+    // Canonical slider geometry — the mobile-matched tall pill (see
+    // unifiedSlider): thumb rides INSIDE the rounded track.
+    const float trackH  = kTallTrackH;
+    const float handleR = trackH * 0.5f - kThumbInset;
     float rowH    = labelH + kLabelGapY + trackH;
     float boltBox = 18.0f; // hit-target square around the sparkle glyph
 
@@ -620,13 +640,13 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
 
     float labelX = rowStart.x + boltBox + 4.0f;
 
-    // ---- Canonical slider drawing (EXACTLY the opacity-slider style) ----
-    // Dim label (offset past the sparkle) + bright right-aligned value.
+    // ---- Canonical slider drawing (mobile hierarchy) ----
+    // BRIGHT label (offset past the sparkle) + dim right-aligned value.
     char valbuf[32]; snprintf(valbuf, sizeof(valbuf), fmt, *v);
     ImVec2 valSize = ImGui::CalcTextSize(valbuf);
-    dl->AddText(ImVec2(labelX, rowStart.y), kColLabel, label);
+    dl->AddText(ImVec2(labelX, rowStart.y), kColValue, label);
     dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
-                kColValue, valbuf);
+                kColLabel, valbuf);
 
     // Right-click anywhere on the label row also opens the bind menu.
     float trackY = rowStart.y + labelH + kLabelGapY;
@@ -636,8 +656,8 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
 
     // Full-width continuous track — many pixels ⇒ fine resolution, no
     // quantization of the underlying float (Shift snaps to 0.05 by choice).
-    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 7.0f));
-    ImGui::InvisibleButton("##track", ImVec2(w, trackH + 14.0f));
+    ImGui::SetCursorScreenPos(ImVec2(rowStart.x, trackY - 4.0f));
+    ImGui::InvisibleButton("##track", ImVec2(w, trackH + 8.0f));
     bool tActive  = ImGui::IsItemActive();
     bool hovered  = ImGui::IsItemHovered();
     if (ImGui::IsItemActivated()) r.activated = true;
@@ -654,39 +674,37 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     float norm = (hi > lo) ? (*v - lo) / (hi - lo) : 0.0f;
     if (norm < 0.0f) norm = 0.0f; if (norm > 1.0f) norm = 1.0f;
 
-    // Track bg + fill — light gray when bound (orange lives on the range
-    // zone below instead), plain control-bg otherwise.
-    ImU32 fillCol = bound ? kColBoundFillMain
-                          : kColCtrlBgActive;
+    // Tall pill track + subtle leading fill — mobile's monochrome palette.
+    // Bound state reads from the tone-tinted sparkle, the live tick, and the
+    // range sub-row, NOT from a tinted fill.
+    ImU32 fillCol = kColTallFill;
+    float inset = handleR + kThumbInset;
+    float hx = rowStart.x + inset + (w - inset * 2.0f) * norm;
+    float hy = trackY + trackH * 0.5f;
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
-                      kColTrackBg, trackH * 0.5f);
+                      kColTallTrack, trackH * 0.5f);
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
-                      ImVec2(rowStart.x + w * norm + 0.5f, trackY + trackH),
+                      ImVec2(hx + inset, trackY + trackH),
                       fillCol, trackH * 0.5f);
-    // Real solid circular thumb + thin dark outline — the opacity handle.
-    float hx = rowStart.x + w * norm;
-    float hy = trackY + trackH * 0.5f;
     ImU32 handleCol = (tActive || hovered) ? IM_COL32(255, 255, 255, 255)
                                            : kColValue;
     dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
     dl->AddCircle      (ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
 
-    // Live audio-driven marker — thin tone-colored caret + triangle riding
-    // the track at the binding's current driven value, drawn ON TOP of the
-    // thumb so the audio stays visible even when it sits under the knob.
+    // Live audio-driven marker — a clean tone-colored tick riding INSIDE the
+    // pill at the binding's current driven value, drawn on top of the thumb
+    // so the audio stays visible even when it sits under the knob. Same
+    // inset travel as the thumb so knob and tick agree at the ends.
     if (liveVal) {
         ImU32 lc = liveCol ? liveCol : kColAccent;
         float lv = *liveVal;
         if (lv < lo) lv = lo; else if (lv > hi) lv = hi;
         float lnorm = (hi > lo) ? (lv - lo) / (hi - lo) : 0.0f;
-        float lx = rowStart.x + w * lnorm;
-        dl->AddLine(ImVec2(lx, trackY - 3.0f),
-                    ImVec2(lx, trackY + trackH + 3.0f), lc, 1.75f);
-        float ty = trackY - 3.0f;
-        dl->AddTriangleFilled(ImVec2(lx - 4.0f, ty - 5.0f),
-                              ImVec2(lx + 4.0f, ty - 5.0f),
-                              ImVec2(lx, ty), lc);
+        float lx = rowStart.x + inset + (w - inset * 2.0f) * lnorm;
+        dl->AddRectFilled(ImVec2(lx - 1.25f, trackY + 2.5f),
+                          ImVec2(lx + 1.25f, trackY + trackH - 2.5f),
+                          lc, 1.25f);
     }
 
     // Bottom breathing room = kRowPadY — identical to every other row helper.
@@ -859,9 +877,10 @@ static bool rangeSlider(const char* id, const char* label,
     float w = ImGui::GetContentRegionAvail().x;
     ImVec2 rowStart = ImGui::GetCursorScreenPos();
     float labelH = ImGui::GetFontSize();
-    // CANONICAL OPACITY-slider geometry — same 6px pill track + r=7 thumbs
-    // as unifiedSlider / pillSlider / paramSlider / the inline opacity track.
-    const float trackH = 6.0f, handleR = 7.0f;
+    // Same tall-pill family as unifiedSlider/paramSlider, one step slimmer —
+    // this is the indented sub-row under a bound param, not a primary value.
+    const float trackH = 14.0f;
+    const float handleR = trackH * 0.5f - kThumbInset;
     float rowH   = labelH + kLabelGapY + trackH;
     float span   = (absHi > absLo) ? (absHi - absLo) : 1.0f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -876,9 +895,14 @@ static bool rangeSlider(const char* id, const char* label,
                 kColValue, val);
 
     float trackY = rowStart.y + labelH + kLabelGapY;
-    auto toX = [&](float v) { return rowStart.x + (v - absLo) / span * w; };
+    // Thumbs travel inset inside the pill (same as the value sliders) so a
+    // handle at min/max never pokes outside the rounded track.
+    float inset = handleR + kThumbInset;
+    auto toX = [&](float v) {
+        return rowStart.x + inset + (v - absLo) / span * (w - inset * 2.0f);
+    };
     auto toV = [&](float x) {
-        float t = (x - rowStart.x) / w;
+        float t = (x - rowStart.x - inset) / (w - inset * 2.0f);
         if (t < 0) t = 0; if (t > 1) t = 1;
         return absLo + t * span;
     };
@@ -898,14 +922,13 @@ static bool rangeSlider(const char* id, const char* label,
         changed = true;
     }
 
-    // Track, selected span, then the two solid thumbs — EXACT canonical
-    // opacity colors (track bg 14; amber span = the meaningful range fill;
-    // each thumb a real filled circle + the same thin dark outline).
+    // Tall pill track, NEUTRAL selected span (mobile's monochrome palette —
+    // no orange), two solid thumbs riding INSIDE the pill.
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
-                      kColTrackBg, trackH * 0.5f);
+                      kColTallTrack, trackH * 0.5f);
     dl->AddRectFilled(ImVec2(toX(*lo), trackY), ImVec2(toX(*hi), trackY + trackH),
-                      kColAccentDim, trackH * 0.5f);
+                      kColRangeSpan, trackH * 0.5f);
     for (float hv : { *lo, *hi }) {
         float hx = toX(hv), hy = trackY + trackH * 0.5f;
         dl->AddCircleFilled(ImVec2(hx, hy), handleR,
@@ -914,18 +937,16 @@ static bool rangeSlider(const char* id, const char* label,
         dl->AddCircle(ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
     }
 
-    // Live driven-value marker — thin bright caret + triangle, on top of the
-    // round thumbs, using the same amber accent as the selected-span fill.
+    // Live driven-value marker — clean tone-colored tick inside the pill,
+    // on top of the thumbs (the only color in the row, by design).
     if (liveVal) {
         ImU32 lc = liveCol ? liveCol : kColAccent;
         float lv = *liveVal;
         if (lv < absLo) lv = absLo; else if (lv > absHi) lv = absHi;
         float lx = toX(lv);
-        dl->AddLine(ImVec2(lx, trackY - 3.0f), ImVec2(lx, trackY + trackH + 3.0f),
-                    lc, 1.75f);
-        float ty = trackY - 3.0f;
-        dl->AddTriangleFilled(ImVec2(lx - 4.0f, ty - 5.0f), ImVec2(lx + 4.0f, ty - 5.0f),
-                              ImVec2(lx, ty), lc);
+        dl->AddRectFilled(ImVec2(lx - 1.25f, trackY + 2.5f),
+                          ImVec2(lx + 1.25f, trackY + trackH - 2.5f),
+                          lc, 1.25f);
     }
 
     ImGui::SetCursorScreenPos(ImVec2(rowStart.x, rowStart.y + rowH + kRowPadY));
@@ -1191,7 +1212,13 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         // Full width, like every other param row (a half-width side-by-side
         // pairing was tried and looked wrong — each slider read as cramped
         // rather than clearer, so both stay full width, simply stacked).
-        if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f")) {
+        // Semantic readouts — the mobile sheet's vocabulary instead of raw
+        // numbers: Reactivity Subtle/Medium/Intense, Punch Smooth/Classic/
+        // Chopped. Same wire values underneath.
+        const char* reactWord = intensity < 0.33f ? "Subtle"
+                              : intensity < 0.66f ? "Medium" : "Intense";
+        if (pillSlider("Reactivity", &intensity, 0.0f, 1.0f, "%.2f", 0.0f,
+                       reactWord)) {
             if (intensity < 0.0f) intensity = 0.0f; else if (intensity > 1.0f) intensity = 1.0f;
             // Touching the slider with nothing bound yet auto-picks a set, so
             // it always DOES something (no need to hit Shuffle first to see
@@ -1210,7 +1237,10 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         // in this layer's recipe gets the same character).
         // "Punch" (was "Character" — too abstract): left = smooth glide,
         // right = snappy chop. Same knob, same wire value.
-        if (pillSlider("Punch", &charKnob, -1.0f, 1.0f, "%.2f")) {
+        const char* punchWord = charKnob < -0.33f ? "Smooth"
+                              : charKnob <  0.33f ? "Classic" : "Chopped";
+        if (pillSlider("Punch", &charKnob, -1.0f, 1.0f, "%.2f", 0.0f,
+                       punchWord)) {
             if (charKnob < -1.0f) charKnob = -1.0f; else if (charKnob > 1.0f) charKnob = 1.0f;
             if (st.recipe.has) buildFromRecipe();
             else {
@@ -1234,10 +1264,12 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
         float gap   = ImGui::GetStyle().ItemSpacing.x;
         float bW    = (avail - gap * 2.0f) / 3.0f;
         if (isOn) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.91f, 0.59f, 0.27f, 0.32f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.91f, 0.59f, 0.27f, 0.44f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.91f, 0.59f, 0.27f, 0.58f));
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.00f, 0.87f, 0.66f, 1.0f));
+            // Lit = the iOS "selected segment" look (mobile palette): a
+            // lifted neutral fill + full-white label, no orange.
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.26f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.32f));
+            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         }
         if (ImGui::Button("On", ImVec2(bW, 28))) {
             if (AudioPresetEngine::on(bindings, params, stateKey)) changed = true;
