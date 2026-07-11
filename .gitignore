@@ -30,3 +30,8 @@ nul
 # Easel project backups
 *.bak.*
 default.easel.bak.*
+
+# Smithers run store (ephemeral — never commit)
+smithers.db
+smithers.db-shm
+smithers.db-wal
