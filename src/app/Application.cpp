@@ -5607,6 +5607,53 @@ void Application::renderUI() {
                 }
 
                 if (ImGui::BeginPopup("##shaderMenu")) {
+                    // ── Zone targeting at ADD time ─────────────────────────
+                    // A plain tile click already adds the shader on top in
+                    // every zone (registerLayerWithZones). These place it
+                    // with an explicit destination instead.
+                    if (ImGui::MenuItem("Add to Whole House")) {
+                        loadShader(shader.fullPath);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Add on top in every zone\n(same as clicking the tile).");
+                    if (ImGui::MenuItem("Whole House — Only This")) {
+                        loadShader(shader.fullPath);
+                        if (m_layerStack.count() > 0)
+                            soloLayerAcrossZones(m_zones,
+                                m_layerStack[m_layerStack.count() - 1]->id);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Every zone shows ONLY this shader —\nthe whole house matches.");
+                    if (m_zones.size() > 1 && ImGui::BeginMenu("Add to Zone")) {
+                        for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+                            if (!m_zones[zi]) continue;
+                            ImGui::PushID(zi);
+                            if (ImGui::MenuItem(m_zones[zi]->name.c_str())) {
+                                loadShader(shader.fullPath);
+                                if (m_layerStack.count() > 0) {
+                                    uint32_t lid =
+                                        m_layerStack[m_layerStack.count() - 1]->id;
+                                    // Visible ONLY in the chosen zone: freeze
+                                    // implicit all-layer zones, pull the new
+                                    // layer out everywhere, then place it.
+                                    for (auto& zz : m_zones) {
+                                        if (!zz) continue;
+                                        if (zz->showAllLayers) {
+                                            zz->showAllLayers = false;
+                                            for (int li = 0; li < m_layerStack.count(); li++)
+                                                zz->visibleLayerIds.insert(m_layerStack[li]->id);
+                                        }
+                                        zz->visibleLayerIds.erase(lid);
+                                    }
+                                    m_zones[zi]->visibleLayerIds.insert(lid);
+                                }
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::Separator();
+
                     // Save Params — only enabled if this shader is the
                     // active source on the selected layer (so we have
                     // current values to capture).
