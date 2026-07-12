@@ -5,6 +5,7 @@
 #include "timeline/Timeline.h"
 #include <vector>
 #include <deque>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 
 struct LayerSnapshot {
@@ -123,6 +124,39 @@ public:
         restore(next, stack, selectedLayer);
         if (next.hasTimeline) tl.fromJson(next.timelineJson);
         m_redoStack.pop_back();
+    }
+
+    // Snapshots share live source objects (shared_ptr, not deep-copied), so
+    // a replaced/deleted layer's source used to stay FULLY ALIVE — running
+    // video decode threads, open capture devices, NDI receivers — until 50
+    // newer pushes rolled it off. Suspend any source that is reachable only
+    // from undo/redo snapshots; sources lazily revive inside their own
+    // update() if anything (undo restore, scene switch) puts them back in
+    // the live stack. Called once per frame — suspend() on an
+    // already-suspended source is a guarded no-op.
+    void suspendOrphanedSources(const LayerStack& live) {
+        if (m_undoStack.empty() && m_redoStack.empty()) return;
+        std::unordered_set<const ContentSource*> liveSet;
+        for (int i = 0; i < live.count(); i++) {
+            if (!live[i]) continue;
+            if (live[i]->source) liveSet.insert(live[i]->source.get());
+            // A mid-transition layer renders nextSource every frame (the B
+            // side of the blend) — it's just as live as source, and a
+            // transition started from another layer's source can be the
+            // only live holder after that donor layer is deleted.
+            if (live[i]->nextSource) liveSet.insert(live[i]->nextSource.get());
+        }
+        auto sweep = [&](std::deque<SceneSnapshot>& dq) {
+            for (auto& snap : dq) {
+                for (auto& ls : snap.layers) {
+                    if (ls.source && !liveSet.count(ls.source.get())) {
+                        ls.source->suspend();
+                    }
+                }
+            }
+        };
+        sweep(m_undoStack);
+        sweep(m_redoStack);
     }
 
 private:

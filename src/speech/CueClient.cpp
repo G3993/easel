@@ -34,11 +34,6 @@ struct WSADATA { int dummy; };
 // blocks disconnect()'s join() for the remainder of that sleep (up to 60s
 // when Cue's server isn't reachable) — the "Easel takes forever to quit"
 // symptom. Sleep in short slices, re-checking m_running each slice.
-static void interruptibleSleep(std::atomic<bool>& running, int seconds) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
-    while (running.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
 }
 
 // ─── Logging (mirrors EthereaClient: cue_debug.log) ────────────────────────
@@ -294,6 +289,10 @@ bool CueClient::connect(const std::string& baseUrl, const std::string& sessionId
 void CueClient::disconnect() {
     m_running.store(false);
     m_wsConnected.store(false);
+#ifdef _WIN32
+    uintptr_t ws = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
+    if (ws != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ws);
+#endif
     if (m_wsThread.joinable()) m_wsThread.join();
 }
 
@@ -330,6 +329,11 @@ void CueClient::wsLoop() {
         return;
     }
 
+    auto iSleep = [&](int ms) {
+        for (int t = 0; t < ms && m_running.load(); t += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    };
+
     int backoff = 3;
     while (m_running.load()) {
         struct addrinfo hints = {}, *result = nullptr;
@@ -338,26 +342,27 @@ void CueClient::wsLoop() {
         std::string portStr = std::to_string(m_port);
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
             cueLog("CueClient WS: DNS failed");
-            interruptibleSleep(m_running, backoff);
+            iSleep(backoff * 1000);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
         if (sock == INVALID_SOCKET) {
             freeaddrinfo(result);
-            interruptibleSleep(m_running, backoff);
+            iSleep(backoff * 1000);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             cueLog("CueClient WS: connect failed (is Cue server running?)");
             closesocket(sock); freeaddrinfo(result);
-            interruptibleSleep(m_running, backoff);
+            iSleep(backoff * 1000);
             backoff = std::min(backoff * 2, 60);
             continue;
         }
         freeaddrinfo(result);
         backoff = 3;
+        m_wsSock.store((uintptr_t)sock);
 
         uint8_t keyBytes[16];
         for (int i = 0; i < 16; i++) keyBytes[i] = (uint8_t)(rand() & 0xFF);
@@ -380,13 +385,13 @@ void CueClient::wsLoop() {
             fd_set readSet;
             FD_ZERO(&readSet);
             FD_SET(sock, &readSet);
-            struct timeval tv = { 3, 0 };
+            struct timeval tv = { 0, 50000 }; // 50ms
 #ifdef _WIN32
             int sel = select(0, &readSet, nullptr, nullptr, &tv);
 #else
             int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
 #endif
-            if (sel <= 0) break;
+            if (sel <= 0) continue;
             int n = recv(sock, buf, sizeof(buf) - 1, 0);
             if (n <= 0) break;
             buf[n] = '\0';
@@ -396,8 +401,9 @@ void CueClient::wsLoop() {
 
         if (response.find("101") == std::string::npos) {
             cueLog("CueClient WS: upgrade failed — " + response.substr(0, 80));
+            m_wsSock.store((uintptr_t)INVALID_SOCKET);
             closesocket(sock);
-            interruptibleSleep(m_running, 3);
+            iSleep(3000);
             continue;
         }
 
@@ -470,10 +476,11 @@ void CueClient::wsLoop() {
         }
 
         m_wsConnected.store(false);
+        m_wsSock.store((uintptr_t)INVALID_SOCKET);
         closesocket(sock);
         if (m_running.load()) {
             cueLog("CueClient WS: disconnected, reconnecting...");
-            interruptibleSleep(m_running, backoff);
+            iSleep(backoff * 1000);
             backoff = std::min(backoff * 2, 60);
         }
     }

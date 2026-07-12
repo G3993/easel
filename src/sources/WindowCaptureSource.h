@@ -23,6 +23,10 @@ public:
     bool start(HWND hwnd);
     void stop();
 
+    // Release the WGC session / GDI resources while keeping the HWND;
+    // update() lazily restarts on the next live frame.
+    void suspend() override;
+
     void update() override;
     GLuint textureId() const override { return m_texture.id(); }
     int width() const override { return m_width; }
@@ -36,6 +40,7 @@ private:
     int m_width = 0, m_height = 0;
     Texture m_texture;
     bool m_active = false;
+    bool m_suspended = false;
 
     // WGC capture (preferred, works for minimized/occluded/GPU-accelerated)
     std::unique_ptr<WGCCapture> m_wgc;

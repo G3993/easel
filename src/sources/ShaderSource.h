@@ -111,6 +111,7 @@ public:
 
     void update() override;
     GLuint textureId() const override { return m_initialized ? m_fbo.textureId() : 0; }
+    bool isInitialized() const { return m_initialized; }
     int width() const override { return m_width; }
     int height() const override { return m_height; }
     std::string typeName() const override { return "Shader"; }

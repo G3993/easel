@@ -616,6 +616,7 @@ bool ShaderSource::reload(const std::string& isfSource) {
     ShaderProgram newShader;
     std::string oldRawFrag = m_rawFragment;
     auto oldInputs = m_inputs;
+    auto oldPassBuffers = m_passBuffers;
 
     m_rawFragment = isfSource;
     parseISF(isfSource);
@@ -629,9 +630,13 @@ bool ShaderSource::reload(const std::string& isfSource) {
     }
 
     if (!newShader.loadFromSource(vertSrc, fragSrc)) {
-        // Restore old state
+        // Restore old state. m_passBuffers must roll back too — the next
+        // successful reload compares against it to decide whether the pass
+        // FBOs need rebuilding, and the failed candidate's layout would
+        // make that comparison lie.
         m_rawFragment = oldRawFrag;
         m_inputs = oldInputs;
+        m_passBuffers = oldPassBuffers;
         std::cerr << "Shader reload failed, keeping previous version" << std::endl;
         return false;
     }
@@ -648,6 +653,16 @@ bool ShaderSource::reload(const std::string& isfSource) {
 
     // Swap in the new shader (old one gets destroyed)
     m_shader.loadFromSource(vertSrc, fragSrc);
+
+    // Rebuild the multi-pass ping-pong FBOs when the PASSES layout changed.
+    // Without this, a hot-reload that dropped passes left their half-float
+    // buffers resident AND still dispatched every frame, while added passes
+    // had no storage at all. When the layout is unchanged (the common case —
+    // ShaderImprover mandates pass-union preservation) the buffers are kept
+    // so persistent-pass state survives the reload.
+    if (m_passBuffers != oldPassBuffers) {
+        createPassFBOs();
+    }
     return true;
 }
 
@@ -1104,5 +1119,15 @@ void ShaderSource::setResolution(int w, int h) {
             }
         }
         m_frameIndex = 0; // reset so shader re-seeds
+    } else if (w > 0 && h > 0 && m_shader.id() != 0) {
+        // Shader compiled but FBO creation failed at load time (0×0 dimensions).
+        // Attempt late initialization now that we have valid dimensions.
+        if (m_fbo.create(w, h)) {
+            m_quad.createQuad();
+            m_initialized = true;
+            if (!m_passBuffers.empty()) {
+                createPassFBOs();
+            }
+        }
     }
 }

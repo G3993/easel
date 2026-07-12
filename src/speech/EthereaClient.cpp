@@ -36,11 +36,6 @@ struct WSADATA { int dummy; };
 // forever to quit when Etherea isn't running" symptom). Sleep in short
 // slices, re-checking m_running each slice, so shutdown interrupts within
 // ~50ms regardless of how long the backoff is.
-static void interruptibleSleep(std::atomic<bool>& running, int seconds) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
-    while (running.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
 }
 
 // ─── Logging ───────────────────────────────────────────────────────────────
@@ -349,6 +344,16 @@ void EthereaClient::disconnect() {
     m_running.store(false);
     m_wsConnected.store(false);
     m_sseConnected.store(false);
+    // Close the live sockets so select()/recv() on the thread unblocks
+    // immediately instead of waiting for the next timeout to fire.
+#ifdef _WIN32
+    {
+        uintptr_t ws = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (ws != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ws);
+        uintptr_t ss = m_sseSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (ss != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ss);
+    }
+#endif
     if (m_wsThread.joinable()) m_wsThread.join();
     if (m_sseThread.joinable()) m_sseThread.join();
 }
@@ -410,6 +415,12 @@ void EthereaClient::wsLoop() {
         return;
     }
 
+    // Sleep in 50ms slices so m_running=false wakes us within one slice.
+    auto iSleep = [&](int ms) {
+        for (int t = 0; t < ms && m_running.load(); t += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    };
+
     int wsBackoff = 3; // seconds, grows exponentially on repeated failures
     while (m_running.load()) {
         struct addrinfo hints = {}, *result = nullptr;
@@ -419,24 +430,25 @@ void EthereaClient::wsLoop() {
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
             etLog("EthereaClient WS: DNS failed");
             m_wsFailedAttempts++;
-            interruptibleSleep(m_running, wsBackoff);
+            iSleep(wsBackoff * 1000);
             wsBackoff = std::min(wsBackoff * 2, 60);
             continue;
         }
 
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); m_wsFailedAttempts++; interruptibleSleep(m_running, wsBackoff); wsBackoff = std::min(wsBackoff * 2, 60); continue; }
+        if (sock == INVALID_SOCKET) { freeaddrinfo(result); m_wsFailedAttempts++; iSleep(wsBackoff * 1000); wsBackoff = std::min(wsBackoff * 2, 60); continue; }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             etLog("EthereaClient WS: connect failed (is Etherea running?)");
             closesocket(sock); freeaddrinfo(result);
             m_wsFailedAttempts++;
-            interruptibleSleep(m_running, wsBackoff);
+            iSleep(wsBackoff * 1000);
             wsBackoff = std::min(wsBackoff * 2, 60);
             continue;
         }
         freeaddrinfo(result);
         wsBackoff = 3; // reset backoff on successful connect
         m_wsFailedAttempts = 0;
+        m_wsSock.store((uintptr_t)sock); // expose so disconnect() can closesocket()
 
         // Generate WebSocket key
         uint8_t keyBytes[16];
@@ -464,13 +476,13 @@ void EthereaClient::wsLoop() {
             fd_set readSet;
             FD_ZERO(&readSet);
             FD_SET(sock, &readSet);
-            struct timeval tv = { 3, 0 };
+            struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
 #ifdef _WIN32
             int sel = select(0, &readSet, nullptr, nullptr, &tv);
 #else
             int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
 #endif
-            if (sel <= 0) break;
+            if (sel <= 0) continue; // timeout — recheck m_running at loop top
             int n = recv(sock, buf, sizeof(buf) - 1, 0);
             if (n <= 0) break;
             buf[n] = '\0';
@@ -480,8 +492,9 @@ void EthereaClient::wsLoop() {
 
         if (response.find("101") == std::string::npos) {
             etLog("EthereaClient WS: upgrade failed — " + response.substr(0, 80));
+            m_wsSock.store((uintptr_t)INVALID_SOCKET);
             closesocket(sock);
-            interruptibleSleep(m_running, 3);
+            iSleep(3000);
             continue;
         }
 
@@ -542,10 +555,11 @@ void EthereaClient::wsLoop() {
         }
 
         m_wsConnected.store(false);
+        m_wsSock.store((uintptr_t)INVALID_SOCKET);
         closesocket(sock);
         if (m_running.load()) {
             etLog("EthereaClient WS: disconnected, reconnecting...");
-            interruptibleSleep(m_running, wsBackoff);
+            iSleep(wsBackoff * 1000);
             wsBackoff = std::min(wsBackoff * 2, 60);
         }
     }
@@ -565,6 +579,11 @@ void EthereaClient::sseLoop() {
     std::string path = "/stream";
     if (!m_sessionId.empty()) path += "?session_id=" + m_sessionId;
 
+    auto iSleep = [&](int ms) {
+        for (int t = 0; t < ms && m_running.load(); t += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    };
+
     int sseBackoff = 3;
     while (m_running.load()) {
         struct addrinfo hints = {}, *result = nullptr;
@@ -573,20 +592,21 @@ void EthereaClient::sseLoop() {
         hints.ai_protocol = IPPROTO_TCP;
         std::string portStr = std::to_string(m_port);
         if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
-            interruptibleSleep(m_running, sseBackoff);
+            iSleep(sseBackoff * 1000);
             sseBackoff = std::min(sseBackoff * 2, 60);
             continue;
         }
         SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); interruptibleSleep(m_running, sseBackoff); sseBackoff = std::min(sseBackoff * 2, 60); continue; }
+        if (sock == INVALID_SOCKET) { freeaddrinfo(result); iSleep(sseBackoff * 1000); sseBackoff = std::min(sseBackoff * 2, 60); continue; }
         if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
             closesocket(sock); freeaddrinfo(result);
-            interruptibleSleep(m_running, sseBackoff);
+            iSleep(sseBackoff * 1000);
             sseBackoff = std::min(sseBackoff * 2, 60);
             continue;
         }
         freeaddrinfo(result);
         sseBackoff = 3; // reset on successful connect
+        m_sseSock.store((uintptr_t)sock);
 
         std::string request =
             "GET " + path + " HTTP/1.1\r\n"
@@ -606,7 +626,7 @@ void EthereaClient::sseLoop() {
             fd_set readSet;
             FD_ZERO(&readSet);
             FD_SET(sock, &readSet);
-            struct timeval tv = { 1, 0 };
+            struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
 #ifdef _WIN32
             int sel = select(0, &readSet, nullptr, nullptr, &tv);
 #else
@@ -676,10 +696,11 @@ void EthereaClient::sseLoop() {
         }
 
         m_sseConnected.store(false);
+        m_sseSock.store((uintptr_t)INVALID_SOCKET);
         closesocket(sock);
         if (m_running.load()) {
             etLog("EthereaClient SSE: reconnecting in 3s...");
-            interruptibleSleep(m_running, 3);
+            iSleep(3000);
         }
     }
 

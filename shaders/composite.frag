@@ -177,9 +177,17 @@ vec4 sampleLayerWithMode(vec2 layerUV, int mode, vec2 cropMin, vec2 cropMax) {
 }
 
 void main() {
-    vec4 base = texture(uBase, vTexCoord);
+    // uFlipV marks the LAYER source as top-down (NDI/video). This program is
+    // linked with passthrough.vert, whose vertex stage ALSO flips vTexCoord
+    // when uFlipV is set — but here vTexCoord addresses the accumulated BASE,
+    // which must never flip. Undo the vertex flip so the base samples
+    // upright; the layer's own top-down correction is applied to layerUV
+    // below (exactly one net flip, matching the first-layer passthrough path).
+    vec2 uv = vTexCoord;
+    if (uFlipV) uv.y = 1.0 - uv.y;
+    vec4 base = texture(uBase, uv);
 
-    vec2 ndc = vTexCoord * 2.0 - 1.0;
+    vec2 ndc = uv * 2.0 - 1.0;
     vec3 layerNDC = uInvTransform * vec3(ndc, 1.0);
     vec2 layerUV = layerNDC.xy * 0.5 + 0.5;
     if (uFlipV) layerUV.y = 1.0 - layerUV.y;

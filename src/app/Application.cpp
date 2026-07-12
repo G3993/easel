@@ -31,6 +31,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -160,6 +161,7 @@ bool Application::init() {
         return false;
     }
 
+
 #ifdef __APPLE__
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -227,7 +229,12 @@ bool Application::init() {
     glfwSetDropCallback(m_window, Application::dropCallback);
 
     glfwMakeContextCurrent(m_window);
-    glfwSwapInterval(1); // vsync — saves CPU, NDI sends after swap
+    // Editor vsync ON by default (see the frame-pacing block in run()): the
+    // loop should run at the display's refresh, not free-run. Output pacing
+    // is independent — NDI throttles itself, the projector present uses a
+    // fence sync on its own context — so editor vsync doesn't gate them.
+    glfwSwapInterval(1);
+    m_appliedSwapInterval = 1;
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         std::cerr << "Failed to init GLAD" << std::endl;
@@ -236,6 +243,7 @@ bool Application::init() {
 
     std::cout << "OpenGL " << glGetString(GL_VERSION) << std::endl;
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
+
 
     if (!m_ui.init(m_window)) return false;
 
@@ -299,6 +307,7 @@ bool Application::init() {
         std::cerr << "Failed to load warp_downsample.frag — falling back "
                      "to linear_copy for warp SS downsample\n";
     }
+
     if (!m_maskRenderer.init()) return false;
 
 #ifdef HAS_OPENCV
@@ -425,8 +434,9 @@ bool Application::init() {
 
     // Etherea client — WebSocket for real-time transcript, SSE for hints
     m_ethereaClient.setTranscriptCallback([this](const std::string& text, bool isFinal) {
-        // Update data bus with latest transcript segment
-        m_dataBus.set("etherea.latest", text);
+        // Feeds etherea.latest (full segment), etherea.words (new-words delta),
+        // and etherea.recent (rolling last-N-words FIFO).
+        pushTranscript("etherea", m_ethereaFeed, text, isFinal);
         if (isFinal && !text.empty()) {
             // Accumulate full transcript (bounded — see DataBus::appendCapped).
             m_dataBus.appendCapped("etherea.transcript", text);
@@ -441,7 +451,7 @@ bool Application::init() {
 
     // Cue: parallel realtime cue harness. Pushes transcript + actions into DataBus.
     m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
-        m_dataBus.set("cue.latest", text);
+        pushCueWords(text, isFinal);   // sets cue.latest + cue.words (new-words delta)
         if (isFinal && !text.empty()) {
             m_dataBus.appendCapped("cue.transcript", text);
         }
@@ -536,14 +546,19 @@ bool Application::init() {
         }
     }
 
-    // Auto-load default project if it exists, otherwise blank
+    // Auto-load the default project when it exists. The landing page still
+    // covers the blank-start case, but skipping auto-load entirely was a
+    // DATA-LOSS trap for the live/agent workflow: a restart came up blank
+    // and the 30s crash-recovery auto-save then overwrote default.easel
+    // with the blank state, destroying the show project (2026-06-12).
     {
         std::string defaultPath = defaultProjectPath();
         if (std::filesystem::exists(defaultPath)) {
             loadProject(defaultPath);
+            m_autoLoadedProject = true;
             std::cout << "[Easel] Auto-loaded default project" << std::endl;
         } else {
-            std::cout << "[Easel] Starting with blank project" << std::endl;
+            std::cout << "[Easel] Starting blank (landing page active)" << std::endl;
         }
     }
 
@@ -566,6 +581,11 @@ bool Application::init() {
     // Auto-start OSC receiver on port 9000
     m_oscManager.startReceiver(9000);
     m_oscManager.setSendTarget("127.0.0.1", 9001);
+
+    // Pro DJ Link — discover Pioneer CDJs on the local network
+    m_prodjlink.start();
+
+    loadRecentProjectsList();
 
     return true;
 }
@@ -971,9 +991,24 @@ void Application::run() {
                 }
             }
 
-            // Recording is indefinite/live now — there is no Work-Area auto-stop.
-            // The REC button records the live output until the user clicks stop.
+            // REC-button recording is indefinite/live (no Work-Area
+            // auto-stop); the export flow below only fires for an explicit
+            // startTimelineExport(), which sets m_timelineExporting.
+            if (m_timelineExporting && m_timeline.playhead() >= m_timelineExportEnd - 1e-3) {
+#ifdef HAS_FFMPEG
+                if (m_recorder.isActive()) m_recorder.stop();
+#endif
+                m_timeline.pause();
+                m_timelineExporting = false;
+            }
         }
+
+        // Park heavy sources (video decode threads, capture devices, NDI
+        // receivers) that are reachable only from undo/redo snapshots —
+        // without this a replaced/deleted layer's source stayed fully live
+        // until 50 newer undo pushes rolled it off. Sources self-revive in
+        // their update() if a restore puts them back in the live stack.
+        m_undoStack.suspendOrphanedSources(m_layerStack);
 
         compositeAndWarp();
         presentOutputs();
@@ -1297,16 +1332,33 @@ void Application::run() {
             }
         }
 
-        glfwSwapBuffers(m_window);
+        // Frame pacing. "Uncapped (vsync)" (m_targetFPS == 0) engages vsync so
+        // the loop runs at the editor display's refresh (~60Hz) instead of
+        // free-running at 300+fps — that surplus was pure wasted GPU and heat,
+        // and stepped GPU sims (the fluid solver's 20 pressure iterations) far
+        // more often than the display could show, with no visual gain (the sim
+        // is wall-clock-dt driven, so its speed is unchanged). An explicit FPS
+        // target turns vsync OFF and busy-waits to that rate below.
+        {
+            int wantInterval = (m_targetFPS > 0.0f) ? 0 : 1;
+            if (wantInterval != m_appliedSwapInterval) {
+                glfwSwapInterval(wantInterval); // main context is current here
+                m_appliedSwapInterval = wantInterval;
+            }
+        }
 
-        // Frame-rate cap (Canvas → Target). 0 = uncapped (vsync only). When
-        // set, busy-wait the remainder of the frame so we hold ~1/target sec.
+        glfwSwapBuffers(m_window);
+        static bool s_maximized = false;
+        if (!s_maximized) { glfwMaximizeWindow(m_window); s_maximized = true; }
+
+        // Explicit FPS target (vsync off above): busy-wait the remainder of the
+        // frame so we hold ~1/target sec.
         //
         // On Apple Silicon the GL-on-Metal compat layer ignores the swap
-        // interval — flushBuffer submits and returns immediately, so "vsync
-        // only" really meant uncapped: the loop spun a full core re-rendering
-        // an unchanged canvas and starved real work (dropped frames with
-        // nothing playing). Treat 0 as "pace to the display, capped at 60":
+        // interval — flushBuffer submits and returns immediately, so vsync-by-
+        // default doesn't actually block there and the loop free-runs: a full
+        // core spent re-rendering an unchanged canvas, dropped frames with
+        // nothing playing. Treat 0 as "pace to the display, capped at 60":
         // on a 120Hz ProMotion panel the fixed per-frame cost of the GL swap
         // submit alone eats most of an 8.3ms budget, so 120 pacing runs hot
         // with zero headroom. 60 is the output pipeline's native rate (NDI /
@@ -1334,46 +1386,192 @@ void Application::run() {
             }
         }
     }
+
+    // ── Closing animation ────────────────────────────────────────────────────
+    // User clicked the window close button. All blocking cleanup (thread joins,
+    // network disconnect, file I/O) runs on a background thread so the window
+    // stays alive and shows a spinner with a step label until everything is done.
+    static const int kCloseSteps = 6;
+    static const char* kCloseLabels[kCloseSteps] = {
+        "Saving project...",
+        "Stopping audio...",
+        "Stopping video output...",
+        "Disconnecting services...",
+        "Releasing outputs...",
+        "Finishing up...",
+    };
+
+    m_closing.store(true);
+    m_closingStep.store(0);
+    m_closingDone.store(false);
+    m_closingThread = std::thread([this]() {
+        m_closingStep.store(0);
+        { std::string p = defaultProjectPath(); saveProject(p); }
+
+        m_closingStep.store(1);
+        m_audioMixer.stop();
+
+        m_closingStep.store(2);
+#ifdef HAS_FFMPEG
+        m_recorder.stop();
+        m_rtmpOutput.stop();
+        cleanupAudioMeter();
+#endif
+
+        m_closingStep.store(3);
+        m_ethereaClient.disconnect();
+        m_cueClient.disconnect();
+
+        m_closingStep.store(4);
+#ifdef HAS_NDI
+        for (int i = 0; i < m_layerStack.count(); i++)
+            m_layerStack[i]->ndiSender.destroy();
+        for (auto& zp : m_zones) zp->ndiOutput.destroy();
+        m_ndiOutput.destroy();
+        NDIRuntime::instance().shutdown();
+#endif
+#ifdef HAS_SPOUT
+        for (auto& zp : m_zones) zp->spoutOutput.destroy();
+        m_spoutOutput.destroy();
+#endif
+
+        m_closingStep.store(5);
+#ifdef HAS_OPENCV
+        m_scanner.cancelScan();
+        m_webcam.close();
+#endif
+
+        m_closingDone.store(true);
+    });
+
+    while (!m_closingDone.load()) {
+        glfwPollEvents();
+
+        glViewport(0, 0, m_windowWidth, m_windowHeight);
+        glClearColor(0.03f, 0.04f, 0.06f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        m_ui.beginFrame();
+
+        ImGuiIO& io = ImGui::GetIO();
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+        // Dark overlay
+        fg->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(8, 10, 16, 230));
+
+        float t  = (float)glfwGetTime();
+        float cx = io.DisplaySize.x * 0.5f;
+        float cy = io.DisplaySize.y * 0.5f - 28.0f;
+        float r  = 26.0f;
+
+        // ── Easel icon with progressive stick-figure painting ───────────────
+        int step = m_closingStep.load();
+        if (step < 0) step = 0;
+        if (step >= kCloseSteps) step = kCloseSteps - 1;
+
+        ImU32 iconCol  = IM_COL32(200, 218, 255, 235);
+        ImU32 dimCol   = IM_COL32(140, 160, 210, 140);
+        float sw  = 2.2f;
+        float sz  = 52.0f;
+
+        // ── Easel frame ──────────────────────────────────────────────────
+        // Canvas (portrait): centered slightly above mid, shifted up for labels
+        float canW = sz * 0.86f,  canH = sz * 1.08f;
+        float cL = cx - canW * 0.5f, cR = cx + canW * 0.5f;
+        float cT = cy - sz * 1.05f,  cB = cT + canH;
+        float fY = cB + sz * 0.80f;   // floor
+
+        // Subtle canvas fill so figure stands out
+        fg->AddRectFilled(ImVec2(cL, cT), ImVec2(cR, cB), IM_COL32(18, 24, 40, 210), 3.0f);
+        // Canvas border
+        fg->AddRect(ImVec2(cL, cT), ImVec2(cR, cB), iconCol, 3.0f, 0, sw);
+
+        // Top ledge / canvas rail
+        float lipY = cT - sz * 0.06f;
+        fg->AddLine(ImVec2(cL - sz * 0.06f, lipY), ImVec2(cR + sz * 0.06f, lipY), iconCol, sw * 1.15f);
+
+        // A-frame back legs — start at ledge corners, spread to floor
+        float legSpan = sz * 1.05f;
+        float legTopL = cL - sz * 0.06f, legTopR = cR + sz * 0.06f;
+        fg->AddLine(ImVec2(legTopL, lipY), ImVec2(cx - legSpan, fY), iconCol, sw);
+        fg->AddLine(ImVec2(legTopR, lipY), ImVec2(cx + legSpan, fY), iconCol, sw);
+
+        // Cross-brace at 46% down between back legs
+        float bk = 0.46f;
+        float cbLx = legTopL + bk * (cx - legSpan - legTopL);
+        float cbRx = legTopR + bk * (cx + legSpan - legTopR);
+        float cbY  = lipY    + bk * (fY - lipY);
+        fg->AddLine(ImVec2(cbLx, cbY), ImVec2(cbRx, cbY), dimCol, sw * 0.9f);
+
+        // Front support leg — single center line, slight forward angle
+        fg->AddLine(ImVec2(cx, cB), ImVec2(cx + sz * 0.07f, fY), iconCol, sw);
+
+        // Foot nubs
+        float nub = sz * 0.05f;
+        fg->AddLine(ImVec2(cx - legSpan - nub, fY), ImVec2(cx - legSpan + nub, fY), iconCol, sw * 1.2f);
+        fg->AddLine(ImVec2(cx + legSpan - nub, fY), ImVec2(cx + legSpan + nub, fY), iconCol, sw * 1.2f);
+        fg->AddLine(ImVec2(cx + sz*0.07f - nub, fY), ImVec2(cx + sz*0.07f + nub, fY), iconCol, sw * 1.2f);
+
+        // ── Stick figure painted progressively onto canvas ───────────────
+        float figH = cB - cT;
+        // Step 1: head
+        if (step >= 1) {
+            float hR = figH * 0.115f, hCy = cT + figH * 0.19f;
+            fg->AddCircle(ImVec2(cx, hCy), hR, iconCol, 18, sw);
+        }
+        // Step 2: body
+        float bodyT = cT + figH * 0.32f, bodyB = cT + figH * 0.65f;
+        if (step >= 2) fg->AddLine(ImVec2(cx, bodyT), ImVec2(cx, bodyB), iconCol, sw);
+        // Step 3: arms (raised slightly — painting gesture)
+        if (step >= 3) {
+            float am   = cT + figH * 0.42f;
+            float aLen = figH * 0.26f;
+            fg->AddLine(ImVec2(cx, am), ImVec2(cx - aLen * 0.9f, am - aLen * 0.30f), iconCol, sw);
+            fg->AddLine(ImVec2(cx, am), ImVec2(cx + aLen * 0.9f, am - aLen * 0.30f), iconCol, sw);
+        }
+        // Step 4: left leg
+        if (step >= 4) {
+            float lLen = figH * 0.28f;
+            fg->AddLine(ImVec2(cx, bodyB), ImVec2(cx - lLen * 0.44f, bodyB + lLen), iconCol, sw);
+        }
+        // Step 5: right leg + feet
+        if (step >= 5) {
+            float lLen = figH * 0.28f;
+            fg->AddLine(ImVec2(cx, bodyB), ImVec2(cx + lLen * 0.44f, bodyB + lLen), iconCol, sw);
+            // small feet
+            float fOff = sz * 0.04f;
+            fg->AddLine(ImVec2(cx - lLen*0.44f, bodyB+lLen),
+                        ImVec2(cx - lLen*0.44f - fOff, bodyB+lLen), iconCol, sw*0.9f);
+            fg->AddLine(ImVec2(cx + lLen*0.44f, bodyB+lLen),
+                        ImVec2(cx + lLen*0.44f + fOff, bodyB+lLen), iconCol, sw*0.9f);
+        }
+
+        // Step label
+        const char* label = kCloseLabels[step];
+        ImVec2 ts = ImGui::CalcTextSize(label);
+        fg->AddText(ImVec2(cx - ts.x * 0.5f, fY + 14.0f),
+                    IM_COL32(185, 200, 230, 200), label);
+
+        // Thin progress bar
+        float progress = (float)step / kCloseSteps;
+        float bw = 210.0f, bh = 3.0f;
+        float bx = cx - bw * 0.5f, by = fY + 36.0f;
+        fg->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh),
+                          IM_COL32(255, 255, 255, 18), 2.0f);
+        fg->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw * progress, by + bh),
+                          IM_COL32(110, 155, 255, 200), 2.0f);
+
+        m_ui.endFrame();
+        glfwSwapBuffers(m_window);
+    }
+
+    if (m_closingThread.joinable()) m_closingThread.join();
 }
 
 void Application::shutdown() {
-    // Auto-save current state as default project
-    {
-        std::string defaultPath = defaultProjectPath();
-        saveProject(defaultPath);
-        std::cout << "[Easel] Auto-saved default project" << std::endl;
-    }
-
-    m_audioMixer.stop();
-#ifdef HAS_FFMPEG
-    m_recorder.stop();
-    m_rtmpOutput.stop();
-    cleanupAudioMeter();
-#endif
-#ifdef HAS_NDI
-    // Destroy per-layer NDI senders before shutting down runtime
-    for (int i = 0; i < m_layerStack.count(); i++) {
-        m_layerStack[i]->ndiSender.destroy();
-    }
-    // Destroy per-zone NDI senders
-    for (auto& zp : m_zones) {
-        zp->ndiOutput.destroy();
-    }
-    m_ndiOutput.destroy();
-    NDIRuntime::instance().shutdown();
-#endif
-#ifdef HAS_SPOUT
-    for (auto& zp : m_zones) {
-        zp->spoutOutput.destroy();
-    }
-    m_spoutOutput.destroy();
-#endif
-    m_ethereaClient.disconnect();
-    m_cueClient.disconnect();
-#ifdef HAS_OPENCV
-    m_scanner.cancelScan();
-    m_webcam.close();
-#endif
+    // GL/GLFW teardown — must run on the main thread after the render loop.
+    // All blocking cleanup already completed in the closing animation in run().
+    m_prodjlink.stop();
     for (auto& [idx, proj] : m_projectors) proj->destroy();
     m_projectors.clear();
     m_ui.shutdown();
@@ -1856,11 +2054,12 @@ void Application::updateSources() {
 }
 
 void Application::compositeAndWarp() {
+    m_compositeFrame++;
 #ifdef HAS_OPENCV
     // During scanning, display the scan pattern instead of the normal composite
     if (m_scanner.isScanning()) {
         GLuint patternTex = m_scanner.currentPatternTexture();
-        if (patternTex) {
+        if (patternTex && activeZone().ensureGpu()) {
             activeZone().warpFBO.bind();
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
@@ -1902,18 +2101,47 @@ void Application::compositeAndWarp() {
         }
     }
 
-    // Composite each zone independently
-    for (auto& zonePtr : m_zones) {
-        compositeZone(*zonePtr);
+    // Composite each zone that actually has a consumer this frame. A zone
+    // with no output routing whose texture isn't shown anywhere still burned
+    // a full supersampled composite + warp pass per frame (and zones are
+    // created on demand by agent OSC zone/ensure, so the per-frame cost
+    // ratcheted up across show segments). Consumers:
+    //   - any output routing (Fullscreen / NDI / Spout)
+    //   - the active zone (viewport preview, present mode, global
+    //     NDI/Spout/RTMP/recorder outputs all read activeZone())
+    //   - zone 0 while the legacy global NDI sender is enabled (pinned feed)
+    //   - all zones while a panel that shows every zone's texture is open
+    //     (Properties' Stage Setup section, Stage 3D pre-viz)
+    bool uiShowsAllZones = m_ui.isPanelVisible("Properties") ||
+        (m_ui.isPanelVisible("Stage") &&
+         UIManager::sMode == UIManager::WorkspaceMode::Stage);
+    OutputZone* active = m_zones.empty() ? nullptr : &activeZone();
+    for (int i = 0; i < (int)m_zones.size(); i++) {
+        auto& zone = *m_zones[i];
+        bool needed = uiShowsAllZones || &zone == active ||
+                      zone.outputDest != OutputDest::None;
+#ifdef HAS_NDI
+        if (i == 0 && m_ndiOutputEnabled) needed = true;
+#endif
+        if (needed) compositeZone(zone);
+        zone.releaseIdleScratch(m_compositeFrame);
     }
     // In spanned mode, also composite the wide span canvas (its own
     // compositor / visibility / warp at the user-defined resolution).
     if (m_outputMode == OutputMode::Spanned) {
         compositeZone(ensureSpanZone());
     }
+    // Age the span zone's scratch UNCONDITIONALLY — m_spanZone isn't in
+    // m_zones, so without this a show segment in Spanned mode would strand
+    // its supersample buffer (~132 MB at the default 3840x1080 span) for
+    // the rest of the show after switching back to Independent.
+    if (m_spanZone) {
+        m_spanZone->releaseIdleScratch(m_compositeFrame);
+    }
 }
 
 void Application::compositeZone(OutputZone& zone) {
+    if (!zone.ensureGpu()) return;
     // Filter layers by zone visibility.
     // "Show all" covers HUMAN-added layers only: agent-managed feed layers
     // (managedKey set — e.g. the FluxRT layer inside a published bus zone)
@@ -2010,10 +2238,11 @@ void Application::compositeZone(OutputZone& zone) {
         if (maskValidCount > 0) {
             maskCombinedTex = singleMaskTex;
             if (maskValidCount > 1) {
-                // Union all mask shapes into m_maskPingPongFBO (read later).
-                if (m_maskPingPongFBO.width() != zone.width || m_maskPingPongFBO.height() != zone.height)
-                    m_maskPingPongFBO.create(zone.width, zone.height);
-                m_maskPingPongFBO.bind();
+                // Union all mask shapes into the zone's union scratch (read later).
+                if (zone.maskUnionFBO.width() != zone.width || zone.maskUnionFBO.height() != zone.height)
+                    zone.maskUnionFBO.create(zone.width, zone.height);
+                zone.scratchUsedFrame[3] = m_compositeFrame;
+                zone.maskUnionFBO.bind();
                 glViewport(0, 0, zone.width, zone.height);
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
@@ -2040,7 +2269,7 @@ void Application::compositeZone(OutputZone& zone) {
                 }
                 glDisable(GL_BLEND);
                 Framebuffer::unbind();
-                maskCombinedTex = m_maskPingPongFBO.textureId();
+                maskCombinedTex = zone.maskUnionFBO.textureId();
             }
         }
     }
@@ -2072,14 +2301,18 @@ void Application::compositeZone(OutputZone& zone) {
     // stepped projector edges. 4K×2 = 33 MP, comfortable on M-series.
     if (longEdge >= 3840)      kWarpSS = 2;
     else if (longEdge >= 1920) kWarpSS = 2;
-    static Framebuffer s_warpSSFBO;
+    // Per-zone supersample target. This was a single function-local static
+    // shared by every zone — with two zones of different resolutions the
+    // size check flip-flopped and the (huge, 16F) buffer was destroyed and
+    // reallocated TWICE PER FRAME, indefinitely.
     const int ssW = zone.width  * kWarpSS;
     const int ssH = zone.height * kWarpSS;
-    if (s_warpSSFBO.width() != ssW || s_warpSSFBO.height() != ssH) {
-        s_warpSSFBO.createHalfFloat(ssW, ssH);
+    if (zone.warpSSFBO.width() != ssW || zone.warpSSFBO.height() != ssH) {
+        zone.warpSSFBO.createHalfFloat(ssW, ssH);
     }
+    zone.scratchUsedFrame[0] = m_compositeFrame;
 
-    s_warpSSFBO.bind();
+    zone.warpSSFBO.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -2133,7 +2366,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_linearCopyShader.setBool("uFlipV",     false);
     }
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_warpSSFBO.textureId());
+    glBindTexture(GL_TEXTURE_2D, zone.warpSSFBO.textureId());
     m_quad.draw();
     Framebuffer::unbind();
 
@@ -2146,18 +2379,19 @@ void Application::compositeZone(OutputZone& zone) {
         const int halfW = std::max(1, zone.width  / 2);
         const int halfH = std::max(1, zone.height / 2);
         // (Re)create FBOs lazily so resize is cheap.
-        if (m_bloomBrightFBO.width() != halfW || m_bloomBrightFBO.height() != halfH) {
-            m_bloomBrightFBO.createHalfFloat(halfW, halfH);
-            m_bloomPingPongFBO[0].createHalfFloat(halfW, halfH);
-            m_bloomPingPongFBO[1].createHalfFloat(halfW, halfH);
+        if (zone.bloomBrightFBO.width() != halfW || zone.bloomBrightFBO.height() != halfH) {
+            zone.bloomBrightFBO.createHalfFloat(halfW, halfH);
+            zone.bloomPingFBO[0].createHalfFloat(halfW, halfH);
+            zone.bloomPingFBO[1].createHalfFloat(halfW, halfH);
         }
-        if (m_bloomCompositeFBO.width() != zone.width ||
-            m_bloomCompositeFBO.height() != zone.height) {
-            m_bloomCompositeFBO.createHalfFloat(zone.width, zone.height);
+        if (zone.bloomCompositeFBO.width() != zone.width ||
+            zone.bloomCompositeFBO.height() != zone.height) {
+            zone.bloomCompositeFBO.createHalfFloat(zone.width, zone.height);
         }
+        zone.scratchUsedFrame[1] = m_compositeFrame;
 
         // ── 1. Bright-pass ───────────────────────────────────────
-        m_bloomBrightFBO.bind();
+        zone.bloomBrightFBO.bind();
         glViewport(0, 0, halfW, halfH);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -2176,33 +2410,33 @@ void Application::compositeZone(OutputZone& zone) {
         m_bloomBlurShader.setInt  ("uTexture",  0);
         m_bloomBlurShader.setMat3 ("uTransform", glm::mat3(1.0f));
         m_bloomBlurShader.setBool ("uFlipV",     false);
-        GLuint srcTex = m_bloomBrightFBO.textureId();
+        GLuint srcTex = zone.bloomBrightFBO.textureId();
         int    pp     = 0;
         const int passes = std::max(1, std::min(6, m_bloomBlurPasses));
         for (int i = 0; i < passes; i++) {
             // Horizontal
-            m_bloomPingPongFBO[pp].bind();
+            zone.bloomPingFBO[pp].bind();
             glViewport(0, 0, halfW, halfH);
             glClear(GL_COLOR_BUFFER_BIT);
             m_bloomBlurShader.setVec2("uDirection", glm::vec2(1.0f / (float)halfW, 0.0f));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, srcTex);
             m_quad.draw();
-            srcTex = m_bloomPingPongFBO[pp].textureId();
+            srcTex = zone.bloomPingFBO[pp].textureId();
             pp ^= 1;
             // Vertical
-            m_bloomPingPongFBO[pp].bind();
+            zone.bloomPingFBO[pp].bind();
             glClear(GL_COLOR_BUFFER_BIT);
             m_bloomBlurShader.setVec2("uDirection", glm::vec2(0.0f, 1.0f / (float)halfH));
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, srcTex);
             m_quad.draw();
-            srcTex = m_bloomPingPongFBO[pp].textureId();
+            srcTex = zone.bloomPingFBO[pp].textureId();
             pp ^= 1;
         }
 
         // ── 3. Composite ─────────────────────────────────────────
-        m_bloomCompositeFBO.bind();
+        zone.bloomCompositeFBO.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -2235,7 +2469,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_linearCopyShader.setMat3 ("uTransform", glm::mat3(1.0f));
         m_linearCopyShader.setBool ("uFlipV",     false);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_bloomCompositeFBO.textureId());
+        glBindTexture(GL_TEXTURE_2D, zone.bloomCompositeFBO.textureId());
         m_quad.draw();
         Framebuffer::unbind();
         glActiveTexture(GL_TEXTURE0);
@@ -2246,11 +2480,12 @@ void Application::compositeZone(OutputZone& zone) {
                                mp->edgeBlendTop > 0 || mp->edgeBlendBottom > 0);
     if (hasEdgeBlend) {
         // Ensure temp FBO matches zone size
-        if (m_edgeBlendFBO.width() != zone.width || m_edgeBlendFBO.height() != zone.height) {
-            m_edgeBlendFBO.create(zone.width, zone.height);
+        if (zone.postFBO.width() != zone.width || zone.postFBO.height() != zone.height) {
+            zone.postFBO.create(zone.width, zone.height);
         }
+        zone.scratchUsedFrame[2] = m_compositeFrame;
         // Render warpFBO through edge blend shader into temp FBO
-        m_edgeBlendFBO.bind();
+        zone.postFBO.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -2283,7 +2518,7 @@ void Application::compositeZone(OutputZone& zone) {
         m_passthroughShader.setBool("uHasMask", false);
         m_passthroughShader.setBool("uFlipV", false);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_edgeBlendFBO.textureId());
+        glBindTexture(GL_TEXTURE_2D, zone.postFBO.textureId());
         m_quad.draw();
         Framebuffer::unbind();
     }
@@ -2292,9 +2527,10 @@ void Application::compositeZone(OutputZone& zone) {
     // The mask clips in the SAME space the user drew it (over the projected
     // image): what you see is what gets masked. warpFBO -> tmp -> warpFBO.
     if (maskValidCount > 0 && maskCombinedTex) {
-        Framebuffer& tmp = m_edgeBlendFBO; // reuse scratch (edge blend already done)
+        Framebuffer& tmp = zone.postFBO; // reuse scratch (edge blend already done)
         if (tmp.width() != zone.width || tmp.height() != zone.height)
             tmp.create(zone.width, zone.height);
+        zone.scratchUsedFrame[2] = m_compositeFrame;
         tmp.bind();
         glViewport(0, 0, zone.width, zone.height);
         glClearColor(0, 0, 0, 0);
@@ -2341,7 +2577,16 @@ void Application::compositeZone(OutputZone& zone) {
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
-    zone.readbackFBO.bind();
+    renderReadbackFBO(zone, zone.readbackFBO, zone.width, zone.height);
+}
+
+void Application::renderReadbackFBO(OutputZone& zone, Framebuffer& target, int width, int height) {
+    // Created on demand: only NDI/RTMP/recorder readback needs this copy,
+    // so zones never read back don't pay for it.
+    if (target.width() != width || target.height() != height) {
+        target.create(width, height, false);
+    }
+    target.bind();
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     m_passthroughShader.use();
@@ -2411,15 +2656,31 @@ void Application::ensureSpanSliceResources() {
     if ((int)m_spanWarpFBO.size() != n) m_spanWarpFBO.resize(n);
     // Each slice gets its own corner-pin profile in the SEPARATE m_spanMappings
     // store (never m_mappings — the normal mapping UI must not see these).
+    // A slice with no valid profile REUSES slot i — slice reconfiguration
+    // (Slices slider, /easel/span/slices|setup) resets every mappingIndex
+    // to -1, and appending fresh profiles each time orphaned N profiles
+    // (3 shader programs + warp meshes each) per reconfiguration forever.
+    // Reuse also preserves each projector slot's alignment across reconfigs.
     for (int i = 0; i < n; i++) {
         if (m_spanSlices[i].mappingIndex < 0 ||
             m_spanSlices[i].mappingIndex >= (int)m_spanMappings.size()) {
-            auto mp = std::make_unique<MappingProfile>();
-            mp->init();
-            mp->name = "Projector " + std::to_string(i + 1);
-            m_spanSlices[i].mappingIndex = (int)m_spanMappings.size();
-            m_spanMappings.push_back(std::move(mp));
+            if (i < (int)m_spanMappings.size()) {
+                m_spanSlices[i].mappingIndex = i;
+            } else {
+                auto mp = std::make_unique<MappingProfile>();
+                mp->init();
+                mp->name = "Projector " + std::to_string(i + 1);
+                m_spanSlices[i].mappingIndex = (int)m_spanMappings.size();
+                m_spanMappings.push_back(std::move(mp));
+            }
         }
+    }
+    // Trim profiles no slice references anymore (only m_spanSlices ever
+    // indexes m_spanMappings).
+    int maxRef = -1;
+    for (const auto& s : m_spanSlices) maxRef = std::max(maxRef, s.mappingIndex);
+    if ((int)m_spanMappings.size() > maxRef + 1) {
+        m_spanMappings.resize(maxRef + 1);
     }
 }
 
@@ -2434,26 +2695,24 @@ void Application::layoutSpanSlices() {
 }
 
 void Application::presentOutputs() {
-    // Only force a full GPU sync when a zone is actually presented to a
-    // SEPARATE projector GL context (the FBO must be finished before that
-    // context samples it). The old unconditional per-frame glFinish() stalled
-    // the CPU on the GPU every frame — capping FPS (e.g. 24fps) even with an
-    // empty scene and no projector attached. Editor preview + NDI (async)
-    // need no sync here, so skip it in the common case.
-    bool needsSync = false;
-    if (m_outputMode == OutputMode::Spanned) {
-        for (auto& s : m_spanSlices) {
-            if (s.monitor >= 0) { needsSync = true; break; }
-        }
-    } else {
+    // Cross-context sync with projector windows is handled inside
+    // ProjectorOutput::presentCrop via glFenceSync + server-side glWaitSync.
+    // The old approach — glFinish() here whenever any projector was attached
+    // — drained the entire pipeline on the CPU every frame, serializing CPU
+    // and GPU so frame time was their SUM for the whole show.
+
+#ifdef HAS_NDI
+    // Apply the shared NDI wire settings to every sender each frame (cheap)
+    // so /easel/ndi/fps takes effect live on global + per-zone senders.
+    {
+        NDIOutputSettings ndiSettings;
+        ndiSettings.targetFps = m_ndiTargetFps;
+        m_ndiOutput.setSettings(ndiSettings);
         for (auto& zp : m_zones) {
-            if (zp && zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor >= 0) {
-                needsSync = true;
-                break;
-            }
+            if (zp) zp->ndiOutput.setSettings(ndiSettings);
         }
     }
-    if (needsSync) glFinish();
+#endif
 
     // Track which monitor indices are still needed
     std::set<int> neededMonitors;
@@ -2506,7 +2765,9 @@ void Application::presentOutputs() {
                 zone.ndiOutput.create(wantName);
                 zone.ndiActiveName = wantName;
             }
-            if (zone.ndiOutput.isActive()) {
+            // Only render the readback copy when someone is listening —
+            // send() drops the frame anyway when there are no receivers.
+            if (zone.ndiOutput.isActive() && zone.ndiOutput.hasReceivers()) {
                 renderReadbackFBO(zone);
                 zone.ndiOutput.send(zone.readbackFBO.textureId(), zone.width, zone.height);
             }
@@ -2647,9 +2908,6 @@ void Application::presentOutputs() {
     // Global outputs (stream/record) — use active zone
     auto& active = activeZone();
     bool needsReadback = false;
-#ifdef HAS_NDI
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive()) needsReadback = true;
-#endif
 #ifdef HAS_FFMPEG
     if (m_rtmpOutput.isActive() || m_recorder.isActive()) needsReadback = true;
 #endif
@@ -2664,10 +2922,13 @@ void Application::presentOutputs() {
     // tab clicks — selecting a zone that contains a FluxRT layer used to
     // feed Flux its own output (2026-06-10 feedback loop). Main is the
     // launch-sequence zone: default shader content only.
-    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty()) {
+    if (m_ndiOutputEnabled && m_ndiOutput.isActive() && !m_zones.empty() &&
+        m_ndiOutput.hasReceivers()) {
         OutputZone& luZone = *m_zones[0];
-        renderReadbackFBO(luZone);
-        m_ndiOutput.send(luZone.readbackFBO.textureId(), luZone.width, luZone.height);
+        constexpr int kFluxInputW = 768;
+        constexpr int kFluxInputH = 432;
+        renderReadbackFBO(luZone, m_ndiFluxInputFBO, kFluxInputW, kFluxInputH);
+        m_ndiOutput.send(m_ndiFluxInputFBO.textureId(), kFluxInputW, kFluxInputH);
     }
 #endif
 #ifdef HAS_SPOUT
@@ -2799,6 +3060,27 @@ void Application::removeZone(int index) {
         zone.spoutOutput.destroy();
     }
 #endif
+
+    // Free the zone's mapping profile (3 shader programs + warp meshes +
+    // mask textures) unless another zone shares it. Erasing shifts later
+    // indices, so re-point every zone past it — zone add/remove cycles used
+    // to strand one profile each.
+    int mi = zone.mappingIndex;
+    if (mi >= 0 && mi < (int)m_mappings.size()) {
+        bool shared = false;
+        for (int i = 0; i < (int)m_zones.size(); i++) {
+            if (i != index && m_zones[i] && m_zones[i]->mappingIndex == mi) {
+                shared = true;
+                break;
+            }
+        }
+        if (!shared) {
+            m_mappings.erase(m_mappings.begin() + mi);
+            for (auto& zp : m_zones) {
+                if (zp && zp->mappingIndex > mi) zp->mappingIndex--;
+            }
+        }
+    }
 
     m_zones.erase(m_zones.begin() + index);
     if (m_activeZone >= (int)m_zones.size()) {
@@ -2950,6 +3232,77 @@ void Application::handleVoiceIntent(const easel::voice::VoiceIntent& intent) {
     }
 }
 
+void Application::pushTranscript(const std::string& prefix, TranscriptFeed& feed,
+                                 const std::string& text, bool isFinal) {
+    // <prefix>.latest — full current segment. Unchanged contract: typewriter/
+    // reveal text shaders bind `msg` to this and depend on the whole utterance.
+    m_dataBus.set(prefix + ".latest", text);
+
+    auto splitWords = [](const std::string& s) {
+        std::vector<std::string> out;
+        size_t i = 0, n = s.size();
+        while (i < n) {
+            while (i < n && std::isspace((unsigned char)s[i])) ++i;
+            size_t start = i;
+            while (i < n && !std::isspace((unsigned char)s[i])) ++i;
+            if (i > start) out.push_back(s.substr(start, i - start));
+        }
+        return out;
+    };
+    auto join = [](const std::vector<std::string>& w, size_t from) {
+        std::string s;
+        for (size_t i = from; i < w.size(); ++i) { if (!s.empty()) s += ' '; s += w[i]; }
+        return s;
+    };
+
+    // Empty interim (recognizer silence) — leave the .words/.recent feeds
+    // showing the last words rather than blanking. (Blanking would set
+    // msgAge<0 and hide the text shader between utterances.)
+    if (text.empty()) return;
+
+    std::vector<std::string> cur = splitWords(text);
+
+    // <prefix>.words — only the words newly appended since the previous segment.
+    // WORD-boundary diff (not char): Deepgram interim results grow ("the quick"
+    // -> "the quick brown") AND revise the tail ("I think" -> "I thought");
+    // word diffing emits "thought" not a mid-word "ought". A brand-new utterance
+    // diverges at the first word, so it's (correctly) all-new. Only publish a
+    // non-empty delta so repeats/finals don't blank the shader (msgAge<0).
+    std::vector<std::string> prev = splitWords(feed.prevSegment);
+    size_t common = 0;
+    while (common < prev.size() && common < cur.size() && prev[common] == cur[common])
+        ++common;
+    std::string delta = join(cur, common);
+    if (!delta.empty()) m_dataBus.set(prefix + ".words", delta);
+
+    // <prefix>.recent — a running FIFO of the last m_recentWordCap words that
+    // slides as you speak. Window = committed words (past utterances) + the
+    // current segment's words, trimmed to the last N. Because the current
+    // segment replaces itself each interim, tail revisions never duplicate, and
+    // the feed "keeps up" word-by-word during speech instead of waiting for the
+    // sentence to finalize.
+    int cap = m_recentWordCap > 0 ? m_recentWordCap : (int)cur.size();
+    std::vector<std::string> window = feed.finalWords;
+    window.insert(window.end(), cur.begin(), cur.end());
+    if ((int)window.size() > cap)
+        window.erase(window.begin(), window.end() - cap);
+    m_dataBus.set(prefix + ".recent", join(window, 0));
+
+    if (isFinal) {
+        // Commit the finished utterance into the FIFO history. Bound the
+        // history to a small buffer (>= any sane cap) so memory stays flat over
+        // a long show while still surviving a runtime cap increase.
+        feed.finalWords.insert(feed.finalWords.end(), cur.begin(), cur.end());
+        constexpr size_t kFinalWordsMax = 128;
+        if (feed.finalWords.size() > kFinalWordsMax)
+            feed.finalWords.erase(feed.finalWords.begin(),
+                                  feed.finalWords.end() - kFinalWordsMax);
+        feed.prevSegment.clear();   // next utterance counts as all-new
+    } else {
+        feed.prevSegment = text;    // keep growing this utterance
+    }
+}
+
 void Application::startVoiceRecording() {
 #ifdef __APPLE__
     if (m_voiceListening) return;
@@ -2976,7 +3329,7 @@ void Application::startVoiceRecording() {
         // stops it from racing test writes during the M7 unicode case.
         if (s.empty()) return;
         if (glfwGetTime() >= m_cueLatestSuppressUntil) {
-            m_dataBus.set("cue.latest", s);
+            pushCueWords(s, /*isFinal=*/false);  // interim — emit only new words
         }
     };
     m_voiceRecognizer.onFinal = [this](const std::string& s) {
@@ -2987,7 +3340,7 @@ void Application::startVoiceRecording() {
         m_voiceLastEchoTime = glfwGetTime();
         // Push the final to the DataBus too so it persists in the bubbles
         // after speech stops, and append to the running transcript.
-        m_dataBus.set("cue.latest", s);
+        pushCueWords(s, /*isFinal=*/true);   // closes the utterance for cue.words
         m_dataBus.appendCapped("cue.transcript", s);
         auto intent = easel::voice::parse(s);
         std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
@@ -3379,6 +3732,12 @@ void Application::renderUI() {
                        && msg.strings.size() >= 2) {
                 // Managed shader overlay layer, keyed by slot. strings = [slot, path].
                 ensureManagedShaderLayer(msg.strings[0], msg.strings[1]);
+            } else if (msg.address == "/easel/layer/ensure/fluid"
+                       && !msg.strings.empty()) {
+                // Managed Fluid Simulation layer, keyed by slot. strings = [slot].
+                // The built-in fluid generator as an agent-managed, zone-assignable
+                // layer (so the SDK can stand up a flux-input zone end to end).
+                ensureManagedFluidLayer(msg.strings[0]);
             } else if (msg.address == "/easel/layer/remove-managed"
                        && !msg.strings.empty()) {
                 // Remove one managed layer by its key (drops an overlay/base).
@@ -3389,15 +3748,6 @@ void Application::renderUI() {
                 // strings = [managedKey, paramName]; value = float/int arg, or
                 // strings[2] for text.
                 setManagedLayerParam(msg.strings[0], msg.strings[1], msg);
-            } else if (msg.address == "/easel/layer/bindImage"
-                       && msg.strings.size() >= 2) {
-                // Bind another layer as a shader's image/texture input — the
-                // remote face of the PropertyPanel's TEXTURE dropdown.
-                // strings = [managedKey, inputName, sourceLayerName]; an empty
-                // or missing source name (or "(none)") clears the binding.
-                setManagedLayerBindImage(msg.strings[0], msg.strings[1],
-                                         msg.strings.size() >= 3 ? msg.strings[2]
-                                                                 : std::string());
             } else if (msg.address == "/easel/layer/audiopreset"
                        && msg.strings.size() >= 2) {
                 // Master audio-reactivity recipe on a managed layer — the
@@ -3405,15 +3755,17 @@ void Application::renderUI() {
                 // Shuffle/Off row. strings = [managedKey, command]; command ∈
                 // intensity|character (floats[0] = value), shuffle, off.
                 setManagedLayerAudioPreset(msg.strings[0], msg.strings[1], msg);
-            } else if (msg.address == "/easel/layer/bindImage"
-                       && msg.strings.size() >= 2) {
-                // Bind a layer as an image input's texture source on a managed
-                // shader layer — the remote face of the PropertyPanel TEXTURE
-                // dropdown. strings = [managedKey, inputName, sourceLayerName];
-                // empty/absent source clears the binding.
-                setManagedLayerBindImage(msg.strings[0], msg.strings[1],
-                                         msg.strings.size() >= 3 ? msg.strings[2]
-                                                                 : std::string());
+            } else if (msg.address == "/easel/layer/bind-image"
+                       && msg.strings.size() >= 3) {
+                // Point a managed shader layer's image INPUT at another layer's
+                // texture — the remote twin of the desktop TEXTURE dropdown.
+                // strings = [managedKey, inputName, sourceRef]; sourceRef is a
+                // layer id, a managedKey, or a layer name. The per-frame
+                // bindings refresh keeps the texture id current afterwards.
+                // (Upstream's verb; the SDK's shader.texture action sends this.
+                // The short-lived local /easel/layer/bindImage twin was dropped
+                // in the merge — nothing ships against it.)
+                bindManagedLayerImage(msg.strings[0], msg.strings[1], msg.strings[2]);
             } else if (msg.address == "/easel/zone/ensure"
                        && msg.strings.size() >= 2) {
                 // Composite/bus: ensure an output zone that publishes a named NDI
@@ -3428,6 +3780,19 @@ void Application::renderUI() {
                        && !msg.strings.empty()) {
                 // Tear down a composite zone (stops its NDI feed).
                 removeZoneByName(msg.strings[0]);
+            } else if (msg.address == "/easel/zone/output"
+                       && msg.strings.size() >= 2) {
+                // Set a zone's physical output at runtime (the render loop applies
+                // it next frame, exactly like the GUI output combo — no display/NDI
+                // setup needed here). strings = [zoneName, dest, arg3];
+                // dest = none|fullscreen|ndi. For fullscreen the monitor index is
+                // ints[0] if present else atoi(strings[2]); for ndi, strings[2] (if
+                // any) is the feed name. This is the missing OSC verb that lets the
+                // agent route a zone to a projector (Fullscreen+monitor), not just NDI.
+                int mon = !msg.ints.empty() ? msg.ints[0]
+                          : (msg.strings.size() >= 3 ? atoi(msg.strings[2].c_str()) : -1);
+                std::string arg3 = msg.strings.size() >= 3 ? msg.strings[2] : std::string();
+                setZoneOutput(msg.strings[0], msg.strings[1], mon, arg3);
             } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
                 int zi = msg.ints[0];
                 if (zi >= 0 && zi < (int)m_zones.size()) {
@@ -3561,6 +3926,12 @@ void Application::renderUI() {
                 m_spanSlices = { SpanSlice{ msg.ints[2], 0.0f, 0.5f },
                                  SpanSlice{ msg.ints[3], 0.5f, 1.0f } };
                 m_outputMode = OutputMode::Spanned;
+            } else if (msg.address == "/easel/ndi/fps"
+                       && (!msg.floats.empty() || !msg.ints.empty())) {
+                // /easel/ndi/fps <fps>  — wire-rate cap for ALL NDI senders
+                // (global + per-zone); <= 0 = uncapped (send at render rate).
+                m_ndiTargetFps = !msg.floats.empty() ? msg.floats[0]
+                                                     : (float)msg.ints[0];
             } else if (msg.address == "/easel/clip/remove"
                        && msg.ints.size() >= 2) {
                 // /easel/clip/remove <layerIndex> <clipId>
@@ -3634,7 +4005,10 @@ void Application::renderUI() {
                 std::string s = msg.strings[0];
                 if (!s.empty()) {
                     if (s.size() > 4096) s.resize(4096);
-                    m_dataBus.set("cue.latest", s);
+                    // Each agent-pushed cue is a complete utterance, so treat
+                    // it as final: cue.words carries the whole new cue (diffed
+                    // against the prior one, then reset).
+                    pushCueWords(s, /*isFinal=*/true);
                     m_cueLatestSuppressUntil = glfwGetTime() + 1.5;
                 }
             } else if (msg.address == "/cue/clear") {
@@ -3645,6 +4019,9 @@ void Application::renderUI() {
                 // ~500ms so an intentional blank doesn't get instantly
                 // overwritten by stray room audio.
                 m_dataBus.set("cue.latest", "");
+                m_dataBus.set("cue.words", "");
+                m_dataBus.set("cue.recent", "");
+                m_cueFeed = TranscriptFeed{};
                 m_cueLatestSuppressUntil = glfwGetTime() + 0.5;
             } else if (msg.address.rfind("/easel/scene/", 0) == 0) {
                 int idx = atoi(msg.address.c_str() + 13);
@@ -3807,6 +4184,25 @@ void Application::renderUI() {
         if (!previewTex) previewTex = m_testPattern.id();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
+        // Tell the viewport the actually-visible region so it fits AND centers
+        // the canvas within the area not hidden by floating chrome.
+        {
+            auto* vp2 = ImGui::GetMainViewport();
+            float rpLeft   = m_ui.getRightPanelLeft();
+            float visLeft  = UIManager::kLeftRailW;
+            float visRight = rpLeft - vp2->WorkPos.x;
+            float visW     = visRight - visLeft;
+            if (visW < 100.0f) { visLeft = 0.0f; visW = 0.0f; }
+            // Visible height: from panel top down to the timeline top edge.
+            // m_timelineTopY is in screen coords; subtract WorkPos.y to get
+            // panel-relative, then subtract workspaceBarHeight for window padding.
+            float visH = 0.0f;
+            if (m_timelineTopY > vp2->WorkPos.y + 40.0f) {
+                visH = m_timelineTopY - vp2->WorkPos.y;
+                if (visH < 100.0f) visH = 0.0f;
+            }
+            m_viewportPanel.setVisibleRegion(visLeft, visW, visH);
+        }
         m_viewportPanel.render(previewTex, mappingForZone(z), projAspect,
                                &m_zones, &m_activeZone, &monitors, ndiAvail, editorMon, &m_mappings,
                                nullptr,  // inlineSetupSection (Canvas mode doesn't need it)
@@ -4416,6 +4812,7 @@ void Application::renderUI() {
     m_speechState.dataBus = &m_dataBus;
     m_speechState.activeLayerId = selectedLayer ? selectedLayer->id : 0;
     m_speechState.midi = &m_midiManager;
+    m_speechState.recentWordCap = &m_recentWordCap;
 
     // Capture undo snapshot BEFORE the property panel modifies values
     SceneSnapshot preEditSnapshot;
@@ -4750,36 +5147,63 @@ void Application::renderUI() {
             // Live output preview — shows the active zone's composited
             // output so the performer can see what the audience sees.
             ImGui::Dummy(ImVec2(0, 4));
-            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImVec2 fullAvail = ImGui::GetContentRegionAvail();
+
+            // Subtract the floating right-panel width so monitors don't
+            // render underneath it (same pattern as the Stage viewport).
+            float rightRailW  = m_ui.rightRailWidth();
+            float usableW     = std::max(120.0f, fullAvail.x - rightRailW - 18.0f);
+
             float aspect = 16.0f / 9.0f;
             if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) {
-                auto& z = m_zones[m_activeZone];
-                if (z->width > 0 && z->height > 0)
-                    aspect = (float)z->width / (float)z->height;
+                auto& z = *m_zones[m_activeZone];
+                if (z.warpFBO.width() > 0 && z.warpFBO.height() > 0)
+                    aspect = (float)z.warpFBO.width() / (float)z.warpFBO.height();
             }
-            // Fit-size baseline (zoom == 1.0) — the preview that exactly
-            // fits the available area while preserving aspect. Apply
-            // m_showZoom as a uniform multiplier; clamp so the preview
-            // doesn't try to render at zero size when shrunk all the way.
-            float fitH = std::min(avail.y - 16.0f, avail.x / aspect);
-            float previewH = std::max(20.0f, fitH * m_showZoom);
-            float previewW = previewH * aspect;
-            float padX = (avail.x - previewW) * 0.5f;
-            if (padX < 0) padX = 0;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padX);
-            GLuint previewTex = 0;
-            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size())
-                previewTex = m_zones[m_activeZone]->warpFBO.textureId();
-            if (previewTex) {
-                ImGui::Image((ImTextureID)(intptr_t)previewTex,
-                             ImVec2(previewW, previewH),
-                             ImVec2(0, 1), ImVec2(1, 0));
-            } else {
-                ImGui::Dummy(ImVec2(previewW, previewH));
+            GLuint showOutTex = 0, showPrvTex = 0;
+            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) {
+                auto& z  = *m_zones[m_activeZone];
+                showOutTex = z.warpFBO.textureId();
+                showPrvTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
             }
+            if (!showOutTex) showOutTex = m_testPattern.id();
+            if (!showPrvTex) showPrvTex = m_testPattern.id();
+
+            // Each panel gets exactly half the usable width, no gap between them.
+            // Height derived from aspect ratio; capped to leave at least 130px for the deck.
+            const float kMonPad   = 4.0f;
+            const float kDeckMinH = 130.0f;
+            float monPW  = floorf(usableW * 0.5f);
+            float imgW   = monPW - kMonPad * 2.0f;
+            float imgH   = imgW / aspect;
+            float hdrH   = ImGui::GetTextLineHeightWithSpacing() + 5.0f + kMonPad;
+            float monH   = imgH + hdrH + kMonPad * 2.0f;
+            float maxMonH = fullAvail.y - kDeckMinH - 8.0f;
+            if (monH > maxMonH) monH = std::max(60.0f, maxMonH);
+
+            auto drawMonitor = [&](const char* id, const char* label, GLuint tex) {
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kMonPad, kMonPad));
+                if (ImGui::BeginChild(id, ImVec2(monPW, monH), false,
+                                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+                    ImGui::PopStyleVar();
+                    ImGui::TextDisabled("%s", label);
+                    ImGui::Separator();
+                    ImVec2 ia = ImGui::GetContentRegionAvail();
+                    float iw = ia.x, ih = iw / aspect;
+                    if (ih > ia.y) { ih = ia.y; iw = ih * aspect; }
+                    float px = std::max(0.0f, (ia.x - iw) * 0.5f);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + px);
+                    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(iw, ih), ImVec2(0,1), ImVec2(1,0));
+                } else { ImGui::PopStyleVar(); }
+                ImGui::EndChild();
+            };
+            drawMonitor("##ShowComp", "Program",  showOutTex);
+            ImGui::SameLine(0, 0);
+            drawMonitor("##ShowPrev", "Preview",  showPrvTex);
 
             ImGui::End();
         }
+
     }
 
     // Projector settings are now rendered inline inside the Canvas tab
@@ -5017,6 +5441,18 @@ void Application::renderUI() {
             // Rendered at 160x160 for the gallery grid — bigger than the old
             // 48x48 list cell so thumbnails read even at 2x DPI.
             const int kThumbRes = 160;
+
+            // Evict thumbnails for shaders that left the manifest — Refresh
+            // used to leave stale entries (GPU textures) until Disconnect.
+            if (m_scThumbnails.size() > m_shaderClaw.shaders().size()) {
+                std::unordered_set<std::string> live;
+                for (const auto& sh : m_shaderClaw.shaders()) live.insert(sh.fullPath);
+                for (auto it = m_scThumbnails.begin(); it != m_scThumbnails.end(); ) {
+                    if (!live.count(it->first)) it = m_scThumbnails.erase(it);
+                    else ++it;
+                }
+            }
+
             if (m_scThumbRenderer) {
                 m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
                 m_scThumbRenderer->update();
@@ -5024,20 +5460,28 @@ void Application::renderUI() {
                 if (m_scThumbRenderFrame > 3) {
                     auto& entry = m_scThumbnails[m_scThumbRenderPath];
                     if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                    std::vector<uint8_t> pixels(kThumbRes * kThumbRes * 4);
                     GLint prevFBO;
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
                     GLuint thumbTex = m_scThumbRenderer->textureId();
                     if (thumbTex != 0) {
+                        // GPU-side copy into the cached thumbnail texture.
+                        // (This was a synchronous glReadPixels into a CPU
+                        // vector — a full pipeline drain mid-show — followed
+                        // by a destroy/recreate + re-upload of the texture.)
                         GLuint tempFBO;
                         glGenFramebuffers(1, &tempFBO);
-                        glBindFramebuffer(GL_FRAMEBUFFER, tempFBO);
-                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
-                        glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
+                        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbTex, 0);
+                        if (!entry.texture->id() ||
+                            entry.texture->width() != kThumbRes ||
+                            entry.texture->height() != kThumbRes) {
+                            entry.texture->createEmpty(kThumbRes, kThumbRes);
+                        }
+                        glBindTexture(GL_TEXTURE_2D, entry.texture->id());
+                        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kThumbRes, kThumbRes);
+                        glBindTexture(GL_TEXTURE_2D, 0);
                         glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
                         glDeleteFramebuffers(1, &tempFBO);
-                        entry.texture->createEmpty(kThumbRes, kThumbRes);
-                        entry.texture->updateData(pixels.data(), kThumbRes, kThumbRes);
                         entry.ready = true;
                     }
                     m_scThumbRenderer.reset();
@@ -5127,17 +5571,33 @@ void Application::renderUI() {
                 // unselected VFX/Text/3D pills, just sits at the right
                 // edge of the row.
                 ImGui::SameLine(0, 0);
-                const char* importLbl = "+";
-                float importW = ImGui::CalcTextSize(importLbl).x
-                              + ImGui::GetStyle().FramePadding.x * 2.0f;
-                float importX = ImGui::GetWindowContentRegionMax().x - importW;
-                if (importX > ImGui::GetCursorPosX() + 6.0f)
-                    ImGui::SetCursorPosX(importX);
+                const char* refreshLbl = "\xE2\x86\xBA"; // ↺
+                const char* importLbl  = "+";
+                const float pillGap = 6.0f;
+                float framePadX = ImGui::GetStyle().FramePadding.x * 2.0f;
+                float refreshW  = ImGui::CalcTextSize(refreshLbl).x + framePadX;
+                float importW   = ImGui::CalcTextSize(importLbl).x  + framePadX;
+                float clusterX  = ImGui::GetWindowContentRegionMax().x
+                                - (refreshW + pillGap + importW);
+                if (clusterX > ImGui::GetCursorPosX() + 6.0f)
+                    ImGui::SetCursorPosX(clusterX);
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f)); // white, visible (2026-07-11)
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+
+                // Refresh pill — re-reads the manifest / re-scans the shaders
+                // directory so shaders added since connecting show up. The
+                // file watcher only hot-reloads already-loaded files, so newly
+                // added files need this explicit rescan.
+                if (ImGui::Button("\xE2\x86\xBA##scRefresh")) {
+                    m_shaderClaw.refreshManifest();
+                }
+                if (ImGui::IsItemHovered())
+                    ParamRow::Tooltip("Re-scan for newly added shaders");
+                ImGui::SameLine(0, pillGap);
+
                 if (ImGui::Button(importLbl)) {
                     std::string picked = openFileDialog("Fragment shader\0*.fs;*.frag;*.glsl\0\0");
                     if (!picked.empty() && m_shaderClaw.isConnected()) {
@@ -5590,9 +6050,21 @@ void Application::renderUI() {
                         thumbTex = it->second.texture->id();
                 }
 
-                // Invisible hit button covering the whole cell — click = add, hover = preview.
-                bool clicked = ImGui::InvisibleButton("##tile", ImVec2(thumbSize, cellH));
+                // Invisible hit button covering the whole cell.
+                // Single-click = show in preview panel. Double-click = add to layer.
+                ImGui::InvisibleButton("##tile", ImVec2(thumbSize, cellH));
+                bool clicked      = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                bool singleClicked = ImGui::IsItemHovered() && ImGui::IsMouseClicked(0);
                 bool hov = ImGui::IsItemHovered();
+
+                // Single-click: load into the sidebar preview panel.
+                if (singleClicked && m_scPreviewPath != shader.fullPath) {
+                    m_scPreviewPath = shader.fullPath;
+                    m_scPreviewFrame = 0;
+                    m_scPreview = std::make_shared<ShaderSource>();
+                    if (!m_scPreview->loadFromFile(shader.fullPath))
+                        m_scPreview.reset();
+                }
                 ImDrawList* d = ImGui::GetWindowDrawList();
 
                 // Tile background + subtle border (brightens on hover).
@@ -5701,11 +6173,109 @@ void Application::renderUI() {
                     hoveredPath = shader.fullPath;
                     if (!shader.description.empty()) {
                         char tipBuf[512];
-                        snprintf(tipBuf, sizeof(tipBuf), "%s\n\n%s",
+                        snprintf(tipBuf, sizeof(tipBuf), "%s\n\n%s\n\nDrag to timeline track",
                                  shader.title.c_str(), shader.description.c_str());
                         ParamRow::Tooltip(tipBuf);
                     } else {
-                        ParamRow::Tooltip(shader.title.c_str());
+                        char tipBuf[256];
+                        snprintf(tipBuf, sizeof(tipBuf), "%s\n\nDrag to timeline track",
+                                 shader.title.c_str());
+                        ParamRow::Tooltip(tipBuf);
+                    }
+                }
+                // Drag-to-timeline: drag the tile onto a timeline track to
+                // create a new clip (or set the source of an existing one).
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    ImGui::SetDragDropPayload("SC_SHADER_PATH",
+                                             shader.fullPath.c_str(),
+                                             shader.fullPath.size() + 1);
+                    ImGui::TextUnformatted(shader.title.empty() ? shader.file.c_str()
+                                                               : shader.title.c_str());
+                    ImGui::TextDisabled("Drop onto timeline track");
+                    ImGui::EndDragDropSource();
+                }
+
+                // Right-click context menu on each shader tile.
+                if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
+                    ImGui::OpenPopup("##scTileCtx");
+                    // stash path for the popup (declared static at top of block below)
+                }
+                // Use a static so the popup outlives the per-frame hover test.
+                {
+                    static std::string s_scCtxPath;
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1))
+                        s_scCtxPath = shader.fullPath;
+                    if (ImGui::BeginPopup("##scTileCtx")) {
+                        auto sslash = s_scCtxPath.find_last_of("/\\");
+                        std::string bn = (sslash == std::string::npos)
+                                         ? s_scCtxPath : s_scCtxPath.substr(sslash + 1);
+                        ImGui::TextDisabled("%s", bn.c_str());
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Add to Layer (new)")) {
+                            loadShader(s_scCtxPath);
+                        }
+                        if (ImGui::MenuItem("Send to Timeline")) {
+                            // Add to the selected layer's track at the end of existing clips,
+                            // or create a new layer if none is selected.
+                            auto baseName2 = [](const std::string& p) -> std::string {
+                                auto sl = p.find_last_of("/\\");
+                                return (sl == std::string::npos) ? p : p.substr(sl + 1);
+                            };
+                            int  targetLayer = m_selectedLayer;
+                            bool layerExists = (targetLayer >= 0 && targetLayer < m_layerStack.count());
+                            if (!layerExists) {
+                                // No layer selected — create one.
+                                loadShader(s_scCtxPath);
+                                // loadShader sets m_selectedLayer; now add a clip below.
+                                targetLayer = m_selectedLayer;
+                                layerExists = (targetLayer >= 0 && targetLayer < m_layerStack.count());
+                            }
+                            if (layerExists) {
+                                auto layer = m_layerStack[targetLayer];
+                                if (layer) {
+                                    auto* track = m_timeline.findTrack(layer->id);
+                                    double startT = 0.0;
+                                    if (track) {
+                                        for (const auto& c : track->clips)
+                                            startT = std::max(startT, c.startTime + c.duration);
+                                    }
+                                    if (startT >= m_timeline.duration())
+                                        startT = std::max(0.0, m_timeline.duration() - 5.0);
+                                    double dur = std::min(5.0, m_timeline.duration() - startT);
+                                    if (dur < 0.1) dur = 0.1;
+                                    m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                                    auto* nc = m_timeline.addClip(layer->id, startT, dur,
+                                                                   baseName2(s_scCtxPath),
+                                                                   s_scCtxPath);
+                                    if (nc) nc->kind = ClipKind::Shader;
+                                }
+                            }
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
+
+                // Double-click: in Show mode swap top layer source live;
+                // in Canvas mode add a new layer as before.
+                if (clicked) {
+                    if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
+                        // Find the top visible layer and hot-swap its source
+                        auto* target = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count())
+                            ? m_layerStack[m_selectedLayer].get() : nullptr;
+                        if (!target && m_layerStack.count() > 0)
+                            target = m_layerStack[m_layerStack.count()-1].get();
+                        if (target) {
+                            auto src = std::make_shared<ShaderSource>();
+                            if (src->loadFromFile(shader.fullPath)) {
+                                target->source = src;
+                                target->visible = true;
+                                target->userHidden = false;
+                            }
+                        } else {
+                            loadShader(shader.fullPath);
+                        }
+                    } else {
+                        loadShader(shader.fullPath);
                     }
                 }
 
@@ -6066,7 +6636,7 @@ void Application::renderUI() {
                     const float addH = ImGui::GetFrameHeight() + 4.0f; // taller than default
                     const float addW = 52.0f;
                     if (ImGui::Button("Add", ImVec2(addW, addH))) {
-                        addNDISource(m_ndiSources[i].name);
+                        addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                     }
                     ImGui::PopStyleColor(4);
                     ImGui::SameLine(0, 10);
@@ -6648,7 +7218,7 @@ void Application::renderUI() {
                         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.50f));
                         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
                         if (ImGui::Button("Add")) {
-                            addNDISource(m_ndiSources[i].name);
+                            addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                         }
                         ImGui::PopStyleColor(4);
                         ImGui::PopID();
@@ -7608,6 +8178,140 @@ void Application::renderUI() {
     ImGui::End();
     }  // end MIDI visibility guard
 
+    // ── Timecode window — Show mode only, toggled via Windows menu ───────────
+    if (UIManager::sMode == UIManager::WorkspaceMode::Show && m_showTimecodeWindow) {
+        m_prodjlink.poll();
+        ImGui::SetNextWindowSize(ImVec2(340, 600), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Timecode##win", &m_showTimecodeWindow,
+                     ImGuiWindowFlags_NoCollapse);
+        m_timecodePanel.render(glfwGetTime(), &m_prodjlink);
+        ImGui::End();
+    }
+
+    // Media panel — categorised browser: Video / Image / Shader / Sources
+    if (m_ui.isPanelVisible("Media")) {
+    ImGui::Begin("        ###Media");
+
+    // Helper: draws a CollapsingHeader with a transparent cog button on the right.
+    // Returns whether the section is open. cogClicked is set when the cog is pressed.
+    auto mediaSection = [&](const char* label, const char* cogId, bool& cogClicked) -> bool {
+        float cogY  = ImGui::GetCursorPosY();
+        bool  open  = ImGui::CollapsingHeader(label,
+                          ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
+        ImVec2 next = ImGui::GetCursorPos();
+        ImGui::SetCursorPos(ImVec2(ImGui::GetContentRegionMax().x - 22.0f, cogY + 2.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.50f,0.53f,0.60f,0.85f));
+        cogClicked = ImGui::SmallButton(cogId);
+        ImGui::PopStyleColor(3);
+        ImGui::SetCursorPos(next);
+        return open;
+    };
+
+    auto dimText = [](const char* t) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.38f,0.41f,0.48f,1.0f));
+        ImGui::TextWrapped("%s", t);
+        ImGui::PopStyleColor();
+    };
+
+    bool cogClicked = false;
+
+    // ── Video ────────────────────────────────────────────────────
+    if (mediaSection("Video", "⚙##vcog", cogClicked)) {
+        ImGui::Indent(8.0f);
+        dimText("Drop .mp4 / .mov / .avi files here to add as a video layer.");
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::Unindent(8.0f);
+    }
+
+    // ── Image ────────────────────────────────────────────────────
+    if (mediaSection("Image", "⚙##icog", cogClicked)) {
+        ImGui::Indent(8.0f);
+        dimText("Drop .png / .jpg / .exr files here to add as an image layer.");
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::Unindent(8.0f);
+    }
+
+    // ── Shader ───────────────────────────────────────────────────
+    if (mediaSection("Shader", "⚙##shcog", cogClicked)) {
+        ImGui::Indent(8.0f);
+        if (!m_shaderClaw.isConnected()) {
+            dimText("ShaderClaw not connected — link it in the Sources panel.");
+        } else {
+            const auto& shaders = m_shaderClaw.shaders();
+            if (shaders.empty()) {
+                dimText("No shaders found. Check the ShaderClaw directory.");
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.13f,0.15f,0.18f,1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
+                for (const auto& sh : shaders) {
+                    std::string lbl = sh.title.empty() ? sh.file : sh.title;
+                    ImGui::PushID(sh.file.c_str());
+                    if (ImGui::Button(lbl.c_str(), ImVec2(-1, 0)))
+                        loadShader(sh.fullPath);
+                    ImGui::PopID();
+                }
+                ImGui::PopStyleColor(2);
+            }
+        }
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::Unindent(8.0f);
+    }
+
+    // ── Sources (cameras + NDI) ───────────────────────────────────
+    if (mediaSection("Sources", "⚙##srccog", cogClicked)) {
+        ImGui::Indent(8.0f);
+
+        // Camera inputs
+        ImGui::TextDisabled("CAMERA");
+        ImGui::Dummy(ImVec2(0, 2));
+#ifdef HAS_OPENCV
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.13f,0.15f,0.18f,1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
+        if (ImGui::Button("Camera 0 (built-in)", ImVec2(-1, 0))) addWebcam(0);
+        if (ImGui::Button("Camera 1",             ImVec2(-1, 0))) addWebcam(1);
+        ImGui::PopStyleColor(2);
+#else
+        dimText("Camera capture requires an OpenCV build.");
+#endif
+
+        ImGui::Dummy(ImVec2(0, 6));
+
+        // NDI sources
+        ImGui::TextDisabled("NDI");
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.50f,0.53f,0.60f,0.85f));
+        if (ImGui::SmallButton("↺##ndiref"))
+            m_ndiSources = m_ndiFinder.sources();
+        ImGui::PopStyleColor(3);
+        ImGui::Dummy(ImVec2(0, 2));
+#ifdef HAS_NDI
+        if (m_ndiSources.empty()) {
+            dimText("No NDI sources found. Press ↺ to refresh.");
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.13f,0.15f,0.18f,1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
+            for (const auto& s : m_ndiSources) {
+                ImGui::PushID(s.name.c_str());
+                if (ImGui::Button(s.name.c_str(), ImVec2(-1, 0)))
+                    addNDISource(s.name, s.url);
+                ImGui::PopID();
+            }
+            ImGui::PopStyleColor(2);
+        }
+#else
+        dimText("NDI not available in this build.");
+#endif
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::Unindent(8.0f);
+    }
+
+    ImGui::End();
+    }  // end Media visibility guard
+
 #if defined(HAS_OPENCV) && !defined(__APPLE__)
     if (m_ui.isPanelVisible("Scene Scanner")) {
         m_scanPanel.render(m_scanner, m_webcam);
@@ -7881,9 +8585,13 @@ void Application::renderPushFurtherPanel() {
             if (ec) {
                 m_shaderImprover.markError("Couldn't overwrite original shader");
             } else {
-                // Reload any layers already running this shader (so they
-                // update live), then ALWAYS load the improved shader onto the
-                // canvas as a fresh selected layer so the result clearly shows.
+                // Reload any layers already running this shader so they
+                // update live. Only when NO live layer runs it is a fresh
+                // layer loaded — stacking a brand-new full-res shader layer
+                // per accepted candidate made every "Push Further" iteration
+                // permanently add a rendering layer (plus its FBO chain) on
+                // top of the hot-reloaded ones showing the same result.
+                int reloadedLayer = -1;
                 for (int li = 0; li < m_layerStack.count(); li++) {
                     auto& L = m_layerStack[li];
                     if (L && L->source && L->source->isShader() &&
@@ -7891,11 +8599,16 @@ void Application::renderPushFurtherPanel() {
                         std::ifstream f(orig);
                         std::stringstream ss; ss << f.rdbuf();
                         auto sh = std::dynamic_pointer_cast<ShaderSource>(L->source);
-                        if (sh) sh->reload(ss.str());
+                        if (sh && sh->reload(ss.str()) && reloadedLayer < 0)
+                            reloadedLayer = li;
                     }
                 }
                 m_shaderClaw.refreshManifest();
-                loadShader(orig);                 // result appears on canvas
+                if (reloadedLayer >= 0) {
+                    m_selectedLayer = reloadedLayer; // result clearly shows
+                } else {
+                    loadShader(orig);                // result appears on canvas
+                }
                 m_shaderImprover.markDone(orig);
                 std::cerr << "[Improve] done → " << orig << "\n";
             }
@@ -8235,7 +8948,15 @@ void Application::renderFloatingTransportPill() {
     float x = vp->Pos.x;
     float yFlush = vp->Pos.y + vp->Size.y - pillH;
     float y = yFlush - m_timelineCurH;
-    float pillW = vp->Size.x;
+    // Clamp transport pill to the left edge of the right sidebar.
+    float pillW;
+    {
+        float rpLeft = m_ui.getRightPanelLeft();
+        if (rpLeft > vp->Pos.x && rpLeft < vp->Pos.x + vp->Size.x)
+            pillW = rpLeft - vp->Pos.x;
+        else
+            pillW = vp->Size.x;
+    }
 
     // Defensive belt-and-braces: m_timelineCurH should never exceed the
     // viewport, but if a degenerate frame made it huge/negative, snap the
@@ -8730,14 +9451,39 @@ void Application::renderFloatingTransportPill() {
                     "Click to edit start/end (or I / O at playhead).");
             }
 
-            // Timeline toggle (film icon) — opens / collapses the timeline.
+            // Timeline toggle (film+play icon) — opens / collapses the timeline.
             ImGui::SameLine(0, kGap);
             if (smallBtn("##fp_tl_toggle", [&](float cx, float cy) {
                 ImU32 c = m_timelineMinimized ? kFgDim : kFgWhite;
-                lucide::clapperboard(dl, cx, cy, kGlyphSize, c);
+                lucide::filmPlay(dl, cx, cy, kGlyphSize, c);
             })) m_timelineMinimized = !m_timelineMinimized;
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(m_timelineMinimized ? "Show timeline" : "Hide timeline");
+                ImGui::SetTooltip("Toggle Timeline");
+
+            // Fit — zoom canvas so it fits within the visible workspace.
+            ImGui::SameLine(0, kGap);
+            if (smallBtn("##fp_fit", [&](float cx, float cy) {
+                dl->AddRect(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
+                            kFgWhite, 1.5f, 0, 1.5f);
+                dl->AddLine(ImVec2(cx - 3, cy - 2), ImVec2(cx + 3, cy + 2), kFgWhite, 1.2f);
+            })) {
+                m_viewportPanel.setZoom(0.75f);
+                m_viewportPanel.resetPan();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit Canvas");
+
+            // Fill — zoom canvas to fill the visible workspace edge-to-edge.
+            ImGui::SameLine(0, kGap);
+            if (smallBtn("##fp_fill", [&](float cx, float cy) {
+                dl->AddRectFilled(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
+                                  IM_COL32(255, 255, 255, 40), 1.5f);
+                dl->AddRect(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
+                            kFgWhite, 1.5f, 0, 1.5f);
+            })) {
+                m_viewportPanel.setZoom(1.0f);
+                m_viewportPanel.resetPan();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill Canvas");
 
             // (Audio meter moved to the LEFT next to the Sound dropdown.)
 
@@ -9334,10 +10080,11 @@ void Application::renderFloatingActionPills() {
         ImGui::PopStyleVar(3);
     };
 
-    bool recording = m_recorder.isActive();
 #ifdef HAS_FFMPEG
+    bool recording = m_recorder.isActive();
     bool living = m_rtmpOutput.isActive();
 #else
+    bool recording = false;
     bool living = false;
 #endif
     float xRight = vp->WorkPos.x + vp->WorkSize.x - rightMargin;
@@ -9400,7 +10147,16 @@ void Application::renderTimelinePanel() {
     // (vp_bottom - pillH - m_timelineCurH); pill bottom edge == timeline top
     // edge, so the two ride together as m_timelineCurH animates.
     float tlX = vp->Pos.x;
-    float tlW = vp->Size.x;
+    // Stop the timeline at the left edge of the right sidebar so it never
+    // overlaps the floating props/mapping panel.
+    float tlW;
+    {
+        float rpLeft = m_ui.getRightPanelLeft();
+        if (rpLeft > vp->Pos.x && rpLeft < vp->Pos.x + vp->Size.x)
+            tlW = rpLeft - vp->Pos.x;
+        else
+            tlW = vp->Size.x;
+    }
     float tlH = m_timelineCurH;
     if (tlH < 1.0f) tlH = 1.0f;
     float tlY = vp->Pos.y + vp->Size.y - tlH;   // pinned to viewport bottom
@@ -9491,6 +10247,43 @@ void Application::renderTimelinePanel() {
         fg->AddLine(ImVec2(wpos.x, wpos.y),
                     ImVec2(wpos.x + wwid, wpos.y),
                     IM_COL32(255, 255, 255, 25), 1.0f);
+    }
+
+    // Drag-to-resize handle on the top edge of the timeline.
+    // A 6px invisible grab strip sits over the hairline; dragging it
+    // adjusts m_timelineTargetH so the user can choose their own height.
+    if (!tlEffectivelyClosed) {
+        static bool  s_tlResizing = false;
+        static float s_tlResizeDragStartY  = 0.0f;
+        static float s_tlResizeDragStartH  = 0.0f;
+        const float kGrabH = 6.0f;
+        ImVec2 grabMin(tlX, tlY);
+        ImVec2 grabMax(tlX + tlW, tlY + kGrabH);
+        ImGui::SetCursorScreenPos(grabMin);
+        ImGui::InvisibleButton("##tlResize", ImVec2(tlW, kGrabH));
+        bool grabHovered = ImGui::IsItemHovered();
+        bool grabActive  = ImGui::IsItemActive();
+        if (grabHovered || s_tlResizing)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        if (grabActive && ImGui::IsMouseClicked(0)) {
+            s_tlResizing        = true;
+            s_tlResizeDragStartY = ImGui::GetIO().MousePos.y;
+            s_tlResizeDragStartH = m_timelineTargetH;
+        }
+        if (s_tlResizing) {
+            float dy = s_tlResizeDragStartY - ImGui::GetIO().MousePos.y; // drag up = taller
+            m_timelineTargetH = s_tlResizeDragStartH + dy;
+            if (m_timelineTargetH < 80.0f)  m_timelineTargetH = 80.0f;
+            if (m_timelineTargetH > vp->Size.y * 0.75f)
+                m_timelineTargetH = vp->Size.y * 0.75f;
+            if (!ImGui::IsMouseDown(0)) s_tlResizing = false;
+        }
+        // Subtle highlight on the grab strip when hovered/active.
+        if (grabHovered || s_tlResizing) {
+            ImGui::GetForegroundDrawList()->AddRectFilled(
+                grabMin, ImVec2(grabMax.x, grabMin.y + 2.0f),
+                IM_COL32(255, 255, 255, 45));
+        }
     }
 
     // Measured fully-open content height — written near the function bottom,
@@ -10269,6 +11062,42 @@ void Application::renderTimelinePanel() {
         ImGui::SetNextItemAllowOverlap();
         ImGui::InvisibleButton("##track", ImVec2(gutterW + trackAreaW, trackH));
 
+        // Drop target: accept a shader dragged from the Media panel.
+        // Dropping on empty space creates a new clip; dropping on an
+        // existing clip assigns its sourcePath.
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload =
+                    ImGui::AcceptDragDropPayload("SC_SHADER_PATH")) {
+                std::string shaderPath(static_cast<const char*>(payload->Data),
+                                       payload->DataSize - 1);
+                float relX = ImGui::GetIO().MousePos.x - trackOrigin.x;
+                double dropTime = xToTime(relX);
+                if (dropTime < 0.0) dropTime = 0.0;
+                TimelineClip* hit = nullptr;
+                for (auto& c : track.clips) {
+                    if (dropTime >= c.startTime && dropTime < c.endTime()) {
+                        hit = m_timeline.findClip(track.layerId, c.id);
+                        break;
+                    }
+                }
+                auto baseName = [](const std::string& p) -> std::string {
+                    auto sl = p.find_last_of("/\\");
+                    return (sl == std::string::npos) ? p : p.substr(sl + 1);
+                };
+                m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                if (hit) {
+                    hit->sourcePath = shaderPath;
+                    hit->name       = baseName(shaderPath);
+                    hit->kind       = ClipKind::Shader;
+                } else {
+                    auto* nc = m_timeline.addClip(track.layerId, dropTime, 5.0,
+                                                  baseName(shaderPath), shaderPath);
+                    if (nc) nc->kind = ClipKind::Shader;
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+
         // Track pill — only over the clip area; the gutter gets its own treatment.
         dl->AddRectFilled(trackOrigin,
                           ImVec2(trackOrigin.x + trackAreaW, rowY + trackH),
@@ -10429,19 +11258,17 @@ void Application::renderTimelinePanel() {
                         IM_COL32(255, 255, 255, 245), dlbl);
             dl->PopClipRect();
 
-            // Visible trim handles on hover (discoverability for resize)
-            if (hover && dragClipId == 0) {
-                bool onLeft  = (mx < x0 + trimZone);
-                bool onRight = (mx > x1 - trimZone);
-                if (onLeft) {
-                    dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x0 + 3, b.y),
-                                      IM_COL32(255, 220, 80, 220), 2.0f);
+            // Trim handles: always visible (faint), brighten on hover.
+            // Yellow indicators at each clip end signal drag-to-trim affordance.
+            {
+                bool onLeft  = hover && dragClipId == 0 && (mx < x0 + trimZone);
+                bool onRight = hover && dragClipId == 0 && (mx > x1 - trimZone);
+                ImU32 colL = onLeft  ? IM_COL32(255, 220, 80, 220) : IM_COL32(255, 220, 80, 70);
+                ImU32 colR = onRight ? IM_COL32(255, 220, 80, 220) : IM_COL32(255, 220, 80, 70);
+                dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x0 + 3, b.y), colL, 2.0f);
+                dl->AddRectFilled(ImVec2(x1 - 3, a.y), ImVec2(x1, b.y), colR, 2.0f);
+                if (hover && dragClipId == 0 && (onLeft || onRight))
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                } else if (onRight) {
-                    dl->AddRectFilled(ImVec2(x1 - 3, a.y), ImVec2(x1, b.y),
-                                      IM_COL32(255, 220, 80, 220), 2.0f);
-                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                }
             }
 
             // Begin drag on click within this clip rect — also select the clip
@@ -10489,6 +11316,91 @@ void Application::renderTimelinePanel() {
                         }
                     }
                 }
+            }
+
+            // Right-click on a clip → source-assignment context menu.
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)
+                && mx >= x0 && mx <= x1 && my >= a.y && my <= b.y) {
+                s_ctxLayerId = track.layerId;
+                s_ctxClipId  = clip.id;
+                ImGui::OpenPopup("##ClipSrcMenu");
+            }
+            // Popup renders within the same PushID scope as OpenPopup.
+            if (ImGui::BeginPopup("##ClipSrcMenu")) {
+                if (auto* cc = m_timeline.findClip(s_ctxLayerId, s_ctxClipId)) {
+                    if (!cc->sourcePath.empty()) {
+                        auto sslash = cc->sourcePath.find_last_of("/\\");
+                        std::string bn = (sslash == std::string::npos)
+                                         ? cc->sourcePath
+                                         : cc->sourcePath.substr(sslash + 1);
+                        ImGui::TextDisabled("%s", bn.c_str());
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Clear Source")) {
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                            cc->sourcePath.clear();
+                        }
+                        ImGui::Separator();
+                    } else {
+                        ImGui::TextDisabled("(no source)");
+                        ImGui::Separator();
+                    }
+                    if (ImGui::MenuItem("Set Source from File...")) {
+                        std::string p = openFileDialog(
+                            "Shaders & Images\0*.fs;*.frag;*.isf;*.png;*.jpg;*.mp4;*.mov\0All\0*.*\0");
+                        if (!p.empty()) {
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                            cc->sourcePath = p;
+                            auto sl2 = p.find_last_of("/\\");
+                            cc->name = (sl2 == std::string::npos) ? p : p.substr(sl2 + 1);
+                            cc->kind = ClipKind::Shader;
+                        }
+                    }
+                    if (ImGui::MenuItem("Add Shader Clip After")) {
+                        // Place the new clip immediately after this one.
+                        double newStart = cc->startTime + cc->duration;
+                        double newDur   = 5.0;
+                        // Clamp to timeline end.
+                        if (newStart >= m_timeline.duration())
+                            newStart = m_timeline.duration() - 0.1;
+                        if (newStart + newDur > m_timeline.duration())
+                            newDur = m_timeline.duration() - newStart;
+                        if (newDur < 0.1) newDur = 0.1;
+                        m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                        auto* nc = m_timeline.addClip(s_ctxLayerId, newStart, newDur, "New Clip");
+                        if (nc) { s_ctxClipId = nc->id; }
+                    }
+                    if (ImGui::MenuItem("Add Shader Clip from File...")) {
+                        std::string p = openFileDialog(
+                            "Shaders & Images\0*.fs;*.frag;*.isf;*.png;*.jpg;*.mp4;*.mov\0All\0*.*\0");
+                        if (!p.empty()) {
+                            double newStart = cc->startTime + cc->duration;
+                            double newDur   = 5.0;
+                            if (newStart >= m_timeline.duration())
+                                newStart = m_timeline.duration() - 0.1;
+                            if (newStart + newDur > m_timeline.duration())
+                                newDur = m_timeline.duration() - newStart;
+                            if (newDur < 0.1) newDur = 0.1;
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                            auto sl2 = p.find_last_of("/\\");
+                            std::string bn = (sl2 == std::string::npos) ? p : p.substr(sl2 + 1);
+                            auto* nc = m_timeline.addClip(s_ctxLayerId, newStart, newDur, bn);
+                            if (nc) {
+                                nc->sourcePath = p;
+                                nc->kind = ClipKind::Shader;
+                                s_ctxClipId = nc->id;
+                            }
+                        }
+                    }
+                    ImGui::Separator();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+                    if (ImGui::MenuItem("Delete Clip")) {
+                        m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                        m_timeline.removeClip(s_ctxLayerId, s_ctxClipId);
+                        s_ctxClipId = 0;
+                    }
+                    ImGui::PopStyleColor();
+                }
+                ImGui::EndPopup();
             }
 
         }
@@ -10934,6 +11846,58 @@ void Application::renderTimelinePanel() {
         }
     }
 
+    // ── Empty-area shader drop zone ───────────────────────────────────────
+    // Accepting SC_SHADER_PATH drops onto the blank space below all tracks
+    // creates a new layer (via loadShader) + a clip placed at the drop time.
+    {
+        float dropZoneH = 36.0f;
+        ImGui::SetCursorScreenPos(ImVec2(rulerOrigin.x, ImGui::GetCursorScreenPos().y));
+        ImGui::InvisibleButton("##tlDropZone", ImVec2(trackAreaW, dropZoneH));
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload =
+                    ImGui::AcceptDragDropPayload("SC_SHADER_PATH")) {
+                std::string shaderPath(static_cast<const char*>(payload->Data),
+                                       payload->DataSize - 1);
+                auto baseName2 = [](const std::string& p) -> std::string {
+                    auto sl = p.find_last_of("/\\");
+                    return (sl == std::string::npos) ? p : p.substr(sl + 1);
+                };
+                float relX = ImGui::GetIO().MousePos.x - rulerOrigin.x;
+                double dropTime = xToTime(relX);
+                if (dropTime < 0.0) dropTime = 0.0;
+                // Create a new layer for this shader then add a clip on it.
+                loadShader(shaderPath);
+                int newLayerIdx = m_selectedLayer;
+                if (newLayerIdx >= 0 && newLayerIdx < m_layerStack.count()) {
+                    auto layer = m_layerStack[newLayerIdx];
+                    if (layer) {
+                        double dur = std::min(5.0, m_timeline.duration() - dropTime);
+                        if (dur < 0.1) dur = 0.1;
+                        m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                        auto* nc = m_timeline.addClip(layer->id, dropTime, dur,
+                                                       baseName2(shaderPath), shaderPath);
+                        if (nc) nc->kind = ClipKind::Shader;
+                    }
+                }
+            }
+            // Visual cue while hovering with a payload.
+            if (ImGui::GetDragDropPayload() &&
+                ImGui::GetDragDropPayload()->IsDataType("SC_SHADER_PATH")) {
+                ImVec2 zMin = ImGui::GetItemRectMin();
+                ImVec2 zMax = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    zMin, zMax, IM_COL32(74, 140, 255, 30), 4.0f);
+                ImGui::GetWindowDrawList()->AddRect(
+                    zMin, zMax, IM_COL32(74, 140, 255, 120), 4.0f, 0, 1.5f);
+                ImGui::GetWindowDrawList()->AddText(
+                    ImGui::GetFont(), 11.0f,
+                    ImVec2(zMin.x + 12, zMin.y + (dropZoneH - 11.0f) * 0.5f),
+                    IM_COL32(255, 255, 255, 180), "Drop to create new layer");
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
+
     // ── Selected clip / transition inline inspector (compact pill row) ────
     // Only appears when something is selected. Styled to match the header
     // pills so it feels like the same app, not a legacy panel.
@@ -11139,6 +12103,76 @@ void Application::renderTimelinePanel() {
             ImGui::SameLine(0, 14);
             ImGui::TextDisabled("%d selected", (int)s_multiSel.size());
         }
+
+        // ── Source row — which shader/video this clip plays when entered.
+        // This is the Ableton-style workflow: each clip on a track can hold a
+        // different source, sequencing them as the playhead crosses boundaries.
+        ImGui::Spacing();
+        {
+            static char srcBuf[512];
+            static uint32_t lastSrcClipId = 0;
+            if (lastSrcClipId != s_ctxClipId) {
+                std::snprintf(srcBuf, sizeof(srcBuf), "%s", selClip->sourcePath.c_str());
+                lastSrcClipId = s_ctxClipId;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 158, 172, 230));
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("  Source");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 8);
+            ImGui::SetNextItemWidth(200);
+            if (ImGui::InputText("##clipSrc", srcBuf, sizeof(srcBuf),
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
+                selClip->sourcePath = srcBuf;
+                selClip->kind = ClipKind::Shader;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                selClip->sourcePath = srcBuf;
+                selClip->kind = ClipKind::Shader;
+            }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("...##srcFile")) {
+                std::string p = openFileDialog(
+                    "Shaders & Images\0*.fs;*.frag;*.isf;*.png;*.jpg;*.mp4;*.mov\0All\0*.*\0");
+                if (!p.empty()) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                    selClip->sourcePath = p;
+                    std::snprintf(srcBuf, sizeof(srcBuf), "%s", p.c_str());
+                    auto sl = p.find_last_of("/\\");
+                    selClip->name = (sl == std::string::npos) ? p : p.substr(sl + 1);
+                    selClip->kind = ClipKind::Shader;
+                }
+            }
+            if (ImGui::IsItemHovered()) ParamRow::Tooltip("Browse for a shader or image file");
+            // ShaderClaw quick-pick — only when connected.
+            if (m_shaderClaw.isConnected() && !m_shaderClaw.shaders().empty()) {
+                ImGui::SameLine(0, 6);
+                ImGui::SetNextItemWidth(160);
+                if (ImGui::BeginCombo("##clipSrcSC", "From ShaderClaw...")) {
+                    for (const auto& sc : m_shaderClaw.shaders()) {
+                        const char* lbl = sc.title.empty() ? sc.file.c_str() : sc.title.c_str();
+                        if (ImGui::Selectable(lbl)) {
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                            selClip->sourcePath = sc.fullPath;
+                            std::snprintf(srcBuf, sizeof(srcBuf), "%s", sc.fullPath.c_str());
+                            selClip->name = sc.title.empty() ? sc.file : sc.title;
+                            selClip->kind = ClipKind::Shader;
+                            lastSrcClipId = 0; // force buffer refresh
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            if (!selClip->sourcePath.empty()) {
+                ImGui::SameLine(0, 4);
+                if (ImGui::SmallButton("x##clearSrc")) {
+                    m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                    selClip->sourcePath.clear();
+                    srcBuf[0] = '\0';
+                }
+            }
+        }
+
         ImGui::PopID();
     }
 
@@ -11516,14 +12550,8 @@ void Application::renderTimelinePanel() {
     // Only update the shared target while fully open so the measurement isn't
     // taken from a clipped/partway-slid frame.
     s_tlMeasuredContentH = ImGui::GetCursorPosY() + 14.0f;
-    // Settle the shared slide target to the real measured content height once
-    // the panel is (essentially) fully open. Guard against a degenerate tiny
-    // measurement (e.g. a clipped/first frame reporting ~1px) so the timeline
-    // never animates toward a 1px height — updateTimelineAnim() additionally
-    // floors fullH at a sane default.
-    if (m_timelineAnimT > 0.98f && s_tlMeasuredContentH > 80.0f) {
-        m_timelineTargetH = s_tlMeasuredContentH;
-    }
+    // Auto-height disabled: timeline stays at user-set height even as layers
+    // are added/removed. Height is only changed via the drag handle at the top.
 
     ImGui::PopClipRect();
     ImGui::End();
@@ -12136,6 +13164,12 @@ void Application::renderNavBarPrefix() {
             }
             ImGui::EndMenu();
         }
+        if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
+            if (ImGui::BeginMenu("Windows")) {
+                ImGui::MenuItem("Timecode Window", nullptr, &m_showTimecodeWindow);
+                ImGui::EndMenu();
+            }
+        }
         ImGui::EndPopup();
     }
 
@@ -12277,7 +13311,7 @@ void Application::renderMenuBar_legacy() {
                 }
                 for (int i = 0; i < (int)m_ndiSources.size(); i++) {
                     if (ImGui::MenuItem(m_ndiSources[i].name.c_str())) {
-                        addNDISource(m_ndiSources[i].name);
+                        addNDISource(m_ndiSources[i].name, m_ndiSources[i].url);
                     }
                 }
                 ImGui::EndMenu();
@@ -12541,6 +13575,12 @@ void Application::toggleEditorFullscreen() {
 }
 
 void Application::registerLayerWithZones(uint32_t layerId) {
+    // Scrub ghosts FIRST: zone sets hold raw ids and deleted layers leave
+    // theirs behind, so after a restart resets the id counter a NEW layer can
+    // recycle a ghost id and silently "join" zones it was never placed in —
+    // the 2026-07-07 painting-fx→FLUX-IN feedback loop. A just-created layer
+    // belongs to no zone, so erasing its id everywhere is always correct.
+    for (auto& z : m_zones) z->visibleLayerIds.erase(layerId);
     // Agent-managed feed layers (non-empty managedKey) are plumbing: they join
     // a zone only via explicit placement (addZoneLayerByKey / the bus-daisy
     // composite path), never this new-layer auto-insert. Without this, every
@@ -12792,9 +13832,14 @@ void Application::loadShader(const std::string& path) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<ShaderSource>();
     if (!source->loadFromFile(path)) {
-        std::cerr << "Failed to load shader: " << path << std::endl;
+        std::cerr << "[Easel] SHADER LOAD FAILED: " << path << std::endl;
         return;
     }
+    std::cerr << "[Easel] Shader loaded OK: " << path
+              << " | initialized=" << source->isInitialized()
+              << " | texId=" << source->textureId()
+              << " | size=" << source->width() << "x" << source->height()
+              << std::endl;
 
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
@@ -12839,10 +13884,10 @@ void Application::loadShader(const std::string& path) {
 }
 
 #ifdef HAS_NDI
-void Application::addNDISource(const std::string& senderName) {
+void Application::addNDISource(const std::string& senderName, const std::string& senderUrl) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<NDISource>();
-    if (!source->connect(senderName)) {
+    if (!source->connect(senderName, senderUrl)) {
         std::cerr << "Failed to connect to NDI source: " << senderName << std::endl;
         return;
     }
@@ -12942,12 +13987,18 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
     };
     // Voice-native binding: a text shader (ISF 'msg' text input) gets the live
     // last-words bound so transcript text shows on-shader (mirrors loadShader).
-    auto bindIfText = [this](const std::shared_ptr<Layer>& layer) {
+    // Caption slots ("<zone>:captions", the mobile captions toggle) bind to the
+    // raw live transcript (etherea.latest, "Latest Words") instead of Cue's
+    // curated utterance — captions must follow speech, not Cue's pushes.
+    auto bindIfText = [this, &slot](const std::shared_ptr<Layer>& layer) {
         if (!layer->source || !layer->source->isShader()) return;
         auto* sh = static_cast<ShaderSource*>(layer->source.get());
         for (const auto& inp : sh->inputs()) {
             if (inp.type == "text" && inp.name == "msg") {
-                m_dataBus.bind(layer->id, "msg", "cue.latest");
+                bool captions = slot.size() >= 9 &&
+                    slot.compare(slot.size() - 9, 9, ":captions") == 0;
+                m_dataBus.bind(layer->id, "msg",
+                               captions ? "etherea.latest" : "cue.latest");
                 break;
             }
         }
@@ -12968,6 +14019,12 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
         m_undoStack.pushState(m_layerStack, m_selectedLayer);
         l->source = src;
         l->name = basename(shaderPath);
+        // A managed-slot swap is a fresh start: voice decay may have driven
+        // the layer's opacity to ~0 while a text shader was bound, and the
+        // stale msg binding keeps doing so for every later shader on this
+        // slot. Reset both; bindIfText re-binds for incoming text shaders.
+        l->opacity = 1.0f;
+        m_dataBus.bind(l->id, "msg", "");
         if (m_shaderClaw.isConnected()) m_shaderClaw.watchSource(shaderPath, src);
         bindIfText(l);
         return;
@@ -12993,6 +14050,59 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
     bindIfText(layer);
 }
 
+void Application::ensureManagedFluidLayer(const std::string& slot) {
+    if (slot.empty()) {
+        std::cerr << "[OSC] ensure/fluid ignored: empty slot\n";
+        return;
+    }
+    // Match the active zone's resolution so the sim aspect is correct (as addFluid).
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    auto makeFluid = [&]() -> std::shared_ptr<FluidSource> {
+        auto src = std::make_shared<FluidSource>();
+        if (!src->init(w, h)) {
+            std::cerr << "[OSC] ensure/fluid: FluidSource init failed\n";
+            return nullptr;
+        }
+        return src;
+    };
+    // Idempotent by slot: a managed fluid layer for this key is already what we want.
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != slot) continue;
+        if (l->source && dynamic_cast<FluidSource*>(l->source.get())) {
+            return;  // already a managed fluid layer for this slot
+        }
+        // Slot holds something else — swap in a fresh fluid source.
+        auto src = makeFluid();
+        if (!src) return;
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        l->source = src;
+        l->name = "Fluid Simulation";
+        // A managed-slot swap is a fresh start: voice decay may have driven
+        // the layer's opacity to ~0 while a text shader was bound, and the
+        // stale msg binding keeps doing so for every later shader on this
+        // slot. Reset both; bindIfText re-binds for incoming text shaders.
+        l->opacity = 1.0f;
+        m_dataBus.bind(l->id, "msg", "");
+        return;
+    }
+    // No managed layer for this slot yet — create one tagged with the key.
+    auto src = makeFluid();
+    if (!src) return;
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->managedKey = slot;
+    layer->source = src;
+    layer->name = "Fluid Simulation";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
 void Application::removeManagedLayer(const std::string& slot) {
     if (slot.empty()) return;
     for (int i = m_layerStack.count() - 1; i >= 0; i--) {
@@ -13006,6 +14116,41 @@ void Application::removeManagedLayer(const std::string& slot) {
             m_selectedLayer = m_layerStack.count() - 1;
         return;
     }
+}
+
+void Application::bindManagedLayerImage(const std::string& key, const std::string& name,
+                                        const std::string& sourceRef) {
+    if (key.empty() || name.empty() || sourceRef.empty()) return;
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key) continue;
+        if (!l->source || !l->source->isShader()) {
+            std::cerr << "[OSC] layer/bind-image: " << key << " is not a shader layer\n";
+            return;
+        }
+        auto* shader = static_cast<ShaderSource*>(l->source.get());
+        uint32_t asId = (uint32_t)atoi(sourceRef.c_str());
+        for (auto& src : m_layerStack.layers()) {
+            if (!src || src->id == l->id || !src->source) continue;
+            bool match = (asId != 0 && src->id == asId)
+                         || src->managedKey == sourceRef
+                         || src->name == sourceRef;
+            if (!match) continue;
+            // Texture id may still be 0 (source warming up) — the per-frame
+            // bindings refresh resolves it from sourceLayerId either way.
+            shader->bindImageInput(name,
+                                   src->source->textureId(),
+                                   src->source->width(),
+                                   src->source->height(),
+                                   src->id,
+                                   src->source->isFlippedV());
+            std::cerr << "[OSC] layer/bind-image: " << key << "." << name
+                      << " <- layer " << src->id << " (" << src->name << ")\n";
+            return;
+        }
+        std::cerr << "[OSC] layer/bind-image: no source layer matches '" << sourceRef << "'\n";
+        return;
+    }
+    std::cerr << "[OSC] layer/bind-image: no managed layer with key " << key << std::endl;
 }
 
 void Application::setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg) {
@@ -13189,6 +14334,48 @@ void Application::ensureZoneNdi(const std::string& zoneName, const std::string& 
     z->outputDest = OutputDest::NDI;
 }
 
+void Application::setZoneOutput(const std::string& zoneName, const std::string& dest,
+                               int monitor, const std::string& ndiFeedName) {
+    if (zoneName.empty()) {
+        std::cerr << "[OSC] zone/output ignored: empty zone\n";
+        return;
+    }
+    OutputZone* z = ensureZoneByName(zoneName);
+    std::string d = dest;
+    for (auto& c : d) c = (char)tolower((unsigned char)c);
+
+    if (d == "fullscreen" || d == "screen" || d == "monitor") {
+        // 0-based GLFW monitor index. The per-zone routing loop in render() opens/
+        // moves the projector window next frame; ProjectorOutput::create validates
+        // the index and falls back to a secondary monitor if it's the editor's, so
+        // a bad index is non-fatal.
+        z->outputDest = OutputDest::Fullscreen;
+        z->outputMonitor = monitor;
+    } else if (d == "ndi") {
+        // Optional explicit feed name, unwrapped the same way as ensureZoneNdi
+        // ("MACHINE (sender)" -> "sender"); else keep/derive from the zone name.
+        if (!ndiFeedName.empty()) {
+            std::string sender = ndiFeedName;
+            size_t op = ndiFeedName.rfind('(');
+            if (op != std::string::npos) {
+                size_t cp = ndiFeedName.find(')', op);
+                if (cp != std::string::npos && cp > op + 1)
+                    sender = ndiFeedName.substr(op + 1, cp - op - 1);
+            }
+            z->ndiStreamName = sender;
+            z->rawNdiName = true;
+        } else if (z->ndiStreamName.empty()) {
+            z->ndiStreamName = z->name;
+        }
+        z->outputDest = OutputDest::NDI;
+    } else { // "none" / "preview" / unknown -> preview-only
+        z->outputDest = OutputDest::None;
+        z->outputMonitor = -1;
+    }
+    std::cerr << "[OSC] zone/output " << zoneName << " -> " << d
+              << " (monitor " << z->outputMonitor << ")\n";
+}
+
 void Application::addZoneLayerByKey(const std::string& zoneName, const std::string& managedKey) {
     if (zoneName.empty() || managedKey.empty()) return;
     OutputZone* z = ensureZoneByName(zoneName);
@@ -13206,15 +14393,18 @@ void Application::removeZoneByName(const std::string& zoneName) {
     if (zoneName.empty()) return;
     for (size_t i = 0; i < m_zones.size(); i++) {
         if (!m_zones[i] || m_zones[i]->name != zoneName) continue;
-#ifdef HAS_NDI
-        if (m_zones[i]->ndiOutput.isActive()) m_zones[i]->ndiOutput.destroy();
-#endif
         if (m_zones.size() > 1) {
-            m_zones.erase(m_zones.begin() + i);
+            // Full cleanup path (projector, NDI/Spout senders, mapping
+            // profile) — this used to erase directly and strand the zone's
+            // MappingProfile and projector window.
+            removeZone((int)i);
             if (m_activeZone >= (int)m_zones.size()) m_activeZone = (int)m_zones.size() - 1;
             if (m_activeZone < 0) m_activeZone = 0;
         } else {
             // Keep at least one zone; just stop its output.
+#ifdef HAS_NDI
+            if (m_zones[i]->ndiOutput.isActive()) m_zones[i]->ndiOutput.destroy();
+#endif
             m_zones[i]->outputDest = OutputDest::None;
             m_zones[i]->visibleLayerIds.clear();
             m_zones[i]->showAllLayers = true;
@@ -13976,6 +15166,14 @@ void Application::saveProject(const std::string& path) {
         if (layer->source) {
             layerJson["sourceType"] = layer->source->typeName();
             layerJson["sourcePath"] = layer->source->sourcePath();
+#ifdef HAS_NDI
+            if (layer->source->typeName() == "NDI") {
+                auto* ndiSrc = dynamic_cast<NDISource*>(layer->source.get());
+                if (ndiSrc && !ndiSrc->sourceUrl().empty()) {
+                    layerJson["sourceUrl"] = ndiSrc->sourceUrl();
+                }
+            }
+#endif
 
             // Save shader parameters
             if (layer->source->isShader()) {
@@ -14294,6 +15492,7 @@ void Application::loadProject(const std::string& path) {
         std::cerr << "Failed to open project: " << path << std::endl;
         return;
     }
+    addRecentProject(path);
 
     json j;
     try {
@@ -14879,7 +16078,8 @@ void Application::loadProject(const std::string& path) {
 #ifdef HAS_NDI
             } else if (sourceType == "NDI" && !sourcePath.empty()) {
                 auto src = std::make_shared<NDISource>();
-                if (src->connect(sourcePath)) {
+                std::string sourceUrl = layerJson.value("sourceUrl", "");
+                if (src->connect(sourcePath, sourceUrl)) {
                     layer->source = src;
                 }
 #endif
@@ -14950,7 +16150,14 @@ void Application::loadProject(const std::string& path) {
             if (inp.type == "text" && inp.name == "msg") { hasMsg = true; break; }
         }
         if (hasMsg) {
-            m_dataBus.bind(layer->id, "msg", "cue.latest");
+            // Managed caption layers ("<zone>:captions") follow the raw live
+            // transcript, not Cue's curated utterance — mirrors
+            // ensureManagedShaderLayer's bindIfText.
+            const std::string& mk = layer->managedKey;
+            bool captions = mk.size() >= 9 &&
+                mk.compare(mk.size() - 9, 9, ":captions") == 0;
+            m_dataBus.bind(layer->id, "msg",
+                           captions ? "etherea.latest" : "cue.latest");
         }
     }
 
@@ -15030,6 +16237,38 @@ void Application::loadProject(const std::string& path) {
     std::cout << "Project loaded: " << path << std::endl;
 }
 
+// Flip + PNG-encode on a worker thread. The encode is the dominant cost of
+// a screenshot (tens to hundreds of ms at show resolutions) and used to run
+// on the render thread — externally triggerable mid-show via the
+// screenshots/.capture file, so each capture froze a frame. At most one job
+// runs at a time; the future's destructor joins at shutdown.
+void Application::writeScreenshotAsync(const std::string& path,
+                                       std::vector<uint8_t> pixels,
+                                       int w, int h) {
+    if (m_screenshotJob.valid()) m_screenshotJob.wait();
+    m_screenshotJob = std::async(std::launch::async,
+        [path, w, h, pixels = std::move(pixels)]() mutable {
+            // Flip vertically (OpenGL has origin at bottom-left)
+            int stride = w * 4;
+            std::vector<uint8_t> row(stride);
+            for (int y = 0; y < h / 2; y++) {
+                uint8_t* top = pixels.data() + y * stride;
+                uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
+                std::memcpy(row.data(), top, stride);
+                std::memcpy(top, bot, stride);
+                std::memcpy(bot, row.data(), stride);
+            }
+            std::error_code ec;
+            std::filesystem::create_directories(
+                std::filesystem::path(path).parent_path(), ec);
+            if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
+                std::cout << "Screenshot saved: " << path << std::endl;
+            } else {
+                std::cerr << "Screenshot failed to write: " << path << std::endl;
+            }
+        });
+}
+
 void Application::captureScreenshot(const std::string& path) {
     auto& zone = activeZone();
     int w = zone.warpFBO.width();
@@ -15039,27 +16278,12 @@ void Application::captureScreenshot(const std::string& path) {
         return;
     }
 
-    std::vector<uint8_t> pixels(w * h * 4);
+    std::vector<uint8_t> pixels((size_t)w * h * 4);
     glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Flip vertically (OpenGL has origin at bottom-left)
-    int stride = w * 4;
-    std::vector<uint8_t> row(stride);
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = pixels.data() + y * stride;
-        uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
-        std::memcpy(row.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, row.data(), stride);
-    }
-
-    if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
-        std::cout << "Screenshot saved: " << path << std::endl;
-    } else {
-        std::cerr << "Screenshot failed to write: " << path << std::endl;
-    }
+    writeScreenshotAsync(path, std::move(pixels), w, h);
 }
 
 void Application::captureWindow(const std::string& path) {
@@ -15067,26 +16291,10 @@ void Application::captureWindow(const std::string& path) {
     int h = m_windowHeight;
     if (w <= 0 || h <= 0) return;
 
-    std::vector<uint8_t> pixels(w * h * 4);
+    std::vector<uint8_t> pixels((size_t)w * h * 4);
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
-    // Flip vertically
-    int stride = w * 4;
-    std::vector<uint8_t> row(stride);
-    for (int y = 0; y < h / 2; y++) {
-        uint8_t* top = pixels.data() + y * stride;
-        uint8_t* bot = pixels.data() + (h - 1 - y) * stride;
-        std::memcpy(row.data(), top, stride);
-        std::memcpy(top, bot, stride);
-        std::memcpy(bot, row.data(), stride);
-    }
-
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    if (stbi_write_png(path.c_str(), w, h, 4, pixels.data(), stride)) {
-        std::cout << "Window screenshot saved: " << path << std::endl;
-    } else {
-        std::cerr << "Window screenshot failed: " << path << std::endl;
-    }
+    writeScreenshotAsync(path, std::move(pixels), w, h);
 }
 
 void Application::pollScreenshotTrigger() {
@@ -15106,6 +16314,226 @@ void Application::renderStageInlineSetup(OutputZone& zone) {
 }
 
 // Masks tab: Edge Blend (collapsible).
+void Application::loadRecentProjectsList() {
+    m_recentProjects.clear();
+    std::ifstream f("recent_projects.txt");
+    std::string line;
+    while (std::getline(f, line))
+        if (!line.empty() && std::filesystem::exists(line))
+            m_recentProjects.push_back(line);
+}
+
+void Application::addRecentProject(const std::string& path) {
+    m_recentProjects.erase(
+        std::remove(m_recentProjects.begin(), m_recentProjects.end(), path),
+        m_recentProjects.end());
+    m_recentProjects.insert(m_recentProjects.begin(), path);
+    if (m_recentProjects.size() > 10) m_recentProjects.resize(10);
+    std::ofstream f("recent_projects.txt");
+    for (auto& p : m_recentProjects) f << p << "\n";
+}
+
+void Application::renderSplash() {
+    if (!m_showSplash) return;
+
+    double now = glfwGetTime();
+    if (m_splashStartTime == 0.0) m_splashStartTime = now;
+    double elapsed = now - m_splashStartTime;
+
+    // Auto-dismiss at 1.6s → reveal landing page (instant cut, no fade).
+    // Skipped when the default project auto-loaded — the show is already
+    // on canvas and the landing page must not cover it.
+    if (elapsed > 1.6) {
+        m_showSplash  = false;
+        m_showLanding = !m_autoLoadedProject;
+        return;
+    }
+
+    // Content fades out in final 0.35s; background stays opaque so there's
+    // never a black flash between the splash and the landing page overlay.
+    float alpha = (elapsed > 1.25) ? (float)(1.0 - (elapsed - 1.25) / 0.35) : 1.0f;
+    if (alpha < 0.0f) alpha = 0.0f;
+
+    ImGuiIO&    io = ImGui::GetIO();
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+    // Background always fully opaque
+    fg->AddRectFilled({0, 0}, io.DisplaySize, IM_COL32(8, 10, 16, 255));
+
+    float cx = io.DisplaySize.x * 0.5f;
+    float cy = io.DisplaySize.y * 0.5f;
+    float t  = (float)now;
+
+    // ── "EASEL" wordmark ────────────────────────────────────────────────
+    float titleSz = ImGui::GetFontSize() * 2.8f;
+    const char* title = "EASEL";
+    ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(titleSz, FLT_MAX, 0.0f, title);
+    fg->AddText(ImGui::GetFont(), titleSz,
+        ImVec2(cx - ts.x * 0.5f, cy - ts.y * 0.5f - 22.0f),
+        IM_COL32(200, 218, 255, (int)(alpha * 245)), title);
+
+    // Subtitle
+    const char* sub = "Projection Mapping";
+    ImVec2 ss = ImGui::CalcTextSize(sub);
+    fg->AddText(ImVec2(cx - ss.x * 0.5f, cy + ts.y * 0.5f - 16.0f),
+        IM_COL32(110, 135, 185, (int)(alpha * 200)), sub);
+
+    // Thin accent line under subtitle
+    float lw = ss.x * 0.55f;
+    float lineY = cy + ts.y * 0.5f - 3.0f;
+    fg->AddLine(ImVec2(cx - lw * 0.5f, lineY), ImVec2(cx + lw * 0.5f, lineY),
+        IM_COL32(80, 110, 200, (int)(alpha * 120)), 1.2f);
+
+    // Three pulsing loading dots
+    float dotY = cy + ts.y * 0.5f + 24.0f;
+    for (int i = 0; i < 3; i++) {
+        float phase = t * 3.2f - i * 0.55f;
+        float pulse = 0.35f + 0.65f * (0.5f + 0.5f * sinf(phase));
+        fg->AddCircleFilled(
+            ImVec2(cx + (i - 1) * 20.0f, dotY), 4.5f,
+            IM_COL32(120, 155, 230, (int)(pulse * alpha * 230)));
+    }
+
+    // Skip hint (fades in after 0.6s)
+    if (elapsed > 0.6) {
+        float hintA = std::min(1.0f, (float)((elapsed - 0.6) / 0.4)) * alpha;
+        const char* hint = "Press any key to continue";
+        ImVec2 hs = ImGui::CalcTextSize(hint);
+        fg->AddText(ImVec2(cx - hs.x * 0.5f, dotY + 26.0f),
+            IM_COL32(70, 95, 145, (int)(hintA * 160)), hint);
+    }
+
+    // Skip on keypress or click
+    if (elapsed > 0.3) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_Space)  ||
+            ImGui::IsKeyPressed(ImGuiKey_Enter)  ||
+            ImGui::IsMouseClicked(0)) {
+            m_showSplash  = false;
+            m_showLanding = true;
+        }
+    }
+}
+
+void Application::renderLandingPage() {
+    if (!m_showLanding) return;
+
+    // Everything lives on the foreground draw list so it renders OVER all
+    // ImGui windows. Using ImGui::Begin() here was wrong — ImGui windows
+    // render before the foreground list, so the dark background rect was
+    // painting on top of the modal card every frame.
+    ImGuiIO&    io  = ImGui::GetIO();
+    ImDrawList* fg  = ImGui::GetForegroundDrawList();
+    ImFont*     font = ImGui::GetFont();
+    float        fsz = ImGui::GetFontSize();
+
+    // Full-screen opaque cover
+    fg->AddRectFilled({0, 0}, io.DisplaySize, IM_COL32(8, 10, 16, 255));
+
+    float cx = io.DisplaySize.x * 0.5f;
+    float cy = io.DisplaySize.y * 0.5f;
+
+    // ── Modal card ───────────────────────────────────────────────────────
+    const float mw = 320.0f, mh = 296.0f;
+    float ml = cx - mw * 0.5f, mt = cy - mh * 0.5f;
+    float mr = ml + mw,        mb = mt + mh;
+    fg->AddRectFilled({ml, mt}, {mr, mb}, IM_COL32(18, 20, 28, 255), 10.0f);
+    fg->AddRect      ({ml, mt}, {mr, mb}, IM_COL32(60, 70, 100, 180), 10.0f, 0, 1.1f);
+
+    // Title
+    float titleSz = fsz * 1.55f;
+    ImVec2 ts = font->CalcTextSizeA(titleSz, FLT_MAX, 0.0f, "Easel");
+    fg->AddText(font, titleSz, {ml + 24.0f, mt + 22.0f},
+                IM_COL32(204, 224, 255, 255), "Easel");
+    fg->AddText({ml + 24.0f, mt + 22.0f + ts.y + 2.0f},
+                IM_COL32(120, 135, 170, 255), "Projection Mapping");
+    float sepY = mt + 22.0f + ts.y + fsz + 16.0f;
+    fg->AddLine({ml + 12.0f, sepY}, {mr - 12.0f, sepY}, IM_COL32(255,255,255,28), 1.0f);
+
+    // ── Buttons (foreground-list drawn, mouse hit-tested) ─────────────
+    ImVec2 mpos   = io.MousePos;
+    bool   clicked = ImGui::IsMouseClicked(0);
+    float  bx = ml + 24.0f, bw = mw - 48.0f, bh = 42.0f;
+    float  by0 = sepY + 14.0f;
+
+    auto fgButton = [&](int idx, const char* label) -> bool {
+        float by = by0 + idx * (bh + 10.0f);
+        bool hov = mpos.x >= bx && mpos.x <= bx + bw &&
+                   mpos.y >= by && mpos.y <= by + bh;
+        fg->AddRectFilled({bx, by}, {bx + bw, by + bh},
+            hov ? IM_COL32(50, 58, 90, 255) : IM_COL32(30, 34, 50, 255), 6.0f);
+        fg->AddRect({bx, by}, {bx + bw, by + bh},
+            IM_COL32(80, 90, 130, hov ? 200 : 80), 6.0f, 0, 1.0f);
+        ImVec2 lsz = ImGui::CalcTextSize(label);
+        fg->AddText({bx + (bw - lsz.x) * 0.5f, by + (bh - lsz.y) * 0.5f},
+                    IM_COL32(215, 225, 255, 255), label);
+        return hov && clicked;
+    };
+
+    // Static state: recent dropdown open flag + deferred file-dialog trigger
+    static bool s_recentOpen      = false;
+    static bool s_openFilePending = false;
+
+    if (fgButton(0, "New Project"))  { m_showLanding = false; }
+    if (fgButton(1, "Open File...")) { m_showLanding = false; s_openFilePending = true; }
+    if (fgButton(2, "Load Recent"))  { s_recentOpen = !s_recentOpen; }
+
+    if (!m_showLanding) s_recentOpen = false;
+
+    // ── Recent dropdown ───────────────────────────────────────────────
+    if (s_recentOpen) {
+        float dropX = bx;
+        float dropY = by0 + 2 * (bh + 10.0f) + bh + 4.0f;
+        float rowH  = 32.0f;
+        int   show  = (int)std::min(m_recentProjects.size(), (size_t)10);
+        float dropH = (show == 0) ? rowH : show * rowH + 8.0f;
+
+        fg->AddRectFilled({dropX, dropY}, {dropX + bw, dropY + dropH},
+                          IM_COL32(22, 26, 40, 252), 6.0f);
+        fg->AddRect({dropX, dropY}, {dropX + bw, dropY + dropH},
+                    IM_COL32(60, 70, 100, 180), 6.0f, 0, 1.0f);
+
+        if (show == 0) {
+            const char* none = "No recent projects";
+            ImVec2 ns = ImGui::CalcTextSize(none);
+            fg->AddText({dropX + (bw - ns.x) * 0.5f, dropY + (rowH - ns.y) * 0.5f},
+                        IM_COL32(120, 135, 170, 255), none);
+        } else {
+            for (int i = 0; i < show; i++) {
+                float ry  = dropY + 4.0f + i * rowH;
+                const std::string& rp = m_recentProjects[i];
+                std::string label = std::filesystem::path(rp).filename().string();
+                bool hov = mpos.x >= dropX + 4 && mpos.x <= dropX + bw - 4 &&
+                           mpos.y >= ry && mpos.y <= ry + rowH;
+                if (hov)
+                    fg->AddRectFilled({dropX + 4.0f, ry}, {dropX + bw - 4.0f, ry + rowH},
+                                      IM_COL32(45, 52, 82, 255), 4.0f);
+                ImVec2 ls = ImGui::CalcTextSize(label.c_str());
+                fg->AddText({dropX + 12.0f, ry + (rowH - ls.y) * 0.5f},
+                            IM_COL32(205, 215, 240, 255), label.c_str());
+                if (hov && clicked) {
+                    loadProject(rp);
+                    m_showLanding = false;
+                    s_recentOpen  = false;
+                }
+            }
+        }
+    }
+
+    // ── Deferred open-file dialog (runs after draw so no half-frame flicker)
+    if (s_openFilePending && !m_showLanding) {
+        s_openFilePending = false;
+        std::string path = openFileDialog("Easel Project\0*.easel\0All Files\0*.*\0");
+        if (!path.empty()) loadProject(path);
+        // landing already dismissed above
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (s_recentOpen) s_recentOpen = false;
+        else              m_showLanding = false;
+    }
+}
+
 void Application::renderEdgeBlendInline(OutputZone& zone) {
     if (flatSection("Edge Blend")) {
         auto* ebm = mappingForZone(zone);

@@ -30,9 +30,13 @@ class NDISource : public ContentSource {
 public:
     ~NDISource();
 
-    bool connect(const std::string& senderName);
+    bool connect(const std::string& senderName, const std::string& senderUrl = "");
     void disconnect();
     bool isConnected() const { return m_recv != nullptr; }
+
+    // Tear down the receiver while keeping the sender name; update()
+    // lazily reconnects on the next live frame.
+    void suspend() override;
 
     void update() override;
     GLuint textureId() const override { return m_texture.id(); }
@@ -40,11 +44,17 @@ public:
     int height() const override { return m_height; }
     std::string typeName() const override { return "NDI"; }
     std::string sourcePath() const override { return m_senderName; }
+    std::string sourceUrl() const { return m_senderUrl; }
     bool isFlippedV() const override { return true; }
 
 private:
     NDIlib_recv_instance_t m_recv = nullptr;
     std::string m_senderName;
+    std::string m_senderUrl;
+    // suspend()/lazy-resume bookkeeping (disconnect() clears name + URL)
+    bool m_suspended = false;
+    std::string m_resumeName;
+    std::string m_resumeUrl;
     Texture m_texture;
     int m_width = 0;
     int m_height = 0;

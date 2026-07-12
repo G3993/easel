@@ -22,6 +22,10 @@ public:
     bool load(const std::string& path);
     void close();
 
+    // Stop the decode thread + free FFmpeg/WASAPI state while keeping
+    // path/position; update() lazily reloads on the next live frame.
+    void suspend() override;
+
     void update() override;
     GLuint textureId() const override { return m_texture.id(); }
     int width() const override { return m_width; }
@@ -104,6 +108,11 @@ private:
     std::atomic<double> m_seekTarget{0.0};
 
     Texture m_texture;
+    // suspend()/lazy-resume bookkeeping
+    bool m_suspended = false;
+    double m_resumeTime = 0.0;
+    bool m_resumePlaying = false;
+    bool m_resumePausePending = false; // decode one frame, then re-pause
     bool m_hasNewFrame = false;
     bool m_isLive = false;  // true for RTMP/live streams — bypass PTS scheduling
     double m_playbackStart = 0.0;

@@ -156,9 +156,20 @@ private:
     ImGuiID m_rightFloatId = 0;
     float m_leftFloatW = 0.0f;
     float m_rightFloatW = 0.0f;
+    float m_rightFloatLeft = 0.0f; // left X of the right sidebar (for timeline width clamping)
     float m_lastTimelineH = 0.0f;
+    // Pixels to reserve at the top of the right sidebar for a preview panel.
+    // Set by Application each frame when a shader preview is active.
+    float m_rightPanelTopOffset = 0.0f;
 
 public:
+    // Left X of the right sidebar panel in screen coords (0 if hidden).
+    // Read by Application to clamp timeline + transport pill width.
+    float getRightPanelLeft() const { return m_rightFloatLeft; }
+    // Call each frame with the desired preview height (0 = no preview offset).
+    void setRightPanelTopOffset(float h) { m_rightPanelTopOffset = h; }
+    float getRightPanelTopOffset() const { return m_rightPanelTopOffset; }
+
     // Icon textures for the inspector tabs (Properties/Mapping/Audio/MIDI).
     // Loaded from assets/icons/ PNGs at startup.
     enum class TabIcon { Properties = 0, Mapping, Audio, MIDI, COUNT };

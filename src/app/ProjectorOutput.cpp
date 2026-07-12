@@ -200,7 +200,16 @@ void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
         return;
     }
 
+    // The composite/warp commands for this texture were queued on the MAIN
+    // context; this projector context must not sample it before they
+    // complete. Fence + server-side glWaitSync keeps the wait on the GPU —
+    // the caller used to glFinish() every frame instead, which drained the
+    // whole pipeline on the CPU and serialized CPU and GPU.
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush(); // make the fence reachable from the projector context
+
     glfwMakeContextCurrent(m_window);
+    if (fence) glWaitSync(fence, 0, GL_TIMEOUT_IGNORED);
 
     int fbW, fbH;
     glfwGetFramebufferSize(m_window, &fbW, &fbH);
@@ -224,4 +233,7 @@ void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
 
     glfwSwapBuffers(m_window);
     glfwMakeContextCurrent(m_mainWindow);
+    // Safe while the wait is queued: deletion is deferred until no context
+    // is using the sync object.
+    if (fence) glDeleteSync(fence);
 }

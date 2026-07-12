@@ -3,6 +3,8 @@
 #include "render/GLTransition.h"
 #include <glm/glm.hpp>
 #include <iostream>
+#include <set>
+#include <string>
 #include <unordered_set>
 
 // Render a gl-transitions.com shader blending source A → nextSource B at
@@ -43,10 +45,13 @@ static GLuint renderLayerGLTransition(const std::shared_ptr<Layer>& layer,
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    bool audioOn = layer->audioReactive;
     xition->render(texA, texB, layer->transitionProgress, w, h,
-                   audio.rms, audio.bass,
-                   (audio.lowMid + audio.highMid) * 0.5f, audio.treble,
-                   audio.beatDecay);
+                   audioOn ? audio.rms : 0.0f,
+                   audioOn ? audio.bass : 0.0f,
+                   audioOn ? (audio.lowMid + audio.highMid) * 0.5f : 0.0f,
+                   audioOn ? audio.treble : 0.0f,
+                   audioOn ? audio.beatDecay : 0.0f);
 
     Framebuffer::unbind();
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
@@ -161,6 +166,42 @@ void CompositeEngine::setAudioUniforms(ShaderProgram& shader, float audioStrengt
     shader.setFloat("uBPM", m_audio.bpm);
 }
 
+void CompositeEngine::releaseIdleScratch() {
+    // ~10s at 60fps. A scratch set whose feature (effects, multi-mask,
+    // drop shadow, transitions) stopped being used is returned to the
+    // driver — these are full-canvas (often supersampled, 16F) buffers
+    // that otherwise stay resident until the zone is deleted.
+    constexpr uint64_t kIdleFrames = 600;
+    auto idle = [&](int g) {
+        return m_scratchUsed[g] != 0 && m_frame - m_scratchUsed[g] > kIdleFrames;
+    };
+    if (idle(0)) {
+        m_effectFBO[0].destroy();
+        m_effectFBO[1].destroy();
+        m_scratchUsed[0] = 0;
+    }
+    if (idle(1)) {
+        m_maskFBO[0].destroy();
+        m_maskFBO[1].destroy();
+        m_scratchUsed[1] = 0;
+    }
+    if (idle(2)) {
+        m_shadowFBO[0].destroy();
+        m_shadowFBO[1].destroy();
+        m_shadowLoRes[0].destroy();
+        m_shadowLoRes[1].destroy();
+        m_scratchUsed[2] = 0;
+    }
+    if (idle(3)) {
+        m_glTransitionFBO.destroy();
+        m_scratchUsed[3] = 0;
+    }
+    if (idle(4)) {
+        m_betweenRowFBO.destroy();
+        m_scratchUsed[4] = 0;
+    }
+}
+
 GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint srcTex) {
     if (layer->effects.empty()) return srcTex;
 
@@ -179,6 +220,7 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
             m_effectFBO[i].createHalfFloat(m_width, m_height);
         }
     }
+    m_scratchUsed[0] = m_frame;
 
     GLuint currentTex = srcTex;
     int pingpong = 0;
@@ -423,34 +465,53 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     m_emptyCleared = false;
 
     clear();
+    m_frame++;
+    releaseIdleScratch();
 
     float dt = m_audio.time - m_lastTime;
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
     m_lastTime = m_audio.time;
     m_dt = dt;  // shared with applyEffects / binding conditioners
 
-    // Prune per-layer / per-path GPU caches to what's still live. Without
-    // this, feedback FBOs (full-canvas, one per layer ID) and lazily-compiled
-    // transition shaders accumulate forever — layer IDs are never reused, so
-    // every add/remove of a feedback or between-row-transition layer orphaned
-    // a full-res FBO / ShaderSource for the lifetime of the app.
-    if (!m_feedbackFBOs.empty() || !m_isfTransitions.empty()) {
-        std::unordered_set<uint32_t> liveIds;
-        std::unordered_set<std::string> livePaths;
+    // Prune per-layer GPU caches. Feedback FBOs (full-canvas, one per layer
+    // ID) are kept only while their layer still has a Feedback effect — they
+    // used to survive disabling/removing the effect until the layer itself
+    // was deleted. ISF transition shaders are deliberately NOT pruned by
+    // live path (a transition is "live" only during its window, and pruning
+    // then meant a driver-compile hitch at every window); they're LRU-capped
+    // instead.
+    if (!m_feedbackFBOs.empty()) {
+        std::unordered_set<uint32_t> feedbackIds;
         for (const auto& l : layers) {
             if (!l) continue;
-            liveIds.insert(l->id);
-            if (!l->betweenRowShaderPath.empty())
-                livePaths.insert(l->betweenRowShaderPath);
+            for (const auto& fx : l->effects) {
+                if (fx.type == EffectType::Feedback) {
+                    feedbackIds.insert(l->id);
+                    break;
+                }
+            }
         }
         for (auto it = m_feedbackFBOs.begin(); it != m_feedbackFBOs.end(); ) {
-            if (liveIds.count(it->first) == 0) it = m_feedbackFBOs.erase(it);
+            if (feedbackIds.count(it->first) == 0) it = m_feedbackFBOs.erase(it);
             else ++it;
         }
-        for (auto it = m_isfTransitions.begin(); it != m_isfTransitions.end(); ) {
-            if (livePaths.count(it->first) == 0) it = m_isfTransitions.erase(it);
-            else ++it;
+    }
+    constexpr size_t kMaxIsfTransitions = 8;
+    while (m_isfTransitions.size() > kMaxIsfTransitions) {
+        auto lru = m_isfTransitions.end();
+        uint64_t oldest = UINT64_MAX;
+        for (auto it = m_isfTransitions.begin(); it != m_isfTransitions.end(); ++it) {
+            auto u = m_isfTransitionUsed.find(it->first);
+            uint64_t stamp = (u != m_isfTransitionUsed.end()) ? u->second : 0;
+            // Never evict an entry rendering this/last frame — with >8
+            // simultaneously-active transition paths that would evict and
+            // recompile a LIVE transition every frame.
+            if (stamp + 1 >= m_frame) continue;
+            if (stamp < oldest) { oldest = stamp; lru = it; }
         }
+        if (lru == m_isfTransitions.end()) break; // everything hot; exceed cap
+        m_isfTransitionUsed.erase(lru->first);
+        m_isfTransitions.erase(lru);
     }
 
     // Solo-aware visibility: if any layer is solo'd, only solo'd layers render.
@@ -561,6 +622,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         // over legacy ISF shader transitions.
         GLuint baseTex = layer->textureId();
         if (layer->glTransitionActive && layer->nextSource) {
+            m_scratchUsed[3] = m_frame;
             GLuint ttex = renderLayerGLTransition(layer, m_glTransitionFBO, m_audio);
             if (ttex) baseTex = ttex;
         } else if (layer->shaderTransitionActive && layer->nextSource) {
@@ -597,6 +659,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                     if (m_maskFBO[fi].width() != m_width || m_maskFBO[fi].height() != m_height)
                         m_maskFBO[fi].create(m_width, m_height);
                 }
+                m_scratchUsed[1] = m_frame;
                 int mpp = 0;
                 bool first = true;
                 for (auto& mask : layer->masks) {
@@ -664,6 +727,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 if (m_shadowFBO[fi].width() != m_width || m_shadowFBO[fi].height() != m_height)
                     m_shadowFBO[fi].create(m_width, m_height);
             }
+            m_scratchUsed[2] = m_frame;
 
             // Step 1: Render the layer silhouette into m_shadowFBO[0] at the layer's transform
             m_shadowFBO[0].bind();
@@ -927,20 +991,26 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         //   - shader is missing any of those → interstitial fallback:
         //     crossfade A → shader → B across the transition window.
         if (layer->betweenRowActive && !layer->betweenRowShaderPath.empty()) {
-            auto& slot = m_isfTransitions[layer->betweenRowShaderPath];
+            const std::string& trPath = layer->betweenRowShaderPath;
+            std::shared_ptr<ShaderSource> slot;
+            auto slotIt = m_isfTransitions.find(trPath);
+            if (slotIt != m_isfTransitions.end()) slot = slotIt->second;
             if (!slot) {
                 auto s = std::make_shared<ShaderSource>();
-                if (s->loadFromFile(layer->betweenRowShaderPath)) {
+                if (s->loadFromFile(trPath)) {
                     s->setResolution(m_width, m_height);
                     slot = s;
+                    m_isfTransitions[trPath] = s;
                 } else {
                     std::cerr << "[CompositeEngine] ISF transition failed to load: "
-                              << layer->betweenRowShaderPath << "\n";
-                    // leave slot null so we skip render this frame
+                              << trPath << "\n";
+                    // Not cached: retried next frame (as before), and a
+                    // broken path doesn't consume an LRU slot.
                 }
             } else if (slot->width() != m_width || slot->height() != m_height) {
                 slot->setResolution(m_width, m_height);
             }
+            if (slot) m_isfTransitionUsed[trPath] = m_frame;
 
             if (slot) {
                 bool hasFrom = false, hasTo = false, hasProgress = false;
@@ -959,6 +1029,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                     else
                         m_betweenRowFBO.resize(m_width, m_height);
                 }
+                m_scratchUsed[4] = m_frame;
                 GLuint toSrc   = m_fbo[next].textureId();
                 GLuint fromSrc = m_fbo[m_current].textureId();
 
@@ -988,10 +1059,13 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
 
                 float p = layer->betweenRowProgress;
 
-                // Audio bindings so user transition shaders can react too.
-                slot->setAudioState(m_audio.rms, m_audio.bass,
-                                    (m_audio.lowMid + m_audio.highMid) * 0.5f,
-                                    m_audio.treble, m_audio.fftTexture);
+                // Keep transition shader audio opt-in through the layer Audio toggle.
+                bool audioOn = layer->audioReactive;
+                slot->setAudioState(audioOn ? m_audio.rms : 0.0f,
+                                    audioOn ? m_audio.bass : 0.0f,
+                                    audioOn ? (m_audio.lowMid + m_audio.highMid) * 0.5f : 0.0f,
+                                    audioOn ? m_audio.treble : 0.0f,
+                                    audioOn ? m_audio.fftTexture : 0);
 
                 if (hasFrom && hasTo && hasProgress) {
                     // (d) Full contract: shader is the transition.
@@ -1055,6 +1129,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                     else
                         m_betweenRowFBO.resize(m_width, m_height);
                 }
+                m_scratchUsed[4] = m_frame;
                 // "to" = the just-rendered m_fbo[next]. Copy it into the
                 // scratch so we can read-from-scratch while writing-to-next.
                 GLuint toSrc   = m_fbo[next].textureId();
@@ -1085,12 +1160,15 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 glViewport(0, 0, m_width, m_height);
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
+                bool audioOn = layer->audioReactive;
                 xition->render(fromSrc, m_betweenRowFBO.textureId(),
                                layer->betweenRowProgress,
                                m_width, m_height,
-                               m_audio.rms, m_audio.bass,
-                               (m_audio.lowMid + m_audio.highMid) * 0.5f,
-                               m_audio.treble, m_audio.beatDecay);
+                               audioOn ? m_audio.rms : 0.0f,
+                               audioOn ? m_audio.bass : 0.0f,
+                               audioOn ? (m_audio.lowMid + m_audio.highMid) * 0.5f : 0.0f,
+                               audioOn ? m_audio.treble : 0.0f,
+                               audioOn ? m_audio.beatDecay : 0.0f);
                 Framebuffer::unbind();
             }
         }
@@ -1106,6 +1184,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     }
 
     Framebuffer::unbind();
+
 }
 
 GLuint CompositeEngine::resultTexture() const {
