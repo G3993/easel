@@ -494,6 +494,10 @@ private:
     // the remote face of the PropertyPanel Reactivity/Character/Shuffle/Off
     // row, via AudioPresetEngine. Backs /easel/layer/audiopreset.
     void setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg);
+    // Bind one param of a managed shader layer to an audio signal (or "off").
+    // Backs /easel/layer/audiobind — the remote face of the per-slider bolt.
+    void setManagedLayerAudioBind(const std::string& key, const std::string& param,
+                                  const std::string& signalName, const OSCMessage& msg);
     // Bind another layer as a shader image input's texture source — the
     // local face of the PropertyPanel TEXTURE dropdown. (The OSC verb rides
     // upstream's bindManagedLayerImage below.)

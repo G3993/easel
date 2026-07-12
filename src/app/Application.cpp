@@ -3755,6 +3755,17 @@ void Application::renderUI() {
                 // Shuffle/Off row. strings = [managedKey, command]; command ∈
                 // intensity|character (floats[0] = value), shuffle, off.
                 setManagedLayerAudioPreset(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/layer/audiobind"
+                       && msg.strings.size() >= 3) {
+                // Bind ONE param of a managed shader layer to an audio signal
+                // — the remote face of the PropertyPanel's per-slider bolt
+                // popover. strings = [managedKey, paramName, signal]; signal ∈
+                // off|level|bass|mid|high|beat|energy|build|drop|silence|
+                // momentum. floats[0] = amount 0..1 (how far above the
+                // param's current value audio may push it), floats[1] =
+                // optional smoothing 0..1 (defaults to the house 0.85).
+                setManagedLayerAudioBind(msg.strings[0], msg.strings[1],
+                                         msg.strings[2], msg);
             } else if (msg.address == "/easel/layer/bind-image"
                        && msg.strings.size() >= 3) {
                 // Point a managed shader layer's image INPUT at another layer's
@@ -14208,6 +14219,57 @@ void Application::setManagedLayerBindImage(const std::string& key, const std::st
         return;
     }
     std::cerr << "[OSC] layer/bindImage: no managed layer with key " << key << std::endl;
+}
+
+void Application::setManagedLayerAudioBind(const std::string& key, const std::string& param,
+                                           const std::string& signalName, const OSCMessage& msg) {
+    if (key.empty() || param.empty() || signalName.empty()) return;
+
+    static const std::map<std::string, AudioSignal> kSignals = {
+        {"level", AudioSignal::Level},   {"bass", AudioSignal::Bass},
+        {"mid", AudioSignal::Mid},       {"high", AudioSignal::High},
+        {"beat", AudioSignal::Beat},     {"energy", AudioSignal::Energy},
+        {"build", AudioSignal::Build},   {"drop", AudioSignal::Drop},
+        {"silence", AudioSignal::Silence}, {"momentum", AudioSignal::Momentum},
+    };
+    std::string sig = signalName;
+    for (auto& c : sig) c = (char)tolower((unsigned char)c);
+
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key || !l->source || !l->source->isShader()) continue;
+        auto* shader = static_cast<ShaderSource*>(l->source.get());
+        auto& bindings = shader->audioBindings();
+
+        if (sig == "off" || sig == "none") {
+            bindings.erase(param);
+            return;
+        }
+        auto it = kSignals.find(sig);
+        if (it == kSignals.end()) {
+            std::cerr << "[OSC] layer/audiobind: unknown signal '" << signalName << "'\n";
+            return;
+        }
+        for (const auto& in : shader->inputs()) {
+            if (in.name != param || in.type != "float") continue;
+            float cur = std::get<float>(in.value);
+            float amount = !msg.floats.empty()
+                ? std::min(1.0f, std::max(0.0f, msg.floats[0])) : 1.0f;
+            AudioBinding& ab = bindings[param];
+            ab.signal = it->second;
+            // Audio pushes the param UP from where the owner set it, by
+            // `amount` of the remaining headroom — the slider stays the
+            // floor, so remote binds never fight the hand-set value.
+            ab.rangeMin = cur;
+            ab.rangeMax = cur + amount * (in.maxVal - cur);
+            if (msg.floats.size() >= 2)
+                ab.smoothing = std::min(1.0f, std::max(0.0f, msg.floats[1]));
+            return;
+        }
+        std::cerr << "[OSC] layer/audiobind: " << key << " has no float param '"
+                  << param << "'\n";
+        return;
+    }
+    std::cerr << "[OSC] layer/audiobind: no managed shader layer with key " << key << std::endl;
 }
 
 void Application::setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg) {
