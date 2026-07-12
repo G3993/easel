@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <thread>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,6 +27,11 @@ static void initHannWindow() {
 }
 
 AudioAnalyzer::~AudioAnalyzer() {
+    // A detached init thread may still be inside initCapture — let it land
+    // before tearing the capture state down under it.
+    while (m_initInFlight.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     cleanupCapture();
     if (m_fftCfg) {
         kiss_fft_free(m_fftCfg);
@@ -60,18 +67,27 @@ void AudioAnalyzer::update(float dt) {
         if (deviceChanged) {
             m_captureFailed = false; // reset on device change
         }
-        if (!m_captureFailed && (deviceChanged || (!m_initialized && m_deviceIdx != -2))) {
+        if (!m_captureFailed && !m_initInFlight.load(std::memory_order_acquire) &&
+            (deviceChanged || (!m_initialized && m_deviceIdx != -2))) {
             cleanupCapture();
             m_deviceIdx = m_requestedDevice;
             m_deviceId = m_requestedDeviceId;
-            initCapture();
-            if (!m_initialized) {
-                m_captureFailed = true;
-            }
+            // initCapture blocks for seconds on macOS (ScreenCaptureKit
+            // bring-up, TCC permission waits) — run it off the render
+            // thread so launch never freezes. While it's in flight the
+            // condition above stays false via m_initInFlight.
+            m_initInFlight.store(true, std::memory_order_release);
+            std::thread([this]() {
+                initCapture();
+                if (!m_initialized) {
+                    m_captureFailed = true;
+                }
+                m_initInFlight.store(false, std::memory_order_release);
+            }).detach();
         }
 
         // Drain WASAPI packets (non-blocking)
-        if (m_initialized) {
+        if (m_initialized && !m_initInFlight.load(std::memory_order_acquire)) {
             drainPackets();
         }
     }

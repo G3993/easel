@@ -3,6 +3,7 @@
 #include "app/EaselAudio.h"
 #include <vector>
 #include <string>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 
@@ -276,6 +277,10 @@ private:
     bool m_initialized = false;
     bool m_externalFeed = false;
     bool m_captureFailed = false;  // true after permission denied — don't retry
+    // initCapture can block for seconds (ScreenCaptureKit setup, TCC
+    // prompts), so update() runs it on a detached thread; this guards
+    // re-entry and lets the destructor wait for a landing.
+    std::atomic<bool> m_initInFlight{false};
     bool m_wantsSystemAudio = false; // opt-in gate for ScreenCaptureKit (see header)
 
     void initCapture();

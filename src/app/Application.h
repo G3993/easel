@@ -122,6 +122,7 @@ private:
     bool m_voiceListening = false;             // mic gate (push-to-talk)
     bool m_voiceContinuous = true;             // when true, mic stays on; auto-restart after every final
     bool m_voiceRestartPending = false;        // set in onFinal; main loop tears down + restarts
+    double m_voiceStartRetryAt = 0.0;          // continuous-mic start backoff (async engine start)
 #ifdef __APPLE__
     MacSpeechRecognizer m_voiceRecognizer;
 #endif

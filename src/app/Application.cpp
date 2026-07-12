@@ -1159,8 +1159,17 @@ void Application::run() {
                 m_voiceRestartPending = false;
                 stopVoiceRecording();
                 startVoiceRecording();
-            } else if (!m_voiceListening && m_voiceRecognizer.available()) {
+            } else if (m_voiceListening && !m_voiceRecognizer.isRecording()) {
+                // The engine start is async (it can block seconds inside
+                // CoreAudio, so it runs off-thread); a failed start clears
+                // the recognizer's flag — resync so the retry below runs.
+                m_voiceListening = false;
+            } else if (!m_voiceListening && m_voiceRecognizer.available() &&
+                       glfwGetTime() >= m_voiceStartRetryAt) {
                 startVoiceRecording();
+                // Backoff so a mic that can't start doesn't get hammered
+                // with a CoreAudio bring-up attempt every frame.
+                m_voiceStartRetryAt = glfwGetTime() + 3.0;
             }
         }
 #endif
