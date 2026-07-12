@@ -3368,6 +3368,15 @@ void Application::renderUI() {
                 // strings = [managedKey, paramName]; value = float/int arg, or
                 // strings[2] for text.
                 setManagedLayerParam(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/layer/bindImage"
+                       && msg.strings.size() >= 2) {
+                // Bind another layer as a shader's image/texture input — the
+                // remote face of the PropertyPanel's TEXTURE dropdown.
+                // strings = [managedKey, inputName, sourceLayerName]; an empty
+                // or missing source name (or "(none)") clears the binding.
+                setManagedLayerBindImage(msg.strings[0], msg.strings[1],
+                                         msg.strings.size() >= 3 ? msg.strings[2]
+                                                                 : std::string());
             } else if (msg.address == "/easel/layer/audiopreset"
                        && msg.strings.size() >= 2) {
                 // Master audio-reactivity recipe on a managed layer — the
@@ -3375,6 +3384,15 @@ void Application::renderUI() {
                 // Shuffle/Off row. strings = [managedKey, command]; command ∈
                 // intensity|character (floats[0] = value), shuffle, off.
                 setManagedLayerAudioPreset(msg.strings[0], msg.strings[1], msg);
+            } else if (msg.address == "/easel/layer/bindImage"
+                       && msg.strings.size() >= 2) {
+                // Bind a layer as an image input's texture source on a managed
+                // shader layer — the remote face of the PropertyPanel TEXTURE
+                // dropdown. strings = [managedKey, inputName, sourceLayerName];
+                // empty/absent source clears the binding.
+                setManagedLayerBindImage(msg.strings[0], msg.strings[1],
+                                         msg.strings.size() >= 3 ? msg.strings[2]
+                                                                 : std::string());
             } else if (msg.address == "/easel/zone/ensure"
                        && msg.strings.size() >= 2) {
                 // Composite/bus: ensure an output zone that publishes a named NDI
@@ -12993,6 +13011,37 @@ void Application::setManagedLayerParam(const std::string& key, const std::string
         return;
     }
     std::cerr << "[OSC] layer/param: no managed layer with key " << key << std::endl;
+}
+
+void Application::setManagedLayerBindImage(const std::string& key, const std::string& input,
+                                           const std::string& sourceName) {
+    if (key.empty() || input.empty()) return;
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != key) continue;
+        if (!l->source || !l->source->isShader()) {
+            std::cerr << "[OSC] layer/bindImage: " << key << " is not a shader layer\n";
+            return;
+        }
+        auto* shader = static_cast<ShaderSource*>(l->source.get());
+        auto& img = shader->imageBindings()[input];
+        if (sourceName.empty() || sourceName == "(none)") {
+            img.sourceLayerId = 0;
+            return;
+        }
+        // Source resolves by layer name first, then managedKey — agents
+        // address their own managed layers by key, humans by display name.
+        for (int li = 0; li < m_layerStack.count(); li++) {
+            auto& other = m_layerStack[li];
+            if (!other || other->id == l->id) continue;
+            if (other->name == sourceName || other->managedKey == sourceName) {
+                img.sourceLayerId = other->id;
+                return;
+            }
+        }
+        std::cerr << "[OSC] layer/bindImage: no source layer named " << sourceName << std::endl;
+        return;
+    }
+    std::cerr << "[OSC] layer/bindImage: no managed layer with key " << key << std::endl;
 }
 
 void Application::setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg) {

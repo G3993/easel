@@ -425,6 +425,10 @@ private:
     // the remote face of the PropertyPanel Reactivity/Character/Shuffle/Off
     // row, via AudioPresetEngine. Backs /easel/layer/audiopreset.
     void setManagedLayerAudioPreset(const std::string& key, const std::string& command, const OSCMessage& msg);
+    // Bind another layer as a shader image input's texture source — the
+    // remote face of the PropertyPanel TEXTURE dropdown. Backs
+    // /easel/layer/bindImage. Empty sourceName clears the binding.
+    void setManagedLayerBindImage(const std::string& key, const std::string& input, const std::string& sourceName);
     // Agent composite/bus: find-or-create an Easel output zone, publish it as a
     // named NDI feed, and assign managed layers to it. Backs /easel/zone/ensure
     // and /easel/zone/layer.
