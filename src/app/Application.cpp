@@ -13424,12 +13424,18 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
     };
     // Voice-native binding: a text shader (ISF 'msg' text input) gets the live
     // last-words bound so transcript text shows on-shader (mirrors loadShader).
-    auto bindIfText = [this](const std::shared_ptr<Layer>& layer) {
+    // Caption slots ("<zone>:captions", the mobile captions toggle) bind to the
+    // raw live transcript (etherea.latest, "Latest Words") instead of Cue's
+    // curated utterance — captions must follow speech, not Cue's pushes.
+    auto bindIfText = [this, &slot](const std::shared_ptr<Layer>& layer) {
         if (!layer->source || !layer->source->isShader()) return;
         auto* sh = static_cast<ShaderSource*>(layer->source.get());
         for (const auto& inp : sh->inputs()) {
             if (inp.type == "text" && inp.name == "msg") {
-                m_dataBus.bind(layer->id, "msg", "cue.latest");
+                bool captions = slot.size() >= 9 &&
+                    slot.compare(slot.size() - 9, 9, ":captions") == 0;
+                m_dataBus.bind(layer->id, "msg",
+                               captions ? "etherea.latest" : "cue.latest");
                 break;
             }
         }
@@ -15422,7 +15428,14 @@ void Application::loadProject(const std::string& path) {
             if (inp.type == "text" && inp.name == "msg") { hasMsg = true; break; }
         }
         if (hasMsg) {
-            m_dataBus.bind(layer->id, "msg", "cue.latest");
+            // Managed caption layers ("<zone>:captions") follow the raw live
+            // transcript, not Cue's curated utterance — mirrors
+            // ensureManagedShaderLayer's bindIfText.
+            const std::string& mk = layer->managedKey;
+            bool captions = mk.size() >= 9 &&
+                mk.compare(mk.size() - 9, 9, ":captions") == 0;
+            m_dataBus.bind(layer->id, "msg",
+                           captions ? "etherea.latest" : "cue.latest");
         }
     }
 
