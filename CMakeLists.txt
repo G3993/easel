@@ -436,6 +436,7 @@ if(APPLE)
     target_link_libraries(test_audio_analyzer PRIVATE
         "-framework ScreenCaptureKit" "-framework CoreMedia" "-framework CoreGraphics"
         "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation"
+        "-framework AVFoundation"     # AVCaptureDevice mic discovery in AudioAnalyzer_mac
     )
 endif()
 
