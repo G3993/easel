@@ -31,13 +31,6 @@ struct WSADATA { int dummy; };
 #include <cstring>
 #include <ctime>
 
-// Reconnect backoff can grow to 60s; a plain sleep_for() there blocks
-// disconnect()'s join() for the remainder of that sleep (the "Easel takes
-// forever to quit when Etherea isn't running" symptom). Sleep in short
-// slices, re-checking m_running each slice, so shutdown interrupts within
-// ~50ms regardless of how long the backoff is.
-}
-
 // ─── Logging ───────────────────────────────────────────────────────────────
 
 static void etLog(const std::string& msg) {

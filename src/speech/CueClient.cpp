@@ -30,12 +30,6 @@ struct WSADATA { int dummy; };
 #include <cstring>
 #include <ctime>
 
-// Same fix as EthereaClient: a plain sleep_for() on the reconnect backoff
-// blocks disconnect()'s join() for the remainder of that sleep (up to 60s
-// when Cue's server isn't reachable) — the "Easel takes forever to quit"
-// symptom. Sleep in short slices, re-checking m_running each slice.
-}
-
 // ─── Logging (mirrors EthereaClient: cue_debug.log) ────────────────────────
 
 static void cueLog(const std::string& msg) {
