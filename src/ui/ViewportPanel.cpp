@@ -827,9 +827,14 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                 fmodf(clipMax.x - clipMin.x, gridStep) * 0.5f;
             float startY = clipMin.y +
                 fmodf(clipMax.y - clipMin.y, gridStep) * 0.5f;
+            // Sub-2px dots at alpha 22 read identically as squares, and a
+            // rect is one quad vs an 8-segment tessellated circle — this
+            // grid is thousands of dots per frame on a large viewport and
+            // was the hottest ImGui call in the whole UI pass.
             for (float gy = startY; gy < clipMax.y; gy += gridStep) {
                 for (float gx = startX; gx < clipMax.x; gx += gridStep) {
-                    draw->AddCircleFilled(ImVec2(gx, gy), 0.9f, dotCol, 8);
+                    draw->AddRectFilled(ImVec2(gx - 0.9f, gy - 0.9f),
+                                        ImVec2(gx + 0.9f, gy + 0.9f), dotCol);
                 }
             }
         }

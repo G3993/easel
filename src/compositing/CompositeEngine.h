@@ -52,6 +52,10 @@ private:
     Framebuffer m_fbo[2]; // ping-pong
     int m_current = 0;
     int m_width = 0, m_height = 0;
+    // True while the ping-pong FBOs hold a clear and no layer is renderable,
+    // so an empty canvas doesn't pay two glClears (= two render-pass breaks +
+    // synchronous Metal submits on Apple's GL stack) per zone per frame.
+    bool m_emptyCleared = false;
 
     ShaderProgram m_compositeShader;
     ShaderProgram m_passthroughShader;

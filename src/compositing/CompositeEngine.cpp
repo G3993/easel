@@ -133,6 +133,7 @@ void CompositeEngine::resize(int width, int height) {
     m_height = height;
     m_fbo[0].resize(width, height);
     m_fbo[1].resize(width, height);
+    m_emptyCleared = false; // resized FBOs hold undefined content
 }
 
 void CompositeEngine::clear() {
@@ -393,6 +394,34 @@ GLuint CompositeEngine::applyEffects(const std::shared_ptr<Layer>& layer, GLuint
 }
 
 void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layers) {
+    // Nothing renderable → clear once, then keep that clear instead of
+    // re-clearing both ping-pong FBOs every frame. On Apple's GL-on-Metal
+    // stack each FBO bind+clear breaks the render pass and synchronously
+    // submits a Metal command buffer, which made an EMPTY canvas the single
+    // most expensive part of the frame (per zone, per frame). Invisible
+    // layers never advance transitions (the loop below skips them before the
+    // transition update), so skipping whole frames here can't stall a fade.
+    bool anyRenderable = false;
+    for (const auto& l : layers) {
+        if (l && l->visible) { anyRenderable = true; break; }
+    }
+    if (!anyRenderable) {
+        // A truly empty list frees the per-layer caches, exactly like the
+        // prune below used to (no live IDs). Hidden-but-present layers keep
+        // theirs so re-showing a feedback layer doesn't reset its history.
+        if (layers.empty()) {
+            m_feedbackFBOs.clear();
+            m_isfTransitions.clear();
+        }
+        if (!m_emptyCleared) {
+            clear();
+            m_emptyCleared = true;
+        }
+        m_lastTime = m_audio.time;
+        return;
+    }
+    m_emptyCleared = false;
+
     clear();
 
     float dt = m_audio.time - m_lastTime;

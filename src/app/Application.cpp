@@ -1301,8 +1301,29 @@ void Application::run() {
 
         // Frame-rate cap (Canvas → Target). 0 = uncapped (vsync only). When
         // set, busy-wait the remainder of the frame so we hold ~1/target sec.
-        if (m_targetFPS > 0.0f) {
-            double frameDur = 1.0 / (double)m_targetFPS;
+        //
+        // On Apple Silicon the GL-on-Metal compat layer ignores the swap
+        // interval — flushBuffer submits and returns immediately, so "vsync
+        // only" really meant uncapped: the loop spun a full core re-rendering
+        // an unchanged canvas and starved real work (dropped frames with
+        // nothing playing). Treat 0 as "pace to the display, capped at 60":
+        // on a 120Hz ProMotion panel the fixed per-frame cost of the GL swap
+        // submit alone eats most of an 8.3ms budget, so 120 pacing runs hot
+        // with zero headroom. 60 is the output pipeline's native rate (NDI /
+        // recorder); anyone who wants 120 can pick it in Canvas → Target.
+        float effectiveFPS = m_targetFPS;
+#ifdef __APPLE__
+        if (effectiveFPS <= 0.0f) {
+            static float sDisplayHz = [] {
+                GLFWmonitor* mon = glfwGetPrimaryMonitor();
+                const GLFWvidmode* vm = mon ? glfwGetVideoMode(mon) : nullptr;
+                return (vm && vm->refreshRate > 0) ? (float)vm->refreshRate : 60.0f;
+            }();
+            effectiveFPS = std::min(sDisplayHz, 60.0f);
+        }
+#endif
+        if (effectiveFPS > 0.0f) {
+            double frameDur = 1.0 / (double)effectiveFPS;
             double remain   = frameDur - (glfwGetTime() - frameStart);
             if (remain > 0.0) {
                 // Sleep most of it, then spin the last ~1ms for accuracy.
