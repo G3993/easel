@@ -3734,10 +3734,14 @@ void Application::renderUI() {
                 ensureManagedShaderLayer(msg.strings[0], msg.strings[1]);
             } else if (msg.address == "/easel/layer/ensure/fluid"
                        && !msg.strings.empty()) {
-                // Managed Fluid Simulation layer, keyed by slot. strings = [slot].
-                // The built-in fluid generator as an agent-managed, zone-assignable
-                // layer (so the SDK can stand up a flux-input zone end to end).
-                ensureManagedFluidLayer(msg.strings[0]);
+                // Managed fluid layer, keyed by slot. strings = [slot, kind?];
+                // kind "3d" = the volumetric FluidSource3D, absent/anything
+                // else = the classic 2D sim. The built-in generators as
+                // agent-managed, zone-assignable layers (so the SDK can stand
+                // up a flux-input zone — and the phone can pick 3D Fluid —
+                // end to end).
+                bool threeD = msg.strings.size() >= 2 && msg.strings[1] == "3d";
+                ensureManagedFluidLayer(msg.strings[0], threeD);
             } else if (msg.address == "/easel/layer/remove-managed"
                        && !msg.strings.empty()) {
                 // Remove one managed layer by its key (drops an overlay/base).
@@ -14061,7 +14065,7 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
     bindIfText(layer);
 }
 
-void Application::ensureManagedFluidLayer(const std::string& slot) {
+void Application::ensureManagedFluidLayer(const std::string& slot, bool threeD) {
     if (slot.empty()) {
         std::cerr << "[OSC] ensure/fluid ignored: empty slot\n";
         return;
@@ -14072,26 +14076,41 @@ void Application::ensureManagedFluidLayer(const std::string& slot) {
         w = m_zones[m_activeZone]->width;
         h = m_zones[m_activeZone]->height;
     }
-    auto makeFluid = [&]() -> std::shared_ptr<FluidSource> {
-        auto src = std::make_shared<FluidSource>();
-        if (!src->init(w, h)) {
-            std::cerr << "[OSC] ensure/fluid: FluidSource init failed\n";
+    const char* kindName = threeD ? "3D Fluid" : "Fluid Simulation";
+    auto makeFluid = [&]() -> std::shared_ptr<ContentSource> {
+        std::shared_ptr<ContentSource> src;
+        bool ok = false;
+        if (threeD) {
+            auto f3 = std::make_shared<FluidSource3D>();
+            ok = f3->init(w, h);
+            src = f3;
+        } else {
+            auto f = std::make_shared<FluidSource>();
+            ok = f->init(w, h);
+            src = f;
+        }
+        if (!ok) {
+            std::cerr << "[OSC] ensure/fluid: " << kindName << " init failed\n";
             return nullptr;
         }
         return src;
     };
+    auto isWantedKind = [&](ContentSource* s) {
+        return threeD ? (dynamic_cast<FluidSource3D*>(s) != nullptr)
+                      : (dynamic_cast<FluidSource*>(s) != nullptr);
+    };
     // Idempotent by slot: a managed fluid layer for this key is already what we want.
     for (auto& l : m_layerStack.layers()) {
         if (!l || l->managedKey != slot) continue;
-        if (l->source && dynamic_cast<FluidSource*>(l->source.get())) {
-            return;  // already a managed fluid layer for this slot
+        if (l->source && isWantedKind(l->source.get())) {
+            return;  // already a managed fluid layer of this kind for this slot
         }
         // Slot holds something else — swap in a fresh fluid source.
         auto src = makeFluid();
         if (!src) return;
         m_undoStack.pushState(m_layerStack, m_selectedLayer);
         l->source = src;
-        l->name = "Fluid Simulation";
+        l->name = kindName;
         // A managed-slot swap is a fresh start: voice decay may have driven
         // the layer's opacity to ~0 while a text shader was bound, and the
         // stale msg binding keeps doing so for every later shader on this
@@ -14108,7 +14127,7 @@ void Application::ensureManagedFluidLayer(const std::string& slot) {
     layer->id = m_nextLayerId++;
     layer->managedKey = slot;
     layer->source = src;
-    layer->name = "Fluid Simulation";
+    layer->name = kindName;
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);

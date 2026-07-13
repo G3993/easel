@@ -484,7 +484,7 @@ private:
     // Idempotent managed Fluid Simulation layer keyed by slot. The built-in fluid
     // generator (addFluid) as an agent-managed, zone-assignable layer. Backs
     // /easel/layer/ensure/fluid.
-    void ensureManagedFluidLayer(const std::string& slot);
+    void ensureManagedFluidLayer(const std::string& slot, bool threeD = false);
     // Remove one managed layer by its exact key (drops an overlay/base layer).
     // Backs /easel/layer/remove-managed.
     void removeManagedLayer(const std::string& slot);
