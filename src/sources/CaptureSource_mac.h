@@ -25,6 +25,10 @@ public:
     int width() const override { return m_width; }
     int height() const override { return m_height; }
     std::string typeName() const override { return "Screen Capture"; }
+    // ScreenCaptureKit IOSurfaces are top-down and bound zero-copy
+    // (CGLTexImageIOSurface2D) with no CPU pass to reorder rows — the
+    // compositor must flip at draw, same as VideoSource/NDISource.
+    bool isFlippedV() const override { return true; }
 
 private:
     int m_width = 0, m_height = 0;
