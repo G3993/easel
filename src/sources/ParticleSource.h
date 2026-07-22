@@ -110,6 +110,9 @@ public:
     bool init(int resolutionW = 1920, int resolutionH = 1080);
 
     void update() override;
+    // Undo-orphan parking: frees the output FBO + VBOs and the live
+    // particle pool; update()'s existing lazy-init path rebuilds everything.
+    void suspend() override;
     GLuint textureId() const override { return m_output.textureId(); }
     int width() const override  { return m_output.width(); }
     int height() const override { return m_output.height(); }

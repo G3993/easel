@@ -43,6 +43,12 @@ bool NDIOutput::create(const std::string& name) {
 }
 
 void NDIOutput::destroy() {
+    destroySender();
+    destroyGL();
+}
+
+// NDI SDK half of the teardown — no GL calls, safe from any thread.
+void NDIOutput::destroySender() {
     if (m_send) {
         auto& rt = NDIRuntime::instance();
         if (rt.isAvailable()) {
@@ -50,6 +56,12 @@ void NDIOutput::destroy() {
         }
         m_send = nullptr;
     }
+    m_lastSendAt = {};
+}
+
+// GL half of the teardown — glDelete* requires a current context, so this
+// may only run on the thread that owns one (the main/render thread).
+void NDIOutput::destroyGL() {
     for (int i = 0; i < kReadbackSlots; ++i) {
         if (m_fence[i]) {
             glDeleteSync(m_fence[i]);
@@ -69,7 +81,6 @@ void NDIOutput::destroy() {
     m_pendingReadbacks = 0;
     m_lastW = 0;
     m_lastH = 0;
-    m_lastSendAt = {};
 }
 
 bool NDIOutput::hasReceivers() const {

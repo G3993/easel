@@ -92,6 +92,17 @@ static OSStatus audioInputCallback(void* inRefCon,
 
     OSStatus status = AudioUnitRender(state->audioUnit, ioActionFlags, inTimeStamp,
                                        inBusNumber, inNumberFrames, &bufferList);
+    // A silently failing render is indistinguishable from a silent room at
+    // the feature level (the AGC just winds up on nothing), so log the
+    // first failure and each status change — not every callback.
+    {
+        static OSStatus sLastLogged = noErr;
+        if (status != sLastLogged) {
+            fprintf(stderr, "[AudioAnalyzer] mic AudioUnitRender status changed: %d\n",
+                    (int)status);
+            sLastLogged = status;
+        }
+    }
     if (status != noErr) return status;
 
     std::lock_guard<std::mutex> lock(state->bufferMutex);
@@ -205,9 +216,28 @@ void AudioAnalyzer::initCapture() {
         AudioUnitSetProperty(state->audioUnit, kAudioOutputUnitProperty_CurrentDevice,
                              kAudioUnitScope_Global, 0, &deviceId, sizeof(deviceId));
 
-        // Set format: 48kHz mono float
+        // Client format must run at the device's nominal rate — AUHAL does
+        // no sample-rate conversion on the input side, so forcing 48k on a
+        // 44.1k device (the built-in mic's default) makes every
+        // AudioUnitRender fail with kAudioUnitErr_CannotDoInCurrentContext
+        // and the mic delivers pure silence.
+        Float64 deviceRate = 48000;
+        {
+            AudioObjectPropertyAddress rateProp = {
+                kAudioDevicePropertyNominalSampleRate,
+                kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain
+            };
+            UInt32 rateSize = sizeof(deviceRate);
+            if (AudioObjectGetPropertyData(deviceId, &rateProp, 0, nullptr,
+                                           &rateSize, &deviceRate) != noErr ||
+                deviceRate <= 0) {
+                deviceRate = 48000;
+            }
+        }
+
         AudioStreamBasicDescription fmt = {};
-        fmt.mSampleRate = 48000;
+        fmt.mSampleRate = deviceRate;
         fmt.mFormatID = kAudioFormatLinearPCM;
         fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
         fmt.mBitsPerChannel = 32;
@@ -241,9 +271,10 @@ void AudioAnalyzer::initCapture() {
         }
 
         m_initialized = true;
-        m_sampleRate = 48000;
+        m_sampleRate = (int)deviceRate;
         m_channels = 1;
-        std::cout << "[AudioAnalyzer] CoreAudio input capture started (device: " << m_deviceId << ")" << std::endl;
+        std::cout << "[AudioAnalyzer] CoreAudio input capture started (device: " << m_deviceId
+                  << ", " << (int)deviceRate << "Hz)" << std::endl;
         return;
     }
 
@@ -338,9 +369,19 @@ void AudioAnalyzer::cleanupCapture() {
             [state->stream stopCaptureWithCompletionHandler:^(NSError* error) {
                 dispatch_semaphore_signal(sem);
             }];
-            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+            // Bounded wait so a wedged SCK stop can't hang the caller — but
+            // on timeout SCK may STILL be delivering into state->queue, and
+            // the delegate holds raw pointers to state->bufferMutex /
+            // sampleBuffer. Deleting now would be a use-after-free inside
+            // the capture callback, so intentionally leak the state instead:
+            // one small struct per wedged stop (documented leak > UAF).
+            // Only delete when the completion handler actually fired.
+            if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0) {
+                std::cerr << "[AudioAnalyzer] SCK stop timed out — leaking capture state to avoid a use-after-free" << std::endl;
+                state = nullptr;
+            }
         }
-        delete state;
+        delete state;   // no-op when parked above
         m_macAudioImpl = nullptr;
     }
     m_initialized = false;

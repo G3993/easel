@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
@@ -98,6 +99,10 @@ private:
     FrameBuffer m_buffers[3];
     std::atomic<int> m_writeIndex{0};
     std::atomic<int> m_readIndex{0};
+    // Buffer the main thread most recently took for GL upload. The decode
+    // thread's forced-overwrite path (all three buffers ready) must never
+    // pick this slot — the main thread may still be mid-upload from it.
+    std::atomic<int> m_displayIndex{-1};
     std::mutex m_frameMutex;
 
     // Decode thread
@@ -107,6 +112,19 @@ private:
     std::atomic<bool> m_seekRequested{false};
     std::atomic<double> m_seekTarget{0.0};
 
+    // FFmpeg blocking-I/O interrupt (AVFormatContext::interrupt_callback).
+    // m_interruptRequested is set by close() BEFORE joining the decode
+    // thread so av_read_frame on a stalled live source aborts instead of
+    // blocking the join forever. Deliberately separate from m_running:
+    // m_running is also consulted by pause/idle paths and must not abort
+    // in-flight I/O on its own. m_interruptDeadlineUs (av_gettime_relative
+    // microseconds, 0 = none) bounds avformat_open_input /
+    // avformat_find_stream_info on live URLs so a dead host can't block
+    // the calling thread indefinitely.
+    std::atomic<bool> m_interruptRequested{false};
+    std::atomic<int64_t> m_interruptDeadlineUs{0};
+    static int interruptCb(void* opaque);
+
     Texture m_texture;
     // suspend()/lazy-resume bookkeeping
     bool m_suspended = false;
@@ -115,8 +133,12 @@ private:
     bool m_resumePausePending = false; // decode one frame, then re-pause
     bool m_hasNewFrame = false;
     bool m_isLive = false;  // true for RTMP/live streams — bypass PTS scheduling
-    double m_playbackStart = 0.0;
-    double m_playbackOffset = 0.0;
+    // Playback clock: written by play()/seek() on the main thread, read by
+    // the decode thread's PTS scheduler (and reset on its EOF-loop path).
+    // Atomic so neither side ever sees a torn double; each value is
+    // independently meaningful, so no ordering between them is required.
+    std::atomic<double> m_playbackStart{0.0};
+    std::atomic<double> m_playbackOffset{0.0};
 
     void decodeLoop();
     bool decodeFrame(AVFrame* frame, AVPacket* pkt);

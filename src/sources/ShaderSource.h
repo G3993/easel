@@ -110,6 +110,12 @@ public:
     bool reload(const std::string& isfSource);
 
     void update() override;
+
+    // Undo-orphan parking: drops the render target + multipass ping-pong
+    // buffers (the VRAM); keeps m_rawFragment, parsed metadata and the
+    // compiled program. update() lazily rebuilds the FBO storage.
+    void suspend() override;
+
     GLuint textureId() const override { return m_initialized ? m_fbo.textureId() : 0; }
     bool isInitialized() const { return m_initialized; }
     int width() const override { return m_width; }
@@ -183,6 +189,7 @@ private:
     float m_msgAge = -1.0f;       // -1 until first text bound; else seconds-since-utterance-start
     std::string m_path;
     bool m_initialized = false;
+    bool m_suspended = false;   // FBOs dropped by suspend(); update() revives
     int m_frameIndex = 0;
     float m_lastTime = 0;
 

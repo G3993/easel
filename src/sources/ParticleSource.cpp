@@ -603,10 +603,39 @@ void ParticleSource::renderParticles() {
     (void)prevBlendSrc; (void)prevBlendDst;
 }
 
+// Park the GPU state while this source is reachable only from undo/redo
+// snapshots. Called from UndoStack::suspendOrphanedSources on the main-thread
+// frame sweep — the GL context is current there, so the deletes are safe.
+// Frees the output FBO (~8 MB at 1080p), the quad/instance VBOs and the
+// color-cache FBO/texture, plus the CPU particle pool. Live particles are
+// lost — accepted for undo-orphaned sources; a revived emitter refills at
+// its spawn rate. update()'s existing lazy-init path rebuilds everything
+// (init() recompiles the render shader — loadFromSource deletes the old
+// program first, so no leak).
+void ParticleSource::suspend() {
+    if (!m_initialized) return;
+    m_output.destroy();
+    if (m_quadVBO)       { glDeleteBuffers(1, &m_quadVBO);            m_quadVBO = 0; }
+    if (m_instanceVBO)   { glDeleteBuffers(1, &m_instanceVBO);        m_instanceVBO = 0; }
+    if (m_quadVAO)       { glDeleteVertexArrays(1, &m_quadVAO);       m_quadVAO = 0; }
+    if (m_colorCacheFBO) { glDeleteFramebuffers(1, &m_colorCacheFBO); m_colorCacheFBO = 0; }
+    if (m_colorCacheTex) { glDeleteTextures(1, &m_colorCacheTex);     m_colorCacheTex = 0; }
+    m_colorCache.clear();
+    m_colorCache.shrink_to_fit();
+    m_colorCacheW = m_colorCacheH = 0;
+    m_particles.clear();
+    m_particles.shrink_to_fit();
+    m_spawnAccumulator = 0.0f;
+    m_instanceCapacity = 0;    // fresh instance VBO starts empty
+    m_lastTime = 0.0;          // revived frame takes the clamped-dt path
+    m_initialized = false;     // update() re-inits at m_w×m_h on next call
+}
+
 void ParticleSource::update() {
     if (!m_initialized) {
         // Lazy init with default resolution — first update() call creates
-        // GL resources so callers don't have to remember to init().
+        // GL resources so callers don't have to remember to init(). Also
+        // serves as the revive path after suspend().
         if (!init(m_w > 0 ? m_w : 1920, m_h > 0 ? m_h : 1080)) return;
     }
 

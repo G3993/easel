@@ -40,6 +40,9 @@ public:
 
     // ContentSource
     void update() override;
+    // Undo-orphan parking: frees the 4 sim volumes + output FBO; programs
+    // stay. Sim state is lost — update() lazily reallocs and re-seeds.
+    void suspend() override;
     GLuint textureId() const override { return m_output.tex; }
     int width() const override { return m_outW; }
     int height() const override { return m_outH; }
@@ -162,6 +165,7 @@ private:
     struct FBO    { GLuint fbo = 0, tex = 0; int w = 0, h = 0; };
 
     bool   m_ready = false;
+    bool   m_suspended = false;  // volumes dropped by suspend(); update() revives
     int    m_outW = 1280, m_outH = 720;   // actual render-target dims (scaled)
     int    m_zoneW = 1280, m_zoneH = 720; // full zone res (pre-scale)
     int    m_size = 64;          // active size3d

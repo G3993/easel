@@ -1116,12 +1116,23 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
             } else if (meshWarpPtr) {
                 const auto& points = meshWarpPtr->points();
                 int cols = meshWarpPtr->cols(), rows = meshWarpPtr->rows();
+                // Grid lines follow the same Catmull-Rom spline the warp
+                // renders with (substepped polylines), so the editor lattice
+                // sits exactly on the curved surface instead of cutting
+                // straight chords between control points.
+                const int kSub = 12;
                 for (int r = 0; r < rows; r++)
-                    for (int c = 0; c < cols - 1; c++)
-                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[r*cols+c+1]), zAccentSoft(zi), 1.0f);
+                    for (int i = 0; i < (cols - 1) * kSub; i++) {
+                        glm::vec2 a = meshWarpPtr->samplePoint((float)i / kSub, (float)r);
+                        glm::vec2 b = meshWarpPtr->samplePoint((float)(i + 1) / kSub, (float)r);
+                        draw->AddLine(ndc2scr(a), ndc2scr(b), zAccentSoft(zi), 1.0f);
+                    }
                 for (int c = 0; c < cols; c++)
-                    for (int r = 0; r < rows - 1; r++)
-                        draw->AddLine(ndc2scr(points[r*cols+c]), ndc2scr(points[(r+1)*cols+c]), zAccentSoft(zi), 1.0f);
+                    for (int j = 0; j < (rows - 1) * kSub; j++) {
+                        glm::vec2 a = meshWarpPtr->samplePoint((float)c, (float)j / kSub);
+                        glm::vec2 b = meshWarpPtr->samplePoint((float)c, (float)(j + 1) / kSub);
+                        draw->AddLine(ndc2scr(a), ndc2scr(b), zAccentSoft(zi), 1.0f);
+                    }
                 for (int i = 0; i < (int)points.size(); i++) {
                     ImVec2 p = ndc2scr(points[i]);
                     bool active = (m_warpDragging && m_warpDragIndex == i);
@@ -1916,7 +1927,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
         navFG->AddRectFilled(
             ImVec2(vpFG->Pos.x, navRowScreenY),
             ImVec2(vpFG->Pos.x + vpFG->Size.x, navRowScreenY + kNavRowH),
-            IM_COL32(0x20, 0x24, 0x28, 255));
+            UITokens::kNavSurface);
         navFG->AddLine(
             ImVec2(vpFG->Pos.x,                  navRowScreenY + kNavRowH),
             ImVec2(vpFG->Pos.x + vpFG->Size.x,   navRowScreenY + kNavRowH),
@@ -2486,6 +2497,10 @@ void ViewportPanel::renderNavBar(bool stageActive,
                     ImGui::OpenPopup("##CompPreset");
                 }
             }
+
+            // (The Fit icon that lived here was removed — canvas-view snap
+            // is now solely the transport pill's Fill Canvas button + Cmd+0,
+            // per "just have one canvas button".)
 
             // Fullscreen icon — 4 corner brackets, drawn directly so the
             // affordance is iconographic rather than a wide text button.

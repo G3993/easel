@@ -217,24 +217,57 @@ void VideoSource::decodeAudioPacket(AVFrame* frame, AVPacket* pkt) {
 
 // ─── Load / Close ────────────────────────────────────────────────────
 
+// AVFormatContext interrupt callback — runs inside FFmpeg's blocking I/O
+// (avformat_open_input, avformat_find_stream_info, av_read_frame, seeks).
+// Returning 1 makes the blocked call fail with AVERROR_EXIT promptly.
+// May be invoked from whichever thread owns the format context (main
+// thread during open/resume, decode thread during reads), so it touches
+// only atomics.
+int VideoSource::interruptCb(void* opaque) {
+    auto* self = static_cast<VideoSource*>(opaque);
+    if (self->m_interruptRequested.load(std::memory_order_relaxed)) return 1;
+    int64_t deadline = self->m_interruptDeadlineUs.load(std::memory_order_relaxed);
+    if (deadline != 0 && av_gettime_relative() > deadline) return 1;
+    return 0;
+}
+
 bool VideoSource::load(const std::string& path) {
     close();
+    m_interruptRequested = false; // close() set it to abort blocked reads; new session starts clean
     m_path = path;
 
     // Detect live streams (RTMP, SRT, etc.)
     m_isLive = (path.rfind("rtmp://", 0) == 0 || path.rfind("srt://", 0) == 0 ||
                 path.rfind("rtsp://", 0) == 0);
 
+    // Pre-allocate the format context so the interrupt callback is installed
+    // BEFORE avformat_open_input starts any network I/O. For live URLs also
+    // arm a 5s open deadline: load() runs on the caller's thread (including
+    // the lazy-resume path inside update(), i.e. the render thread), and a
+    // dead host must not block it indefinitely. avformat_open_input frees
+    // the context itself on failure.
+    m_formatCtx = avformat_alloc_context();
+    m_formatCtx->interrupt_callback.callback = &VideoSource::interruptCb;
+    m_formatCtx->interrupt_callback.opaque = this;
+    m_interruptDeadlineUs = m_isLive ? av_gettime_relative() + 5000000 : 0;
+
     if (avformat_open_input(&m_formatCtx, path.c_str(), nullptr, nullptr) < 0) {
         std::cerr << "Failed to open video: " << path << std::endl;
+        m_interruptDeadlineUs = 0;
         return false;
     }
 
     if (avformat_find_stream_info(m_formatCtx, nullptr) < 0) {
         std::cerr << "Failed to find stream info" << std::endl;
+        m_interruptDeadlineUs = 0;
         close();
         return false;
     }
+
+    // Open succeeded — disarm the deadline. Steady-state live reads may
+    // legitimately stall (idle stream); close()/suspend() interrupt them
+    // via m_interruptRequested instead.
+    m_interruptDeadlineUs = 0;
 
     // Find video and audio streams
     m_videoStreamIndex = -1;
@@ -373,6 +406,13 @@ bool VideoSource::load(const std::string& path) {
 }
 
 void VideoSource::close() {
+    // Order matters: raise the interrupt FIRST so a decode thread parked
+    // inside av_read_frame on a stalled live source aborts with
+    // AVERROR_EXIT, then drop m_running so its loop (including the live
+    // reconnect/retry path) exits instead of re-entering a blocking read.
+    // Without the interrupt this join could hang forever (and did, when
+    // deleting a stalled live-stream layer).
+    m_interruptRequested = true;
     m_running = false;
     m_playing = false;
     if (m_decodeThread.joinable()) {
@@ -414,12 +454,12 @@ void VideoSource::seek(double seconds) {
 
 void VideoSource::suspend() {
     if (!m_running) return;
-    // Live streams: close() joins the decode thread, which can sit blocked
-    // in av_read_frame on a stalled network source with no timeout — that
-    // would freeze the render thread one frame after the layer is deleted.
-    // A pinned live stream also has no resumable position; just leave it
-    // running until the snapshot ages out.
-    if (m_isLive) return;
+    // Live streams are suspendable now that the interrupt callback makes
+    // close()'s join prompt even when av_read_frame is blocked on a stalled
+    // network source (previously they were left running — thread + socket +
+    // CPU retained for up to 50 undo entries). A live stream has no
+    // resumable position; update()'s lazy resume reopens it via load() and
+    // already skips the seek for live sources.
     m_resumeTime = m_currentTime;
     m_resumePlaying = m_playing;
     close();
@@ -468,6 +508,10 @@ void VideoSource::update() {
     }
 
     if (displayed >= 0) {
+        // Publish which buffer we're uploading from BEFORE touching its
+        // data, so the decode thread's forced-overwrite path steers clear
+        // of it while the glTexSubImage read is in flight.
+        m_displayIndex.store(displayed, std::memory_order_release);
         m_texture.updateData(m_buffers[displayed].data.data(), m_width, m_height, GL_RGBA, GL_UNSIGNED_BYTE);
         m_currentTime = m_buffers[displayed].pts;
         m_buffers[displayed].ready = false;
@@ -543,7 +587,14 @@ void VideoSource::decodeLoop() {
                 for (int i = 0; i < 3; i++) {
                     if (!m_buffers[i].ready.load()) { wi = i; break; }
                 }
-                if (wi < 0) { wi = 0; m_buffers[wi].ready = false; }
+                if (wi < 0) {
+                    // All three buffers ready — the main thread has stalled.
+                    // Overwrite one, but never the buffer it most recently
+                    // took for GL upload: forcing wi=0 unconditionally could
+                    // memcpy into the exact buffer mid-glTexSubImage (tear).
+                    wi = (m_displayIndex.load(std::memory_order_acquire) + 1) % 3;
+                    m_buffers[wi].ready = false;
+                }
                 memcpy(m_buffers[wi].data.data(), rgbaBuf.data(), rgbaSize);
                 m_buffers[wi].pts = pendingPts;
                 m_buffers[wi].ready = true;

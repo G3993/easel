@@ -1,5 +1,6 @@
 #include "AudioPresetEngine.h"
 #include <algorithm>
+#include <cctype>
 #include <random>
 #include <unordered_map>
 
@@ -41,6 +42,19 @@ bool rebuild(std::map<std::string, AudioBinding>& bindings,
     return true;
 }
 
+// White-screen guard: params whose name suggests they scale brightness.
+// Stacking several of these upward in one recipe blows the frame to white
+// on the first loud passage, so shuffle() treats them specially.
+static bool isBrightnessParam(const std::string& name) {
+    static const char* kWords[] = { "glow", "bright", "exposure", "bloom",
+                                    "gain", "luma", "flash", "intens" };
+    std::string s; s.reserve(name.size());
+    for (char c : name) s += (char)std::tolower((unsigned char)c);
+    for (const char* w : kWords)
+        if (s.find(w) != std::string::npos) return true;
+    return false;
+}
+
 bool shuffle(std::map<std::string, AudioBinding>& bindings,
              const std::vector<Param>& params, uint32_t layerId) {
     Recipe r; r.has = true;
@@ -52,13 +66,22 @@ bool shuffle(std::map<std::string, AudioBinding>& bindings,
     const AudioSignal cs[] = { AudioSignal::Level, AudioSignal::Bass,
                                AudioSignal::Mid,   AudioSignal::High,
                                AudioSignal::Energy, AudioSignal::Build };
-    int n = std::min(5, (int)idx.size());
-    for (int j = 0; j < n; j++) {
+    int want = std::min(5, (int)idx.size());
+    bool brightUsed = false;
+    for (int j = 0; j < (int)idx.size() && (int)r.e.size() < want; j++) {
+        bool bright = isBrightnessParam(params[idx[j]].name);
+        if (bright && brightUsed) continue;       // at most ONE brightness param
         RecipeEntry e;
-        e.idx      = idx[j];
-        e.sig      = cs[sRng() % 6];
-        e.center01 = 0.25f + 0.50f * u01(sRng);   // random centre, room both ways
-        e.invert   = (sRng() % 2 == 0);           // ~half fall as energy rises
+        e.idx = idx[j];
+        e.sig = cs[sRng() % 6];
+        if (bright) {
+            brightUsed = true;
+            e.center01 = 0.20f + 0.20f * u01(sRng); // low centre — headroom above
+            e.invert   = (sRng() % 10) < 7;         // bias loud -> dimmer
+        } else {
+            e.center01 = 0.25f + 0.50f * u01(sRng); // random centre, room both ways
+            e.invert   = (sRng() % 2 == 0);         // ~half fall as energy rises
+        }
         r.e.push_back(e);
     }
     sState[layerId].recipe = r;

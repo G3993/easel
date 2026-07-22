@@ -310,6 +310,13 @@ bool Application::init() {
 
     if (!m_maskRenderer.init()) return false;
 
+    // Mapping-workspace gizmo overlay (points + edges on the projector
+    // output). Non-fatal: drawing is skipped if the shader failed.
+    if (!m_warpOverlay.init()) {
+        std::cerr << "Failed to init WarpOverlay — mapping gizmos won't "
+                     "show on the projector output\n";
+    }
+
 #ifdef HAS_OPENCV
     m_scanner.init(1920, 1080);
 #endif
@@ -481,6 +488,12 @@ bool Application::init() {
         m_dataBus.set("cue.prompt", p);
     });
     m_cueClient.connect("http://localhost:8791", "easel");
+
+#ifdef HAS_FFMPEG
+    // Watch for audio interfaces being plugged/unplugged so the device list
+    // and any live capture re-sync instead of requiring a relaunch.
+    VideoRecorder::watchAudioDevices(&m_audioDevicesChanged);
+#endif
 
     // Record initial monitor count and auto-connect if secondary exists
     m_lastMonitorCount = (int)ProjectorOutput::enumerateMonitors().size();
@@ -771,6 +784,12 @@ void Application::run() {
 
         updateSources();
 
+#ifdef HAS_FFMPEG
+        // Re-sync the audio device list after hot-plug events (interface
+        // connected/disconnected) before the analyzer consumes the selection.
+        refreshAudioDevicesIfChanged();
+#endif
+
         // Update audio analyzer (dt-based)
         {
             static double lastTime = glfwGetTime();
@@ -1018,7 +1037,10 @@ void Application::run() {
             static double lastAutoSave = 0;
             double now = glfwGetTime();
             if (now - lastAutoSave > 30.0) {
-                saveProject(defaultProjectPath());
+                // After a failed load the session is the empty fallback —
+                // never let the autosave clobber the intact file on disk.
+                if (defaultProjectPath() != m_projectLoadFailedPath)
+                    saveProject(defaultProjectPath());
                 lastAutoSave = now;
             }
         }
@@ -1109,6 +1131,21 @@ void Application::run() {
                     }
                 }
                 sResetAllPrev = resetAllNow;
+
+                // Cmd/Ctrl + 0 (no shift) — snap to the default view: canvas
+                // fit + centered, left flyout collapsed, Control Panel clear
+                // of the image. Same action as the nav-bar Fit button. Only
+                // meaningful in the 2D editor modes (Canvas / Mapping) — the
+                // Show workspace has its own Cmd+0 preview-zoom handler.
+                static bool sSnapViewPrev = false;
+                bool snapViewNow = gCtrl && !gShift && gZero &&
+                                   (UIManager::sMode == UIManager::WorkspaceMode::Canvas ||
+                                    UIManager::sMode == UIManager::WorkspaceMode::Mapping);
+                if (snapViewNow && !sSnapViewPrev) {
+                    m_viewportPanel.resetZoom();
+                    m_ui.setActiveLeftPanel(UIManager::LeftPanel::None);
+                }
+                sSnapViewPrev = snapViewNow;
             }
 
             // Undo / Redo keybinds — use GLFW for reliable detection.
@@ -1170,6 +1207,13 @@ void Application::run() {
         // Dispatch Etherea events on main thread
         m_ethereaClient.poll();
         m_cueClient.poll();
+#ifdef __APPLE__
+        // Replay mic speech events queued by the Speech.framework callbacks.
+        // They arrive on Apple's dispatch queue and only enqueue; every state
+        // mutation (transcript feeds, voice intents, echo/log) happens here
+        // on the main thread — same dispatch model as the two polls above.
+        drainPendingSpeech();
+#endif
 
         // Push hints and prompt from Etherea into data bus
         {
@@ -1406,7 +1450,12 @@ void Application::run() {
     m_closingDone.store(false);
     m_closingThread = std::thread([this]() {
         m_closingStep.store(0);
-        { std::string p = defaultProjectPath(); saveProject(p); }
+        {
+            // Same guard as the periodic autosave: don't overwrite an intact
+            // file with the empty fallback session from a failed load.
+            std::string p = defaultProjectPath();
+            if (p != m_projectLoadFailedPath) saveProject(p);
+        }
 
         m_closingStep.store(1);
         m_audioMixer.stop();
@@ -1424,10 +1473,14 @@ void Application::run() {
 
         m_closingStep.store(4);
 #ifdef HAS_NDI
+        // This thread has NO current GL context — the main thread keeps it to
+        // render the closing spinner below. Tear down only the NDI SDK side
+        // here (destroySender is GL-free); the gl* deletes (fences/PBOs/FBOs)
+        // run on the main thread via destroyGL() after the spinner loop exits.
         for (int i = 0; i < m_layerStack.count(); i++)
-            m_layerStack[i]->ndiSender.destroy();
-        for (auto& zp : m_zones) zp->ndiOutput.destroy();
-        m_ndiOutput.destroy();
+            m_layerStack[i]->ndiSender.destroySender();
+        for (auto& zp : m_zones) zp->ndiOutput.destroySender();
+        m_ndiOutput.destroySender();
         NDIRuntime::instance().shutdown();
 #endif
 #ifdef HAS_SPOUT
@@ -1566,6 +1619,17 @@ void Application::run() {
     }
 
     if (m_closingThread.joinable()) m_closingThread.join();
+
+#ifdef HAS_NDI
+    // Main-thread half of the NDI teardown. The closing thread above called
+    // destroySender() only (it has no GL context); the context is still
+    // current here, so delete the GL readback objects now — before shutdown()
+    // destroys the window. After this the NDIOutput destructors are no-ops.
+    for (int i = 0; i < m_layerStack.count(); i++)
+        m_layerStack[i]->ndiSender.destroyGL();
+    for (auto& zp : m_zones) zp->ndiOutput.destroyGL();
+    m_ndiOutput.destroyGL();
+#endif
 }
 
 void Application::shutdown() {
@@ -1578,6 +1642,57 @@ void Application::shutdown() {
     glfwDestroyWindow(m_window);
     glfwTerminate();
 }
+
+#ifdef HAS_FFMPEG
+void Application::refreshAudioDevicesIfChanged() {
+    if (!m_audioDevicesChanged.exchange(false, std::memory_order_acq_rel)) return;
+
+    // Selections are indexes into m_audioDevices; hot-plug shifts indexes, so
+    // pin the current selection to its UID and re-find it after enumerating.
+    std::string curUID;
+    if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size())
+        curUID = m_audioDevices[m_selectedAudioDevice].id;
+
+    m_audioDevices = VideoRecorder::enumerateAudioDevices();
+
+    auto findByUID = [&](const std::string& uid) -> int {
+        for (int i = 0; i < (int)m_audioDevices.size(); i++)
+            if (m_audioDevices[i].id == uid) return i;
+        return -1;
+    };
+
+    if (!curUID.empty()) {
+        // An explicit selection is active — follow the same physical device.
+        m_pendingAudioDeviceUID.clear();
+        int idx = findByUID(curUID);
+        if (idx >= 0) {
+            m_selectedAudioDevice = idx;
+        } else {
+            // Selected device vanished (interface unplugged). Fall back to
+            // System Audio so reactivity stays alive, and remember the UID so
+            // the device is restored the moment it comes back.
+            std::cout << "[Audio] Capture device disappeared — falling back to "
+                         "System Audio (will restore on reconnect)" << std::endl;
+            m_pendingAudioDeviceUID = curUID;
+            m_selectedAudioDevice = -1;
+        }
+    } else if (!m_pendingAudioDeviceUID.empty()) {
+        int idx = findByUID(m_pendingAudioDeviceUID);
+        if (idx >= 0) {
+            std::cout << "[Audio] Capture device reconnected — restoring "
+                      << m_audioDevices[idx].name << std::endl;
+            m_selectedAudioDevice = idx;
+            m_pendingAudioDeviceUID.clear();
+        }
+    }
+    m_recorder.setAudioDevice(m_selectedAudioDevice);
+
+    // Unlatch failed captures: a device that was missing may exist now.
+    // Analyzers whose device is present and running are unaffected.
+    m_audioAnalyzer.notifyDevicesChanged();
+    for (auto& zp : m_zones) zp->micAnalyzer.notifyDevicesChanged();
+}
+#endif
 
 void Application::updateSources() {
     // Hot-reload any changed Shader-Claw shaders
@@ -2326,6 +2441,27 @@ void Application::compositeZone(OutputZone& zone) {
             float aspect = (float)zone.width / (float)zone.height;
             mp->objMeshWarp.render(sourceTex, aspect);
         }
+
+        // MAPPING workspace: draw the control points + edges into the warp
+        // output itself, so the gizmos are visible ON the projection surface
+        // while you stand at the wall and drag. Drawn pre-downsample so the
+        // lines get the same supersampled AA as the warped content. The
+        // point being dragged (active zone only) renders bigger and white.
+        if (UIManager::sMode == UIManager::WorkspaceMode::Mapping &&
+            mp->warpMode != ViewportPanel::WarpMode::ObjMesh) {
+            bool zoneIsActive = m_activeZone >= 0 &&
+                                m_activeZone < (int)m_zones.size() &&
+                                m_zones[m_activeZone].get() == &zone;
+            int activeIdx = (zoneIsActive && m_viewportPanel.warpDragging())
+                                ? m_viewportPanel.warpDragIndex() : -1;
+            if (mp->warpMode == ViewportPanel::WarpMode::CornerPin) {
+                m_warpOverlay.drawCornerPin(mp->cornerPin.corners(), activeIdx,
+                                            zone.width, zone.height);
+            } else {
+                m_warpOverlay.drawMeshWarp(mp->meshWarp, activeIdx,
+                                           zone.width, zone.height);
+            }
+        }
     } else if (sourceTex) {
         // No mapping — passthrough
         m_passthroughShader.use();
@@ -2881,6 +3017,25 @@ void Application::presentOutputs() {
                 glBindTexture(GL_TEXTURE_2D, croppedTex);
                 m_quad.draw();
             }
+
+            // MAPPING workspace: gizmos on the spanned projector outputs
+            // too — same as the per-zone path. Highlight the dragged point
+            // only on the slice whose mapping is being edited in the
+            // viewport (the drag index is meaningless on the others).
+            if (UIManager::sMode == UIManager::WorkspaceMode::Mapping &&
+                mp && mp->warpMode != ViewportPanel::WarpMode::ObjMesh) {
+                MappingProfile* editedMp =
+                    (m_activeZone >= 0 && m_activeZone < (int)m_zones.size())
+                        ? mappingForZone(*m_zones[m_activeZone]) : nullptr;
+                int activeIdx = (mp == editedMp && m_viewportPanel.warpDragging())
+                                    ? m_viewportPanel.warpDragIndex() : -1;
+                if (mp->warpMode == ViewportPanel::WarpMode::CornerPin) {
+                    m_warpOverlay.drawCornerPin(mp->cornerPin.corners(),
+                                                activeIdx, pw, ph);
+                } else {
+                    m_warpOverlay.drawMeshWarp(mp->meshWarp, activeIdx, pw, ph);
+                }
+            }
             Framebuffer::unbind();
 
             // 3) Present the warped, aligned half to the projector.
@@ -3314,45 +3469,20 @@ void Application::startVoiceRecording() {
         return;
     }
     m_voicePartial.clear();
+    // Both callbacks run on Speech.framework's dispatch queue — NOT the main
+    // thread. Everything the old inline handlers touched (m_voicePartial,
+    // m_cueFeed via pushCueWords, the layer stack / timeline / m_voiceLog via
+    // handleVoiceIntent) is read or mutated by the render loop every frame
+    // with no locking, so the only safe move here is to queue the raw event.
+    // drainPendingSpeech() (pumped once per frame next to m_cueClient.poll())
+    // replays partials and finals on the main thread in arrival order.
     m_voiceRecognizer.onPartial = [this](const std::string& s) {
-        m_voicePartial = s;
-        // Stream partials into the same DataBus key the Cue transcript
-        // callback uses so text_clusters.fs (and any other shader bound
-        // to "cue.latest") sees live speech as the user is speaking.
-        // Mirrors CueClient::setTranscriptCallback's path so the bubbles
-        // light up whether the words come from local speech or a remote
-        // Cue session.
-        //
-        // Empty partials (recognizer producing nothing during silence)
-        // are ignored — same guard as the /cue/latest OSC handler. This
-        // stops the mic from blanking a bridge-driven cue mid-show, and
-        // stops it from racing test writes during the M7 unicode case.
-        if (s.empty()) return;
-        if (glfwGetTime() >= m_cueLatestSuppressUntil) {
-            pushCueWords(s, /*isFinal=*/false);  // interim — emit only new words
-        }
+        std::lock_guard<std::mutex> lock(m_pendingSpeechMutex);
+        m_pendingSpeech.push_back({s, /*isFinal=*/false});
     };
     m_voiceRecognizer.onFinal = [this](const std::string& s) {
-        m_voicePartial.clear();
-        std::cerr << "[Voice] final: \"" << s << "\"\n";
-        if (s.empty()) return;
-        m_voiceLastEcho = std::string("\"") + s + "\"";
-        m_voiceLastEchoTime = glfwGetTime();
-        // Push the final to the DataBus too so it persists in the bubbles
-        // after speech stops, and append to the running transcript.
-        pushCueWords(s, /*isFinal=*/true);   // closes the utterance for cue.words
-        m_dataBus.appendCapped("cue.transcript", s);
-        auto intent = easel::voice::parse(s);
-        std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
-        if (!intent.target.empty()) std::cerr << " target=" << intent.target;
-        std::cerr << "\n";
-        handleVoiceIntent(intent);
-        // Apple's SFSpeechRecognitionTask is single-shot — once isFinal fires
-        // the task is done. To keep the mic continuously transcribing while
-        // m_voiceContinuous is true, ask the main loop to tear down and
-        // restart the session on its next tick (don't restart from inside
-        // this callback; it runs on the Speech framework's queue).
-        if (m_voiceContinuous) m_voiceRestartPending = true;
+        std::lock_guard<std::mutex> lock(m_pendingSpeechMutex);
+        m_pendingSpeech.push_back({s, /*isFinal=*/true});
     };
     m_voiceRecognizer.start();
     m_voiceListening = m_voiceRecognizer.isRecording();
@@ -3368,6 +3498,69 @@ void Application::stopVoiceRecording() {
     std::cerr << "[Voice] stop\n";
 #endif
 }
+
+#ifdef __APPLE__
+// Replay the speech events queued by the recognizer callbacks (see
+// startVoiceRecording — they run on Speech.framework's queue and may only
+// enqueue). Called once per frame from the main loop, right after the
+// Etherea/Cue polls, so ALL transcript writers now funnel through the main
+// thread. The bodies below are the old inline lambda bodies, verbatim, with
+// partials and finals interleaved exactly as received.
+void Application::drainPendingSpeech() {
+    // Swap the queue out under the lock, then dispatch lock-free — the
+    // handlers below can take long enough (intent parse, keyframe edits)
+    // that holding the mutex would stall the recognizer's queue.
+    std::vector<PendingSpeech> events;
+    {
+        std::lock_guard<std::mutex> lock(m_pendingSpeechMutex);
+        if (m_pendingSpeech.empty()) return;
+        events.swap(m_pendingSpeech);
+    }
+    for (const auto& ev : events) {
+        const std::string& s = ev.text;
+        if (!ev.isFinal) {
+            m_voicePartial = s;
+            // Stream partials into the same DataBus key the Cue transcript
+            // callback uses so text_clusters.fs (and any other shader bound
+            // to "cue.latest") sees live speech as the user is speaking.
+            // Mirrors CueClient::setTranscriptCallback's path so the bubbles
+            // light up whether the words come from local speech or a remote
+            // Cue session.
+            //
+            // Empty partials (recognizer producing nothing during silence)
+            // are ignored — same guard as the /cue/latest OSC handler. This
+            // stops the mic from blanking a bridge-driven cue mid-show, and
+            // stops it from racing test writes during the M7 unicode case.
+            if (s.empty()) continue;
+            if (glfwGetTime() >= m_cueLatestSuppressUntil) {
+                pushCueWords(s, /*isFinal=*/false);  // interim — emit only new words
+            }
+        } else {
+            m_voicePartial.clear();
+            std::cerr << "[Voice] final: \"" << s << "\"\n";
+            if (s.empty()) continue;
+            m_voiceLastEcho = std::string("\"") + s + "\"";
+            m_voiceLastEchoTime = glfwGetTime();
+            // Push the final to the DataBus too so it persists in the bubbles
+            // after speech stops, and append to the running transcript.
+            pushCueWords(s, /*isFinal=*/true);   // closes the utterance for cue.words
+            m_dataBus.appendCapped("cue.transcript", s);
+            auto intent = easel::voice::parse(s);
+            std::cerr << "[Voice] parsed: " << easel::voice::intentName(intent.kind);
+            if (!intent.target.empty()) std::cerr << " target=" << intent.target;
+            std::cerr << "\n";
+            handleVoiceIntent(intent);
+            // Apple's SFSpeechRecognitionTask is single-shot — once isFinal
+            // fires the task is done. To keep the mic continuously
+            // transcribing while m_voiceContinuous is true, ask the main
+            // loop's continuous-mic block (which runs later this same frame)
+            // to tear down and restart the session. Same deferred-restart
+            // contract as before the queueing change.
+            if (m_voiceContinuous) m_voiceRestartPending = true;
+        }
+    }
+}
+#endif
 
 void Application::renderVoiceCommandBar() {
     if (!m_voiceBarOpen) return;
@@ -3622,6 +3815,46 @@ void Application::renderUI() {
                 m_bpmSync.setBPM(msg.floats[0]);
             } else if (msg.address == "/easel/tap") {
                 m_bpmSync.tap();
+            } else if (msg.address == "/easel/audio/device" && !msg.strings.empty()) {
+                // Remote audio-input selection — same effect as the Audio
+                // dropdown. Accepts "system"/"default"/"loopback" (restores
+                // the -1 loopback default), a CoreAudio device UID, or a
+                // case-insensitive name substring ("macbook pro mic").
+                // Capture devices win ties so a mic beats a loopback alias.
+#ifdef HAS_FFMPEG
+                std::string want = msg.strings[0];
+                std::string wantLower = want;
+                for (auto& c : wantLower) c = (char)tolower((unsigned char)c);
+                if (wantLower == "system" || wantLower == "default" ||
+                    wantLower == "loopback") {
+                    m_selectedAudioDevice = -1;
+                    std::cout << "[OSC] audio device -> System Audio (loopback)"
+                              << std::endl;
+                } else {
+                    if (m_audioDevices.empty())
+                        m_audioDevices = VideoRecorder::enumerateAudioDevices();
+                    int match = -1;
+                    for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+                        std::string nameLower = m_audioDevices[i].name;
+                        for (auto& c : nameLower)
+                            c = (char)tolower((unsigned char)c);
+                        bool hit = m_audioDevices[i].id == want ||
+                                   nameLower.find(wantLower) != std::string::npos;
+                        if (!hit) continue;
+                        if (match < 0 || (m_audioDevices[i].isCapture &&
+                                          !m_audioDevices[match].isCapture))
+                            match = i;
+                    }
+                    if (match >= 0) {
+                        m_selectedAudioDevice = match;
+                        std::cout << "[OSC] audio device -> "
+                                  << m_audioDevices[match].name << std::endl;
+                    } else {
+                        std::cerr << "[OSC] audio device: no match for '"
+                                  << want << "'" << std::endl;
+                    }
+                }
+#endif
             } else if (msg.address == "/easel/play/publish") {
                 // Headless trigger for "publish Play to mobile" — same action
                 // as the File > Publish to Mobile menu item.
@@ -3726,8 +3959,11 @@ void Application::renderUI() {
                 clearManagedLayers();
             } else if (msg.address == "/easel/project/save") {
                 // Persist to the default project path so the agent SDK can read
-                // the file back and confirm an applied route.
-                saveProject(defaultProjectPath());
+                // the file back and confirm an applied route. Skipped while the
+                // session is the empty fallback from a failed load — an agent
+                // trigger must not overwrite the intact file with emptiness.
+                if (defaultProjectPath() != m_projectLoadFailedPath)
+                    saveProject(defaultProjectPath());
             } else if (msg.address == "/easel/layer/ensure/shader"
                        && msg.strings.size() >= 2) {
                 // Managed shader overlay layer, keyed by slot. strings = [slot, path].
@@ -4452,7 +4688,10 @@ void Application::renderUI() {
     // shows the projector/output routing and the zone's mic input. Clicking
     // a card makes that zone active (same selection the zone bar drives).
     if (m_ui.isPanelVisible("Zones")) {
+        // Body bg = kNavSurface, matching every other right-dock panel.
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImU32)UITokens::kNavSurface);
         ImGui::Begin("        ###Zones");
+        ImGui::PopStyleColor();
         ImDrawList* zdl = ImGui::GetWindowDrawList();
         for (int zi = 0; zi < (int)m_zones.size(); zi++) {
             OutputZone& z = *m_zones[zi];
@@ -4519,7 +4758,10 @@ void Application::renderUI() {
     // dropdown BELOW the mapping parameters). Closed by default — expand to
     // tweak canvas/layer masks.
     if (m_ui.isPanelVisible("Mapping")) {
+    // Body bg = kNavSurface, matching every other right-dock panel.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImU32)UITokens::kNavSurface);
     ImGui::Begin("        ###Mapping");
+    ImGui::PopStyleColor();
     if (flatSection("Masks"))
     {
         // (Edge Blend moved to the bottom of this panel — you only want to
@@ -5385,7 +5627,7 @@ void Application::renderUI() {
     // ShaderClaw tab
     if (sourcesTabsOpen && sourcesActiveSub == ST::Shader) {
     {
-        PropertyPanel::PanelSectionHeader("Shaders", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("Shaders", /*firstSection=*/true)) {
         if (!m_shaderClaw.isConnected()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
             ImGui::TextWrapped("Connect to a Shader-Claw shaders directory to browse and hot-reload ISF shaders.");
@@ -5441,6 +5683,144 @@ void Application::renderUI() {
             // controls live under FILE → Sources in the menu bar instead.
             ImGui::Dummy(ImVec2(0, 6));
 
+            // Destination + zone-placement helpers — declared before the
+            // docked preview monitor (which ADDs via addShaderRouted) and
+            // shared with the gallery grid below.
+            static int s_addDestZone = -1;   // -1 = Whole House, else zone idx
+            if (s_addDestZone >= (int)m_zones.size()) s_addDestZone = -1;
+            // Place a layer so it renders ONLY in one zone: freeze implicit
+            // all-layer zones, pull the layer out everywhere, then set it.
+            // Shared by the destination dropdown and the tile ... menu.
+            auto placeInZoneOnly = [&](uint32_t lid, int zi) {
+                if (zi < 0 || zi >= (int)m_zones.size() || !m_zones[zi]) return;
+                for (auto& zz : m_zones) {
+                    if (!zz) continue;
+                    if (zz->showAllLayers) {
+                        zz->showAllLayers = false;
+                        for (int li = 0; li < m_layerStack.count(); li++)
+                            zz->visibleLayerIds.insert(m_layerStack[li]->id);
+                    }
+                    zz->visibleLayerIds.erase(lid);
+                }
+                m_zones[zi]->visibleLayerIds.insert(lid);
+            };
+            // Add a shader routed to the current destination.
+            auto addShaderRouted = [&](const std::string& fullPath) {
+                int before = m_layerStack.count();
+                loadShader(fullPath);
+                if (m_layerStack.count() > before) {
+                    auto& nl = m_layerStack[m_layerStack.count() - 1];
+                    if (s_addDestZone >= 0)
+                        placeInZoneOnly(nl->id, s_addDestZone);
+                    // New shaders fade in instead of popping onto the output.
+                    // CompositeEngine advances transitionProgress each frame
+                    // and multiplies it into the layer's effective opacity.
+                    nl->transitionType = TransitionType::Fade;
+                    nl->transitionDuration = std::max(nl->transitionDuration, 1.2f);
+                    nl->transitionProgress = 0.0f;
+                    nl->transitionDirection = true;
+                    nl->transitionActive = true;
+                }
+            };
+
+            // ─── Preview monitor — DOCKED at the top of the panel ───────
+            // Single-click on a tile loads the shader here: a small live
+            // monitor that plays it (with live audio) WITHOUT sending it to
+            // any zone. ADD TO TIMELINE commits it with a fade-in; ✕ closes.
+            // Rendered before the scrollable browser child below so it stays
+            // pinned while the gallery scrolls underneath it.
+            if (m_scPreview && !m_scPreviewPath.empty()) {
+                m_scPreview->setAudioState(
+                    m_audioAnalyzer.smoothedRMS(), m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(), m_audioAnalyzer.fftTexture());
+                m_scPreview->update();
+                m_scPreviewFrame++;
+
+                float monW = ImGui::GetContentRegionAvail().x;
+                float monH = std::min(monW * 9.0f / 16.0f, 240.0f);
+                ImVec2 monPos = ImGui::GetCursorScreenPos();
+                ImDrawList* md = ImGui::GetWindowDrawList();
+                md->AddRectFilled(monPos, ImVec2(monPos.x + monW, monPos.y + monH),
+                                  IM_COL32(8, 10, 14, 255), 6.0f);
+                GLuint ptex = m_scPreview->textureId();
+                if (ptex) {
+                    md->AddImageRounded((ImTextureID)(intptr_t)ptex,
+                                        ImVec2(monPos.x + 2, monPos.y + 2),
+                                        ImVec2(monPos.x + monW - 2, monPos.y + monH - 2),
+                                        ImVec2(0, 1), ImVec2(1, 0),
+                                        IM_COL32(255, 255, 255, 255), 5.0f);
+                }
+                md->AddRect(monPos, ImVec2(monPos.x + monW, monPos.y + monH),
+                            IM_COL32(255, 255, 255, 70), 6.0f);
+                md->AddText(ImVec2(monPos.x + 8, monPos.y + 6),
+                            IM_COL32(255, 255, 255, 160), "PREVIEW");
+                // Shader title, bottom-left over the monitor
+                {
+                    std::string pTitle;
+                    for (const auto& sh : m_shaderClaw.shaders())
+                        if (sh.fullPath == m_scPreviewPath) { pTitle = sh.title; break; }
+                    if (!pTitle.empty()) {
+                        pTitle = shaderDisplayName(pTitle);
+                        md->AddText(ImVec2(monPos.x + 8, monPos.y + monH - 20),
+                                    IM_COL32(255, 255, 255, 220), pTitle.c_str());
+                    }
+                }
+                ImGui::Dummy(ImVec2(monW, monH + 6));
+
+                // Actions: ADD (accent pill) + dismiss
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                bool addNow = ImGui::Button("+ ADD TO TIMELINE",
+                                            ImVec2(ImGui::GetContentRegionAvail().x - 40.0f, 0));
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine(0, 6);
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
+                bool dismiss = ImGui::Button("x##scPrevClose");
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar();
+                if (addNow) {
+                    addShaderRouted(m_scPreviewPath);
+                    m_scPreview.reset();
+                    m_scPreviewPath.clear();
+                } else if (dismiss) {
+                    m_scPreview.reset();
+                    m_scPreviewPath.clear();
+                }
+                ImGui::Dummy(ImVec2(0, 10));
+            } else {
+                // Empty slot with the SAME footprint as the live monitor +
+                // action row — without it, the first click on a tile inserts
+                // ~270px above the scroll child and the whole gallery jumps.
+                float monW = ImGui::GetContentRegionAvail().x;
+                float monH = std::min(monW * 9.0f / 16.0f, 240.0f);
+                ImVec2 monPos = ImGui::GetCursorScreenPos();
+                ImDrawList* md = ImGui::GetWindowDrawList();
+                md->AddRectFilled(monPos, ImVec2(monPos.x + monW, monPos.y + monH),
+                                  IM_COL32(8, 10, 14, 255), 6.0f);
+                md->AddRect(monPos, ImVec2(monPos.x + monW, monPos.y + monH),
+                            IM_COL32(255, 255, 255, 40), 6.0f);
+                md->AddText(ImVec2(monPos.x + 8, monPos.y + 6),
+                            IM_COL32(255, 255, 255, 90), "PREVIEW");
+                const char* hint = "Click a shader to preview it here";
+                ImVec2 hs = ImGui::CalcTextSize(hint);
+                md->AddText(ImVec2(monPos.x + (monW - hs.x) * 0.5f,
+                                   monPos.y + (monH - hs.y) * 0.5f),
+                            IM_COL32(255, 255, 255, 80), hint);
+                ImGui::Dummy(ImVec2(monW, monH + 6));
+                ImGui::Dummy(ImVec2(0, ImGui::GetFrameHeight() + 10.0f));
+            }
+
+            // ─── Scrollable browser body ────────────────────────────────
+            // Everything below the docked preview (sub-tab pills, ADD TO
+            // destination, gallery grid) lives in its own scroll region so
+            // the preview monitor never scrolls out of view.
+            ImGui::BeginChild("##scBrowserScroll", ImVec2(0, 0), false);
+
             // The Particles entry used to be a full-width button here;
             // it now lives as the first tile in the VFX gallery grid
             // below so it reads as "another shader" instead of a
@@ -5467,6 +5847,27 @@ void Application::renderUI() {
                     else ++it;
                 }
             }
+
+            // Disk thumbnail cache: cooked thumbs persist across launches so
+            // the browser doesn't recompile+render the whole library (one
+            // GLSL compile per frame, ~200 frames of jank) every session.
+            // PNGs are stored in GL row order (bottom-up) — the grid's
+            // flipped UVs expect exactly that, so no flip on either side.
+            static std::string sThumbCacheDir;
+            if (sThumbCacheDir.empty()) {
+                const char* home = getenv("HOME");
+                if (!home || !*home) home = getenv("USERPROFILE"); // Windows
+                sThumbCacheDir = std::string(home ? home : "") + "/.easel/shader_thumbs";
+                std::error_code ec;
+                std::filesystem::create_directories(sThumbCacheDir, ec);
+            }
+            auto thumbCachePath = [&](const std::string& fullPath) {
+                size_t s = fullPath.find_last_of("/\\");
+                std::string stem = (s == std::string::npos) ? fullPath : fullPath.substr(s + 1);
+                size_t d = stem.find_last_of('.');
+                if (d != std::string::npos) stem = stem.substr(0, d);
+                return sThumbCacheDir + "/" + stem + ".png";
+            };
 
             if (m_scThumbRenderer) {
                 m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
@@ -5495,6 +5896,22 @@ void Application::renderUI() {
                         glBindTexture(GL_TEXTURE_2D, entry.texture->id());
                         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kThumbRes, kThumbRes);
                         glBindTexture(GL_TEXTURE_2D, 0);
+                        // Persist to the disk cache — this synchronous read
+                        // happens once per shader EVER (cache hit thereafter),
+                        // not per session. Written TOP-DOWN (flip on write):
+                        // Texture::loadFromFile flips on load, which lands the
+                        // reloaded texture back in GL bottom-up order — the
+                        // orientation the grid's flipped UVs expect. (Written
+                        // bottom-up, every cache-loaded thumb rendered upside
+                        // down after relaunch.)
+                        {
+                            std::vector<unsigned char> px((size_t)kThumbRes * kThumbRes * 4);
+                            glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                            stbi_flip_vertically_on_write(1);
+                            stbi_write_png(thumbCachePath(m_scThumbRenderPath).c_str(),
+                                           kThumbRes, kThumbRes, 4, px.data(), kThumbRes * 4);
+                            stbi_flip_vertically_on_write(0);
+                        }
                         glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
                         glDeleteFramebuffers(1, &tempFBO);
                         entry.ready = true;
@@ -5504,9 +5921,26 @@ void Application::renderUI() {
                 }
             } else {
                 // Find next shader that needs a thumbnail
+                int cacheLoads = 0;
                 for (const auto& shader : m_shaderClaw.shaders()) {
                     auto it = m_scThumbnails.find(shader.fullPath);
                     if (it == m_scThumbnails.end() || !it->second.ready) {
+                        // Disk-cache hit: load the PNG (a few per frame) and
+                        // skip the compile+render entirely. Stale when the
+                        // .fs was edited after the PNG was written.
+                        std::string png = thumbCachePath(shader.fullPath);
+                        std::error_code e1, e2;
+                        auto pngT = std::filesystem::last_write_time(png, e1);
+                        auto srcT = std::filesystem::last_write_time(shader.fullPath, e2);
+                        if (!e1 && !e2 && pngT >= srcT) {
+                            auto& entry = m_scThumbnails[shader.fullPath];
+                            if (!entry.texture) entry.texture = std::make_shared<Texture>();
+                            if (entry.texture->loadFromFile(png)) {
+                                entry.ready = true;
+                                if (++cacheLoads < 8) continue;
+                                break;
+                            }
+                        }
                         m_scThumbRenderer = std::make_shared<ShaderSource>();
                         // Size to thumb res BEFORE loadFromFile so the FBO +
                         // any multi-pass ping-pong buffers allocate at 160px
@@ -5691,8 +6125,8 @@ void Application::renderUI() {
             // dropdown listing Whole House and every zone. Click a tile and
             // the shader lands exactly there — Whole House layers it into
             // every zone; a named zone gets it exclusively.
-            static int s_addDestZone = -1;   // -1 = Whole House, else zone idx
-            if (s_addDestZone >= (int)m_zones.size()) s_addDestZone = -1;
+            // (s_addDestZone + placeInZoneOnly/addShaderRouted are declared
+            // above the docked preview monitor at the top of this branch.)
             {
                 ImGui::AlignTextToFramePadding();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
@@ -5730,30 +6164,6 @@ void Application::renderUI() {
                 ImGui::Dummy(ImVec2(0, 6));
             }
 
-            // Place a layer so it renders ONLY in one zone: freeze implicit
-            // all-layer zones, pull the layer out everywhere, then set it.
-            // Shared by the destination dropdown and the tile ... menu.
-            auto placeInZoneOnly = [&](uint32_t lid, int zi) {
-                if (zi < 0 || zi >= (int)m_zones.size() || !m_zones[zi]) return;
-                for (auto& zz : m_zones) {
-                    if (!zz) continue;
-                    if (zz->showAllLayers) {
-                        zz->showAllLayers = false;
-                        for (int li = 0; li < m_layerStack.count(); li++)
-                            zz->visibleLayerIds.insert(m_layerStack[li]->id);
-                    }
-                    zz->visibleLayerIds.erase(lid);
-                }
-                m_zones[zi]->visibleLayerIds.insert(lid);
-            };
-            // Add a shader routed to the current destination.
-            auto addShaderRouted = [&](const std::string& fullPath) {
-                int before = m_layerStack.count();
-                loadShader(fullPath);
-                if (m_layerStack.count() > before && s_addDestZone >= 0)
-                    placeInZoneOnly(m_layerStack[m_layerStack.count() - 1]->id,
-                                    s_addDestZone);
-            };
             // Retag a shader's gallery group (VFX/Text/3D) in the manifest.
             auto setShaderGroup = [&](const std::string& file, const char* group) {
                 namespace fs = std::filesystem;
@@ -5784,11 +6194,14 @@ void Application::renderUI() {
                 }
             };
 
+            // (Preview monitor moved — it renders DOCKED at the top of the
+            // panel, above the ##scBrowserScroll child this code runs in.)
+
             // ─── Gallery grid ───────────────────────────────────────────
             // Big thumbnail tiles laid out in a responsive grid (auto-sizes
             // columns to panel width). Each tile = thumbnail + title. Click a
-            // thumbnail to add that shader as a layer; hover to see it
-            // animated. Works like a shader-picker gallery.
+            // thumbnail to preview it in the monitor above; double-click adds
+            // it to the timeline directly (also fades in).
             std::string hoveredPath;
             const float cellPad     = 8.0f;
             const float starsH      = 16.0f;   // stars row beneath title
@@ -6077,6 +6490,10 @@ void Application::renderUI() {
                     m_scPreviewPath = shader.fullPath;
                     m_scPreviewFrame = 0;
                     m_scPreview = std::make_shared<ShaderSource>();
+                    // 16:9 at 480p — matches the preview monitor above the
+                    // grid and keeps multi-pass buffers small. Set BEFORE
+                    // loadFromFile so FBOs allocate at this size.
+                    m_scPreview->setResolution(480, 270);
                     if (!m_scPreview->loadFromFile(shader.fullPath))
                         m_scPreview.reset();
                 }
@@ -6280,8 +6697,18 @@ void Application::renderUI() {
                         if (!target && m_layerStack.count() > 0)
                             target = m_layerStack[m_layerStack.count()-1].get();
                         if (target) {
-                            auto src = std::make_shared<ShaderSource>();
-                            if (src->loadFromFile(shader.fullPath)) {
+                            // Same preview-reuse as loadShader(): skip the
+                            // second compile when the preview already has it.
+                            std::shared_ptr<ShaderSource> src;
+                            if (m_scPreview && m_scPreviewPath == shader.fullPath) {
+                                src = m_scPreview;
+                                m_scPreview.reset();
+                                m_scPreviewPath.clear();
+                            } else {
+                                src = std::make_shared<ShaderSource>();
+                                if (!src->loadFromFile(shader.fullPath)) src.reset();
+                            }
+                            if (src) {
                                 target->source = src;
                                 target->visible = true;
                                 target->userHidden = false;
@@ -6487,7 +6914,10 @@ void Application::renderUI() {
             // every tile hover. Static thumbs alone now; less GPU thrash,
             // less visual noise.)
             (void)hoveredPath;
+
+            ImGui::EndChild();  // ##scBrowserScroll
         }
+        } // end collapsible Shaders section
     }
     }  // end ShaderClaw section (was a BeginTabItem block before the inner Sources TabBar was retired)
     // NDI tab (moved from position 4 to 1)
@@ -6719,7 +7149,7 @@ void Application::renderUI() {
     // Etherea tab
     if (sourcesTabsOpen && sourcesActiveSub == ST::Mic) {
     {
-        PropertyPanel::PanelSectionHeader("Voice", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("Voice", /*firstSection=*/true)) {
         if (!m_ethereaClient.isRunning()) {
             static char etUrl[256] = "http://localhost:7860";
             static std::vector<EthereaSession> sessions;
@@ -6997,6 +7427,7 @@ void Application::renderUI() {
             }
         }
 #endif
+        } // end collapsible Voice section
     }
     }  // end Etherea section
 
@@ -7006,7 +7437,7 @@ void Application::renderUI() {
 
 #ifdef HAS_OPENCV
     if (sourcesTabsOpen && sourcesActiveSub == ST::Cam) {
-        PropertyPanel::PanelSectionHeader("Camera", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("Camera", /*firstSection=*/true)) {
         ImGui::TextWrapped("Live webcam feed — drop onto a layer.");
         ImGui::Dummy(ImVec2(0, 8));
 
@@ -7113,6 +7544,7 @@ void Application::renderUI() {
             ImGui::PopStyleColor();
         }
 #endif
+        } // end collapsible Camera section
 
     }
 #endif
@@ -7121,7 +7553,7 @@ void Application::renderUI() {
     // NDI source list so all "incoming display feed" routes live together.
     if (sourcesTabsOpen && sourcesActiveSub == ST::Win) {
     {
-        PropertyPanel::PanelSectionHeader("Display", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("Display", /*firstSection=*/true)) {
 #if defined(_WIN32) || defined(__APPLE__)
         if (flatSection("Screen Capture")) {
             auto capMonitors = CaptureSource::enumerateMonitors();
@@ -7469,6 +7901,7 @@ void Application::renderUI() {
                 "restart Easel. The runtime is loaded via dlopen at startup.");
         }
 #endif // HAS_NDI
+        } // end collapsible Display section
     }
     }  // end Capture (Win/Display) section
 
@@ -7519,7 +7952,7 @@ void Application::renderUI() {
     ImGui::Begin("        ###Audio");
     PropertyPanel::PopPanelStyle();
     {
-        PropertyPanel::PanelSectionHeader("Audio", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("Audio", /*firstSection=*/true)) {
         // --- Device selection: [ Input ] [ combo ................ ] [ Refresh ]
         //     Single-line layout — label + combo + refresh all share a row.
 #ifdef HAS_FFMPEG
@@ -7981,9 +8414,11 @@ void Application::renderUI() {
             }
         }
 
+        } // end collapsible Audio section
+
         // --- MIDI: device + status, right here in the Audio tab ----------
         ImGui::Dummy(ImVec2(0, 6));
-        PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/false);
+        if (PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/false))
         {
             auto mdevs = m_midiManager.listDevices();
             const char* mlabel = (m_midiManager.isOpen() &&
@@ -8033,7 +8468,7 @@ void Application::renderUI() {
     ImGui::Begin("        ###MIDI");
     PropertyPanel::PopPanelStyle();
     {
-        PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/true);
+        if (PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/true)) {
         auto devices = m_midiManager.listDevices();
         if (devices.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
@@ -8189,6 +8624,7 @@ void Application::renderUI() {
             }
             if (removeIdx >= 0) m_midiManager.removeMapping(removeIdx);
         }
+        } // end collapsible MIDI section
     }
     ImGui::End();
     }  // end MIDI visibility guard
@@ -8205,7 +8641,10 @@ void Application::renderUI() {
 
     // Media panel — categorised browser: Video / Image / Shader / Sources
     if (m_ui.isPanelVisible("Media")) {
+    // Body bg = kNavSurface, matching every other right-dock panel.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImU32)UITokens::kNavSurface);
     ImGui::Begin("        ###Media");
+    ImGui::PopStyleColor();
 
     // Helper: draws a CollapsingHeader with a transparent cog button on the right.
     // Returns whether the section is open. cogClicked is set when the cog is pressed.
@@ -8963,15 +9402,12 @@ void Application::renderFloatingTransportPill() {
     float x = vp->Pos.x;
     float yFlush = vp->Pos.y + vp->Size.y - pillH;
     float y = yFlush - m_timelineCurH;
-    // Clamp transport pill to the left edge of the right sidebar.
-    float pillW;
-    {
-        float rpLeft = m_ui.getRightPanelLeft();
-        if (rpLeft > vp->Pos.x && rpLeft < vp->Pos.x + vp->Size.x)
-            pillW = rpLeft - vp->Pos.x;
-        else
-            pillW = vp->Size.x;
-    }
+    // Full-width transport pill. The right float panel reserves the
+    // transport height + gap for its own bottom edge (and clamps further
+    // to the timeline top when open), so the pill never collides with it.
+    // Clamping the pill to getRightPanelLeft() left an empty dead corner
+    // bottom-right where neither the panel nor the pill rendered.
+    float pillW = vp->Size.x;
 
     // Defensive belt-and-braces: m_timelineCurH should never exceed the
     // viewport, but if a degenerate frame made it huge/negative, snap the
@@ -9475,19 +9911,10 @@ void Application::renderFloatingTransportPill() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Toggle Timeline");
 
-            // Fit — zoom canvas so it fits within the visible workspace.
-            ImGui::SameLine(0, kGap);
-            if (smallBtn("##fp_fit", [&](float cx, float cy) {
-                dl->AddRect(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
-                            kFgWhite, 1.5f, 0, 1.5f);
-                dl->AddLine(ImVec2(cx - 3, cy - 2), ImVec2(cx + 3, cy + 2), kFgWhite, 1.2f);
-            })) {
-                m_viewportPanel.setZoom(0.75f);
-                m_viewportPanel.resetPan();
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fit Canvas");
-
-            // Fill — zoom canvas to fill the visible workspace edge-to-edge.
+            // Fill Canvas — THE one canvas-view button (user request: exactly
+            // one). Snaps to the default view: canvas fit + centered in the
+            // space left of the Control Panel, left flyout collapsed so
+            // nothing overlaps the image. Same action as Cmd+0.
             ImGui::SameLine(0, kGap);
             if (smallBtn("##fp_fill", [&](float cx, float cy) {
                 dl->AddRectFilled(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
@@ -9495,10 +9922,10 @@ void Application::renderFloatingTransportPill() {
                 dl->AddRect(ImVec2(cx - 6, cy - 5), ImVec2(cx + 6, cy + 5),
                             kFgWhite, 1.5f, 0, 1.5f);
             })) {
-                m_viewportPanel.setZoom(1.0f);
-                m_viewportPanel.resetPan();
+                m_viewportPanel.resetZoom();
+                m_ui.setActiveLeftPanel(UIManager::LeftPanel::None);
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill Canvas");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill Canvas (Cmd+0)");
 
             // (Audio meter moved to the LEFT next to the Sound dropdown.)
 
@@ -10162,16 +10589,11 @@ void Application::renderTimelinePanel() {
     // (vp_bottom - pillH - m_timelineCurH); pill bottom edge == timeline top
     // edge, so the two ride together as m_timelineCurH animates.
     float tlX = vp->Pos.x;
-    // Stop the timeline at the left edge of the right sidebar so it never
-    // overlaps the floating props/mapping panel.
-    float tlW;
-    {
-        float rpLeft = m_ui.getRightPanelLeft();
-        if (rpLeft > vp->Pos.x && rpLeft < vp->Pos.x + vp->Size.x)
-            tlW = rpLeft - vp->Pos.x;
-        else
-            tlW = vp->Size.x;
-    }
+    // Full-width timeline. The right float panel clamps its own bottom to
+    // the timeline's top edge (m_timelineTopY, "Fix 1" in UIManager), so
+    // the two never overlap even at full width — clamping the timeline to
+    // getRightPanelLeft() just left an empty dead corner bottom-right.
+    float tlW = vp->Size.x;
     float tlH = m_timelineCurH;
     if (tlH < 1.0f) tlH = 1.0f;
     float tlY = vp->Pos.y + vp->Size.y - tlH;   // pinned to viewport bottom
@@ -13005,24 +13427,7 @@ void Application::renderNavBarPrefix() {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New Project")) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
-                while (m_layerStack.count() > 0) {
-                    int li = m_layerStack.count() - 1;
-                    uint32_t rid = m_layerStack[li] ? m_layerStack[li]->id : 0;
-                    m_layerStack.removeLayer(li);
-                    if (rid) m_timeline.removeTrackForLayer(rid);
-                }
-                m_selectedLayer = -1;
-                m_mappings.clear();
-                auto mp = std::make_unique<MappingProfile>();
-                mp->init();
-                m_mappings.push_back(std::move(mp));
-                m_zones.clear();
-                auto zone = std::make_unique<OutputZone>();
-                zone->mappingIndex = 0;
-                zone->init();
-                m_zones.push_back(std::move(zone));
-                m_activeZone = 0;
-                m_viewportPanel.resetZoom();
+                resetToEmptyProject();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Add Image Layer...")) {
@@ -13060,7 +13465,13 @@ void Application::renderNavBarPrefix() {
             ImGui::Separator();
             if (ImGui::MenuItem("Save Project...")) {
                 std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
-                if (!path.empty()) saveProject(path);
+                if (!path.empty()) {
+                    saveProject(path);
+                    // An explicit user save over the failed-load file is a
+                    // deliberate overwrite — lift the autosave guard.
+                    if (path == m_projectLoadFailedPath)
+                        m_projectLoadFailedPath.clear();
+                }
             }
             if (ImGui::MenuItem("Publish to Mobile")) {
                 publishPlayToAgent();
@@ -13262,25 +13673,7 @@ void Application::renderMenuBar_legacy() {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New Project")) {
                 m_undoStack.pushState(m_layerStack, m_selectedLayer);
-                while (m_layerStack.count() > 0) {
-                    int li = m_layerStack.count() - 1;
-                    uint32_t rid = m_layerStack[li] ? m_layerStack[li]->id : 0;
-                    m_layerStack.removeLayer(li);
-                    if (rid) m_timeline.removeTrackForLayer(rid);
-                }
-                m_selectedLayer = -1;
-                // Reset mappings, masks, and zones to defaults
-                m_mappings.clear();
-                auto mp = std::make_unique<MappingProfile>();
-                mp->init();
-                m_mappings.push_back(std::move(mp));
-                m_zones.clear();
-                auto zone = std::make_unique<OutputZone>();
-                zone->mappingIndex = 0;
-                zone->init();
-                m_zones.push_back(std::move(zone));
-                m_activeZone = 0;
-                m_viewportPanel.resetZoom();
+                resetToEmptyProject();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Add Image Layer...")) {
@@ -13342,7 +13735,13 @@ void Application::renderMenuBar_legacy() {
             ImGui::Separator();
             if (ImGui::MenuItem("Save Project...")) {
                 std::string path = saveFileDialog("Easel Project\0*.easel\0", "easel");
-                if (!path.empty()) saveProject(path);
+                if (!path.empty()) {
+                    saveProject(path);
+                    // An explicit user save over the failed-load file is a
+                    // deliberate overwrite — lift the autosave guard.
+                    if (path == m_projectLoadFailedPath)
+                        m_projectLoadFailedPath.clear();
+                }
             }
             if (ImGui::MenuItem("Publish to Mobile")) {
                 publishPlayToAgent();
@@ -13845,10 +14244,22 @@ void Application::addWindowCapture(uint32_t windowID, const std::string& title) 
 
 void Application::loadShader(const std::string& path) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
-    auto source = std::make_shared<ShaderSource>();
-    if (!source->loadFromFile(path)) {
-        std::cerr << "[Easel] SHADER LOAD FAILED: " << path << std::endl;
-        return;
+    // Reuse the browser preview's already-compiled instance when it's the
+    // same file: the single-click that precedes an add compiled this shader
+    // moments ago, and recompiling doubled the click hitch (GLSL compile
+    // blocks the render thread; 3D shaders are the worst). The render loop
+    // resizes it from 480p to zone res on the next frame.
+    std::shared_ptr<ShaderSource> source;
+    if (m_scPreview && m_scPreviewPath == path) {
+        source = m_scPreview;
+        m_scPreview.reset();
+        m_scPreviewPath.clear();
+    } else {
+        source = std::make_shared<ShaderSource>();
+        if (!source->loadFromFile(path)) {
+            std::cerr << "[Easel] SHADER LOAD FAILED: " << path << std::endl;
+            return;
+        }
     }
     std::cerr << "[Easel] Shader loaded OK: " << path
               << " | initialized=" << source->isInitialized()
@@ -15555,16 +15966,67 @@ void Application::saveProject(const std::string& path) {
         j["groups"] = groupsJson;
     }
 
-    // Write to file
-    std::ofstream file(path);
-    if (file.is_open()) {
+    // Write atomically: stream to a sibling ".tmp", then rename over the
+    // target. This path autosaves every 30s AND runs at quit — a crash /
+    // power cut / full disk mid-write would otherwise truncate the show file.
+    // The rename is the atomic step (same volume), so the file on disk is
+    // always either the old complete project or the new complete project.
+    const std::string tmpPath = path + ".tmp";
+    {
+        std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            std::cerr << "Failed to save project (cannot open " << tmpPath
+                      << ")" << std::endl;
+            return;
+        }
         // error_handler_t::replace — never abort the app on a stray
         // non-UTF-8 byte in a layer name / msg / path; substitute U+FFFD.
         file << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
-        std::cout << "Project saved: " << path << std::endl;
-    } else {
-        std::cerr << "Failed to save project: " << path << std::endl;
+        file.flush();
+        if (!file.good()) {
+            // Disk full / IO error — the original is untouched; drop the tmp.
+            file.close();
+            std::error_code rmEc;
+            std::filesystem::remove(tmpPath, rmEc);
+            std::cerr << "Failed to save project (write error): " << path
+                      << std::endl;
+            return;
+        }
     }
+    std::error_code ec;
+    std::filesystem::rename(tmpPath, path, ec);
+    if (ec) {
+        // Leave the tmp on disk for manual recovery — the original is intact.
+        std::cerr << "Failed to save project (rename " << tmpPath << " -> "
+                  << path << "): " << ec.message() << std::endl;
+        return;
+    }
+    std::cout << "Project saved: " << path << std::endl;
+}
+
+// Fresh-session state: no layers, one default zone + one default mapping,
+// centered viewport. Extracted from the File > New Project menu handler so
+// loadProject's corrupt-file recovery lands in exactly the same usable shape.
+void Application::resetToEmptyProject() {
+    while (m_layerStack.count() > 0) {
+        int li = m_layerStack.count() - 1;
+        uint32_t rid = m_layerStack[li] ? m_layerStack[li]->id : 0;
+        m_layerStack.removeLayer(li);
+        if (rid) m_timeline.removeTrackForLayer(rid);
+    }
+    m_selectedLayer = -1;
+    // Reset mappings, masks, and zones to defaults
+    m_mappings.clear();
+    auto mp = std::make_unique<MappingProfile>();
+    mp->init();
+    m_mappings.push_back(std::move(mp));
+    m_zones.clear();
+    auto zone = std::make_unique<OutputZone>();
+    zone->mappingIndex = 0;
+    zone->init();
+    m_zones.push_back(std::move(zone));
+    m_activeZone = 0;
+    m_viewportPanel.resetZoom();
 }
 
 void Application::loadProject(const std::string& path) {
@@ -15583,6 +16045,37 @@ void Application::loadProject(const std::string& path) {
         return;
     }
 
+    // The load body performs dozens of typed .get<T>() reads on nested arrays
+    // (corner pins, mask points, positions, …). A truncated or wrong-typed
+    // field throws json::type_error AFTER the layer stack was already cleared,
+    // which used to leave the app half-loaded (or dead) at showtime. Guard the
+    // whole body: on failure, fall back to a clean empty session and refuse to
+    // autosave over the original file so it stays recoverable.
+    try {
+        loadProjectBody(j);
+        std::cout << "Project loaded: " << path << std::endl;
+        // A good load lifts any autosave guard left by an earlier failed one —
+        // the in-memory state is a real project again (matches the existing
+        // autosave semantics: whatever is loaded gets autosaved).
+        m_projectLoadFailedPath.clear();
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load project '" << path << "': " << e.what()
+                  << " — recovering with an empty session; the file on disk "
+                     "was NOT modified." << std::endl;
+        resetToEmptyProject();
+        // The body may have thrown after timeline tracks/clips were rebuilt
+        // for layers that no longer exist — drop them with the rest.
+        m_timeline.clear();
+        // Autosave guard: the session is now empty, so a reflexive save to
+        // this path would replace the (intact, possibly fixable) show file
+        // with nothing. Checked at every non-explicit saveProject call site.
+        m_projectLoadFailedPath = path;
+    }
+}
+
+// Everything that can throw during a project load — split from loadProject()
+// so the caller can wrap it in a single try/catch (see above).
+void Application::loadProjectBody(const json& j) {
 #ifdef HAS_NDI
     // NDI network selection (additive — absent in older projects → stays Auto).
     if (j.contains("ndiNetwork")) {
@@ -16208,6 +16701,10 @@ void Application::loadProject(const std::string& path) {
         maxId = std::max(maxId, m_layerStack[i]->id);
     }
     m_nextLayerId = maxId + 1;
+    // Undo snapshots from the previous project carry ids minted under the
+    // OLD counter; restoring one after the reset below could collide with a
+    // freshly assigned id. Cross-project undo was never meaningful anyway.
+    m_undoStack.clear();
     for (int i = 0; i < m_layerStack.count(); i++) {
         if (m_layerStack[i]->id == 0) {
             m_layerStack[i]->id = m_nextLayerId++;
@@ -16314,8 +16811,6 @@ void Application::loadProject(const std::string& path) {
             }
         }
     }
-
-    std::cout << "Project loaded: " << path << std::endl;
 }
 
 // Flip + PNG-encode on a worker thread. The encode is the dominant cost of

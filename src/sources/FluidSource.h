@@ -23,6 +23,9 @@ public:
 
     // ContentSource
     void update() override;
+    // Undo-orphan parking: frees every sim/post FBO; programs stay. The
+    // fluid state is lost — update() lazily reallocs and re-develops.
+    void suspend() override;
     GLuint textureId() const override { return m_output.tex; }
     int width() const override { return m_outW; }
     int height() const override { return m_outH; }
@@ -130,6 +133,7 @@ private:
     struct DoubleFBO { FBO read, write; int w = 0, h = 0; void swap(); };
 
     bool m_ready = false;
+    bool m_suspended = false;   // FBOs dropped by suspend(); update() revives
     int  m_outW = 1280, m_outH = 720;
     double m_lastTime = 0.0;
     float  m_hue = 0.0f;
@@ -217,6 +221,7 @@ private:
     FBO       createFBO(int w, int h, GLint internalFmt, GLenum type, GLenum filter);
     DoubleFBO createDoubleFBO(int w, int h, GLint internalFmt, GLenum type, GLenum filter);
     void destroyFBO(FBO& f);
+    void createSimBuffers();   // all sim/post FBOs at m_outW×m_outH (init + revive)
     void createDitherTexture();
     void getResolution(int res, int& w, int& h) const;
     void blit(const FBO& target);

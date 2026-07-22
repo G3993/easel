@@ -53,6 +53,9 @@ public:
     bool init(int resolutionW = 1920, int resolutionH = 1080);
 
     void update() override;
+    // Undo-orphan parking: frees the color+depth render target; shaders +
+    // the loaded jet mesh stay resident. update() lazily recreates the FBO.
+    void suspend() override;
     GLuint textureId() const override { return m_output.textureId(); }
     int width() const override  { return m_output.width(); }
     int height() const override { return m_output.height(); }
@@ -82,5 +85,6 @@ private:
     float       m_extent = 1.0f;   // mesh bbox half-extent
     double      m_startTime = 0.0;
     bool        m_ready = false;
+    bool        m_suspended = false; // FBO dropped by suspend(); update() revives
     int         m_w = 1920, m_h = 1080;
 };

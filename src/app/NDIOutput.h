@@ -27,6 +27,15 @@ public:
 
     bool create(const std::string& name = "Easel");
     void destroy();
+    // Split teardown for the async quit path. destroySender() tears down only
+    // the NDI SDK sender — safe to call from any thread. destroyGL() deletes
+    // the GL readback objects (fences/PBOs/FBO) and MUST run on a thread with
+    // the GL context current; the background closing thread has no context
+    // (the main thread keeps it to render the closing spinner), so it calls
+    // destroySender() and the main thread calls destroyGL() afterwards.
+    // destroy() calls both, for the single-threaded (main-thread) call sites.
+    void destroySender();
+    void destroyGL();
     bool isActive() const { return m_send != nullptr; }
     bool hasReceivers() const;
     const std::string& publishedName() const { return m_publishedName; }

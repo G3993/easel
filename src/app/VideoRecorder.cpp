@@ -176,6 +176,10 @@ std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     enumerator->Release();
     return result;
 }
+
+// Hot-plug watching not wired up on Windows yet (would use
+// IMMNotificationClient); the flag simply never fires.
+void VideoRecorder::watchAudioDevices(std::atomic<bool>*) {}
 #elif defined(__APPLE__)
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -285,10 +289,45 @@ std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
 
     return result;
 }
+
+// ─── Hot-plug watcher ────────────────────────────────────────────────
+// CoreAudio fires these on its own internal thread; the handler only flips
+// an atomic flag, and the render loop does the actual re-enumeration.
+
+static std::atomic<bool>* sAudioDevicesChangedFlag = nullptr;
+
+static OSStatus audioTopologyListener(AudioObjectID, UInt32,
+                                      const AudioObjectPropertyAddress*, void*) {
+    if (sAudioDevicesChangedFlag)
+        sAudioDevicesChangedFlag->store(true, std::memory_order_release);
+    return noErr;
+}
+
+void VideoRecorder::watchAudioDevices(std::atomic<bool>* changedFlag) {
+    sAudioDevicesChangedFlag = changedFlag;
+    AudioObjectPropertyAddress devsProp = {
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &devsProp,
+                                   audioTopologyListener, nullptr);
+    // Default-input switches (plugging an interface usually retargets it)
+    // don't change the device list but do change what "Default" means for
+    // consumers — surface those too so pickers and capture can re-sync.
+    AudioObjectPropertyAddress defInProp = {
+        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &defInProp,
+                                   audioTopologyListener, nullptr);
+}
 #else
 std::vector<RecAudioDevice> VideoRecorder::enumerateAudioDevices() {
     return {};
 }
+void VideoRecorder::watchAudioDevices(std::atomic<bool>*) {}
 #endif
 
 // ─── WASAPI capture ─────────────────────────────────────────────────

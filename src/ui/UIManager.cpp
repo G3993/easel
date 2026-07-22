@@ -711,23 +711,42 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
                       active != QuickNavTab::Mapping &&
                       activeSub == SourceTab::Win);
 
-    pill("##rdProps", actProps, &lucide::sliders, "Parameters",
-         [this]() { focusPanel("        ###Properties"); });
+    // Click-again-to-collapse: an active pill's second click folds the whole
+    // dock down to this strip (same idiom as the left rail); clicking any
+    // pill while folded reopens with that panel. While folded no pill reads
+    // as active — the panel it pointed at isn't visible.
+    auto toggleOr = [this](bool isActive, std::function<void()> focus) {
+        if (isActive && !m_rightDockCollapsed) {
+            m_rightDockCollapsed = true;
+            return;
+        }
+        if (m_rightDockCollapsed) {
+            // Unfold: resettle the dock layout next frame — the node may
+            // have been pruned while its dockspace went unsubmitted.
+            m_forceDockRebuild = true;
+        }
+        m_rightDockCollapsed = false;
+        focus();
+    };
+    const bool folded = m_rightDockCollapsed;
+
+    pill("##rdProps", actProps && !folded, &lucide::sliders, "Parameters",
+         [=]() { toggleOr(actProps, [this]() { focusPanel("        ###Properties"); }); });
     ImGui::SameLine(0, gap);
-    pill("##rdShader", actShader, &lucide::zap, "Shaders",
-         [this]() { focusSourcesTab(SourceTab::Shader); });
+    pill("##rdShader", actShader && !folded, &lucide::zap, "Shaders",
+         [=]() { toggleOr(actShader, [this]() { focusSourcesTab(SourceTab::Shader); }); });
     ImGui::SameLine(0, gap);
-    pill("##rdMic", actMic, &lucide::mic, "Voice / Etherea",
-         [this]() { focusSourcesTab(SourceTab::Mic); });
+    pill("##rdMic", actMic && !folded, &lucide::mic, "Voice / Etherea",
+         [=]() { toggleOr(actMic, [this]() { focusSourcesTab(SourceTab::Mic); }); });
     ImGui::SameLine(0, gap);
-    pill("##rdMusic", actMusic, &lucide::music, "Music / Audio",
-         [this]() { focusPanel("        ###Audio"); });
+    pill("##rdMusic", actMusic && !folded, &lucide::music, "Music / Audio",
+         [=]() { toggleOr(actMusic, [this]() { focusPanel("        ###Audio"); }); });
     ImGui::SameLine(0, gap);
-    pill("##rdCam", actCam, &lucide::camera, "Camera",
-         [this]() { focusSourcesTab(SourceTab::Cam); });
+    pill("##rdCam", actCam && !folded, &lucide::camera, "Camera",
+         [=]() { toggleOr(actCam, [this]() { focusSourcesTab(SourceTab::Cam); }); });
     ImGui::SameLine(0, gap);
-    pill("##rdWin", actWin, &lucide::monitor, "Display / Capture",
-         [this]() { focusSourcesTab(SourceTab::Win); });
+    pill("##rdWin", actWin && !folded, &lucide::monitor, "Display / Capture",
+         [=]() { toggleOr(actWin, [this]() { focusSourcesTab(SourceTab::Win); }); });
     // Mapping pill removed — Mapping is now its own top-level workspace
     // (CANVAS · MAPPING · STAGE · PLAY), so it no longer belongs in the
     // parameters-panel quick-nav.
@@ -775,10 +794,10 @@ void UIManager::drawInspectorTabIcons() {
         // inside each panel). The tab bar still exists functionally so
         // pill-driven ImGui::SetWindowFocus actually switches windows.
         if (f == 1) {
-            // Match the host K bg (pure black) and extend a few pixels past
+            // Match the host K bg (kNavSurface) and extend a few pixels past
             // the bar bottom so there's no visible seam against the panel
             // body below.
-            ImU32 bg = IM_COL32(0, 0, 0, 255);
+            ImU32 bg = UITokens::kNavSurface;
             fg->AddRectFilled(
                 ImVec2(tabBar->BarRect.Min.x, tabBar->BarRect.Min.y - 2.0f),
                 ImVec2(tabBar->BarRect.Max.x, tabBar->BarRect.Max.y + 4.0f),
@@ -1137,7 +1156,8 @@ void UIManager::setupDockspace(float bottomBarHeight) {
     bool modeChanged = (s_lastMode != sMode);
     s_lastMode = sMode;
 
-    bool structuralRebuild = (m_firstFrame || sizeChanged);
+    bool structuralRebuild = (m_firstFrame || sizeChanged || m_forceDockRebuild);
+    m_forceDockRebuild = false;
 
     // A mode switch no longer tears down the dock node. The full
     // DockBuilderRemoveNode + resettle below caused a visible one-frame
@@ -1414,23 +1434,49 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // renderRightToolRail() is defined but never invoked, so we
         // don't need to reserve space for it.)
         const float kRightInset = 20.0f;
-        if (rightHasContent) {
+        // Publish the float's left edge (screen X) — the canvas fit region,
+        // timeline width and transport pill all read getRightPanelLeft() to
+        // stay clear of the panel. This was never assigned before, so every
+        // consumer silently fell back to "no panel" and the float sat on
+        // top of the canvas. 0 = hidden.
+        // The pill strip only exists outside Mapping/Zones (those modes host a
+        // single panel with no switcher), so the collapse toggle is inert there.
+        const bool navStripHere = (sMode != WorkspaceMode::Mapping &&
+                                   sMode != WorkspaceMode::Zones);
+        const bool dockCollapsed = m_rightDockCollapsed && navStripHere;
+        // Latch for isPanelVisible(): the pill bar below may flip
+        // m_rightDockCollapsed mid-frame, but panel visibility must not
+        // change until the DockSpace submission matches (see header note).
+        m_rightDockCollapsedApplied = dockCollapsed;
+        // Collapsed → the canvas reclaims the panel width (the icon strip
+        // still floats at the top-right, which is fine to overlap).
+        m_rightFloatLeft = (rightHasContent && !dockCollapsed)
+            ? viewport->WorkPos.x + dockSize.x - rightW - kRightInset
+            : 0.0f;
+        // Folded: isPanelVisible() hides every right-dock panel, so
+        // rightHasContent reads false — but the strip host must still render
+        // or there'd be nothing left to click to reopen the dock.
+        if (rightHasContent || dockCollapsed) {
+            // Collapsed height = just the pill bar (42) + a little breathing
+            // room, so the strip stays clickable to reopen a panel.
+            const float kCollapsedH = 54.0f;
             ImGui::SetNextWindowPos (
                 ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kRightInset,
                        floatY),
                 ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(rightW, floatH), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(rightW, dockCollapsed ? kCollapsedH : floatH),
+                                     ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             // Zero vertical item-spacing so the pill bar sits FLUSH against
             // the DockSpace below — no implicit ~4 px gap between the
             // BeginChild's bottom and the next widget.
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(0, 0));
-            // Black background for the host AND every internal surface
+            // One flat surface for the host AND every internal surface
             // ImGui paints behind the dock-tab strip (TitleBg* and the
-            // unselected/dimmed Tab fills). Without this the global theme
-            // shows a charcoal grey strip behind the 4 dock tab icons —
-            // visibly distinct from the black panel body below.
-            const ImU32 K = IM_COL32(0, 0, 0, 255);
+            // unselected/dimmed Tab fills) — otherwise the global theme
+            // shows a differently-shaded strip behind the 4 dock tab icons.
+            // kNavSurface so the panel matches the top nav band exactly.
+            const ImU32 K = UITokens::kNavSurface;
             ImGui::PushStyleColor(ImGuiCol_WindowBg,            K);
             ImGui::PushStyleColor(ImGuiCol_ChildBg,             K);
             ImGui::PushStyleColor(ImGuiCol_TitleBg,             K);
@@ -1461,10 +1507,13 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                 // the Zones panel), so the pill switcher would just be a row
                 // of dead/duplicate icons — skip it and let the panel body
                 // start at the top.
-                if (sMode != WorkspaceMode::Mapping &&
-                    sMode != WorkspaceMode::Zones) {
+                if (navStripHere) {
                     renderRightDockNavBar(QuickNavTab::None);
                 }
+                // Collapsed: no DockSpace this frame — ImGui then hides every
+                // window docked into it, which is exactly the fold we want;
+                // only the pill strip above stays.
+                if (!dockCollapsed) {
                 // Shrink the auto tab bar's height to ~font height so it
                 // doesn't reserve a visible strip below the pill bar.
                 // FramePadding controls tab height; push y=0 just for the
@@ -1478,6 +1527,7 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                                  ImGuiDockNodeFlags_NoDockingSplit |
                                  ImGuiDockNodeFlags_NoUndocking);
                 ImGui::PopStyleVar(2);
+                } // end !dockCollapsed
             }
             ImGui::End();
             ImGui::PopStyleColor(17);  // 11 K-fills + 3 FrameBg + 3 Button
@@ -1562,6 +1612,19 @@ bool UIManager::isPanelVisible(const char* title) const {
     // rail compositions. Bottom dock (Timeline) stays in every mode.
     if (!title) return true;
     auto eq = [&](const char* x) { return std::strcmp(title, x) == 0; };
+
+    // Right dock folded to the icon strip (active pill clicked again):
+    // the right-dock panels must not even Begin() — if they render while
+    // their DockSpace is skipped, ImGui re-floats them over the canvas.
+    // Reads the frame-latched copy so a mid-frame pill click can't create
+    // a submit-without-dockspace frame. Mapping/Zones have no strip.
+    if (m_rightDockCollapsedApplied &&
+        sMode != WorkspaceMode::Mapping && sMode != WorkspaceMode::Zones) {
+        if (eq("Layers") || eq("Sources") || eq("Mapping") ||
+            eq("Properties") || eq("Audio") || eq("MIDI") ||
+            eq("Media") || eq("Zones"))
+            return false;
+    }
 
     switch (sMode) {
     case WorkspaceMode::Canvas:

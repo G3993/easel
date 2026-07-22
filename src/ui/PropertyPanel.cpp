@@ -126,7 +126,13 @@ static constexpr float kTallTrackH  = 18.0f;                     // pill height
 static constexpr float kThumbInset  = 2.5f;                      // thumb gap inside the pill
 static constexpr ImU32 kColTallTrack = IM_COL32(255, 255, 255, 18); // pill body
 static constexpr ImU32 kColTallFill  = IM_COL32(255, 255, 255, 26); // leading fill (subtle)
-static constexpr ImU32 kColRangeSpan = IM_COL32(255, 255, 255, 56); // range row's selected span (neutral, mobile palette)
+static constexpr ImU32 kColRangeSpan = IM_COL32(74, 140, 255, 88); // range row's selected span — blue = "live-driven" (2026-07-18 directive), matches UITokens::kAccent
+// Live audio-driven markers only — blue (user directive 2026-07-18: "live
+// signals should be a different color … make it blue for live", superseding
+// the 2026-07-16 mint). Matches UITokens::kAccent so "live" reads as the one
+// accent family app-wide. Everything static stays monochrome; this is the
+// one "alive" color in the panel.
+static constexpr ImU32 kColLiveSignal = IM_COL32(74, 140, 255, 255);
 
 // ImVec4 mirrors for the PushStyleColor() call sites. Same values as the
 // ImU32 constants above — one palette, two encodings, no new numbers.
@@ -473,8 +479,13 @@ void PropertyPanel::PushPanelStyle() {
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(kInnerPad, kStepY * 2.5f));     // 12,10
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding,  6.0f);
+    // Panel body matches the host float + top nav band (kNavSurface) —
+    // the theme's near-black WindowBg otherwise paints a visibly darker
+    // card over the slate host, leaving a seam under the icon strip.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImU32)UITokens::kNavSurface);
 }
 void PropertyPanel::PopPanelStyle() {
+    ImGui::PopStyleColor(1);
     ImGui::PopStyleVar(5);
 }
 
@@ -560,13 +571,14 @@ static void drawBolt(ImDrawList* dl, float cx, float cy, float s, ImU32 col) {
 }
 
 // Live-marker color for a bound slider. This was per-signal tone colors
-// (bass rose, mid green, …) for one day; the user's monochrome directive
-// (2026-07-11, "accent colors should be white") flattened it to pure white —
-// matching the mobile sheet. The per-signal plumbing (a liveCol argument on
-// paramSlider/rangeSlider) is kept so tones can return as an option later.
+// (bass rose, mid green, …) for one day, then pure white under the monochrome
+// directive (2026-07-11) — which made the live tick invisible against the
+// white thumbs. Now a single slight mint (2026-07-16 directive), one shade
+// off white, shared by every signal. The per-signal plumbing (a liveCol
+// argument on paramSlider/rangeSlider) is kept so tones can return later.
 static ImU32 signalToneColor(AudioSignal s) {
     (void)s;
-    return IM_COL32(255, 255, 255, 255);
+    return kColLiveSignal;
 }
 
 // Parameter row styled after the reference UI: muted label (top-left) + right-aligned
@@ -689,7 +701,7 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     // so the audio stays visible even when it sits under the knob. Same
     // inset travel as the thumb so knob and tick agree at the ends.
     if (liveVal) {
-        ImU32 lc = liveCol ? liveCol : kColAccent;
+        ImU32 lc = liveCol ? liveCol : kColLiveSignal;
         float lv = *liveVal;
         if (lv < lo) lv = lo; else if (lv > hi) lv = hi;
         float lnorm = (hi > lo) ? (lv - lo) / (hi - lo) : 0.0f;
@@ -920,8 +932,9 @@ static bool rangeSlider(const char* id, const char* label,
     }
 
     // Tall pill track + a quiet lighter BAND for the selected range. No ball
-    // thumbs — the band itself is the affordance. Slim rounded edge caps mark
-    // the draggable ends, brightening on hover/drag. Minimal, monochrome.
+    // thumbs — the band itself is the affordance. Each end of the range is a
+    // thin full-height rounded rectangular line (2026-07-16 directive),
+    // brightening on hover/drag. Minimal, monochrome.
     bool hovered = ImGui::IsItemHovered();
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
@@ -932,15 +945,15 @@ static bool rangeSlider(const char* id, const char* label,
                                        : IM_COL32(255, 255, 255, 150);
     for (float hv : { *lo, *hi }) {
         float hx = toX(hv);
-        dl->AddRectFilled(ImVec2(hx - 1.5f, trackY + 3.5f),
-                          ImVec2(hx + 1.5f, trackY + trackH - 3.5f),
+        dl->AddRectFilled(ImVec2(hx - 1.5f, trackY + 1.5f),
+                          ImVec2(hx + 1.5f, trackY + trackH - 1.5f),
                           capCol, 1.5f);
     }
 
     // Live driven-value marker — clean tone-colored tick inside the pill,
     // on top of the thumbs (the only color in the row, by design).
     if (liveVal) {
-        ImU32 lc = liveCol ? liveCol : kColAccent;
+        ImU32 lc = liveCol ? liveCol : kColLiveSignal;
         float lv = *liveVal;
         if (lv < absLo) lv = absLo; else if (lv > absHi) lv = absHi;
         float lx = toX(lv);
@@ -4340,10 +4353,10 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         // Match the panel bg so the combo doesn't read as a
                         // visible "container box", and force full remaining
                         // width so the preview text never has to scroll.
-                        ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(0, 0, 0, 255));
+                        ImGui::PushStyleColor(ImGuiCol_FrameBg,        UITokens::kNavSurface);
                         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(255, 255, 255, 14));
                         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(255, 255, 255, 22));
-                        ImGui::PushStyleColor(ImGuiCol_Button,         IM_COL32(0, 0, 0, 255));
+                        ImGui::PushStyleColor(ImGuiCol_Button,         UITokens::kNavSurface);
                         ImGui::PushStyleColor(ImGuiCol_Border,         IM_COL32(255, 255, 255, 18));
                         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                         ImGui::SetNextItemWidth(-1);

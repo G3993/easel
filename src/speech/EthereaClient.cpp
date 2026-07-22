@@ -34,6 +34,9 @@ struct WSADATA { int dummy; };
 // ─── Logging ───────────────────────────────────────────────────────────────
 
 static void etLog(const std::string& msg) {
+    // Called from both the ws and sse threads — the static state needs a lock.
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
     static int suppressCount = 0;
     static std::string lastMsg;
     // Suppress repeated messages (log every 10th repeat)
@@ -149,11 +152,11 @@ struct WSReader {
     std::string buf;
 
     // Read exactly `len` bytes into `out`, using buffer + socket.
-    bool readExact(char* out, int len, int timeoutMs = 10000) {
-        int have = 0;
+    bool readExact(char* out, size_t len, int timeoutMs = 10000) {
+        size_t have = 0;
         // Drain from buffer first
         if (!buf.empty()) {
-            int take = std::min(len, (int)buf.size());
+            size_t take = std::min(len, buf.size());
             memcpy(out, buf.data(), take);
             buf.erase(0, take);
             have = take;
@@ -172,9 +175,11 @@ struct WSReader {
             int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
 #endif
             if (sel <= 0) return false;
-            int n = recv(sock, out + have, len - have, 0);
+            // Chunked so the recv length always fits an int on every platform
+            int want = (int)std::min<size_t>(len - have, 65536);
+            int n = recv(sock, out + have, want, 0);
             if (n <= 0) return false;
-            have += n;
+            have += (size_t)n;
         }
         return true;
     }
@@ -206,6 +211,11 @@ static bool wsReadFrame(WSReader& rd, WSFrame& frame) {
         for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
     }
 
+    // len comes off the wire — a hostile/corrupt peer can claim up to 2^63
+    // bytes and resize() would throw and kill the thread. Treat as dead link.
+    constexpr uint64_t kMaxFramePayload = 4 * 1024 * 1024;
+    if (len > kMaxFramePayload) return false;
+
     uint8_t mask[4] = {};
     if (masked) {
         if (!rd.readExact((char*)mask, 4)) return false;
@@ -213,7 +223,7 @@ static bool wsReadFrame(WSReader& rd, WSFrame& frame) {
 
     frame.payload.resize((size_t)len);
     if (len > 0) {
-        if (!rd.readExact(&frame.payload[0], (int)len)) return false;
+        if (!rd.readExact(&frame.payload[0], (size_t)len)) return false;
         if (masked) {
             for (size_t i = 0; i < len; i++)
                 frame.payload[i] ^= mask[i % 4];
@@ -304,7 +314,14 @@ void EthereaClient::parseUrl() {
     std::string hostPort = (slashPos != std::string::npos) ? u.substr(0, slashPos) : u;
     size_t colonPos = hostPort.find(':');
     m_host = (colonPos != std::string::npos) ? hostPort.substr(0, colonPos) : hostPort;
-    if (colonPos != std::string::npos) m_port = std::stoi(hostPort.substr(colonPos + 1));
+    if (colonPos != std::string::npos) {
+        // strtol, not stoi — "host:" or "host:abc" must not throw on the main thread
+        std::string portPart = hostPort.substr(colonPos + 1);
+        char* end = nullptr;
+        long p = strtol(portPart.c_str(), &end, 10);
+        if (end != portPart.c_str() && p > 0 && p <= 65535) m_port = (int)p;
+        else etLog("EthereaClient: bad port in \"" + hostPort + "\", using " + std::to_string(m_port));
+    }
 }
 
 bool EthereaClient::connect(const std::string& baseUrl, const std::string& sessionId) {
@@ -339,14 +356,22 @@ void EthereaClient::disconnect() {
     m_sseConnected.store(false);
     // Close the live sockets so select()/recv() on the thread unblocks
     // immediately instead of waiting for the next timeout to fire.
-#ifdef _WIN32
     {
         uintptr_t ws = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
-        if (ws != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ws);
-        uintptr_t ss = m_sseSock.exchange((uintptr_t)INVALID_SOCKET);
-        if (ss != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ss);
-    }
+        if (ws != (uintptr_t)INVALID_SOCKET) {
+#ifndef _WIN32
+            shutdown((SOCKET)ws, SHUT_RDWR); // close() alone may not wake select() on POSIX
 #endif
+            closesocket((SOCKET)ws);
+        }
+        uintptr_t ss = m_sseSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (ss != (uintptr_t)INVALID_SOCKET) {
+#ifndef _WIN32
+            shutdown((SOCKET)ss, SHUT_RDWR);
+#endif
+            closesocket((SOCKET)ss);
+        }
+    }
     if (m_wsThread.joinable()) m_wsThread.join();
     if (m_sseThread.joinable()) m_sseThread.join();
 }
@@ -373,7 +398,14 @@ std::vector<EthereaSession> EthereaClient::fetchSessions(const std::string& base
         std::string hostPort = (slashPos != std::string::npos) ? u.substr(0, slashPos) : u;
         size_t colonPos = hostPort.find(':');
         host = (colonPos != std::string::npos) ? hostPort.substr(0, colonPos) : hostPort;
-        if (colonPos != std::string::npos) port = std::stoi(hostPort.substr(colonPos + 1));
+        if (colonPos != std::string::npos) {
+            // strtol, not stoi — malformed port must not throw on the main thread
+            std::string portPart = hostPort.substr(colonPos + 1);
+            char* end = nullptr;
+            long p = strtol(portPart.c_str(), &end, 10);
+            if (end != portPart.c_str() && p > 0 && p <= 65535) port = (int)p;
+            else etLog("EthereaClient: bad port in \"" + hostPort + "\", using " + std::to_string(port));
+        }
     }
 
     std::string body = httpGet(host, port, "/api/sessions");
@@ -416,144 +448,162 @@ void EthereaClient::wsLoop() {
 
     int wsBackoff = 3; // seconds, grows exponentially on repeated failures
     while (m_running.load()) {
-        struct addrinfo hints = {}, *result = nullptr;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        std::string portStr = std::to_string(m_port);
-        if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
-            etLog("EthereaClient WS: DNS failed");
-            m_wsFailedAttempts++;
-            iSleep(wsBackoff * 1000);
-            wsBackoff = std::min(wsBackoff * 2, 60);
-            continue;
-        }
-
-        SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); m_wsFailedAttempts++; iSleep(wsBackoff * 1000); wsBackoff = std::min(wsBackoff * 2, 60); continue; }
-        if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-            etLog("EthereaClient WS: connect failed (is Etherea running?)");
-            closesocket(sock); freeaddrinfo(result);
-            m_wsFailedAttempts++;
-            iSleep(wsBackoff * 1000);
-            wsBackoff = std::min(wsBackoff * 2, 60);
-            continue;
-        }
-        freeaddrinfo(result);
-        wsBackoff = 3; // reset backoff on successful connect
-        m_wsFailedAttempts = 0;
-        m_wsSock.store((uintptr_t)sock); // expose so disconnect() can closesocket()
-
-        // Generate WebSocket key
-        uint8_t keyBytes[16];
-        for (int i = 0; i < 16; i++) keyBytes[i] = (uint8_t)(rand() & 0xFF);
-        std::string wsKey = base64Encode(keyBytes, 16);
-
-        // WebSocket upgrade request
-        std::string path = "/ws/transcript";
-        if (!m_sessionId.empty()) path += "?session_id=" + m_sessionId;
-
-        std::string request =
-            "GET " + path + " HTTP/1.1\r\n"
-            "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Key: " + wsKey + "\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n";
-        send(sock, request.c_str(), (int)request.size(), 0);
-
-        // Read upgrade response
-        std::string response;
-        char buf[4096];
-        while (m_running.load()) {
-            fd_set readSet;
-            FD_ZERO(&readSet);
-            FD_SET(sock, &readSet);
-            struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
-#ifdef _WIN32
-            int sel = select(0, &readSet, nullptr, nullptr, &tv);
-#else
-            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
-#endif
-            if (sel <= 0) continue; // timeout — recheck m_running at loop top
-            int n = recv(sock, buf, sizeof(buf) - 1, 0);
-            if (n <= 0) break;
-            buf[n] = '\0';
-            response += buf;
-            if (response.find("\r\n\r\n") != std::string::npos) break;
-        }
-
-        if (response.find("101") == std::string::npos) {
-            etLog("EthereaClient WS: upgrade failed — " + response.substr(0, 80));
-            m_wsSock.store((uintptr_t)INVALID_SOCKET);
-            closesocket(sock);
-            iSleep(3000);
-            continue;
-        }
-
-        // Preserve any leftover data after HTTP headers (may contain first WS frame)
-        WSReader rd;
-        rd.sock = sock;
-        size_t headerEnd = response.find("\r\n\r\n");
-        if (headerEnd != std::string::npos && headerEnd + 4 < response.size()) {
-            rd.buf = response.substr(headerEnd + 4);
-        }
-
-        m_wsConnected.store(true);
-        etLog("EthereaClient WS: connected");
-
-        // Read WebSocket frames
-        while (m_running.load()) {
-            WSFrame frame;
-            if (!wsReadFrame(rd, frame)) {
-                etLog("EthereaClient WS: read failed");
-                break;
-            }
-
-            if (frame.opcode == 0x8) { // close
-                etLog("EthereaClient WS: server closed");
-                break;
-            }
-            if (frame.opcode == 0x9) { // ping
-                wsSendFrame(sock, 0xA, frame.payload); // pong
+        // Nothing thrown in here may kill the app — catch, log, reconnect.
+        try {
+            struct addrinfo hints = {}, *result = nullptr;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            std::string portStr = std::to_string(m_port);
+            if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
+                etLog("EthereaClient WS: DNS failed");
+                m_wsFailedAttempts++;
+                iSleep(wsBackoff * 1000);
+                wsBackoff = std::min(wsBackoff * 2, 60);
                 continue;
             }
-            if (frame.opcode != 0x1) continue; // only text frames
 
-            // Parse JSON message
-            std::string type = jsonStr(frame.payload, "type");
-            if (type == "transcript") {
-                std::string text = jsonStr(frame.payload, "text");
-                bool isFinal = jsonBool(frame.payload, "is_final");
-
-                {
-                    std::lock_guard<std::mutex> lk(m_dataMutex);
-                    m_latestWords = text;
-                    if (isFinal && !text.empty()) {
-                        if (!m_fullTranscript.empty()) m_fullTranscript += " ";
-                        m_fullTranscript += text;
-                        // Bound for 24/7 runs — keep only the recent tail.
-                        constexpr size_t kMaxTranscript = 16000;
-                        if (m_fullTranscript.size() > kMaxTranscript)
-                            m_fullTranscript.erase(0, m_fullTranscript.size() - kMaxTranscript);
-                    }
-                }
-                {
-                    std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingEvents.push_back({text, isFinal});
-                }
-            } else if (type == "ping") {
-                // server keepalive, no action needed
+            SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+            if (sock == INVALID_SOCKET) { freeaddrinfo(result); m_wsFailedAttempts++; iSleep(wsBackoff * 1000); wsBackoff = std::min(wsBackoff * 2, 60); continue; }
+            if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
+                etLog("EthereaClient WS: connect failed (is Etherea running?)");
+                closesocket(sock); freeaddrinfo(result);
+                m_wsFailedAttempts++;
+                iSleep(wsBackoff * 1000);
+                wsBackoff = std::min(wsBackoff * 2, 60);
+                continue;
             }
-        }
+            freeaddrinfo(result);
+            wsBackoff = 3; // reset backoff on successful connect
+            m_wsFailedAttempts = 0;
+            m_wsSock.store((uintptr_t)sock); // expose so disconnect() can closesocket()
 
-        m_wsConnected.store(false);
-        m_wsSock.store((uintptr_t)INVALID_SOCKET);
-        closesocket(sock);
-        if (m_running.load()) {
-            etLog("EthereaClient WS: disconnected, reconnecting...");
-            iSleep(wsBackoff * 1000);
-            wsBackoff = std::min(wsBackoff * 2, 60);
+            // Generate WebSocket key
+            uint8_t keyBytes[16];
+            for (int i = 0; i < 16; i++) keyBytes[i] = (uint8_t)(rand() & 0xFF);
+            std::string wsKey = base64Encode(keyBytes, 16);
+
+            // WebSocket upgrade request
+            std::string path = "/ws/transcript";
+            if (!m_sessionId.empty()) path += "?session_id=" + m_sessionId;
+
+            std::string request =
+                "GET " + path + " HTTP/1.1\r\n"
+                "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: " + wsKey + "\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "\r\n";
+            send(sock, request.c_str(), (int)request.size(), 0);
+
+            // Read upgrade response
+            std::string response;
+            char buf[4096];
+            while (m_running.load()) {
+                fd_set readSet;
+                FD_ZERO(&readSet);
+                FD_SET(sock, &readSet);
+                struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
+#ifdef _WIN32
+                int sel = select(0, &readSet, nullptr, nullptr, &tv);
+#else
+                int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+#endif
+                if (sel <= 0) continue; // timeout — recheck m_running at loop top
+                int n = recv(sock, buf, sizeof(buf) - 1, 0);
+                if (n <= 0) break;
+                buf[n] = '\0';
+                response += buf;
+                if (response.size() > 65536) break; // runaway pre-upgrade stream
+                if (response.find("\r\n\r\n") != std::string::npos) break;
+            }
+
+            if (response.find("101") == std::string::npos) {
+                etLog("EthereaClient WS: upgrade failed — " + response.substr(0, 80));
+                // exchange so disconnect() and this path can't both close the fd
+                if (m_wsSock.exchange((uintptr_t)INVALID_SOCKET) != (uintptr_t)INVALID_SOCKET)
+                    closesocket(sock);
+                iSleep(3000);
+                continue;
+            }
+
+            // Preserve any leftover data after HTTP headers (may contain first WS frame)
+            WSReader rd;
+            rd.sock = sock;
+            size_t headerEnd = response.find("\r\n\r\n");
+            if (headerEnd != std::string::npos && headerEnd + 4 < response.size()) {
+                rd.buf = response.substr(headerEnd + 4);
+            }
+
+            m_wsConnected.store(true);
+            etLog("EthereaClient WS: connected");
+
+            // Read WebSocket frames
+            while (m_running.load()) {
+                WSFrame frame;
+                if (!wsReadFrame(rd, frame)) {
+                    etLog("EthereaClient WS: read failed");
+                    break;
+                }
+
+                if (frame.opcode == 0x8) { // close
+                    etLog("EthereaClient WS: server closed");
+                    break;
+                }
+                if (frame.opcode == 0x9) { // ping
+                    wsSendFrame(sock, 0xA, frame.payload); // pong
+                    continue;
+                }
+                if (frame.opcode != 0x1) continue; // only text frames
+
+                // Parse JSON message
+                std::string type = jsonStr(frame.payload, "type");
+                if (type == "transcript") {
+                    std::string text = jsonStr(frame.payload, "text");
+                    bool isFinal = jsonBool(frame.payload, "is_final");
+
+                    {
+                        std::lock_guard<std::mutex> lk(m_dataMutex);
+                        m_latestWords = text;
+                        if (isFinal && !text.empty()) {
+                            if (!m_fullTranscript.empty()) m_fullTranscript += " ";
+                            m_fullTranscript += text;
+                            // Bound for 24/7 runs — keep only the recent tail.
+                            constexpr size_t kMaxTranscript = 16000;
+                            if (m_fullTranscript.size() > kMaxTranscript)
+                                m_fullTranscript.erase(0, m_fullTranscript.size() - kMaxTranscript);
+                        }
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(m_eventMutex);
+                        m_pendingEvents.push_back({text, isFinal});
+                    }
+                } else if (type == "ping") {
+                    // server keepalive, no action needed
+                }
+            }
+
+            m_wsConnected.store(false);
+            // exchange so disconnect() and this path can't both close the fd
+            if (m_wsSock.exchange((uintptr_t)INVALID_SOCKET) != (uintptr_t)INVALID_SOCKET)
+                closesocket(sock);
+            if (m_running.load()) {
+                etLog("EthereaClient WS: disconnected, reconnecting...");
+                iSleep(wsBackoff * 1000);
+                wsBackoff = std::min(wsBackoff * 2, 60);
+            }
+        } catch (const std::exception& e) {
+            etLog(std::string("EthereaClient WS: exception — ") + e.what());
+        } catch (...) {
+            etLog("EthereaClient WS: unknown exception");
+        }
+        // The exception path skips the normal teardown — make sure the socket
+        // is closed and a pause happens before retrying (no-op on clean exit).
+        uintptr_t leaked = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (leaked != (uintptr_t)INVALID_SOCKET) {
+            m_wsConnected.store(false);
+            closesocket((SOCKET)leaked);
+            iSleep(3000);
         }
     }
 
@@ -579,120 +629,142 @@ void EthereaClient::sseLoop() {
 
     int sseBackoff = 3;
     while (m_running.load()) {
-        struct addrinfo hints = {}, *result = nullptr;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-        std::string portStr = std::to_string(m_port);
-        if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
-            iSleep(sseBackoff * 1000);
-            sseBackoff = std::min(sseBackoff * 2, 60);
-            continue;
-        }
-        SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) { freeaddrinfo(result); iSleep(sseBackoff * 1000); sseBackoff = std::min(sseBackoff * 2, 60); continue; }
-        if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-            closesocket(sock); freeaddrinfo(result);
-            iSleep(sseBackoff * 1000);
-            sseBackoff = std::min(sseBackoff * 2, 60);
-            continue;
-        }
-        freeaddrinfo(result);
-        sseBackoff = 3; // reset on successful connect
-        m_sseSock.store((uintptr_t)sock);
+        // Nothing thrown in here may kill the app — catch, log, reconnect.
+        try {
+            struct addrinfo hints = {}, *result = nullptr;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_protocol = IPPROTO_TCP;
+            std::string portStr = std::to_string(m_port);
+            if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
+                iSleep(sseBackoff * 1000);
+                sseBackoff = std::min(sseBackoff * 2, 60);
+                continue;
+            }
+            SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+            if (sock == INVALID_SOCKET) { freeaddrinfo(result); iSleep(sseBackoff * 1000); sseBackoff = std::min(sseBackoff * 2, 60); continue; }
+            if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
+                closesocket(sock); freeaddrinfo(result);
+                iSleep(sseBackoff * 1000);
+                sseBackoff = std::min(sseBackoff * 2, 60);
+                continue;
+            }
+            freeaddrinfo(result);
+            sseBackoff = 3; // reset on successful connect
+            m_sseSock.store((uintptr_t)sock);
 
-        std::string request =
-            "GET " + path + " HTTP/1.1\r\n"
-            "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
-            "Accept: text/event-stream\r\n"
-            "Connection: keep-alive\r\n"
-            "\r\n";
-        send(sock, request.c_str(), (int)request.size(), 0);
+            std::string request =
+                "GET " + path + " HTTP/1.1\r\n"
+                "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
+                "Accept: text/event-stream\r\n"
+                "Connection: keep-alive\r\n"
+                "\r\n";
+            send(sock, request.c_str(), (int)request.size(), 0);
 
-        std::string buffer;
-        char chunk[4096];
-        bool headersSkipped = false;
-        m_sseConnected.store(true);
-        etLog("EthereaClient SSE: connected");
+            std::string buffer;
+            char chunk[4096];
+            bool headersSkipped = false;
+            m_sseConnected.store(true);
+            etLog("EthereaClient SSE: connected");
 
-        while (m_running.load()) {
-            fd_set readSet;
-            FD_ZERO(&readSet);
-            FD_SET(sock, &readSet);
-            struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
+            while (m_running.load()) {
+                fd_set readSet;
+                FD_ZERO(&readSet);
+                FD_SET(sock, &readSet);
+                struct timeval tv = { 0, 50000 }; // 50ms — loop checks m_running
 #ifdef _WIN32
-            int sel = select(0, &readSet, nullptr, nullptr, &tv);
+                int sel = select(0, &readSet, nullptr, nullptr, &tv);
 #else
-            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+                int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
 #endif
-            if (sel == 0) continue;
-            if (sel == SOCKET_ERROR) break;
+                if (sel == 0) continue;
+                if (sel == SOCKET_ERROR) break;
 
-            int bytesRead = recv(sock, chunk, sizeof(chunk) - 1, 0);
-            if (bytesRead <= 0) break;
-            chunk[bytesRead] = '\0';
-            buffer += chunk;
-
-            if (!headersSkipped) {
-                size_t headerEnd = buffer.find("\r\n\r\n");
-                if (headerEnd == std::string::npos) continue;
-                buffer = buffer.substr(headerEnd + 4);
-                headersSkipped = true;
-            }
-
-            // Process complete SSE messages
-            size_t pos;
-            while ((pos = buffer.find("\n\n")) != std::string::npos) {
-                std::string message = buffer.substr(0, pos);
-                buffer = buffer.substr(pos + 2);
-
-                // Parse data: lines
-                std::string data;
-                std::istringstream stream(message);
-                std::string line;
-                while (std::getline(stream, line)) {
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                    if (line.size() >= 5 && line.substr(0, 5) == "data:") {
-                        std::string payload = line.substr(5);
-                        if (!payload.empty() && payload[0] == ' ') payload = payload.substr(1);
-                        data += payload;
-                    }
+                int bytesRead = recv(sock, chunk, sizeof(chunk) - 1, 0);
+                if (bytesRead <= 0) break;
+                chunk[bytesRead] = '\0';
+                buffer += chunk;
+                // A peer streaming bytes without SSE delimiters would grow this
+                // forever — drop the connection and let reconnect handle it.
+                if (buffer.size() > 1024 * 1024) {
+                    etLog("EthereaClient SSE: buffer overrun, dropping connection");
+                    break;
                 }
 
-                if (data.empty() || data[0] != '{') continue;
-
-                // Extract hints/suggestions
-                auto suggestions = jsonStrArray(data, "suggestions");
-
-                // Extract prompt
-                std::string promptVal = jsonStr(data, "prompt");
-
-                // Extract full_transcript (fallback if WS not connected)
-                std::string transcript = jsonStr(data, "full_transcript");
-                std::string latestWords = jsonStr(data, "latest_words");
-
-                // Extract reset_cache
-                bool resetCache = jsonBool(data, "reset_cache");
-
-                {
-                    std::lock_guard<std::mutex> lk(m_dataMutex);
-                    if (!suggestions.empty()) m_hints = suggestions;
-                    if (!promptVal.empty()) m_prompt = promptVal;
-                    // Only update transcript from SSE if WebSocket is not connected
-                    if (!m_wsConnected.load()) {
-                        if (!transcript.empty()) m_fullTranscript = transcript;
-                        if (!latestWords.empty()) m_latestWords = latestWords;
-                    }
+                if (!headersSkipped) {
+                    size_t headerEnd = buffer.find("\r\n\r\n");
+                    if (headerEnd == std::string::npos) continue;
+                    buffer = buffer.substr(headerEnd + 4);
+                    headersSkipped = true;
                 }
-                m_resetCache.store(resetCache);
+
+                // Process complete SSE messages
+                size_t pos;
+                while ((pos = buffer.find("\n\n")) != std::string::npos) {
+                    std::string message = buffer.substr(0, pos);
+                    buffer = buffer.substr(pos + 2);
+
+                    // Parse data: lines
+                    std::string data;
+                    std::istringstream stream(message);
+                    std::string line;
+                    while (std::getline(stream, line)) {
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        if (line.size() >= 5 && line.substr(0, 5) == "data:") {
+                            std::string payload = line.substr(5);
+                            if (!payload.empty() && payload[0] == ' ') payload = payload.substr(1);
+                            data += payload;
+                        }
+                    }
+
+                    if (data.empty() || data[0] != '{') continue;
+
+                    // Extract hints/suggestions
+                    auto suggestions = jsonStrArray(data, "suggestions");
+
+                    // Extract prompt
+                    std::string promptVal = jsonStr(data, "prompt");
+
+                    // Extract full_transcript (fallback if WS not connected)
+                    std::string transcript = jsonStr(data, "full_transcript");
+                    std::string latestWords = jsonStr(data, "latest_words");
+
+                    // Extract reset_cache
+                    bool resetCache = jsonBool(data, "reset_cache");
+
+                    {
+                        std::lock_guard<std::mutex> lk(m_dataMutex);
+                        if (!suggestions.empty()) m_hints = suggestions;
+                        if (!promptVal.empty()) m_prompt = promptVal;
+                        // Only update transcript from SSE if WebSocket is not connected
+                        if (!m_wsConnected.load()) {
+                            if (!transcript.empty()) m_fullTranscript = transcript;
+                            if (!latestWords.empty()) m_latestWords = latestWords;
+                        }
+                    }
+                    m_resetCache.store(resetCache);
+                }
             }
+
+            m_sseConnected.store(false);
+            // exchange so disconnect() and this path can't both close the fd
+            if (m_sseSock.exchange((uintptr_t)INVALID_SOCKET) != (uintptr_t)INVALID_SOCKET)
+                closesocket(sock);
+            if (m_running.load()) {
+                etLog("EthereaClient SSE: reconnecting in 3s...");
+                iSleep(3000);
+            }
+        } catch (const std::exception& e) {
+            etLog(std::string("EthereaClient SSE: exception — ") + e.what());
+        } catch (...) {
+            etLog("EthereaClient SSE: unknown exception");
         }
-
-        m_sseConnected.store(false);
-        m_sseSock.store((uintptr_t)INVALID_SOCKET);
-        closesocket(sock);
-        if (m_running.load()) {
-            etLog("EthereaClient SSE: reconnecting in 3s...");
+        // The exception path skips the normal teardown — make sure the socket
+        // is closed and a pause happens before retrying (no-op on clean exit).
+        uintptr_t leaked = m_sseSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (leaked != (uintptr_t)INVALID_SOCKET) {
+            m_sseConnected.store(false);
+            closesocket((SOCKET)leaked);
             iSleep(3000);
         }
     }

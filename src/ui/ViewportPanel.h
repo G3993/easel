@@ -81,6 +81,11 @@ public:
     void clearFullscreenSignal() { m_wantsFullscreenToggle = false; }
     void setEditorFullscreen(bool on) { m_editorFullscreenHint = on; }
 
+    // Warp drag state — read by Application so the projector-output warp
+    // overlay can highlight the exact point being dragged.
+    bool warpDragging() const { return m_warpDragging; }
+    int  warpDragIndex() const { return m_warpDragIndex; }
+
     void setLayerSelected(bool sel) { m_layerSelected = sel; }
     bool isHovered() const { return m_hovered; }
     glm::vec2 size() const { return m_size; }

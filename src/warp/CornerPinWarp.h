@@ -34,11 +34,11 @@ private:
 
     Mesh m_mesh;
     ShaderProgram m_shader;
-    // 64×64 substeps: the corner-pin is a true projective homography applied
+    // 160×160 substeps: the corner-pin is a true projective homography applied
     // per-vertex, so more substeps mean the perspective stays exact across the
-    // surface instead of kinking on diagonals under a strong keystone. 64²
-    // quads is trivial geometry on any GPU.
-    int m_subdivisions = 64;
+    // surface instead of kinking on diagonals under a strong keystone. 160²
+    // quads (~51k tris, built once) is still trivial geometry on any GPU.
+    int m_subdivisions = 160;
 
     void rebuildMesh();
 };

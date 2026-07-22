@@ -46,10 +46,18 @@ public:
     void toggleCorner(int i) { if (i >= 0 && i < (int)m_corner.size()) m_corner[i] = m_corner[i] ? 0 : 1; }
     void setAllCorners(bool on) { for (auto& c : m_corner) c = on ? 1 : 0; }
 
+    // Sample the warped surface at continuous lattice coords
+    // (gx in [0, cols-1], gy in [0, rows-1]) — bicubic Catmull-Rom through
+    // the control points, falling back to linear across "corner" points.
+    // Used by render()'s tessellation AND the projector-output overlay so
+    // the drawn edges follow the exact same curve as the warped surface.
+    glm::vec2 samplePoint(float gx, float gy) const;
+
     // Tessellation substeps per control cell for the smooth Catmull-Rom warp
-    // (higher = smoother diagonals between control points). 12 → a 4×4 grid
-    // renders as 36×36 smoothly-curved quads.
-    int m_renderSubsteps = 12;
+    // (higher = smoother diagonals between control points). 48 → a 4×4 grid
+    // renders as 144×144 smoothly-curved quads, so steep diagonals stay
+    // clean instead of faceting at cell boundaries.
+    int m_renderSubsteps = 48;
 
 private:
     int m_cols = 4, m_rows = 4;

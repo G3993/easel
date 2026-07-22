@@ -31,6 +31,12 @@ public:
 
     static std::vector<RecAudioDevice> enumerateAudioDevices();
 
+    // Register a hardware hot-plug watcher: sets *changedFlag whenever the
+    // OS audio-device topology changes (interface plugged/unplugged, default
+    // input switched). macOS only for now; a no-op stub elsewhere. Call once —
+    // the listener stays registered for the process lifetime.
+    static void watchAudioDevices(std::atomic<bool>* changedFlag);
+
     void setAudioDevice(int index) { m_selectedAudioDevice = index; }
     int audioDevice() const { return m_selectedAudioDevice; }
 

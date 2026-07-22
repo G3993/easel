@@ -61,6 +61,39 @@ void MeshWarp::rebuildMesh() {
     m_meshedCols = m_meshedRows = m_meshedSubsteps = 0;
 }
 
+glm::vec2 MeshWarp::samplePoint(float gx, float gy) const {
+    auto cp = [&](int c, int r) -> glm::vec2 {
+        c = std::min(std::max(c, 0), m_cols - 1);
+        r = std::min(std::max(r, 0), m_rows - 1);
+        return m_controlPoints[r * m_cols + c];
+    };
+    auto cornerAt = [&](int c, int r) -> bool {
+        c = std::min(std::max(c, 0), m_cols - 1);
+        r = std::min(std::max(r, 0), m_rows - 1);
+        int idx = r * m_cols + c;
+        return idx < (int)m_corner.size() && m_corner[idx] != 0;
+    };
+    // Bicubic Catmull-Rom sample at continuous lattice coords
+    // (gx in [0,cols-1], gy in [0,rows-1]). A segment whose either
+    // endpoint is flagged "corner" falls back to straight (linear)
+    // interpolation, so hard edges stay straight while the rest of the
+    // lattice curves smoothly.
+    int ix = (int)std::floor(gx); float fx = gx - (float)ix;
+    int iy = (int)std::floor(gy); float fy = gy - (float)iy;
+    glm::vec2 row[4];
+    for (int k = 0; k < 4; k++) {
+        int rr = iy - 1 + k;
+        row[k] = (cornerAt(ix, rr) || cornerAt(ix + 1, rr))
+                   ? cp(ix, rr) * (1.0f - fx) + cp(ix + 1, rr) * fx   // straight
+                   : catmull(cp(ix - 1, rr), cp(ix, rr),
+                             cp(ix + 1, rr), cp(ix + 2, rr), fx);
+    }
+    int cc = (fx < 0.5f) ? ix : ix + 1;   // nearest column for the vertical decision
+    return (cornerAt(cc, iy) || cornerAt(cc, iy + 1))
+             ? row[1] * (1.0f - fy) + row[2] * fy                     // straight
+             : catmull(row[0], row[1], row[2], row[3], fy);
+}
+
 void MeshWarp::render(GLuint sourceTexture) {
     // Smoothly tessellate the control lattice with Catmull-Rom interpolation:
     // each control cell is split into S×S sub-quads whose positions follow a
@@ -77,39 +110,6 @@ void MeshWarp::render(GLuint sourceTexture) {
                        m_meshedSubsteps != S || m_meshedPoints != m_controlPoints ||
                        m_meshedCorner != m_corner;
     if (dirty) {
-        auto cp = [&](int c, int r) -> glm::vec2 {
-            c = std::min(std::max(c, 0), m_cols - 1);
-            r = std::min(std::max(r, 0), m_rows - 1);
-            return m_controlPoints[r * m_cols + c];
-        };
-        auto cornerAt = [&](int c, int r) -> bool {
-            c = std::min(std::max(c, 0), m_cols - 1);
-            r = std::min(std::max(r, 0), m_rows - 1);
-            int idx = r * m_cols + c;
-            return idx < (int)m_corner.size() && m_corner[idx] != 0;
-        };
-        // Bicubic Catmull-Rom sample at continuous lattice coords
-        // (gx in [0,cols-1], gy in [0,rows-1]). A segment whose either
-        // endpoint is flagged "corner" falls back to straight (linear)
-        // interpolation, so hard edges stay straight while the rest of the
-        // lattice curves smoothly.
-        auto sample = [&](float gx, float gy) -> glm::vec2 {
-            int ix = (int)std::floor(gx); float fx = gx - (float)ix;
-            int iy = (int)std::floor(gy); float fy = gy - (float)iy;
-            glm::vec2 row[4];
-            for (int k = 0; k < 4; k++) {
-                int rr = iy - 1 + k;
-                row[k] = (cornerAt(ix, rr) || cornerAt(ix + 1, rr))
-                           ? cp(ix, rr) * (1.0f - fx) + cp(ix + 1, rr) * fx   // straight
-                           : catmull(cp(ix - 1, rr), cp(ix, rr),
-                                     cp(ix + 1, rr), cp(ix + 2, rr), fx);
-            }
-            int cc = (fx < 0.5f) ? ix : ix + 1;   // nearest column for the vertical decision
-            return (cornerAt(cc, iy) || cornerAt(cc, iy + 1))
-                     ? row[1] * (1.0f - fy) + row[2] * fy                     // straight
-                     : catmull(row[0], row[1], row[2], row[3], fy);
-        };
-
         const int FX = (m_cols - 1) * S;   // fine quads across / down
         const int FY = (m_rows - 1) * S;
         const int stride = FX + 1;
@@ -121,7 +121,7 @@ void MeshWarp::render(GLuint sourceTexture) {
             for (int i = 0; i <= FX; i++) {
                 float gx = (float)i / (float)S;
                 float u  = gx / (float)(m_cols - 1);
-                glm::vec2 p = sample(gx, gy);
+                glm::vec2 p = samplePoint(gx, gy);
                 verts.push_back({p.x, p.y, u, v});
             }
         }

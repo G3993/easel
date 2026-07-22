@@ -197,8 +197,29 @@ bool MovingCompanySource::loadModel() {
     return false;
 }
 
-void MovingCompanySource::update() {
+// Park the GPU render target while this source is reachable only from
+// undo/redo snapshots. Called from UndoStack::suspendOrphanedSources on the
+// main-thread frame sweep — the GL context is current there, so the delete
+// is safe. Frees the color+depth output (~17 MB at 1080p). Shaders, the
+// quad and the F-117 mesh stay resident — reloading the GLB from disk on
+// revive would cost far more than the VRAM its VBOs hold.
+void MovingCompanySource::suspend() {
     if (!m_ready) return;
+    m_output.destroy();
+    m_ready = false;
+    m_suspended = true;
+}
+
+void MovingCompanySource::update() {
+    if (!m_ready) {
+        // Lazy revive after suspend(): recreate the FBO at the configured
+        // resolution (fixed-res source — m_w/m_h are exactly what a fresh
+        // init() would use, so nothing can be stale).
+        if (!m_suspended) return;
+        m_suspended = false;   // one attempt — no retry storm on failure
+        if (!m_output.create(m_w, m_h, /*withDepth=*/true)) return;
+        m_ready = true;
+    }
 
     float t = static_cast<float>(glfwGetTime() - m_startTime);
     float aspect = (m_h > 0) ? (float)m_w / (float)m_h : 1.777f;

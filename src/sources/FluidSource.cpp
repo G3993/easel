@@ -536,6 +536,22 @@ bool FluidSource::init(int outW, int outH) {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
     glBindVertexArray(0);
 
+    createSimBuffers();
+    createDitherTexture();
+
+    m_lastTime = glfwGetTime();
+    m_ready = true;
+
+    // Seed with a few splats so it isn't empty on first frame.
+    for (int i = 0; i < 8; i++) autoSplats(0.016f);
+    std::cout << "[FluidSource] init " << m_velocity.w << "x" << m_velocity.h
+              << " sim, " << m_dye.w << "x" << m_dye.h << " dye" << std::endl;
+    return true;
+}
+
+// Allocate every sim/post render target at the current output size. Shared
+// by init() and the post-suspend() revive in update().
+void FluidSource::createSimBuffers() {
     // Sim res scaled to output aspect.
     int sw = m_simRes, sh = m_simRes;
     int dw = m_dyeRes, dh = m_dyeRes;
@@ -585,16 +601,6 @@ bool FluidSource::init(int outW, int outH) {
         m_sunraysFbo  = createFBO(sw2, sh2, GL_RGBA16F, GL_HALF_FLOAT, GL_LINEAR);
         m_sunraysTemp = createFBO(sw2, sh2, GL_RGBA16F, GL_HALF_FLOAT, GL_LINEAR);
     }
-    createDitherTexture();
-
-    m_lastTime = glfwGetTime();
-    m_ready = true;
-
-    // Seed with a few splats so it isn't empty on first frame.
-    for (int i = 0; i < 8; i++) autoSplats(0.016f);
-    std::cout << "[FluidSource] init " << sw << "x" << sh << " sim, "
-              << dw << "x" << dh << " dye" << std::endl;
-    return true;
 }
 
 void FluidSource::blit(const FBO& target) {
@@ -1266,8 +1272,42 @@ void FluidSource::renderToOutput() {
     blit(m_output);
 }
 
-void FluidSource::update() {
+// Park the GPU sim while this source is reachable only from undo/redo
+// snapshots. Called from UndoStack::suspendOrphanedSources on the main-thread
+// frame sweep — the GL context is current there, so the deletes are safe.
+// Frees every sim/post FBO (~25 MB at 720p output, more at 4K): velocity/
+// pressure/dye/coord double-FBOs, divergence/curl, output, bloom target +
+// mip chain, sunrays pair. The fluid state itself is lost — accepted for
+// undo-orphaned sources; a revived fluid re-seeds and re-develops within
+// seconds. Programs, quad VAO and the dither texture stay (trivial), so
+// revival is just a buffer realloc in update().
+void FluidSource::suspend() {
     if (!m_ready) return;
+    destroyFBO(m_velocity.read);  destroyFBO(m_velocity.write);
+    destroyFBO(m_dye.read);       destroyFBO(m_dye.write);
+    destroyFBO(m_pressure.read);  destroyFBO(m_pressure.write);
+    destroyFBO(m_coord.read);     destroyFBO(m_coord.write);
+    destroyFBO(m_divergence);     destroyFBO(m_curl);
+    destroyFBO(m_output);
+    destroyFBO(m_bloomTarget);
+    for (FBO& f : m_bloomMips) destroyFBO(f);
+    m_bloomMips.clear();
+    destroyFBO(m_sunraysFbo);     destroyFBO(m_sunraysTemp);
+    m_ready = false;
+    m_suspended = true;
+}
+
+void FluidSource::update() {
+    if (!m_ready) {
+        // Lazy revive after suspend(): realloc every buffer at the current
+        // output size and start from a fresh (empty) fluid state — the
+        // regular per-frame autoSplats() repopulate it within seconds.
+        if (!m_suspended) return;
+        m_suspended = false;
+        createSimBuffers();
+        m_lastTime = glfwGetTime();   // no giant dt on the first revived frame
+        m_ready = true;
+    }
     // Save GL state the rest of Easel relies on, since we rebind FBO/VAO.
     GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
     GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);

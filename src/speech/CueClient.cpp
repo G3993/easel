@@ -33,6 +33,9 @@ struct WSADATA { int dummy; };
 // ─── Logging (mirrors EthereaClient: cue_debug.log) ────────────────────────
 
 static void cueLog(const std::string& msg) {
+    // Single ws thread today, but guard the static state anyway (mirrors etLog).
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
     static int suppressCount = 0;
     static std::string lastMsg;
     if (msg == lastMsg) {
@@ -151,10 +154,10 @@ struct WSReader {
     SOCKET sock = INVALID_SOCKET;
     std::string buf;
 
-    bool readExact(char* out, int len, int timeoutMs = 10000) {
-        int have = 0;
+    bool readExact(char* out, size_t len, int timeoutMs = 10000) {
+        size_t have = 0;
         if (!buf.empty()) {
-            int take = std::min(len, (int)buf.size());
+            size_t take = std::min(len, buf.size());
             memcpy(out, buf.data(), take);
             buf.erase(0, take);
             have = take;
@@ -172,9 +175,11 @@ struct WSReader {
             int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
 #endif
             if (sel <= 0) return false;
-            int n = recv(sock, out + have, len - have, 0);
+            // Chunked so the recv length always fits an int on every platform
+            int want = (int)std::min<size_t>(len - have, 65536);
+            int n = recv(sock, out + have, want, 0);
             if (n <= 0) return false;
-            have += n;
+            have += (size_t)n;
         }
         return true;
     }
@@ -203,11 +208,15 @@ static bool wsReadFrame(WSReader& rd, WSFrame& frame) {
         len = 0;
         for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
     }
+    // len comes off the wire — a hostile/corrupt peer can claim up to 2^63
+    // bytes and resize() would throw and kill the thread. Treat as dead link.
+    constexpr uint64_t kMaxFramePayload = 4 * 1024 * 1024;
+    if (len > kMaxFramePayload) return false;
     uint8_t mask[4] = {};
     if (masked && !rd.readExact((char*)mask, 4)) return false;
     frame.payload.resize((size_t)len);
     if (len > 0) {
-        if (!rd.readExact(&frame.payload[0], (int)len)) return false;
+        if (!rd.readExact(&frame.payload[0], (size_t)len)) return false;
         if (masked) {
             for (size_t i = 0; i < len; i++) frame.payload[i] ^= mask[i % 4];
         }
@@ -250,7 +259,14 @@ void CueClient::parseUrl() {
     std::string hostPort = (slashPos != std::string::npos) ? u.substr(0, slashPos) : u;
     size_t colonPos = hostPort.find(':');
     m_host = (colonPos != std::string::npos) ? hostPort.substr(0, colonPos) : hostPort;
-    if (colonPos != std::string::npos) m_port = std::stoi(hostPort.substr(colonPos + 1));
+    if (colonPos != std::string::npos) {
+        // strtol, not stoi — "host:" or "host:abc" must not throw on the main thread
+        std::string portPart = hostPort.substr(colonPos + 1);
+        char* end = nullptr;
+        long p = strtol(portPart.c_str(), &end, 10);
+        if (end != portPart.c_str() && p > 0 && p <= 65535) m_port = (int)p;
+        else cueLog("CueClient: bad port in \"" + hostPort + "\", using " + std::to_string(m_port));
+    }
 }
 
 bool CueClient::connect(const std::string& baseUrl, const std::string& sessionId) {
@@ -283,10 +299,15 @@ bool CueClient::connect(const std::string& baseUrl, const std::string& sessionId
 void CueClient::disconnect() {
     m_running.store(false);
     m_wsConnected.store(false);
-#ifdef _WIN32
+    // Close the live socket so select()/recv() on the ws thread unblocks
+    // immediately instead of waiting for the next timeout to fire.
     uintptr_t ws = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
-    if (ws != (uintptr_t)INVALID_SOCKET) closesocket((SOCKET)ws);
+    if (ws != (uintptr_t)INVALID_SOCKET) {
+#ifndef _WIN32
+        shutdown((SOCKET)ws, SHUT_RDWR); // close() alone may not wake select() on POSIX
 #endif
+        closesocket((SOCKET)ws);
+    }
     if (m_wsThread.joinable()) m_wsThread.join();
 }
 
@@ -330,152 +351,170 @@ void CueClient::wsLoop() {
 
     int backoff = 3;
     while (m_running.load()) {
-        struct addrinfo hints = {}, *result = nullptr;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        std::string portStr = std::to_string(m_port);
-        if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
-            cueLog("CueClient WS: DNS failed");
-            iSleep(backoff * 1000);
-            backoff = std::min(backoff * 2, 60);
-            continue;
-        }
-        SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-        if (sock == INVALID_SOCKET) {
-            freeaddrinfo(result);
-            iSleep(backoff * 1000);
-            backoff = std::min(backoff * 2, 60);
-            continue;
-        }
-        if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-            cueLog("CueClient WS: connect failed (is Cue server running?)");
-            closesocket(sock); freeaddrinfo(result);
-            iSleep(backoff * 1000);
-            backoff = std::min(backoff * 2, 60);
-            continue;
-        }
-        freeaddrinfo(result);
-        backoff = 3;
-        m_wsSock.store((uintptr_t)sock);
-
-        uint8_t keyBytes[16];
-        for (int i = 0; i < 16; i++) keyBytes[i] = (uint8_t)(rand() & 0xFF);
-        std::string wsKey = base64Encode(keyBytes, 16);
-
-        std::string path = "/sessions/" + m_sessionId + "/events";
-        std::string request =
-            "GET " + path + " HTTP/1.1\r\n"
-            "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Key: " + wsKey + "\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n";
-        send(sock, request.c_str(), (int)request.size(), 0);
-
-        std::string response;
-        char buf[4096];
-        while (m_running.load()) {
-            fd_set readSet;
-            FD_ZERO(&readSet);
-            FD_SET(sock, &readSet);
-            struct timeval tv = { 0, 50000 }; // 50ms
-#ifdef _WIN32
-            int sel = select(0, &readSet, nullptr, nullptr, &tv);
-#else
-            int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
-#endif
-            if (sel <= 0) continue;
-            int n = recv(sock, buf, sizeof(buf) - 1, 0);
-            if (n <= 0) break;
-            buf[n] = '\0';
-            response += buf;
-            if (response.find("\r\n\r\n") != std::string::npos) break;
-        }
-
-        if (response.find("101") == std::string::npos) {
-            cueLog("CueClient WS: upgrade failed — " + response.substr(0, 80));
-            m_wsSock.store((uintptr_t)INVALID_SOCKET);
-            closesocket(sock);
-            iSleep(3000);
-            continue;
-        }
-
-        WSReader rd;
-        rd.sock = sock;
-        size_t headerEnd = response.find("\r\n\r\n");
-        if (headerEnd != std::string::npos && headerEnd + 4 < response.size()) {
-            rd.buf = response.substr(headerEnd + 4);
-        }
-
-        m_wsConnected.store(true);
-        cueLog("CueClient WS: connected (" + path + ")");
-
-        while (m_running.load()) {
-            WSFrame frame;
-            if (!wsReadFrame(rd, frame)) {
-                cueLog("CueClient WS: read failed");
-                break;
+        // Nothing thrown in here may kill the app — catch, log, reconnect.
+        try {
+            struct addrinfo hints = {}, *result = nullptr;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            std::string portStr = std::to_string(m_port);
+            if (getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &result) != 0) {
+                cueLog("CueClient WS: DNS failed");
+                iSleep(backoff * 1000);
+                backoff = std::min(backoff * 2, 60);
+                continue;
             }
-            if (frame.opcode == 0x8) { cueLog("CueClient WS: server closed"); break; }
-            if (frame.opcode == 0x9) { wsSendFrame(sock, 0xA, frame.payload); continue; }
-            if (frame.opcode != 0x1) continue;
+            SOCKET sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+            if (sock == INVALID_SOCKET) {
+                freeaddrinfo(result);
+                iSleep(backoff * 1000);
+                backoff = std::min(backoff * 2, 60);
+                continue;
+            }
+            if (::connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
+                cueLog("CueClient WS: connect failed (is Cue server running?)");
+                closesocket(sock); freeaddrinfo(result);
+                iSleep(backoff * 1000);
+                backoff = std::min(backoff * 2, 60);
+                continue;
+            }
+            freeaddrinfo(result);
+            backoff = 3;
+            m_wsSock.store((uintptr_t)sock);
 
-            const std::string& msg = frame.payload;
-            std::string type = jsonStr(msg, "type");
+            uint8_t keyBytes[16];
+            for (int i = 0; i < 16; i++) keyBytes[i] = (uint8_t)(rand() & 0xFF);
+            std::string wsKey = base64Encode(keyBytes, 16);
 
-            if (type == "transcript") {
-                std::string text    = jsonStr(msg, "text");
-                bool isFinal        = jsonBool(msg, "isFinal");
-                std::string speaker = jsonStr(msg, "speaker");
-                std::string fullT   = jsonStr(msg, "fullTranscript");
-                {
-                    std::lock_guard<std::mutex> lk(m_dataMutex);
-                    m_latestWords = text;
-                    if (!fullT.empty()) m_fullTranscript = fullT;
+            std::string path = "/sessions/" + m_sessionId + "/events";
+            std::string request =
+                "GET " + path + " HTTP/1.1\r\n"
+                "Host: " + m_host + ":" + std::to_string(m_port) + "\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: " + wsKey + "\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "\r\n";
+            send(sock, request.c_str(), (int)request.size(), 0);
+
+            std::string response;
+            char buf[4096];
+            while (m_running.load()) {
+                fd_set readSet;
+                FD_ZERO(&readSet);
+                FD_SET(sock, &readSet);
+                struct timeval tv = { 0, 50000 }; // 50ms
+#ifdef _WIN32
+                int sel = select(0, &readSet, nullptr, nullptr, &tv);
+#else
+                int sel = select(sock + 1, &readSet, nullptr, nullptr, &tv);
+#endif
+                if (sel <= 0) continue;
+                int n = recv(sock, buf, sizeof(buf) - 1, 0);
+                if (n <= 0) break;
+                buf[n] = '\0';
+                response += buf;
+                if (response.size() > 65536) break; // runaway pre-upgrade stream
+                if (response.find("\r\n\r\n") != std::string::npos) break;
+            }
+
+            if (response.find("101") == std::string::npos) {
+                cueLog("CueClient WS: upgrade failed — " + response.substr(0, 80));
+                // exchange so disconnect() and this path can't both close the fd
+                if (m_wsSock.exchange((uintptr_t)INVALID_SOCKET) != (uintptr_t)INVALID_SOCKET)
+                    closesocket(sock);
+                iSleep(3000);
+                continue;
+            }
+
+            WSReader rd;
+            rd.sock = sock;
+            size_t headerEnd = response.find("\r\n\r\n");
+            if (headerEnd != std::string::npos && headerEnd + 4 < response.size()) {
+                rd.buf = response.substr(headerEnd + 4);
+            }
+
+            m_wsConnected.store(true);
+            cueLog("CueClient WS: connected (" + path + ")");
+
+            while (m_running.load()) {
+                WSFrame frame;
+                if (!wsReadFrame(rd, frame)) {
+                    cueLog("CueClient WS: read failed");
+                    break;
                 }
-                {
-                    std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingTranscripts.push_back({text, isFinal, speaker});
-                }
-            } else if (type == "action") {
-                // action: { sessionId, action: { type, payload, ... } }
-                std::string actionObj = jsonObj(msg, "action");
-                std::string actType   = jsonStr(actionObj, "type");
-                std::string payload   = jsonObj(actionObj, "payload");
-                {
-                    std::lock_guard<std::mutex> lk(m_dataMutex);
-                    m_lastActionType    = actType;
-                    m_lastActionPayload = payload;
-                }
-                {
-                    std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingActions.push_back({actType, payload});
-                }
-            } else if (type == "prompt") {
-                // prompt: { sessionId, actionType, prompt, reset, payload }
-                std::string p = jsonStr(msg, "prompt");
-                bool reset = jsonBool(msg, "reset");
-                if (!p.empty()) {
+                if (frame.opcode == 0x8) { cueLog("CueClient WS: server closed"); break; }
+                if (frame.opcode == 0x9) { wsSendFrame(sock, 0xA, frame.payload); continue; }
+                if (frame.opcode != 0x1) continue;
+
+                const std::string& msg = frame.payload;
+                std::string type = jsonStr(msg, "type");
+
+                if (type == "transcript") {
+                    std::string text    = jsonStr(msg, "text");
+                    bool isFinal        = jsonBool(msg, "isFinal");
+                    std::string speaker = jsonStr(msg, "speaker");
+                    std::string fullT   = jsonStr(msg, "fullTranscript");
                     {
                         std::lock_guard<std::mutex> lk(m_dataMutex);
-                        m_prompt = p;
+                        m_latestWords = text;
+                        if (!fullT.empty()) m_fullTranscript = fullT;
                     }
-                    std::lock_guard<std::mutex> lk(m_eventMutex);
-                    m_pendingPrompts.push_back({p, reset});
+                    {
+                        std::lock_guard<std::mutex> lk(m_eventMutex);
+                        m_pendingTranscripts.push_back({text, isFinal, speaker});
+                    }
+                } else if (type == "action") {
+                    // action: { sessionId, action: { type, payload, ... } }
+                    std::string actionObj = jsonObj(msg, "action");
+                    std::string actType   = jsonStr(actionObj, "type");
+                    std::string payload   = jsonObj(actionObj, "payload");
+                    {
+                        std::lock_guard<std::mutex> lk(m_dataMutex);
+                        m_lastActionType    = actType;
+                        m_lastActionPayload = payload;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(m_eventMutex);
+                        m_pendingActions.push_back({actType, payload});
+                    }
+                } else if (type == "prompt") {
+                    // prompt: { sessionId, actionType, prompt, reset, payload }
+                    std::string p = jsonStr(msg, "prompt");
+                    bool reset = jsonBool(msg, "reset");
+                    if (!p.empty()) {
+                        {
+                            std::lock_guard<std::mutex> lk(m_dataMutex);
+                            m_prompt = p;
+                        }
+                        std::lock_guard<std::mutex> lk(m_eventMutex);
+                        m_pendingPrompts.push_back({p, reset});
+                    }
                 }
+                // ready/state.snapshot/observation/actions/vision.description/signal
+                // /output.available/source.available/output.status — pass-through (ignored).
             }
-            // ready/state.snapshot/observation/actions/vision.description/signal
-            // /output.available/source.available/output.status — pass-through (ignored).
-        }
 
-        m_wsConnected.store(false);
-        m_wsSock.store((uintptr_t)INVALID_SOCKET);
-        closesocket(sock);
-        if (m_running.load()) {
-            cueLog("CueClient WS: disconnected, reconnecting...");
-            iSleep(backoff * 1000);
-            backoff = std::min(backoff * 2, 60);
+            m_wsConnected.store(false);
+            // exchange so disconnect() and this path can't both close the fd
+            if (m_wsSock.exchange((uintptr_t)INVALID_SOCKET) != (uintptr_t)INVALID_SOCKET)
+                closesocket(sock);
+            if (m_running.load()) {
+                cueLog("CueClient WS: disconnected, reconnecting...");
+                iSleep(backoff * 1000);
+                backoff = std::min(backoff * 2, 60);
+            }
+        } catch (const std::exception& e) {
+            cueLog(std::string("CueClient WS: exception — ") + e.what());
+        } catch (...) {
+            cueLog("CueClient WS: unknown exception");
+        }
+        // The exception path skips the normal teardown — make sure the socket
+        // is closed and a pause happens before retrying (no-op on clean exit).
+        uintptr_t leaked = m_wsSock.exchange((uintptr_t)INVALID_SOCKET);
+        if (leaked != (uintptr_t)INVALID_SOCKET) {
+            m_wsConnected.store(false);
+            closesocket((SOCKET)leaked);
+            iSleep(3000);
         }
     }
 

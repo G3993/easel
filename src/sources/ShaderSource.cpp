@@ -668,8 +668,34 @@ bool ShaderSource::reload(const std::string& isfSource) {
 
 // --- Rendering ---
 
-void ShaderSource::update() {
+// Park the GPU storage while this source is reachable only from undo/redo
+// snapshots. Called from UndoStack::suspendOrphanedSources on the main-thread
+// frame sweep — the GL context is current there, so the deletes are safe.
+// Drops the output FBO (~33 MB RGBA8 at 4K) plus every pass's ping-pong pair
+// (2× half-float per pass — up to ~132 MB for multipass shaders at 4K).
+// Persistent-pass state (fluid sims etc.) is lost; accepted for undo-orphaned
+// sources — a restored shader re-seeds from frame 0.
+void ShaderSource::suspend() {
     if (!m_initialized) return;
+    m_fbo.destroy();
+    m_passes.clear();   // frees each pass's ping-pong Framebuffers
+    m_initialized = false;
+    m_suspended = true;
+}
+
+void ShaderSource::update() {
+    if (!m_initialized) {
+        // Lazy revive after suspend(): rebuild the FBO storage. m_width/
+        // m_height still track the host's setResolution() calls while
+        // suspended, so buffers come back at the current canvas size, not a
+        // stale one. m_frameIndex resets so persistent passes re-seed.
+        if (!m_suspended || m_width <= 0 || m_height <= 0 || m_shader.id() == 0) return;
+        m_suspended = false;   // one attempt — no retry storm on failure
+        if (!m_fbo.create(m_width, m_height)) return;
+        if (!m_passBuffers.empty()) createPassFBOs();   // resets m_frameIndex
+        m_frameIndex = 0;
+        m_initialized = true;
+    }
 
     m_shader.use();
 
@@ -1122,9 +1148,11 @@ void ShaderSource::setResolution(int w, int h) {
     } else if (w > 0 && h > 0 && m_shader.id() != 0) {
         // Shader compiled but FBO creation failed at load time (0×0 dimensions).
         // Attempt late initialization now that we have valid dimensions.
+        // Also revives a suspend()ed source directly at the new size.
         if (m_fbo.create(w, h)) {
             m_quad.createQuad();
             m_initialized = true;
+            m_suspended = false;
             if (!m_passBuffers.empty()) {
                 createPassFBOs();
             }

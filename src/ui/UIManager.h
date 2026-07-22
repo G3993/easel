@@ -12,6 +12,10 @@ struct ImFont;
 // in lockstep.
 namespace UITokens {
     static constexpr ImU32 kChromeSurface = IM_COL32(11, 13, 17, 255);
+    // The top nav band's fill — ALSO the right float parameter panel's bg
+    // (2026-07-18 directive: "floating right parameters same color as the
+    // top nav"). Change here and both surfaces move together.
+    static constexpr ImU32 kNavSurface    = IM_COL32(0x20, 0x24, 0x28, 255);
     static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 30);
     static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 22);
     static constexpr ImU32 kButtonHover   = IM_COL32(255, 255, 255, 22);
@@ -157,6 +161,21 @@ private:
     float m_leftFloatW = 0.0f;
     float m_rightFloatW = 0.0f;
     float m_rightFloatLeft = 0.0f; // left X of the right sidebar (for timeline width clamping)
+    // Right dock collapsed to just the icon strip — toggled by clicking the
+    // already-active pill in renderRightDockNavBar (same idiom as the left
+    // rail's click-again-to-close). The canvas reclaims the width.
+    bool m_rightDockCollapsed = false;
+    // Frame-latched copy, snapped in setupDockspace BEFORE the pill bar can
+    // flip m_rightDockCollapsed mid-frame. isPanelVisible() reads THIS one:
+    // if panels re-Begin in the same frame whose DockSpace was already
+    // skipped, ImGui un-docks them into floating windows permanently. The
+    // latch delays the visibility flip to the next frame, where the
+    // DockSpace submission agrees with it.
+    bool m_rightDockCollapsedApplied = false;
+    // Set when the dock unfolds: while folded the (unsubmitted) dockspace
+    // node can be pruned, so returning panels need a full DockBuilder
+    // resettle or they come back into a dead node and render nothing.
+    bool m_forceDockRebuild = false;
     float m_lastTimelineH = 0.0f;
     // Pixels to reserve at the top of the right sidebar for a preview panel.
     // Set by Application each frame when a shader preview is active.

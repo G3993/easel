@@ -41,6 +41,9 @@ public:
     bool loadModel(const std::string& path);   // .obj/.gltf/.glb
 
     void update() override;
+    // Undo-orphan parking: frees the two render targets; shaders + the
+    // loaded model stay resident. update() lazily recreates the FBOs.
+    void suspend() override;
     GLuint textureId() const override { return m_output.textureId(); }
     int width() const override  { return m_output.width(); }
     int height() const override { return m_output.height(); }
@@ -79,6 +82,7 @@ private:
     float       m_extent = 1.0f;
     double      m_startTime = 0.0;
     bool        m_ready = false;
+    bool        m_suspended = false; // FBOs dropped by suspend(); update() revives
     bool        m_hasModel = false;
     int         m_w = 1280, m_h = 720;
 

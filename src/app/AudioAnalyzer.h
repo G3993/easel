@@ -112,6 +112,12 @@ public:
     // call after this reopens capture from scratch if a device is set.
     void stopCapture();
 
+    // The OS audio-device topology changed (interface plugged/unplugged).
+    // Clear the failed-init latch so update() retries capture — a device
+    // that was missing a moment ago may exist now. If capture is currently
+    // live on a still-present device this is a no-op.
+    void notifyDevicesChanged() { m_captureFailed = false; }
+
     // Opt-in gate for macOS ScreenCaptureKit system-audio capture. macOS
     // triggers a "Screen Recording" TCC prompt the first time SCShareableContent
     // is called; for self-signed dev builds the grant is keyed to the binary's
@@ -281,6 +287,14 @@ private:
     // prompts), so update() runs it on a detached thread; this guards
     // re-entry and lets the destructor wait for a landing.
     std::atomic<bool> m_initInFlight{false};
+    // Set by stopCapture() when an init is still in flight (e.g. push-to-
+    // talk released before capture landed). stopCapture() can't delete
+    // state a blocked init thread is still constructing, and must not wait
+    // for it either (it runs on the render thread) — so the init thread
+    // consumes this flag when initCapture() returns and tears down what it
+    // just built. update() clears it before spawning a new init so a fresh
+    // init never consumes a stale stop.
+    std::atomic<bool> m_stopRequested{false};
     bool m_wantsSystemAudio = false; // opt-in gate for ScreenCaptureKit (see header)
 
     void initCapture();

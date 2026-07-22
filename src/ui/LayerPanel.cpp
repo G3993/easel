@@ -394,7 +394,10 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
     // 8-space pad + ###ID suffix matches Mapping/Properties/Audio/MIDI:
     // the empty space gives drawInspectorTabIcons() room to paint the
     // Layers icon over the tab (otherwise the text would show through).
+    // Body bg = kNavSurface so the panel matches the host + top nav band.
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImU32)UITokens::kNavSurface);
     ImGui::Begin("        ###Layers");
+    ImGui::PopStyleColor();
     // 6-pill nav is rendered at the right-dock host level (one bar total).
     // 1px outline only when floating — when docked, dock-node edges already
     // separate the panel from its neighbours and a window border just adds

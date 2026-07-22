@@ -845,8 +845,36 @@ void FluidSource3D::renderToOutput() {
     glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
-void FluidSource3D::update() {
+// Park the GPU state while this source is reachable only from undo/redo
+// snapshots. Called from UndoStack::suspendOrphanedSources on the main-thread
+// frame sweep — the GL context is current there, so the deletes are safe.
+// Frees the 4 sim volumes (the VRAM hog: at size3d=128 the two RGBA32UI
+// particle cubes are ~33 MB each and the two RGBA16F cubes ~17 MB each,
+// ~100 MB total) plus the output FBO. Sim state is lost — accepted for
+// undo-orphaned sources; revival re-runs the seed block. Programs, the quad
+// and the layered-render FBO handle stay resident (trivial).
+void FluidSource3D::suspend() {
     if (!m_ready) return;
+    destroyVolume(m_volA); destroyVolume(m_volB);
+    destroyVolume(m_volC); destroyVolume(m_volD);
+    destroyFBO(m_output);
+    m_ready = false;
+    m_suspended = true;
+}
+
+void FluidSource3D::update() {
+    if (!m_ready) {
+        // Lazy revive after suspend(): recreate the volumes at the current
+        // m_simRes (reallocVolumes also resets m_frame so the seed block
+        // re-runs) and the output at the current zone size × render scale
+        // (reallocOutput sees the destroyed FBO's 0×0 dims and reallocs).
+        if (!m_suspended || !m_progRender) return;
+        m_suspended = false;   // one attempt — no retry storm on failure
+        reallocVolumes();
+        reallocOutput();
+        m_lastTime = glfwGetTime();   // no giant dt on the first revived frame
+        m_ready = true;
+    }
     // Optional fps diagnostic — set EASEL_F3D_FPS=1 in the environment.
     static const bool s_fpsLog = (std::getenv("EASEL_F3D_FPS") != nullptr);
     if (s_fpsLog) {

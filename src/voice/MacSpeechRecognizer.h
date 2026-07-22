@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <functional>
+#include <memory>
 
 // Push-to-talk wrapper around macOS SFSpeechRecognizer + AVAudioEngine.
 //
@@ -38,5 +39,9 @@ public:
 
 private:
     struct Impl;
-    Impl* m_impl = nullptr;
+    // shared_ptr, not raw: Apple's recognition callbacks run on a framework
+    // queue and can fire once more even after the task is canceled. Every
+    // in-flight handler block holds shared ownership of Impl, so a late
+    // result can never touch freed state (see MacSpeechRecognizer.mm).
+    std::shared_ptr<Impl> m_impl;
 };

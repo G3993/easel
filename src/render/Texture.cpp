@@ -40,6 +40,13 @@ bool Texture::loadFromFile(const std::string& path) {
     destroy();
     glGenTextures(1, &m_texture);
     glBindTexture(GL_TEXTURE_2D, m_texture);
+    // Reset unpack state: the ImGui GL3 backend leaves GL_UNPACK_ROW_LENGTH
+    // at its atlas width after dynamic font updates, which strides this
+    // upload through the buffer (first rows squished, rest heap noise).
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_width, m_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -96,6 +103,9 @@ bool Texture::createEmpty(int width, int height, GLenum internalFormat) {
 void Texture::updateData(const void* data, int width, int height, GLenum format, GLenum type) {
     if (!m_texture) return;
     glBindTexture(GL_TEXTURE_2D, m_texture);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     if (width != m_width || height != m_height) {
         m_width = width;
         m_height = height;

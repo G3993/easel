@@ -8,6 +8,7 @@
 #include "compositing/MaskRenderer.h"
 #include "warp/CornerPinWarp.h"
 #include "warp/MeshWarp.h"
+#include "warp/WarpOverlay.h"
 #include "render/Framebuffer.h"
 #include "render/ShaderProgram.h"
 #include "render/Mesh.h"
@@ -94,6 +95,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 class Application {
@@ -152,6 +154,15 @@ private:
     double m_voiceStartRetryAt = 0.0;          // continuous-mic start backoff (async engine start)
 #ifdef __APPLE__
     MacSpeechRecognizer m_voiceRecognizer;
+    // Speech.framework delivers onPartial/onFinal on its own dispatch queue.
+    // Those callbacks must NOT touch app state — the main thread iterates
+    // m_cueFeed / m_layerStack / m_timeline / m_voiceLog every frame with no
+    // locking — so they only append here, and drainPendingSpeech() replays
+    // the events on the main thread once per frame, in arrival order.
+    struct PendingSpeech { std::string text; bool isFinal; };
+    std::vector<PendingSpeech> m_pendingSpeech;  // guarded by m_pendingSpeechMutex
+    std::mutex m_pendingSpeechMutex;
+    void drainPendingSpeech();
 #endif
     ViewportPanel m_viewportPanel;
     LayerPanel m_layerPanel;
@@ -256,6 +267,9 @@ private:
     LayerStack m_layerStack;
     std::unordered_map<int, std::unique_ptr<ProjectorOutput>> m_projectors;
     MaskRenderer m_maskRenderer;
+    // MAPPING-workspace gizmo overlay drawn into the warp output itself so
+    // control points + edges are visible on the projector while aligning.
+    WarpOverlay m_warpOverlay;
     UndoStack m_undoStack;
 
     Mesh m_quad;
@@ -570,6 +584,15 @@ private:
     VideoRecorder m_recorder;
     std::vector<RecAudioDevice> m_audioDevices;
     std::vector<RecAudioDevice> m_outputDevices; // render devices for mixer output
+    // Audio hot-plug: set by a CoreAudio listener thread whenever the device
+    // topology changes; the render loop re-enumerates and remaps the current
+    // selection by UID (indexes shift when devices come and go).
+    std::atomic<bool> m_audioDevicesChanged{false};
+    // UID of a selected capture device that vanished (interface unplugged).
+    // Capture falls back to System Audio, and this remembers what to restore
+    // the moment the device reappears.
+    std::string m_pendingAudioDeviceUID;
+    void refreshAudioDevicesIfChanged();
     void renderTransportBar();
     void renderTimelinePanel();
     // Phase 5 — floating transport pill at viewport bottom-center. Draws
@@ -643,6 +666,19 @@ private:
     // JSON save/load
     void saveProject(const std::string& path);
     void loadProject(const std::string& path);
+    // The throwing part of loadProject — dozens of typed .get<T>() reads on
+    // nested arrays. Split out so loadProject can wrap it in one try/catch
+    // and recover to a clean session when a file is truncated/mis-typed.
+    void loadProjectBody(const nlohmann::json& j);
+    // Fresh-session state: no layers, one default zone + one default mapping.
+    // Shared by File > New Project and loadProject's corrupt-file recovery.
+    void resetToEmptyProject();
+    // Set when loadProject() threw mid-load on this file: the app is showing
+    // an empty fallback session, so the periodic / quit-time / OSC autosaves
+    // must not overwrite the (still intact) file on disk with the empty
+    // state. Cleared by a later successful load, or by an explicit
+    // Save Project… over the same path (deliberate user overwrite).
+    std::string m_projectLoadFailedPath;
 
     // Publish the current Show (layers + timeline + markers + BPM) to the
     // etherea-agent over OSC at /agent/play/publish. The agent caches it and

@@ -49,7 +49,23 @@ void AudioAnalyzer::setDeviceId(const std::string& id, bool isCapture) {
 }
 
 void AudioAnalyzer::stopCapture() {
-    cleanupCapture();
+    // Same hazard the destructor guards against: a detached init thread may
+    // still be inside initCapture() (TCC permission waits block for
+    // seconds), and deleting the capture state under it is a use-after-
+    // free. Unlike the destructor we must not block here (render thread,
+    // fires on every push-to-talk release) — so when an init is in flight,
+    // hand the teardown to the init thread via m_stopRequested and only
+    // clean up directly ourselves when none is. update() runs on this same
+    // thread, so the in-flight check can't race a new init being spawned.
+    // The narrow window where the init thread lands between our load and
+    // its own flag check self-heals: the next update() goes through its
+    // normal deviceChanged cleanup+reinit path (documented stopCapture
+    // semantics — capture reopens on the next update() anyway).
+    if (m_initInFlight.load(std::memory_order_acquire)) {
+        m_stopRequested.store(true, std::memory_order_release);
+    } else {
+        cleanupCapture();
+    }
     m_deviceIdx = -2; // uninitialized — forces reinit on next update() with a device
     m_initialized = false;
     m_captureFailed = false;
@@ -77,10 +93,23 @@ void AudioAnalyzer::update(float dt) {
             // thread so launch never freezes. While it's in flight the
             // condition above stays false via m_initInFlight.
             m_initInFlight.store(true, std::memory_order_release);
+            // A fresh init must never consume a stop meant for a previous
+            // session (stopCapture can latch the flag in a race window).
+            m_stopRequested.store(false, std::memory_order_relaxed);
             std::thread([this]() {
                 initCapture();
                 if (!m_initialized) {
                     m_captureFailed = true;
+                }
+                // stopCapture() may have fired while we were blocked above
+                // (push-to-talk released before init landed). It can't free
+                // state a blocked init is still building, so the teardown
+                // falls to us — otherwise capture would keep running with
+                // nobody left holding it. Tear down BEFORE clearing
+                // m_initInFlight so the render thread never cleans up
+                // concurrently with us.
+                if (m_stopRequested.exchange(false, std::memory_order_acq_rel)) {
+                    cleanupCapture();
                 }
                 m_initInFlight.store(false, std::memory_order_release);
             }).detach();

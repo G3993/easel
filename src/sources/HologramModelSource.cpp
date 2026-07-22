@@ -270,8 +270,32 @@ void HologramModelSource::renderMesh(float t, float aspect) {
     Framebuffer::unbind();
 }
 
-void HologramModelSource::update() {
+// Park the GPU render targets while this source is reachable only from
+// undo/redo snapshots. Called from UndoStack::suspendOrphanedSources on the
+// main-thread frame sweep — the GL context is current there, so the deletes
+// are safe. Frees the mesh pass (color+depth, ~7 MB at 720p) and the output
+// (~3.7 MB). Shaders, the quad and the loaded model mesh stay resident —
+// re-reading the model from disk on revive would cost far more than the
+// VRAM its VBOs hold.
+void HologramModelSource::suspend() {
     if (!m_ready) return;
+    m_meshFBO.destroy();
+    m_output.destroy();
+    m_ready = false;
+    m_suspended = true;
+}
+
+void HologramModelSource::update() {
+    if (!m_ready) {
+        // Lazy revive after suspend(): recreate the FBOs at the configured
+        // resolution (fixed-res source — m_w/m_h are exactly what a fresh
+        // init() would use, so nothing can be stale).
+        if (!m_suspended) return;
+        m_suspended = false;   // one attempt — no retry storm on failure
+        if (!m_meshFBO.create(m_w, m_h, /*withDepth=*/true) ||
+            !m_output.create(m_w, m_h, /*withDepth=*/false)) return;
+        m_ready = true;
+    }
 
     float t = static_cast<float>(glfwGetTime() - m_startTime);
     float aspect = (m_h > 0) ? (float)m_w / (float)m_h : 1.777f;

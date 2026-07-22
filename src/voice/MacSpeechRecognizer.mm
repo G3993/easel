@@ -20,11 +20,28 @@ struct MacSpeechRecognizer::Impl {
     // on stop() or when the async start fails. Callers keep the same
     // synchronous view they had before the engine work went async.
     std::atomic<bool>                         recording {false};
+    // Session generation — bumped by every stop(). Each recognition task's
+    // resultHandler stamps the generation it was created under and refuses
+    // to deliver once it changes: Apple can hold a task open past stop(),
+    // and continuous mode restarts the session every utterance, so a stale
+    // task must not inject partials/finals into the next session.
+    std::atomic<uint64_t>                     generation{0};
     std::function<void(const std::string&)>   onPartial;
     std::function<void(const std::string&)>   onFinal;
+
+    ~Impl() {
+        // Runs when the LAST shared owner drops — possibly a late
+        // resultHandler block, after ~MacSpeechRecognizer already returned.
+        // Project compiles without ARC — `nil` doesn't release. Manual.
+        [recognizer release];
+        recognizer = nil;
+        // Releasing a queue from a block running on it is fine: GCD holds
+        // its own reference for the duration of the block.
+        if (q) dispatch_release(q);
+    }
 };
 
-MacSpeechRecognizer::MacSpeechRecognizer() : m_impl(new Impl()) {
+MacSpeechRecognizer::MacSpeechRecognizer() : m_impl(std::make_shared<Impl>()) {
     m_impl->q = dispatch_queue_create("easel.voice.engine", DISPATCH_QUEUE_SERIAL);
     NSLocale* loc = [NSLocale localeWithLocaleIdentifier:@"en-US"];
     m_impl->recognizer = [[SFSpeechRecognizer alloc] initWithLocale:loc];
@@ -32,7 +49,9 @@ MacSpeechRecognizer::MacSpeechRecognizer() : m_impl(new Impl()) {
         NSLog(@"[Voice] SFSpeechRecognizer unavailable for en-US");
         return;
     }
-    Impl* impl = m_impl;
+    // Blocks copy the shared_ptr (Block_copy runs C++ copy ctors), so every
+    // escaped block below co-owns Impl — see the header comment on m_impl.
+    std::shared_ptr<Impl> impl = m_impl;
     [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus s) {
         bool ok = (s == SFSpeechRecognizerAuthorizationStatusAuthorized);
         if (!ok) NSLog(@"[Voice] Speech auth denied (%ld)", (long)s);
@@ -43,15 +62,15 @@ MacSpeechRecognizer::MacSpeechRecognizer() : m_impl(new Impl()) {
 MacSpeechRecognizer::~MacSpeechRecognizer() {
     if (m_impl) {
         if (m_impl->recording.load()) stop();
-        // Drain the engine queue so no async start/stop block can touch
-        // m_impl after we delete it.
+        // Drain the engine queue so the queued teardown (engine/request/task
+        // cancel) lands before we drop our reference. Apple may still fire
+        // one last resultHandler after the cancel — that's safe: the handler
+        // holds its own shared_ptr to Impl (so Impl and the queue outlive
+        // us exactly as long as needed) and its delivery is rejected by the
+        // generation check. Recognizer/queue release happen in ~Impl, with
+        // the last owner.
         dispatch_sync(m_impl->q, ^{});
-        dispatch_release(m_impl->q);
-        // Project compiles without ARC — `nil` doesn't release. Manual.
-        [m_impl->recognizer release];
-        m_impl->recognizer = nil;
-        delete m_impl;
-        m_impl = nullptr;
+        m_impl.reset();
     }
 }
 
@@ -70,16 +89,20 @@ void MacSpeechRecognizer::start() {
     // on the engine queue.
     if (m_impl->recording.exchange(true)) return;
 
-    // Callbacks are copied here, synchronously, before the async block —
-    // the resultHandler only ever reads them, so there is no race.
-    m_impl->onPartial = onPartial;
-    m_impl->onFinal   = onFinal;
+    // Callbacks are captured here, synchronously, so callers see start()-
+    // time values — but the write into impl happens ON the engine queue,
+    // because marshaled resultHandlers read impl->onPartial/onFinal on
+    // that same queue (a stale handler could otherwise race this write).
+    std::function<void(const std::string&)> partialCb = onPartial;
+    std::function<void(const std::string&)> finalCb   = onFinal;
 
-    Impl* impl = m_impl;
+    std::shared_ptr<Impl> impl = m_impl;
     dispatch_async(impl->q, ^{
         // A stop() may have landed between the request and this block.
         if (!impl->recording.load()) return;
         if (impl->engine) return; // already running
+        impl->onPartial = partialCb;
+        impl->onFinal   = finalCb;
 
         NSError* err = nil;
         impl->engine  = [[AVAudioEngine alloc] init];
@@ -106,19 +129,32 @@ void MacSpeechRecognizer::start() {
             return;
         }
 
+        // Stamp this session's generation (see Impl::generation). Read on
+        // the serial queue, after any preceding stop()'s bump is visible.
+        const uint64_t gen = impl->generation.load(std::memory_order_relaxed);
         impl->task = [impl->recognizer
             recognitionTaskWithRequest:impl->request
                          resultHandler:^(SFSpeechRecognitionResult* result, NSError* taskErr) {
             if (taskErr) {
-                // Cancellation while idle fires here — quiet log so it's not noisy.
+                // Cancellation (every stop() cancels the task) lands here —
+                // quiet return so it's not noisy.
                 return;
             }
             if (!result) return;
             NSString* str = result.bestTranscription.formattedString;
             if (!str) return;
             std::string s = std::string([str UTF8String]);
-            if (result.isFinal) { if (impl->onFinal)   impl->onFinal(s); }
-            else                { if (impl->onPartial) impl->onPartial(s); }
+            bool isFinal = result.isFinal;
+            // Apple invokes this on its own internal queue, racing stop().
+            // Marshal onto the engine queue (serialized with start/stop) and
+            // re-check the generation there: once stop() has bumped it, a
+            // result from the old task is dropped instead of delivered into
+            // whatever session is live now.
+            dispatch_async(impl->q, ^{
+                if (impl->generation.load(std::memory_order_relaxed) != gen) return;
+                if (isFinal) { if (impl->onFinal)   impl->onFinal(s); }
+                else         { if (impl->onPartial) impl->onPartial(s); }
+            });
         }];
     });
 }
@@ -127,9 +163,18 @@ void MacSpeechRecognizer::stop() {
     if (!m_impl) return;
     if (!m_impl->recording.exchange(false)) return;
 
+    // Invalidate the live session's results immediately: anything Apple
+    // delivers from here on fails the generation check in the
+    // resultHandler and is dropped, so a stop→final race (or a stale
+    // continuous-mode task) can't fire callbacks into the next session.
+    // Both product paths consume onFinal BEFORE calling stop (continuous
+    // mode restarts off onFinal; manual stop discards the tail), so
+    // nothing wanted is lost.
+    m_impl->generation.fetch_add(1, std::memory_order_relaxed);
+
     // Teardown rides the same serial queue as start, so a queued start
     // always fully precedes its matching teardown and vice versa.
-    Impl* impl = m_impl;
+    std::shared_ptr<Impl> impl = m_impl;
     dispatch_async(impl->q, ^{
         // No ARC — every nil-assignment without a matching release leaks.
         // AVAudioEngine + SFSpeechAudioBufferRecognitionRequest are heavy
@@ -146,8 +191,11 @@ void MacSpeechRecognizer::stop() {
             [impl->request release];
             impl->request = nil;
         }
-        // The task is owned by the recognizer; don't release it ourselves.
-        // It self-releases after isFinal fires.
+        // Actively cancel — endAudio alone leaves the task running until
+        // Apple decides it's done, and a lingering task keeps delivering
+        // (and holding Speech.framework state) long after stop. The task is
+        // owned by the recognizer; don't release it ourselves.
+        if (impl->task) [impl->task cancel];
         impl->task = nil;
     });
 }
