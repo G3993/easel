@@ -10,6 +10,7 @@ struct WindowInfo {
     uint32_t windowID;
     std::string title;
     int width, height;
+    bool onScreen = true;
 };
 
 class WindowCaptureSource : public ContentSource {
@@ -34,6 +35,7 @@ private:
     int m_width = 0, m_height = 0;
     Texture m_texture;
     bool m_active = false;
-    std::vector<uint8_t> m_pixelBuffer;
+    void* m_impl = nullptr;        // MacWindowCaptureState (ScreenCaptureKit)
+    int m_boundsPollCountdown = 0; // frames until next window-resize check
 };
 #endif
