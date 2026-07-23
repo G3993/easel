@@ -6138,9 +6138,13 @@ void Application::renderUI() {
                     destPreview = m_zones[s_addDestZone]->name.c_str();
                 ImGui::SetNextItemWidth(-1);
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
-                ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(1, 1, 1, 0.06f));
-                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
-                ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(1, 1, 1, 0.18f));
+                // A specific zone armed = blue tint (blue means live/routed
+                // across the app chrome) so it's obvious adds aren't going
+                // to the whole house.
+                bool zoneArmed = (s_addDestZone >= 0);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg,        zoneArmed ? ImVec4(0.24f, 0.47f, 0.85f, 0.30f) : ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, zoneArmed ? ImVec4(0.28f, 0.52f, 0.90f, 0.42f) : ImVec4(1, 1, 1, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  zoneArmed ? ImVec4(0.30f, 0.55f, 0.95f, 0.50f) : ImVec4(1, 1, 1, 0.18f));
                 ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
                 if (ImGui::BeginCombo("##shaderAddDest", destPreview)) {
                     if (ImGui::Selectable("Whole House", s_addDestZone < 0))
@@ -6644,7 +6648,7 @@ void Application::renderUI() {
                         ImGui::TextDisabled("%s", bn.c_str());
                         ImGui::Separator();
                         if (ImGui::MenuItem("Add to Layer (new)")) {
-                            loadShader(s_scCtxPath);
+                            addShaderRouted(s_scCtxPath); // respects ADD TO destination
                         }
                         if (ImGui::MenuItem("Send to Timeline")) {
                             // Add to the selected layer's track at the end of existing clips,
@@ -6687,39 +6691,12 @@ void Application::renderUI() {
                     }
                 }
 
-                // Double-click: in Show mode swap top layer source live;
-                // in Canvas mode add a new layer as before.
-                if (clicked) {
-                    if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
-                        // Find the top visible layer and hot-swap its source
-                        auto* target = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count())
-                            ? m_layerStack[m_selectedLayer].get() : nullptr;
-                        if (!target && m_layerStack.count() > 0)
-                            target = m_layerStack[m_layerStack.count()-1].get();
-                        if (target) {
-                            // Same preview-reuse as loadShader(): skip the
-                            // second compile when the preview already has it.
-                            std::shared_ptr<ShaderSource> src;
-                            if (m_scPreview && m_scPreviewPath == shader.fullPath) {
-                                src = m_scPreview;
-                                m_scPreview.reset();
-                                m_scPreviewPath.clear();
-                            } else {
-                                src = std::make_shared<ShaderSource>();
-                                if (!src->loadFromFile(shader.fullPath)) src.reset();
-                            }
-                            if (src) {
-                                target->source = src;
-                                target->visible = true;
-                                target->userHidden = false;
-                            }
-                        } else {
-                            loadShader(shader.fullPath);
-                        }
-                    } else {
-                        loadShader(shader.fullPath);
-                    }
-                }
+                // (Double-click handling lives BELOW the ⋯ overflow button —
+                // its hit-test clears `clicked` so a click on the menu never
+                // also adds the shader. A stale copy of the handler used to
+                // sit here, pre-suppression, so every double-click added the
+                // shader TWICE and the Show-mode hot-swap bypassed the
+                // ADD TO destination entirely.)
 
                 // ── Overflow ⋯ button (top-right of thumb). Manual hit-test
                 //    so it doesn't advance the grid cursor. Opens a popup
@@ -6905,7 +6882,45 @@ void Application::renderUI() {
                     ImGui::EndPopup();
                 }
 
-                if (clicked) addShaderRouted(shader.fullPath);
+                // Double-click add — exactly one path runs:
+                //  - Explicit zone destination (ADD TO): routed add, ALWAYS —
+                //    the user said where it goes, so Show mode doesn't
+                //    hot-swap.
+                //  - Whole House + Show mode: hot-swap the top layer's source
+                //    live (the classic show gesture, no new layer).
+                //  - Whole House + Canvas mode: routed add (lands in every
+                //    zone).
+                if (clicked) {
+                    if (s_addDestZone < 0 &&
+                        UIManager::sMode == UIManager::WorkspaceMode::Show) {
+                        auto* target = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count())
+                            ? m_layerStack[m_selectedLayer].get() : nullptr;
+                        if (!target && m_layerStack.count() > 0)
+                            target = m_layerStack[m_layerStack.count()-1].get();
+                        if (target) {
+                            // Same preview-reuse as loadShader(): skip the
+                            // second compile when the preview already has it.
+                            std::shared_ptr<ShaderSource> src;
+                            if (m_scPreview && m_scPreviewPath == shader.fullPath) {
+                                src = m_scPreview;
+                                m_scPreview.reset();
+                                m_scPreviewPath.clear();
+                            } else {
+                                src = std::make_shared<ShaderSource>();
+                                if (!src->loadFromFile(shader.fullPath)) src.reset();
+                            }
+                            if (src) {
+                                target->source = src;
+                                target->visible = true;
+                                target->userHidden = false;
+                            }
+                        } else {
+                            addShaderRouted(shader.fullPath);
+                        }
+                    } else {
+                        addShaderRouted(shader.fullPath);
+                    }
+                }
 
                 ImGui::PopID();
             }
