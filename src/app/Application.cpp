@@ -558,6 +558,22 @@ bool Application::init() {
     m_shaderPresets.load();
         }
     }
+    m_showPresets.load();
+
+    // Timeline clip hot-swaps re-apply saved params: first the per-shader
+    // preset (same as loadShader does), then the active show's per-entry
+    // override — so a show plays back the exact looks that were saved with
+    // it, not shader defaults.
+    m_timeline.onSourceLoaded = [this](const std::string& path, ContentSource& srcRef) {
+        auto* ss = dynamic_cast<ShaderSource*>(&srcRef);
+        if (!ss) return;
+        size_t sl = path.find_last_of("/\\");
+        std::string fileKey = (sl != std::string::npos) ? path.substr(sl + 1) : path;
+        m_shaderPresets.apply(fileKey, *ss);
+        auto ov = m_showParamOverrides.find(path);
+        if (ov != m_showParamOverrides.end())
+            ShaderPresets::applyJson(ov->second, *ss);
+    };
 
     // Auto-load the default project when it exists. The landing page still
     // covers the blank-start case, but skipping auto-load entirely was a
@@ -3734,7 +3750,7 @@ void Application::renderUI() {
             nowT - s_midiScan > 1.0) {
             s_midiScan = nowT;
             auto devs = m_midiManager.listDevices();
-            if (!devs.empty()) m_midiManager.openDevice(0);
+            if (!devs.empty()) m_midiManager.openAll();
         }
         auto events = m_midiManager.pollEvents();
         // Update normalized CC table for shader-parameter MIDI bindings
@@ -5990,6 +6006,19 @@ void Application::renderUI() {
                 subTabBtn("Text", 1);
                 ImGui::SameLine(0, 6);
                 subTabBtn("3D",   2);
+                // BABY — opens the fullscreen gallery over the whole app.
+                ImGui::SameLine(0, 6);
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.24f, 0.47f, 0.85f, 0.35f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.52f, 0.90f, 0.55f));
+                    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.96f, 0.97f, 1.00f, 1.0f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    if (ImGui::Button("GALLERY")) UIManager::sGalleryOpen = true;
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Fullscreen shader gallery");
+                }
 
                 // Right-aligned "Reload" pill — rescans the shader library
                 // (manifest + files) so freshly-added shaders appear without
@@ -6834,23 +6863,21 @@ void Application::renderUI() {
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Delete")) {
-                        // Move .fs into ~/.easel/trash/ and drop from manifest.
+                        // PERMANENT delete (Lu's rule: no trash, no cache) --
+                        // remove the .fs, its thumbnail, and the vendored copy.
                         namespace fs = std::filesystem;
                         try {
                             const char* home = std::getenv("HOME");
-                            fs::path trashDir = fs::path(home ? home : ".")
-                                              / ".easel" / "trash";
                             std::error_code ec;
-                            fs::create_directories(trashDir, ec);
                             fs::path src(shader.fullPath);
-                            fs::path dst = trashDir / src.filename();
-                            int suffix = 1;
-                            while (fs::exists(dst)) {
-                                dst = trashDir / (src.stem().string() + "_" +
-                                                  std::to_string(suffix++) +
-                                                  src.extension().string());
+                            fs::remove(src, ec);
+                            if (home) {
+                                fs::remove(fs::path(home) / ".easel" / "shader_thumbs" /
+                                           (src.stem().string() + ".png"), ec);
+                                fs::remove(fs::path(home) / "easel" / "external" /
+                                           "ShaderClaw3" / "shaders" / src.filename(), ec);
                             }
-                            fs::rename(src, dst, ec);
+                            m_scThumbnails.erase(shader.fullPath);
 
                             // Drop entry from manifest.
                             fs::path manifestPath =
@@ -6873,8 +6900,7 @@ void Application::renderUI() {
                             }
                             m_shaderClaw.refreshManifest();
                             m_shaderPresets.clear(shader.file);
-                            std::cout << "[ShaderClaw] Trashed " << shader.file
-                                      << " → " << dst.string() << "\n";
+                            std::cout << "[ShaderClaw] Deleted " << shader.file << " permanently\n";
                         } catch (const std::exception& e) {
                             std::cerr << "[ShaderClaw] Delete failed: " << e.what() << "\n";
                         }
@@ -7460,6 +7486,21 @@ void Application::renderUI() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+#ifdef __APPLE__
+        refreshCameraDevices();
+        if (m_cameraDevices.empty()) {
+            ImGui::TextWrapped("No cameras detected — plug one in (it rescans automatically).");
+        } else {
+            for (int ci = 0; ci < (int)m_cameraDevices.size(); ++ci) {
+                ImGui::PushID(9000 + ci);
+                std::string label = "+ Add " + m_cameraDevices[ci].name;
+                if (ImGui::Button(label.c_str(), ImVec2(-1, 0))) {
+                    addWebcam(ci, m_cameraDevices[ci].name);
+                }
+                ImGui::PopID();
+            }
+        }
+#else
         for (int i = 0; i < 4; i++) {
             ImGui::PushID(9000 + i);
             char label[32];
@@ -7469,11 +7510,12 @@ void Application::renderUI() {
             }
             ImGui::PopID();
         }
+#endif
         ImGui::PopStyleColor(4);
 
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
-        ImGui::TextWrapped("Camera 0 is typically the built-in webcam. If a camera is already in use by the scene scanner it cannot be opened a second time.");
+        ImGui::TextWrapped("If a camera is already in use by the scene scanner it cannot be opened a second time.");
         ImGui::PopStyleColor();
 
 #ifdef __APPLE__
@@ -8436,14 +8478,16 @@ void Application::renderUI() {
         if (PropertyPanel::PanelSectionHeader("MIDI", /*firstSection=*/false))
         {
             auto mdevs = m_midiManager.listDevices();
-            const char* mlabel = (m_midiManager.isOpen() &&
-                                  m_midiManager.deviceIndex() < (int)mdevs.size())
-                ? mdevs[m_midiManager.deviceIndex()].c_str() : "None";
+            std::string mlabel = m_midiManager.currentDeviceLabel();
             ParamRow::Begin("DEVICE");
-            if (ImGui::BeginCombo("##AudioMIDIDevice", mlabel)) {
+            if (ImGui::BeginCombo("##AudioMIDIDevice", mlabel.c_str())) {
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                     m_midiManager.closeDevice();
                     m_midiUserDisconnected = true;
+                }
+                if (!mdevs.empty() && ImGui::Selectable("All devices", m_midiManager.isAllDevices())) {
+                    m_midiManager.openAll();
+                    m_midiUserDisconnected = false;
                 }
                 for (int i = 0; i < (int)mdevs.size(); i++) {
                     bool sel = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
@@ -8494,15 +8538,18 @@ void Application::renderUI() {
             ImGui::PopStyleColor();
         } else {
             // Current device label
-            const char* currentLabel = m_midiManager.isOpen()
-                ? devices[m_midiManager.deviceIndex()].c_str() : "None";
+            std::string currentLabel = m_midiManager.currentDeviceLabel();
 
             ParamRow::Begin("DEVICE");
-            if (ImGui::BeginCombo("##MIDIDevice", currentLabel)) {
+            if (ImGui::BeginCombo("##MIDIDevice", currentLabel.c_str())) {
                 // "None" option to disconnect
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                     m_midiManager.closeDevice();
                     m_midiUserDisconnected = true;   // stop auto-reconnecting
+                }
+                if (ImGui::Selectable("All devices", m_midiManager.isAllDevices())) {
+                    m_midiManager.openAll();
+                    m_midiUserDisconnected = false;
                 }
                 for (int i = 0; i < (int)devices.size(); i++) {
                     bool selected = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
@@ -8734,12 +8781,34 @@ void Application::renderUI() {
 
         // Camera inputs
         ImGui::TextDisabled("CAMERA");
+#if defined(HAS_OPENCV) && defined(__APPLE__)
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.50f,0.53f,0.60f,0.85f));
+        bool camForceScan = ImGui::SmallButton("↺##camref");
+        ImGui::PopStyleColor(3);
+        refreshCameraDevices(camForceScan);
+#endif
         ImGui::Dummy(ImVec2(0, 2));
 #ifdef HAS_OPENCV
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.13f,0.15f,0.18f,1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
+#ifdef __APPLE__
+        if (m_cameraDevices.empty()) {
+            dimText("No cameras detected — plug one in (it rescans automatically).");
+        } else {
+            for (int ci = 0; ci < (int)m_cameraDevices.size(); ++ci) {
+                ImGui::PushID(ci);
+                if (ImGui::Button(m_cameraDevices[ci].name.c_str(), ImVec2(-1, 0)))
+                    addWebcam(ci, m_cameraDevices[ci].name);
+                ImGui::PopID();
+            }
+        }
+#else
         if (ImGui::Button("Camera 0 (built-in)", ImVec2(-1, 0))) addWebcam(0);
         if (ImGui::Button("Camera 1",             ImVec2(-1, 0))) addWebcam(1);
+#endif
         ImGui::PopStyleColor(2);
 #else
         dimText("Camera capture requires an OpenCV build.");
@@ -8802,6 +8871,11 @@ void Application::renderUI() {
     // over the canvas, matching reference B's chrome-light vibe.
     renderFloatingTransportPill();
     renderFloatingActionPills();
+
+    // Fullscreen shader GALLERY — rendered late so it overlays everything;
+    // it takes focus on open and Esc closes it. The show runner ticks the
+    // rotating shader playlist regardless of whether the gallery is open.
+    renderShaderGallery();
 
     // Overlay inspector tab icons (Properties/Mapping/Audio/MIDI) after all
     // panels have rendered so the icon painting lands on top of ImGui's
@@ -10943,6 +11017,49 @@ void Application::renderTimelinePanel() {
             }
         }
 
+        // ── DISTRIBUTE — turn a stack into a show. Divides the timeline's
+        // duration equally among the layer tracks (top row first): each
+        // track's first clip becomes one equal slot, laid end-to-end, so a
+        // pile of shaders all sitting at 0:00 becomes a sequential show that
+        // fills the whole timeline. Existing per-clip fades are kept.
+        ImGui::SameLine(0, 12);
+        {
+            int nDist = 0;
+            for (auto& tr : m_timeline.tracks())
+                if (!tr.clips.empty()) nDist++;
+            bool can = nDist >= 2;
+            if (!can) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Distribute")) {
+                m_undoStack.pushState(m_layerStack, m_selectedLayer, m_timeline);
+                double slot = m_timeline.duration() / (double)nDist;
+                if (slot < 1.0) slot = 1.0;
+                int i = 0;
+                for (auto& tr : m_timeline.tracks()) {
+                    if (tr.clips.empty()) continue;
+                    TimelineClip& c = tr.clips.front();
+                    double extra = 0.0;  // preserve relative layout of any
+                    for (size_t k = 1; k < tr.clips.size(); k++) {
+                        // additional clips: keep their offset from clip 0
+                        extra = tr.clips[k].startTime - c.startTime;
+                        tr.clips[k].startTime = (double)i * slot + extra;
+                    }
+                    c.startTime = (double)i * slot;
+                    c.duration  = slot;
+                    m_timeline.sortTrack(tr.layerId);
+                    i++;
+                }
+                m_timeline.setWorkArea(0.0, m_timeline.duration());
+                m_timeline.seek(0.0);
+            }
+            if (!can) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                ParamRow::Tooltip("Lay the layers out as a show:\n"
+                                  "divide the timeline equally, one layer's\n"
+                                  "clip after another instead of stacked at 0:00.\n"
+                                  "Set the timeline Duration first to pick the\n"
+                                  "total show length.");
+        }
+
         // ── Transport row layout (left → right):
         //   [play/stop/loop] [time] [dur] [zoom]
         //   ... [AUDIO COMBO][METER]  (centered together as one group)
@@ -12174,15 +12291,81 @@ void Application::renderTimelinePanel() {
                                      laneOrigin.y + laneH),
                               IM_COL32(255, 255, 255, 4), 4.0f);
 
-            // Gutter label — tiny "⇄" icon + blank space to mirror the row rhythm.
-            dl->AddTriangleFilled(ImVec2(laneOrigin.x + 18, laneOrigin.y + 4),
-                                  ImVec2(laneOrigin.x + 18, laneOrigin.y + laneH - 4),
-                                  ImVec2(laneOrigin.x + 26, laneOrigin.y + laneH * 0.5f),
-                                  IM_COL32(180, 150, 240, 180));
-            dl->AddTriangleFilled(ImVec2(laneOrigin.x + 36, laneOrigin.y + 4),
-                                  ImVec2(laneOrigin.x + 36, laneOrigin.y + laneH - 4),
-                                  ImVec2(laneOrigin.x + 28, laneOrigin.y + laneH * 0.5f),
-                                  IM_COL32(180, 150, 240, 180));
+            // Gutter — transition-type dropdown (replaces the old "⇄"
+            // triangle glyphs). Shows the pair's current transition effect;
+            // picking a name changes every transition connecting these two
+            // rows, or creates one across their overlap if none exists yet.
+            {
+                TimelineTransition* firstTr = nullptr;
+                for (auto& tr : m_timeline.transitions()) {
+                    bool connects = (tr.fromLayerId == aId && tr.toLayerId == bId) ||
+                                    (tr.fromLayerId == bId && tr.toLayerId == aId);
+                    if (connects) { firstTr = &tr; break; }
+                }
+                const char* preview = firstTr
+                    ? (!firstTr->shaderPath.empty() ? "custom shader"
+                       : (firstTr->name.empty() ? "crossfade" : firstTr->name.c_str()))
+                    : "+ transition";
+                ImVec2 savedCursor = ImGui::GetCursorScreenPos();
+                ImGui::SetCursorScreenPos(ImVec2(laneOrigin.x + 8, laneOrigin.y));
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 1));
+                ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(170, 120, 230, 28));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(170, 120, 230, 60));
+                ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(210, 180, 250, 220));
+                ImGui::SetNextItemWidth(gutterW - 16.0f);
+                if (ImGui::BeginCombo("##trType", preview,
+                                      ImGuiComboFlags_HeightLarge)) {
+                    for (const auto& n : GLTransitionLibrary::instance().names()) {
+                        bool sel = firstTr && firstTr->shaderPath.empty()
+                                   && firstTr->name == n;
+                        if (ImGui::Selectable(n.c_str(), sel)) {
+                            m_undoStack.pushState(m_layerStack, m_selectedLayer,
+                                                  m_timeline);
+                            bool changedAny = false;
+                            for (auto& tr : m_timeline.transitions()) {
+                                bool connects =
+                                    (tr.fromLayerId == aId && tr.toLayerId == bId) ||
+                                    (tr.fromLayerId == bId && tr.toLayerId == aId);
+                                if (!connects) continue;
+                                tr.name = n;
+                                tr.shaderPath.clear();
+                                changedAny = true;
+                            }
+                            if (!changedAny) {
+                                // No transition yet — create one across the
+                                // overlap of the two rows' outer clips (or a
+                                // 1s blend at their meeting point).
+                                auto* aT = m_timeline.findTrack(aId);
+                                auto* bT = m_timeline.findTrack(bId);
+                                if (aT && bT && !aT->clips.empty() && !bT->clips.empty()) {
+                                    double as = aT->clips.front().startTime;
+                                    double ae = aT->clips.back().endTime();
+                                    double bs = bT->clips.front().startTime;
+                                    double be = bT->clips.back().endTime();
+                                    double ovS = std::max(as, bs);
+                                    double ovE = std::min(ae, be);
+                                    double mid = (ovE > ovS)
+                                        ? (ovS + ovE) * 0.5
+                                        : std::min(ae, be);
+                                    double d = (ovE > ovS)
+                                        ? std::min(1.0, (ovE - ovS) * 0.6) : 1.0;
+                                    m_timeline.addTransition(aId, bId,
+                                                             mid - d * 0.5, d, n);
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered())
+                    ParamRow::Tooltip("Transition between these two rows.\n"
+                                      "Pick an effect to change (or add) it;\n"
+                                      "double-click the bar for custom shaders\n"
+                                      "and duration.");
+                ImGui::SetCursorScreenPos(savedCursor);
+            }
 
             // Draw each transition connecting this pair.
             for (auto& tr : m_timeline.transitions()) {
@@ -13510,6 +13693,11 @@ void Application::renderNavBarPrefix() {
             // Global Audio -> Shaders switch (feeds the Audio Feature Bus to
             // every shader's GLSL uniforms; off = neutralized / fed zeros).
             ImGui::MenuItem("Audio -> Shaders", nullptr, &m_audioToShaders);
+            // Global Motion Ease: smooths the audio uniforms of every shader
+            // (attack fast-ish, release slow) so music never slams visuals.
+            ImGui::SetNextItemWidth(180.0f);
+            ImGui::SliderFloat("Motion Ease", &ShaderSource::sMotionEase,
+                               0.0f, 1.0f, "%.2f");
             ImGui::Separator();
             // Two alternative output modes (the existing per-zone behaviour is
             // "Independent"; "Spanned" slices one wide canvas across screens).
@@ -13608,6 +13796,7 @@ void Application::renderNavBarPrefix() {
         if (UIManager::sMode == UIManager::WorkspaceMode::Show) {
             if (ImGui::BeginMenu("Windows")) {
                 ImGui::MenuItem("Timecode Window", nullptr, &m_showTimecodeWindow);
+                ImGui::MenuItem("Gallery (fullscreen)", nullptr, &UIManager::sGalleryOpen);
                 ImGui::EndMenu();
             }
         }
@@ -14201,7 +14390,7 @@ void Application::addMovingCompany() {
 }
 
 #ifdef HAS_OPENCV
-void Application::addWebcam(int cameraIndex) {
+void Application::addWebcam(int cameraIndex, const std::string& deviceName) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto src = std::make_shared<WebcamSource>();
     if (!src->open(cameraIndex)) {
@@ -14212,11 +14401,23 @@ void Application::addWebcam(int cameraIndex) {
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = src;
-    layer->name = "Camera " + std::to_string(cameraIndex);
+    layer->name = deviceName.empty() ? ("Camera " + std::to_string(cameraIndex))
+                                     : deviceName;
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
+}
+#endif
+
+#ifdef __APPLE__
+void Application::refreshCameraDevices(bool force) {
+    const double now = ImGui::GetTime();
+    if (!force && m_cameraDevicesLastScan >= 0.0 &&
+        now - m_cameraDevicesLastScan < 2.0)
+        return;
+    m_cameraDevices = enumerateCameraDevices();
+    m_cameraDevicesLastScan = now;
 }
 #endif
 
@@ -14287,6 +14488,11 @@ void Application::loadShader(const std::string& path) {
     layer->source = source;
     size_t slash = path.find_last_of("/\\");
     layer->name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+    // Prefer the manifest title so dropdowns (TEXTURE source picker, layer
+    // list) read "Butaflies", not "butaflies.fs".
+    for (const auto& sh : m_shaderClaw.shaders()) {
+        if (sh.fullPath == path && !sh.title.empty()) { layer->name = sh.title; break; }
+    }
 
     // Restore saved param preset for this shader file, if any. Keyed by the
     // bare filename (matches manifest's `file` field used elsewhere).
@@ -17155,3 +17361,716 @@ void Application::renderEdgeBlendInline(OutputZone& zone) {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// BABY — fullscreen shader gallery. Every shader in the library as a big
+// thumbnail tile on one scrollable page, instead of the narrow right-dock
+// browser. Shares the panel's thumbnail cache (m_scThumbnails + the disk
+// PNG cache) and runs its own cache-load/generate loop so it works even
+// when the Sources panel isn't rendering. Click a tile → the shader is
+// added with a fade, routed to the chosen destination. Esc / ✕ closes.
+// ─────────────────────────────────────────────────────────────────────────
+// Build + start a show: one SHOW layer whose track carries one clip per
+// picked shader, laid end-to-end, DIVIDING the requested minutes equally —
+// the whole show is visible and editable on the timeline, never stacked.
+void Application::startShow(const std::vector<std::string>& sel, float minutes) {
+    if (sel.empty()) return;
+    float slot = minutes * 60.0f / (float)sel.size();
+    float slotS = (slot < 3.0f) ? 3.0f : slot;
+
+    // Tear down any previous show layer/track.
+    if (m_showLayerId != 0) {
+        m_timeline.removeTrackForLayer(m_showLayerId);
+        for (int li = 0; li < m_layerStack.count(); li++)
+            if (m_layerStack[li]->id == m_showLayerId) {
+                m_layerStack.removeLayer(li); break;
+            }
+        m_showLayerId = 0;
+    }
+
+    int before = m_layerStack.count();
+    loadShader(sel[0]);
+    if (m_layerStack.count() <= before) return;
+
+    auto& nl = m_layerStack[m_layerStack.count() - 1];
+    nl->name = "SHOW";
+    m_showLayerId = nl->id;
+
+    // Show-preset param override for the first shader (loadShader only
+    // applies the per-shader preset; the override carries the SAVED look).
+    {
+        auto ov = m_showParamOverrides.find(sel[0]);
+        if (ov != m_showParamOverrides.end()) {
+            if (auto* ss = dynamic_cast<ShaderSource*>(nl->source.get()))
+                ShaderPresets::applyJson(ov->second, *ss);
+        }
+    }
+
+    for (int ci = 0; ci < (int)sel.size(); ci++) {
+        std::string title = sel[ci];
+        for (const auto& shh : m_shaderClaw.shaders())
+            if (shh.fullPath == sel[ci]) { title = shh.title; break; }
+        TimelineClip* c = m_timeline.addClip(
+            nl->id, (double)ci * (double)slotS, (double)slotS, title, sel[ci]);
+        if (c) {
+            c->kind = ClipKind::Shader;
+            c->transitionInName = "fade";
+            c->transitionInDuration = 1.0;
+        }
+    }
+    double showLen = (double)sel.size() * (double)slotS;
+    m_timeline.setDuration(showLen);
+    m_timeline.setWorkArea(0.0, showLen);
+    m_timeline.setLooping(true);
+    m_timeline.seek(0.0);
+    m_timeline.play();
+    m_showRunning = true;
+    m_timelineMinimized = false;  // show the show
+}
+
+void Application::renderShaderGallery() {
+    static bool s_wasOpen = false;
+    if (!UIManager::sGalleryOpen) { s_wasOpen = false; return; }
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30, 24));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.030f, 0.040f, 0.060f, 0.99f));
+    ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                          ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoScrollbar;
+    bool open = ImGui::Begin("###BabyGallery", nullptr, fl);
+    if (!s_wasOpen) { ImGui::SetWindowFocus(); s_wasOpen = true; }
+    if (open) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) UIManager::sGalleryOpen = false;
+
+        // ── header row: title · search · filter pills · dest · close ────
+        static char s_search[128] = "";
+        static int  s_filter = 0;            // 0 ALL / 1 VFX / 2 Text / 3 3D
+        static int  s_destZone = -1;         // -1 = Whole House
+        if (s_destZone >= (int)m_zones.size()) s_destZone = -1;
+
+        {
+            ImGuiWindow* w = ImGui::GetCurrentWindow();
+            float prevScale = w->FontWindowScale;
+            w->FontWindowScale = 1.9f;
+            ImGui::TextUnformatted("GALLERY");
+            w->FontWindowScale = prevScale;
+        }
+        ImGui::SameLine(0, 14);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.52f, 0.56f, 0.64f, 1.0f));
+        ImGui::Text("shader gallery — %d shaders", (int)m_shaderClaw.shaders().size());
+        ImGui::PopStyleColor();
+
+        // close ✕ pinned to the right edge
+        ImGui::SameLine(0, 0);
+        float xBtnW = ImGui::CalcTextSize("CLOSE  x").x + 24.0f;
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - xBtnW);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.18f));
+        if (ImGui::Button("CLOSE  x")) UIManager::sGalleryOpen = false;
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+
+        ImGui::Dummy(ImVec2(0, 8));
+
+        // search + pills + destination on one row
+        ImGui::SetNextItemWidth(280.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.07f));
+        ImGui::InputTextWithHint("##babySearch", "search shaders...", s_search, sizeof(s_search));
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+
+        auto pill = [&](const char* label, int idx) {
+            ImGui::SameLine(0, 6);
+            bool active = (s_filter == idx);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
+            }
+            if (ImGui::Button(label)) s_filter = idx;
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar();
+        };
+        pill("ALL", 0); pill("VFX", 1); pill("Text", 2); pill("3D", 3);
+
+        // destination dropdown (same semantics as the panel's ADD TO)
+        ImGui::SameLine(0, 18);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
+        ImGui::TextUnformatted("ADD TO");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8);
+        const char* destPreview = "Whole House";
+        if (s_destZone >= 0 && m_zones[s_destZone])
+            destPreview = m_zones[s_destZone]->name.c_str();
+        ImGui::SetNextItemWidth(200.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
+        bool zoneArmed = (s_destZone >= 0);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, zoneArmed ? ImVec4(0.24f, 0.47f, 0.85f, 0.30f)
+                                                          : ImVec4(1, 1, 1, 0.06f));
+        if (ImGui::BeginCombo("##babyDest", destPreview)) {
+            if (ImGui::Selectable("Whole House", s_destZone < 0)) s_destZone = -1;
+            for (int zi = 0; zi < (int)m_zones.size(); zi++) {
+                if (!m_zones[zi]) continue;
+                ImGui::PushID(zi);
+                if (ImGui::Selectable(m_zones[zi]->name.c_str(), s_destZone == zi))
+                    s_destZone = zi;
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+
+        ImGui::SameLine(0, 18);
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.42f, 0.46f, 0.54f, 1.0f));
+        ImGui::TextUnformatted("click a tile to add it  ·  esc to close");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 10));
+
+        if (!m_shaderClaw.isConnected()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::TextWrapped("ShaderClaw not connected — connect it in the Sources panel first.");
+            ImGui::PopStyleColor();
+        } else {
+            // ── thumbnail generation (self-sufficient copy of the panel's
+            // loop so BABY fills in even when the panel isn't rendering) ──
+            const int kThumbRes = 160;
+            static std::string sThumbCacheDir;
+            if (sThumbCacheDir.empty()) {
+                const char* home = getenv("HOME");
+                if (!home || !*home) home = getenv("USERPROFILE");
+                sThumbCacheDir = std::string(home ? home : "") + "/.easel/shader_thumbs";
+                std::error_code ec;
+                std::filesystem::create_directories(sThumbCacheDir, ec);
+            }
+            auto thumbCachePath = [&](const std::string& fullPath) {
+                size_t sp = fullPath.find_last_of("/\\");
+                std::string stem = (sp == std::string::npos) ? fullPath : fullPath.substr(sp + 1);
+                size_t d = stem.find_last_of('.');
+                if (d != std::string::npos) stem = stem.substr(0, d);
+                return sThumbCacheDir + "/" + stem + ".png";
+            };
+            if (m_scThumbRenderer) {
+                m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
+                m_scThumbRenderer->update();
+                m_scThumbRenderFrame++;
+                if (m_scThumbRenderFrame > 3) {
+                    auto& entry = m_scThumbnails[m_scThumbRenderPath];
+                    if (!entry.texture) entry.texture = std::make_shared<Texture>();
+                    GLint prevFBO;
+                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+                    GLuint thumbTex = m_scThumbRenderer->textureId();
+                    if (thumbTex != 0) {
+                        GLuint tempFBO;
+                        glGenFramebuffers(1, &tempFBO);
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
+                        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                               GL_TEXTURE_2D, thumbTex, 0);
+                        if (!entry.texture->id() ||
+                            entry.texture->width() != kThumbRes ||
+                            entry.texture->height() != kThumbRes)
+                            entry.texture->createEmpty(kThumbRes, kThumbRes);
+                        glBindTexture(GL_TEXTURE_2D, entry.texture->id());
+                        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kThumbRes, kThumbRes);
+                        glBindTexture(GL_TEXTURE_2D, 0);
+                        {
+                            std::vector<unsigned char> px((size_t)kThumbRes * kThumbRes * 4);
+                            glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                            stbi_flip_vertically_on_write(1);
+                            stbi_write_png(thumbCachePath(m_scThumbRenderPath).c_str(),
+                                           kThumbRes, kThumbRes, 4, px.data(), kThumbRes * 4);
+                            stbi_flip_vertically_on_write(0);
+                        }
+                        glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                        glDeleteFramebuffers(1, &tempFBO);
+                        entry.ready = true;
+                    }
+                    m_scThumbRenderer.reset();
+                    m_scThumbRenderPath.clear();
+                }
+            } else {
+                int cacheLoads = 0;
+                for (const auto& shader : m_shaderClaw.shaders()) {
+                    auto it = m_scThumbnails.find(shader.fullPath);
+                    if (it != m_scThumbnails.end() && it->second.ready) continue;
+                    std::string png = thumbCachePath(shader.fullPath);
+                    std::error_code e1, e2;
+                    auto pngT = std::filesystem::last_write_time(png, e1);
+                    auto srcT = std::filesystem::last_write_time(shader.fullPath, e2);
+                    if (!e1 && !e2 && pngT >= srcT) {
+                        auto& entry = m_scThumbnails[shader.fullPath];
+                        if (!entry.texture) entry.texture = std::make_shared<Texture>();
+                        if (entry.texture->loadFromFile(png)) {
+                            entry.ready = true;
+                            if (++cacheLoads < 8) continue;
+                            break;
+                        }
+                    }
+                    m_scThumbRenderer = std::make_shared<ShaderSource>();
+                    m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
+                    if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
+                        m_scThumbRenderPath = shader.fullPath;
+                        m_scThumbRenderFrame = 0;
+                    } else {
+                        m_scThumbRenderer.reset();
+                        m_scThumbnails[shader.fullPath].ready = true;
+                    }
+                    break;
+                }
+            }
+
+            // ── routing helpers (same behavior as the panel) ────────────
+            auto placeInZoneOnly = [&](uint32_t lid, int zi) {
+                if (zi < 0 || zi >= (int)m_zones.size() || !m_zones[zi]) return;
+                for (auto& zz : m_zones) {
+                    if (!zz) continue;
+                    if (zz->showAllLayers) {
+                        zz->showAllLayers = false;
+                        for (int li = 0; li < m_layerStack.count(); li++)
+                            zz->visibleLayerIds.insert(m_layerStack[li]->id);
+                    }
+                    zz->visibleLayerIds.erase(lid);
+                }
+                m_zones[zi]->visibleLayerIds.insert(lid);
+            };
+            auto addShaderRouted = [&](const std::string& fullPath) {
+                int before = m_layerStack.count();
+                loadShader(fullPath);
+                if (m_layerStack.count() > before) {
+                    auto& nl = m_layerStack[m_layerStack.count() - 1];
+                    if (s_destZone >= 0) placeInZoneOnly(nl->id, s_destZone);
+                    nl->transitionType = TransitionType::Fade;
+                    nl->transitionDuration = std::max(nl->transitionDuration, 1.2f);
+                    nl->transitionProgress = 0.0f;
+                    nl->transitionDirection = true;
+                    nl->transitionActive = true;
+                }
+            };
+
+            // ── SHUFFLE + BUILD SHOW row ────────────────────────────────
+            static bool s_building = false;
+            static std::vector<std::string> s_showSel;
+            static float s_showMinutes = 10.0f;
+            {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.08f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.18f));
+                if (ImGui::Button("SHUFFLE")) {
+                    const auto& all = m_shaderClaw.shaders();
+                    if (!all.empty())
+                        addShaderRouted(all[(size_t)(ImGui::GetTime() * 997.0)
+                                            % all.size()].fullPath);
+                }
+                ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a random shader");
+
+                ImGui::SameLine(0, 8);
+                if (s_building) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.24f, 0.47f, 0.85f, 0.75f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.52f, 0.90f, 0.90f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.24f, 0.47f, 0.85f, 0.30f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.52f, 0.90f, 0.50f));
+                }
+                if (ImGui::Button(s_building ? "BUILDING SHOW - pick tiles" : "BUILD SHOW"))
+                    s_building = !s_building;
+                ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Pick a show length, click tiles to add them,\nthen START - the shaders rotate as a playlist.");
+
+                // ── SHOWS — saved show presets. Picking one loads its
+                // shader playlist + every saved parameter and starts it.
+                if (!m_showPresets.all().empty()) {
+                    ImGui::SameLine(0, 8);
+                    ImGui::SetNextItemWidth(150.0f);
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(1, 1, 1, 0.08f));
+                    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.18f));
+                    if (ImGui::BeginCombo("##showsMenu", "SHOWS", ImGuiComboFlags_HeightLarge)) {
+                        std::string toDelete;
+                        for (const auto& sp : m_showPresets.all()) {
+                            ImGui::PushID(sp.name.c_str());
+                            char lbl[128];
+                            snprintf(lbl, sizeof(lbl), "%s  (%d - %.0fmin)",
+                                     sp.name.c_str(), (int)sp.entries.size(), sp.minutes);
+                            if (ImGui::Selectable(lbl)) {
+                                m_showParamOverrides.clear();
+                                std::vector<std::string> paths;
+                                for (const auto& e : sp.entries) {
+                                    paths.push_back(e.path);
+                                    if (e.params.is_object() && !e.params.empty())
+                                        m_showParamOverrides[e.path] = e.params;
+                                }
+                                s_showSel     = paths;
+                                s_showMinutes = sp.minutes;
+                                startShow(paths, sp.minutes);
+                                UIManager::sGalleryOpen = false;
+                            }
+                            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 14.0f);
+                            if (ImGui::SmallButton("x")) toDelete = sp.name;
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Delete this show preset");
+                            ImGui::PopID();
+                        }
+                        if (!toDelete.empty()) m_showPresets.remove(toDelete);
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PopStyleColor(2);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Start a saved show preset -\n"
+                                          "shaders + all their saved parameters.");
+                }
+
+                if (m_showRunning) {
+                    ImGui::SameLine(0, 8);
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.80f, 0.22f, 0.22f, 0.75f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.28f, 0.28f, 0.90f));
+                    if (ImGui::Button("STOP SHOW")) {
+                        m_showRunning = false;
+                        m_timeline.pause();
+                        m_timeline.setLooping(false);
+                        if (m_showLayerId != 0) {
+                            m_timeline.removeTrackForLayer(m_showLayerId);
+                            for (int li = 0; li < m_layerStack.count(); li++)
+                                if (m_layerStack[li]->id == m_showLayerId) {
+                                    m_layerStack.removeLayer(li); break;
+                                }
+                            m_showLayerId = 0;
+                        }
+                    }
+                    ImGui::PopStyleColor(2);
+                }
+
+                if (s_building) {
+                    ImGui::SameLine(0, 14);
+                    ImGui::SetNextItemWidth(150.0f);
+                    ImGui::DragFloat("##showMin", &s_showMinutes, 0.5f, 1.0f, 180.0f,
+                                     "Show: %.0f min");
+                    ImGui::SameLine(0, 10);
+                    int selN = (int)s_showSel.size();
+                    float slot = selN > 0 ? s_showMinutes * 60.0f / (float)selN : 0.0f;
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.70f, 0.78f, 1.0f));
+                    ImGui::Text("%d picked - %.0fs each", selN, slot);
+                    ImGui::PopStyleColor();
+                    if (selN > 0) {
+                        ImGui::SameLine(0, 10);
+                        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.96f, 0.97f, 1.00f, 1.00f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.05f, 0.07f, 0.10f, 1.00f));
+                        if (ImGui::Button("START SHOW")) {
+                            // A hand-built show carries no param overrides —
+                            // clips use the live per-shader presets.
+                            m_showParamOverrides.clear();
+                            startShow(s_showSel, s_showMinutes);
+                            s_building = false;
+                            UIManager::sGalleryOpen = false;   // drop to canvas to watch
+                        }
+                        ImGui::PopStyleColor(3);
+                        ImGui::SameLine(0, 6);
+                        if (ImGui::Button("CLEAR")) s_showSel.clear();
+                        // ── SAVE SHOW: name it, snapshot every picked
+                        // shader's params (from its live layer when one
+                        // exists, else its saved per-shader preset).
+                        ImGui::SameLine(0, 6);
+                        if (ImGui::Button("SAVE SHOW"))
+                            ImGui::OpenPopup("##saveShowPopup");
+                        if (ImGui::BeginPopup("##saveShowPopup")) {
+                            static char s_showName[64] = "";
+                            ImGui::TextDisabled("Save show preset");
+                            ImGui::SetNextItemWidth(220);
+                            bool enter = ImGui::InputTextWithHint(
+                                "##showName", "Show name...", s_showName,
+                                sizeof(s_showName),
+                                ImGuiInputTextFlags_EnterReturnsTrue);
+                            ImGui::SameLine();
+                            if ((ImGui::Button("Save") || enter) && s_showName[0]) {
+                                ShowPreset sp;
+                                sp.name    = s_showName;
+                                sp.minutes = s_showMinutes;
+                                for (const auto& pth : s_showSel) {
+                                    ShowPresetEntry e;
+                                    e.path   = pth;
+                                    e.params = nlohmann::json::object();
+                                    // Live layer running this shader wins —
+                                    // that's the look on screen right now.
+                                    bool got = false;
+                                    for (int li = 0; li < m_layerStack.count(); li++) {
+                                        auto l = m_layerStack[li];
+                                        if (!l || !l->source) continue;
+                                        auto* ss = dynamic_cast<ShaderSource*>(l->source.get());
+                                        if (ss && ss->sourcePath() == pth) {
+                                            e.params = ShaderPresets::captureJson(*ss);
+                                            got = true; break;
+                                        }
+                                    }
+                                    if (!got) {
+                                        size_t sl2 = pth.find_last_of("/\\");
+                                        std::string fk = (sl2 != std::string::npos)
+                                            ? pth.substr(sl2 + 1) : pth;
+                                        if (const auto* snap = m_shaderPresets.findSnapshot(fk))
+                                            e.params = *snap;
+                                    }
+                                    sp.entries.push_back(std::move(e));
+                                }
+                                m_showPresets.put(sp);
+                                s_showName[0] = '\0';
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::EndPopup();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Save this show (shaders + all their\n"
+                                              "current parameters) as a named preset.");
+                    }
+                }
+                ImGui::PopStyleVar();
+                ImGui::Dummy(ImVec2(0, 8));
+            }
+
+            // ── filter ──────────────────────────────────────────────────
+            std::string needle = s_search;
+            for (auto& c : needle) c = (char)tolower(c);
+            const auto& shaders = m_shaderClaw.shaders();
+            std::vector<int> vis;
+            vis.reserve(shaders.size());
+            for (int i = 0; i < (int)shaders.size(); i++) {
+                const auto& sh = shaders[i];
+                bool isText = false, is3D = false;
+                for (const auto& c : sh.categories) {
+                    if (c == "Text") isText = true;
+                    if (c == "3D")   is3D   = true;
+                }
+                if (!isText && sh.file.rfind("text_", 0) == 0) isText = true;
+                bool keep = (s_filter == 0) ||
+                            (s_filter == 1 && !isText && !is3D) ||
+                            (s_filter == 2 && isText) ||
+                            (s_filter == 3 && is3D);
+                if (keep && !needle.empty()) {
+                    std::string t = sh.title;
+                    for (auto& c : t) c = (char)tolower(c);
+                    if (t.find(needle) == std::string::npos) keep = false;
+                }
+                if (keep) vis.push_back(i);
+            }
+
+            // ── the big grid ────────────────────────────────────────────
+            static std::unordered_map<std::string, double> s_addedAt;
+            ImGui::BeginChild("##babyScroll", ImVec2(0, 0), false);
+            const float cellPad  = 14.0f;
+            const float labelH   = 26.0f;
+            const float minCellW = 190.0f;
+            const float maxCellW = 280.0f;
+            float availW = ImGui::GetContentRegionAvail().x;
+            int cols = std::max(1, (int)((availW + cellPad) / (minCellW + cellPad)));
+            float cellW = (availW - cellPad * (cols - 1)) / (float)cols;
+            if (cellW > maxCellW) cellW = maxCellW;
+            float thumbSize = cellW;
+            float cellH = thumbSize + labelH;
+
+            for (int vi = 0; vi < (int)vis.size(); vi++) {
+                const auto& sh = shaders[vis[vi]];
+                if (vi % cols != 0) ImGui::SameLine(0, cellPad);
+                ImGui::PushID(vis[vi]);
+                ImVec2 cellPos = ImGui::GetCursorScreenPos();
+                bool clicked = ImGui::InvisibleButton("##btile", ImVec2(thumbSize, cellH));
+                bool hov = ImGui::IsItemHovered();
+
+                // Right-click menu: Add / Duplicate / Push Further / Delete.
+                if (ImGui::BeginPopupContextItem("##btileMenu")) {
+                    clicked = false;
+                    if (ImGui::MenuItem("Add")) {
+                        addShaderRouted(sh.fullPath);
+                        s_addedAt[sh.fullPath] = ImGui::GetTime();
+                    }
+                    if (ImGui::MenuItem("Duplicate")) {
+                        // Copy the .fs + append a manifest entry (new id, " Copy").
+                        namespace fs = std::filesystem;
+                        try {
+                            fs::path src(sh.fullPath);
+                            fs::path dir = src.parent_path();
+                            std::string stem = src.stem().string();
+                            fs::path dst; int suffix = 2;
+                            do {
+                                dst = dir / (stem + "_" + std::to_string(suffix++) + ".fs");
+                            } while (fs::exists(dst));
+                            fs::copy_file(src, dst);
+                            fs::path manifestPath = dir / "manifest.json";
+                            nlohmann::json manifest = nlohmann::json::array();
+                            { std::ifstream mf(manifestPath); if (mf) mf >> manifest; }
+                            int nextId = 1000;
+                            nlohmann::json entryCopy;
+                            for (auto& e : manifest) {
+                                if (e.contains("id") && e["id"].is_number())
+                                    nextId = std::max(nextId, e["id"].get<int>() + 1);
+                                if (e.value("file", std::string()) == sh.file) entryCopy = e;
+                            }
+                            if (entryCopy.is_null()) entryCopy = nlohmann::json::object();
+                            entryCopy["id"]    = nextId;
+                            entryCopy["file"]  = dst.filename().string();
+                            entryCopy["title"] = sh.title + " Copy";
+                            manifest.push_back(entryCopy);
+                            std::ofstream out(manifestPath);
+                            out << manifest.dump(2, ' ', false,
+                                    nlohmann::json::error_handler_t::replace);
+                            out.close();
+                            m_shaderClaw.refreshManifest();
+                        } catch (const std::exception& e) {
+                            std::cerr << "[Gallery] Duplicate failed: " << e.what() << "\n";
+                        }
+                    }
+                    if (ImGui::MenuItem("Push Further...")) {
+                        m_pushPath  = sh.fullPath;
+                        m_pushTitle = sh.title;
+                        m_pushFile  = sh.file;
+                        m_pushInstr[0] = '\0';
+                        m_pushCombine = 0;
+                        m_shaderImprover.reset();
+                        m_pushOpen = true;
+                        UIManager::sGalleryOpen = false;  // panel lives under the overlay
+                    }
+                    ImGui::Separator();
+                    if (ImGui::BeginMenu("Delete Permanently")) {
+                        if (ImGui::MenuItem("Yes - delete forever")) {
+                            // PERMANENT (Lu's rule): file + thumbnail + vendored
+                            // copy + manifest entry, no trash.
+                            namespace fs = std::filesystem;
+                            try {
+                                std::error_code ec;
+                                fs::path src(sh.fullPath);
+                                fs::remove(src, ec);
+                                const char* home = std::getenv("HOME");
+                                if (home) {
+                                    fs::remove(fs::path(home) / ".easel" / "shader_thumbs" /
+                                               (src.stem().string() + ".png"), ec);
+                                    fs::remove(fs::path(home) / "easel" / "external" /
+                                               "ShaderClaw3" / "shaders" / src.filename(), ec);
+                                }
+                                m_scThumbnails.erase(sh.fullPath);
+                                fs::path manifestPath =
+                                    fs::path(m_shaderClaw.shadersDir()) / "manifest.json";
+                                if (fs::exists(manifestPath)) {
+                                    nlohmann::json manifest = nlohmann::json::array();
+                                    { std::ifstream mf(manifestPath); if (mf) mf >> manifest; }
+                                    nlohmann::json kept = nlohmann::json::array();
+                                    for (auto& e : manifest)
+                                        if (e.value("file", std::string()) != sh.file)
+                                            kept.push_back(e);
+                                    std::ofstream out(manifestPath);
+                                    out << kept.dump(2, ' ', false,
+                                            nlohmann::json::error_handler_t::replace);
+                                }
+                                m_shaderClaw.refreshManifest();
+                            } catch (const std::exception& e) {
+                                std::cerr << "[Gallery] Delete failed: " << e.what() << "\n";
+                            }
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImDrawList* d = ImGui::GetWindowDrawList();
+
+                ImU32 tileBg   = hov ? IM_COL32(255, 255, 255, 24) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge = hov ? IM_COL32(255, 255, 255, 150) : IM_COL32(255, 255, 255, 45);
+                d->AddRectFilled(cellPos, ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                                 tileBg, 8.0f);
+                d->AddRect(cellPos, ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                           tileEdge, 8.0f, 0, 1.0f);
+
+                ImVec2 thumbMin(cellPos.x + 4, cellPos.y + 4);
+                ImVec2 thumbMax(cellPos.x + thumbSize - 4, cellPos.y + thumbSize - 4);
+                auto it = m_scThumbnails.find(sh.fullPath);
+                if (it != m_scThumbnails.end() && it->second.ready &&
+                    it->second.texture && it->second.texture->id()) {
+                    d->AddImageRounded((ImTextureID)(intptr_t)it->second.texture->id(),
+                                       thumbMin, thumbMax, ImVec2(0, 1), ImVec2(1, 0),
+                                       IM_COL32(255, 255, 255, 255), 6.0f);
+                } else {
+                    d->AddRectFilled(thumbMin, thumbMax, IM_COL32(14, 18, 30, 255), 6.0f);
+                    const char* wait = "...";
+                    ImVec2 ws = ImGui::CalcTextSize(wait);
+                    d->AddText(ImVec2((thumbMin.x + thumbMax.x - ws.x) * 0.5f,
+                                      (thumbMin.y + thumbMax.y - ws.y) * 0.5f),
+                               IM_COL32(255, 255, 255, 90), wait);
+                }
+
+                std::string title = shaderDisplayName(sh.title);
+                ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+                float tx = cellPos.x + (thumbSize - ts.x) * 0.5f;
+                if (ts.x > thumbSize - 8) tx = cellPos.x + 4;
+                d->AddText(ImVec2(tx, cellPos.y + thumbSize + 5),
+                           hov ? IM_COL32(255, 255, 255, 255)
+                               : IM_COL32(215, 222, 232, 215),
+                           title.c_str());
+
+                // "ADDED" flash after a click
+                auto fa = s_addedAt.find(sh.fullPath);
+                if (fa != s_addedAt.end()) {
+                    double dt = ImGui::GetTime() - fa->second;
+                    if (dt < 1.1) {
+                        int a = (int)(200.0 * (1.0 - dt / 1.1));
+                        d->AddRectFilled(thumbMin, thumbMax,
+                                         IM_COL32(40, 180, 90, a / 3), 6.0f);
+                        const char* msg = "ADDED";
+                        ImVec2 ms = ImGui::CalcTextSize(msg);
+                        d->AddText(ImVec2((thumbMin.x + thumbMax.x - ms.x) * 0.5f,
+                                          (thumbMin.y + thumbMax.y - ms.y) * 0.5f),
+                                   IM_COL32(255, 255, 255, a), msg);
+                    } else s_addedAt.erase(fa);
+                }
+
+                // Show-builder selection ring + badge
+                int selIdx = -1;
+                for (int si = 0; si < (int)s_showSel.size(); si++)
+                    if (s_showSel[si] == sh.fullPath) { selIdx = si; break; }
+                if (s_building && selIdx >= 0) {
+                    d->AddRect(cellPos, ImVec2(cellPos.x + thumbSize, cellPos.y + cellH),
+                               IM_COL32(70, 140, 255, 255), 8.0f, 0, 3.0f);
+                    char badge[8];
+                    snprintf(badge, sizeof(badge), "%d", selIdx + 1);
+                    ImVec2 bp(cellPos.x + 10, cellPos.y + 8);
+                    d->AddCircleFilled(ImVec2(bp.x + 9, bp.y + 9), 12.0f,
+                                       IM_COL32(70, 140, 255, 255));
+                    ImVec2 bs = ImGui::CalcTextSize(badge);
+                    d->AddText(ImVec2(bp.x + 9 - bs.x * 0.5f, bp.y + 9 - bs.y * 0.5f),
+                               IM_COL32(255, 255, 255, 255), badge);
+                }
+
+                if (clicked) {
+                    if (s_building) {
+                        if (selIdx >= 0) s_showSel.erase(s_showSel.begin() + selIdx);
+                        else             s_showSel.push_back(sh.fullPath);
+                    } else {
+                        addShaderRouted(sh.fullPath);
+                        s_addedAt[sh.fullPath] = ImGui::GetTime();
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+

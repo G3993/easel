@@ -46,6 +46,12 @@ bool Framebuffer::create(int width, int height, bool withDepth) {
         return false;
     }
 
+    // Fresh GL textures contain stale GPU memory (often literally the last
+    // thing on screen) -- shaders with persistent pass buffers were flashing
+    // a "screenshot" ghost on their first frames. Clear to transparent black.
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | (withDepth ? GL_DEPTH_BUFFER_BIT : 0));
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return true;
 }
@@ -70,6 +76,11 @@ bool Framebuffer::createHalfFloat(int width, int height) {
 
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_texture, 0);
 
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        // Same stale-memory clear as create() -- see comment there.
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         std::cerr << "Half-float framebuffer incomplete, falling back to RGBA8" << std::endl;
         glBindFramebuffer(GL_FRAMEBUFFER, 0);

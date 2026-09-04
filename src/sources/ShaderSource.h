@@ -85,6 +85,10 @@ struct ImageBinding {
     int height = 0;
     uint32_t sourceLayerId = 0; // layer ID providing the texture (0 = none)
     bool flippedV = false;      // source is top-down (NDI etc.)
+    // File-backed binding (TEXTURE dropdown "Load Image File..."):
+    // the ShaderSource OWNS the texture; sourceLayerId stays 0.
+    std::string filePath;
+    std::shared_ptr<class Texture> ownedTex;
 };
 
 // AudioSignal + AudioBinding moved to a shared header so non-shader sources
@@ -154,7 +158,14 @@ public:
 
     // Bind an external texture to an ISF image input by name
     void bindImageInput(const std::string& name, GLuint texId, int w, int h, uint32_t sourceLayerId, bool flippedV = false);
+    // Bind an image FILE directly (the source owns the loaded texture).
+    bool bindImageFileInput(const std::string& name, const std::string& path);
     void unbindImageInput(const std::string& name);
+
+    // Global Motion Ease (0 = raw audio, 1 = very smooth): attack/release
+    // smoothing applied to the core audio uniforms of EVERY shader so music
+    // never slams the visuals. One knob, app-wide (Output menu).
+    static float sMotionEase;
     const std::map<std::string, ImageBinding>& imageBindings() const { return m_imageBindings; }
     std::map<std::string, ImageBinding>& imageBindings() { return m_imageBindings; }
 
@@ -224,6 +235,10 @@ private:
 
     // Image input bindings (input name -> external texture)
     std::map<std::string, ImageBinding> m_imageBindings;
+
+    // Motion Ease follower state (per instance)
+    float m_easeL = 0.0f, m_easeB = 0.0f, m_easeLM = 0.0f,
+          m_easeHM = 0.0f, m_easeT = 0.0f, m_easeBt = 0.0f;
 
     // Audio-reactive bindings (param name -> binding)
     std::map<std::string, AudioBinding> m_audioBindings;

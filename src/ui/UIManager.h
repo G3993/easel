@@ -81,6 +81,9 @@ public:
     // Canvas / Mapping / Stage / Play, so Mapping sits between Canvas and Stage.
     enum class WorkspaceMode { Canvas, Mapping, Stage, Show, Zones };
     static WorkspaceMode sMode;
+    // Fullscreen shader GALLERY overlay -- toggled by the top-nav GALLERY
+    // tab (next to ZONES) and rendered by Application::renderShaderGallery.
+    static bool sGalleryOpen;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
     // with an ease-out cubic. Set via setMode() — never write sMode directly

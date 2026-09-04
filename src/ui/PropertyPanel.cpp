@@ -889,7 +889,10 @@ static bool rangeSlider(const char* id, const char* label,
     // Same tall-pill family as unifiedSlider/paramSlider, one step slimmer —
     // this is the indented sub-row under a bound param, not a primary value.
     const float trackH = 14.0f;
-    const float handleR = trackH * 0.5f - kThumbInset;
+    // Circular end thumbs, a touch LARGER than the pill so they read (and
+    // grab) as real handles — the thin 3px caps were unclickable
+    // (2026-08-12 directive, supersedes the 2026-07-16 thin-line look).
+    const float handleR = trackH * 0.5f + 1.5f;
     float rowH   = labelH + kLabelGapY + trackH;
     float span   = (absHi > absLo) ? (absHi - absLo) : 1.0f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -931,23 +934,22 @@ static bool rangeSlider(const char* id, const char* label,
         changed = true;
     }
 
-    // Tall pill track + a quiet lighter BAND for the selected range. No ball
-    // thumbs — the band itself is the affordance. Each end of the range is a
-    // thin full-height rounded rectangular line (2026-07-16 directive),
-    // brightening on hover/drag. Minimal, monochrome.
+    // Tall pill track + a quiet lighter BAND for the selected range, with a
+    // solid circular thumb on each end — same visual language as the
+    // paramSlider ball, brightening on hover/drag.
     bool hovered = ImGui::IsItemHovered();
     dl->AddRectFilled(ImVec2(rowStart.x, trackY),
                       ImVec2(rowStart.x + w, trackY + trackH),
                       kColTallTrack, trackH * 0.5f);
     dl->AddRectFilled(ImVec2(toX(*lo), trackY), ImVec2(toX(*hi), trackY + trackH),
                       kColRangeSpan, trackH * 0.5f);
-    ImU32 capCol = (active || hovered) ? IM_COL32(255, 255, 255, 235)
-                                       : IM_COL32(255, 255, 255, 150);
+    ImU32 handleCol = (active || hovered) ? IM_COL32(255, 255, 255, 255)
+                                          : kColValue;
+    float hy = trackY + trackH * 0.5f;
     for (float hv : { *lo, *hi }) {
         float hx = toX(hv);
-        dl->AddRectFilled(ImVec2(hx - 1.5f, trackY + 1.5f),
-                          ImVec2(hx + 1.5f, trackY + trackH - 1.5f),
-                          capCol, 1.5f);
+        dl->AddCircleFilled(ImVec2(hx, hy), handleR, handleCol);
+        dl->AddCircle      (ImVec2(hx, hy), handleR, IM_COL32(0, 0, 0, 110), 0, 1.2f);
     }
 
     // Live driven-value marker — clean tone-colored tick inside the pill,
@@ -1056,7 +1058,7 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
             if (ab.signal == AudioSignal::MidiCC && midi) {
                 if (!midi->isOpen()) {
                     auto devs = midi->listDevices();
-                    if (!devs.empty()) midi->openDevice(0);
+                    if (!devs.empty()) midi->openAll();
                 }
                 midi->startLearn();
             }
@@ -4543,9 +4545,19 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     for (int li = 0; li < layerStack->count(); li++) {
                         auto& other = (*layerStack)[li];
                         if (other->id == currentSrcId && other->source) {
-                            preview = other->name + " (" + other->source->typeName() + ")";
+                            std::string nm = other->name;
+                            if (nm.empty()) nm = "Layer " + std::to_string(li + 1);
+                            preview = nm + " (" + other->source->typeName() + ")";
                             break;
                         }
+                    }
+                    // File-backed binding shows the image filename.
+                    if (currentSrcId == 0 && it != bindings.end() &&
+                        !it->second.filePath.empty()) {
+                        const std::string& fp = it->second.filePath;
+                        size_t sp = fp.find_last_of("/\\");
+                        preview = (sp == std::string::npos ? fp : fp.substr(sp + 1))
+                                + " (image)";
                     }
 
                     // Same shared control column as RESOLUTION / enum combos
@@ -4556,12 +4568,24 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         if (ImGui::Selectable("None", currentSrcId == 0)) {
                             shaderSrc->unbindImageInput(input.name);
                         }
+#ifdef __APPLE__
+                        // Bind an image FILE straight from disk -- no layer needed.
+                        if (ImGui::Selectable("Load Image File...", false)) {
+                            extern std::string openFileDialog_mac(const char* filter);
+                            std::string picked = openFileDialog_mac(
+                                "Images\0*.png;*.jpg;*.jpeg;*.bmp\0\0");
+                            if (!picked.empty())
+                                shaderSrc->bindImageFileInput(input.name, picked);
+                        }
+#endif
                         // List all other layers that have a texture
                         for (int li = 0; li < layerStack->count(); li++) {
                             auto& other = (*layerStack)[li];
                             if (other->id == layer->id) continue; // skip self
                             if (!other->source || other->source->textureId() == 0) continue;
-                            std::string label = other->name + " (" + other->source->typeName() + ")";
+                            std::string nm = other->name;
+                            if (nm.empty()) nm = "Layer " + std::to_string(li + 1);
+                            std::string label = nm + " (" + other->source->typeName() + ")";
                             bool selected = (other->id == currentSrcId);
                             if (ImGui::Selectable(label.c_str(), selected)) {
                                 shaderSrc->bindImageInput(input.name,

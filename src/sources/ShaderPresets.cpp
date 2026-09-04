@@ -44,48 +44,44 @@ bool ShaderPresets::has(const std::string& shaderFile) const {
     return m_presets.find(shaderFile) != m_presets.end();
 }
 
-int ShaderPresets::capture(const std::string& shaderFile, const ShaderSource& src) {
+json ShaderPresets::captureJson(const ShaderSource& src) {
     json snap = json::object();
-    int n = 0;
     for (const auto& in : src.inputs()) {
         if (in.type == "float" || in.type == "long") {
             if (std::holds_alternative<float>(in.value)) {
                 snap[in.name] = std::get<float>(in.value);
-                n++;
             }
         } else if (in.type == "color") {
             if (std::holds_alternative<glm::vec4>(in.value)) {
                 const auto& v = std::get<glm::vec4>(in.value);
                 snap[in.name] = { v.x, v.y, v.z, v.w };
-                n++;
             }
         } else if (in.type == "bool" || in.type == "event") {
             if (std::holds_alternative<bool>(in.value)) {
                 snap[in.name] = std::get<bool>(in.value);
-                n++;
             }
         } else if (in.type == "point2D") {
             if (std::holds_alternative<glm::vec2>(in.value)) {
                 const auto& v = std::get<glm::vec2>(in.value);
                 snap[in.name] = { v.x, v.y };
-                n++;
             }
         } else if (in.type == "text") {
             if (std::holds_alternative<std::string>(in.value)) {
                 snap[in.name] = std::get<std::string>(in.value);
-                n++;
             }
         }
     }
-    m_presets[shaderFile] = snap;
-    save();
-    return n;
+    return snap;
 }
 
-int ShaderPresets::apply(const std::string& shaderFile, ShaderSource& src) const {
-    auto it = m_presets.find(shaderFile);
-    if (it == m_presets.end()) return 0;
-    const json& snap = it->second;
+int ShaderPresets::capture(const std::string& shaderFile, const ShaderSource& src) {
+    json snap = captureJson(src);
+    m_presets[shaderFile] = snap;
+    save();
+    return (int)snap.size();
+}
+
+int ShaderPresets::applyJson(const json& snap, ShaderSource& src) {
     int n = 0;
     for (auto& in : src.inputs()) {
         if (!snap.contains(in.name)) continue;
@@ -113,6 +109,17 @@ int ShaderPresets::apply(const std::string& shaderFile, ShaderSource& src) const
         }
     }
     return n;
+}
+
+int ShaderPresets::apply(const std::string& shaderFile, ShaderSource& src) const {
+    auto it = m_presets.find(shaderFile);
+    if (it == m_presets.end()) return 0;
+    return applyJson(it->second, src);
+}
+
+const json* ShaderPresets::findSnapshot(const std::string& shaderFile) const {
+    auto it = m_presets.find(shaderFile);
+    return it == m_presets.end() ? nullptr : &it->second;
 }
 
 void ShaderPresets::clear(const std::string& shaderFile) {

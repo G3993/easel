@@ -593,6 +593,9 @@ void Timeline::applyToLayers(LayerStack& layers) {
                 if (!active->sourcePath.empty()) {
                     auto src = loadSourceForPath(active->sourcePath);
                     if (src) {
+                        // Let the app re-apply saved params / show-preset
+                        // overrides before the source goes live.
+                        if (onSourceLoaded) onSourceLoaded(active->sourcePath, *src);
                         // Respect sourceIn — video clips play from the clip's in-point.
 #ifdef HAS_FFMPEG
                         if (active->sourceIn > 0.0) {

@@ -44,6 +44,13 @@ struct AudioBinding {
     float character = 0.0f;
     float smoothedValue = 0.0f; // internal follower state (0-1, pre-range-map)
     bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
+    // Gentle-enable ramp: modulation DEPTH eases in over rampTime seconds
+    // after the binding is created, so flipping reactivity on (or shuffling)
+    // never slams the look — it fades from "no reaction" to full swing.
+    // rampTime <= 0 disables. AudioPresetEngine::rebuild carries rampAge
+    // across knob re-scales so only a true enable restarts the ramp.
+    float rampAge  = 0.0f;
+    float rampTime = 4.0f;
     // MIDI fields (used when signal == MidiCC)
     int midiCC = -1;        // CC number 0-127, -1 = unassigned
     int midiChannel = -1;   // MIDI channel 0-15, -1 = any
@@ -62,6 +69,23 @@ struct AudioBinding {
         if (!(dt > 0.0f)) dt = 1.0f / 60.0f;
         if (dt > 0.1f)    dt = 0.1f;
 
+        // MIDI knob path: NO audio conditioning. The gate/hold/asymmetric
+        // release block (tuned for loudness envelopes) made a CC land ~0.3s
+        // behind the hand on attack and ~0.6s on release at the default
+        // smoothing — it read as MIDI "lag". A knob is already a human-
+        // smoothed signal, so only a light symmetric slew survives, purely
+        // to hide 7-bit zipper: smoothing slider 0 = instant, 1 = 60ms tau
+        // (default 0.85 ≈ 50ms, settles within ~150ms).
+        if (signal == AudioSignal::MidiCC) {
+            float s = smoothing;
+            if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
+            if (!hasSmoothed) { smoothedValue = raw; hasSmoothed = true; }
+            float tau = s * 0.06f;
+            float a = (tau > 1e-4f) ? (1.0f - std::exp(-dt / tau)) : 1.0f;
+            smoothedValue += (raw - smoothedValue) * a;
+            return rangeMin + smoothedValue * (rangeMax - rangeMin);
+        }
+
         // Legacy smoothing-slider → rate mapping (fast ends roughly halved
         // vs the original 28/14 so even a snappy binding glides rather than
         // strobes — the "way too fast" fix). Unchanged math, now expressed
@@ -77,6 +101,17 @@ struct AudioBinding {
         if (!hasSmoothed) { cond.reset(); hasSmoothed = true; }
         smoothedValue = cond.process(raw, dt);
 
-        return rangeMin + smoothedValue * (rangeMax - rangeMin);
+        float out = rangeMin + smoothedValue * (rangeMax - rangeMin);
+        // Depth ramp: swing grows from 0 → full around the range midpoint
+        // with a smoothstep ease, so reactivity ALWAYS arrives gradually.
+        if (rampTime > 0.0f && rampAge < rampTime) {
+            rampAge += dt;
+            float x = rampAge / rampTime;
+            if (x > 1.0f) x = 1.0f;
+            float ease = x * x * (3.0f - 2.0f * x);
+            float mid = 0.5f * (rangeMin + rangeMax);
+            out = mid + (out - mid) * ease;
+        }
+        return out;
     }
 };

@@ -29,6 +29,15 @@ public:
     // Drop any saved preset for `shaderFile` (e.g. on delete).
     void clear(const std::string& shaderFile);
 
+    // Raw snapshot helpers — the same param-name → value shape the store
+    // uses, but standalone so other systems (show presets, timeline clip
+    // hot-swaps) can capture/apply without touching the persisted store.
+    static nlohmann::json captureJson(const ShaderSource& src);
+    static int            applyJson(const nlohmann::json& snap, ShaderSource& src);
+
+    // Stored snapshot lookup (nullptr when none) — read-only.
+    const nlohmann::json* findSnapshot(const std::string& shaderFile) const;
+
 private:
     std::string filePath() const;
     // Per-shader → param-name → JSON value (float, [r,g,b,a], bool, [x,y], string)

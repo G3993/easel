@@ -41,6 +41,12 @@ bool MIDIManager::openDevice(int index) {
 #endif
 }
 
+void MIDIManager::handleHotplug() {
+    // Windows: no topology tracking yet — auto-connect in Application covers
+    // the "nothing open" case.
+    m_setupChanged = false;
+}
+
 void MIDIManager::closeDevice() {
 #ifdef _WIN32
     if (m_midiIn) {
@@ -104,10 +110,19 @@ void CALLBACK MIDIManager::midiCallback(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dw
 #endif
 
 std::vector<MIDIEvent> MIDIManager::pollEvents() {
+    handleHotplug(); // main thread: apply any device add/remove first
     std::lock_guard<std::mutex> lock(m_eventMutex);
     auto result = std::move(m_pendingEvents);
     m_pendingEvents.clear();
     return result;
+}
+
+std::string MIDIManager::currentDeviceLabel() {
+    if (!m_open) return "None";
+    if (m_deviceIdx == kAllDevices) return "All devices";
+    auto devs = listDevices();
+    if (m_deviceIdx >= 0 && m_deviceIdx < (int)devs.size()) return devs[m_deviceIdx];
+    return m_deviceName.empty() ? "Connected" : m_deviceName;
 }
 
 float MIDIManager::getCCValue(int channel, int ccNum) const {

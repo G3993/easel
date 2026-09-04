@@ -16,16 +16,41 @@ float characterKnobToConditioner(float k) {
     return (k + 0.5f) / 1.5f;                    // -0.5 … +1  →   0 … +1
 }
 
+static bool isBrightnessParam(const std::string& name); // defined below
+
+// Motion-integrator params (speeds, spins, zooms…) compound over time, so
+// even a modest modulation reads violently — a shader whose motionSpeed
+// swings ±20% looks twice as "intense" as one whose color does. These get
+// their swing damped so hot shaders calm down to the same felt level.
+static bool isMotionParam(const std::string& name) {
+    static const char* kWords[] = { "speed", "spin", "rotat", "zoom", "scroll",
+                                    "twist", "fall", "roam", "crawl", "flow",
+                                    "slide", "race", "drift", "rate" };
+    std::string s; s.reserve(name.size());
+    for (char c : name) s += (char)std::tolower((unsigned char)c);
+    for (const char* w : kWords)
+        if (s.find(w) != std::string::npos) return true;
+    return false;
+}
+
 bool rebuild(std::map<std::string, AudioBinding>& bindings,
              const std::vector<Param>& params, uint32_t layerId) {
     State& st = sState[layerId];
     if (!st.recipe.has) return false;
-    bindings.clear();
+    // Keep the old bindings around: follower + ramp state carries over per
+    // param, so dragging the Reactivity/Punch knobs re-scales the live swing
+    // WITHOUT restarting the gentle-enable ramp or resetting the follower.
+    std::map<std::string, AudioBinding> old;
+    old.swap(bindings);
     for (auto& e : st.recipe.e) {
         if (e.idx < 0 || e.idx >= (int)params.size()) continue;
         const Param& pp = params[e.idx];
         float span = pp.hi - pp.lo; if (span <= 0.0f) continue;
-        float half   = span * (0.08f + 0.42f * st.intensity) * 0.5f; // subtle..intense
+        float half   = span * (0.06f + 0.32f * st.intensity) * 0.5f; // subtle..intense
+        // Sensitivity normalization: motion/brightness params get a fraction
+        // of the swing so no single hot param dominates the look.
+        if (isMotionParam(pp.name))     half *= 0.45f;
+        if (isBrightnessParam(pp.name)) half *= 0.70f;
         float center = pp.lo + e.center01 * span;
         float rmin = center - half, rmax = center + half;
         if (rmin < pp.lo) rmin = pp.lo;
@@ -37,6 +62,14 @@ bool rebuild(std::map<std::string, AudioBinding>& bindings,
         ab.rangeMax  = rmax;
         ab.smoothing = 0.96f - 0.24f * st.intensity;   // syrupy..less syrupy (never strobey)
         ab.character = characterKnobToConditioner(st.character); // bus-wide 2nd knob
+        auto it = old.find(pp.name);
+        if (it != old.end()) {
+            ab.smoothedValue = it->second.smoothedValue;
+            ab.hasSmoothed   = it->second.hasSmoothed;
+            ab.cond          = it->second.cond;
+            ab.rampAge       = it->second.rampAge;
+            ab.rampTime      = it->second.rampTime;
+        }
         bindings[pp.name] = ab;
     }
     return true;
@@ -74,12 +107,21 @@ bool shuffle(std::map<std::string, AudioBinding>& bindings,
         RecipeEntry e;
         e.idx = idx[j];
         e.sig = cs[sRng() % 6];
+        // Anchor the modulation CENTRE at the param's CURRENT value, so the
+        // moment reactivity turns on, silence keeps the exact look the user
+        // dialed in — the music then breathes around it. (Random centres
+        // used to re-style the shader instantly on click: the "way too
+        // intense" jolt.) Clamped inward so there's room to swing both ways.
+        const Param& pp = params[idx[j]];
+        float span  = pp.hi - pp.lo;
+        float cur01 = span > 0.0f ? (pp.cur - pp.lo) / span : 0.5f;
         if (bright) {
             brightUsed = true;
-            e.center01 = 0.20f + 0.20f * u01(sRng); // low centre — headroom above
+            // Brightness stays anchored too, but capped low — headroom above.
+            e.center01 = std::min(std::max(cur01, 0.08f), 0.40f);
             e.invert   = (sRng() % 10) < 7;         // bias loud -> dimmer
         } else {
-            e.center01 = 0.25f + 0.50f * u01(sRng); // random centre, room both ways
+            e.center01 = std::min(std::max(cur01, 0.12f), 0.88f);
             e.invert   = (sRng() % 2 == 0);         // ~half fall as energy rises
         }
         r.e.push_back(e);

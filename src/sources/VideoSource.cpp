@@ -577,8 +577,13 @@ void VideoSource::decodeLoop() {
                 double elapsed = glfwGetTime() - m_playbackStart + m_playbackOffset;
                 double waitTime = pendingPts - elapsed;
                 shouldDisplay = (waitTime <= 0.001);
-                if (!shouldDisplay && waitTime > 0.002) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (!shouldDisplay) {
+                    // Not due yet: ALWAYS loop back. Falling through here used
+                    // to read+decode the next packet and drop that frame
+                    // (hasPendingVideo already set) — ~44% of frames lost,
+                    // playback looked strobed/"sped up".
+                    if (waitTime > 0.002) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    else                  std::this_thread::yield();
                     continue;
                 }
             }

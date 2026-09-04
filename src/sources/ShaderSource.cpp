@@ -1,6 +1,7 @@
 #include "sources/ShaderSource.h"
 #include "app/MIDIManager.h"
 #include "render/FontAtlas.h"
+#include "render/Texture.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>
@@ -1046,6 +1047,21 @@ void ShaderSource::unbindImageInput(const std::string& name) {
     m_imageBindings.erase(name);
 }
 
+bool ShaderSource::bindImageFileInput(const std::string& name, const std::string& path) {
+    auto tex = std::make_shared<Texture>();
+    if (!tex->loadFromFile(path)) return false;
+    ImageBinding b;
+    b.textureId = tex->id();
+    b.width = tex->width();
+    b.height = tex->height();
+    b.sourceLayerId = 0;        // file-backed: the refresh loop leaves it alone
+    b.flippedV = false;         // Texture::loadFromFile lands GL bottom-up
+    b.filePath = path;
+    b.ownedTex = tex;
+    m_imageBindings[name] = b;
+    return true;
+}
+
 void ShaderSource::applyAudioBindings(float level, float bass, float mid, float high, float beat,
                                       float dt, MIDIManager* midi,
                                       float energy, float build, float drop,
@@ -1113,14 +1129,33 @@ void ShaderSource::setAudioState(float rms, float bass, float mid, float high, G
     m_audioFFTTex = fftTex;
 }
 
+float ShaderSource::sMotionEase = 0.35f;
+
 void ShaderSource::setAudioFeatures(const AudioFeatures& f) {
     m_af = f;
+    // Global Motion Ease: attack/release smoothing on the core bands so a
+    // sudden drop in the music swells the visuals instead of slamming them.
+    float e = sMotionEase;
+    if (e > 0.001f) {
+        float atk = 1.0f - e * 0.80f;   // rises stay fairly quick
+        float rel = 1.0f - e * 0.96f;   // falls glide out slowly
+        auto sm = [&](float& st, float target) {
+            st += (target - st) * ((target > st) ? atk : rel);
+            return st;
+        };
+        m_af.level     = sm(m_easeL,  f.level);
+        m_af.bass      = sm(m_easeB,  f.bass);
+        m_af.lowMid    = sm(m_easeLM, f.lowMid);
+        m_af.highMid   = sm(m_easeHM, f.highMid);
+        m_af.treble    = sm(m_easeT,  f.treble);
+        m_af.beatPulse = sm(m_easeBt, f.beatPulse);
+    }
     // Mirror the legacy fields so old shaders' audioLevel/Bass/Mid/High/FFT
     // keep their exact prior meaning (audioMid = merged lowMid+highMid).
-    m_audioRMS  = f.level;
-    m_audioBass = f.bass;
-    m_audioMid  = (f.lowMid + f.highMid) * 0.5f;
-    m_audioHigh = f.treble;
+    m_audioRMS  = m_af.level;
+    m_audioBass = m_af.bass;
+    m_audioMid  = (m_af.lowMid + m_af.highMid) * 0.5f;
+    m_audioHigh = m_af.treble;
     m_audioFFTTex = f.fftTex;
 }
 

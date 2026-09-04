@@ -81,7 +81,7 @@ public:
     // The SPH constants live as GLSL #defines for now (faithful to the
     // shadertoy); M5 promotes the tunable ones to uniforms.
     float m_deepColor[3]  = {0.220f, 0.349f, 1.000f}; // albedo
-    float m_glowColor[3]  = {0.420f, 0.302f, 0.996f}; // velocity glow
+    float m_glowColor[3]  = {1.000f, 1.000f, 1.000f}; // velocity glow (white default)
     float m_brightness    = 2.5f;     // diffuse multiplier
 
     // ── Color + lighting options (defaults reproduce the original look) ──
@@ -92,11 +92,12 @@ public:
     float m_shallowColor[3]= {0.60f, 0.85f, 1.00f};    // rim / grazing-edge tint
     float m_rim            = 0.0f;    // rim amount (0 = off)
     float m_saturation     = 1.0f;    // output saturation
-    // Background (also reflection env) + blob sphere size. Defaults = original.
-    float m_bgTop[3]       = {0.12f, 0.16f, 0.28f};
-    float m_bgBottom[3]    = {0.02f, 0.03f, 0.06f};
+    // Background (also reflection env) + blob sphere size.
+    // Defaults: white room + small blob (Lu, 2026-08-27).
+    float m_bgTop[3]       = {0.97f, 0.97f, 0.97f};
+    float m_bgBottom[3]    = {1.00f, 1.00f, 1.00f};
     float m_bgAlpha        = 1.0f;    // 0 = transparent bg (composites under)
-    float m_sphereScale    = 1.0f;    // particle sphere size (lower = smaller blobs)
+    float m_sphereScale    = 0.15f;   // particle sphere size (lower = smaller blobs)
     float m_zoom           = 1.0f;    // camera zoom (1 = original; >1 zooms in)
     // Audio-driven motion: 0 = off (original constant motion); higher = the
     // fluid is calm when quiet and churns as the music gets loud.
@@ -127,12 +128,12 @@ public:
     // and even then you can grab the fader. ──────────────────────────────────
     struct FluidLook {
         float deepColor[3]    = {0.220f, 0.349f, 1.000f};
-        float glowColor[3]    = {0.420f, 0.302f, 0.996f};
+        float glowColor[3]    = {1.000f, 1.000f, 1.000f};
         float shallowColor[3] = {0.60f, 0.85f, 1.00f};
-        float bgTop[3]        = {0.12f, 0.16f, 0.28f};
-        float bgBottom[3]     = {0.02f, 0.03f, 0.06f};
+        float bgTop[3]        = {0.97f, 0.97f, 0.97f};
+        float bgBottom[3]     = {1.00f, 1.00f, 1.00f};
         float brightness = 2.5f, lightIntensity = 1.0f, ambient = 0.10f, specular = 1.0f;
-        float rim = 0.0f, saturation = 1.0f, bgAlpha = 1.0f, sphereScale = 1.0f, zoom = 1.0f;
+        float rim = 0.0f, saturation = 1.0f, bgAlpha = 1.0f, sphereScale = 0.15f, zoom = 1.0f;
         float gravity = 1.0f, vortex = 0.0f, turbulence = 0.0f, forceScale = 1.0f;
         float rotateSpeed = 0.2f, tilt = -0.5f;
     };

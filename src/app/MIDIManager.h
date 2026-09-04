@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <utility>
+#include <atomic>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -46,11 +47,25 @@ public:
     ~MIDIManager();
 
     // Device management
+    // deviceIndex() == kAllDevices means every MIDI source is connected at
+    // once (the default): a Launch Control next to an audio interface's MIDI
+    // port both work without the user picking one. Hot-plug is handled in
+    // handleHotplug() (called from pollEvents on the main thread).
+    static constexpr int kAllDevices = -1;
     std::vector<std::string> listDevices();
-    bool openDevice(int index);
+    bool openDevice(int index);   // kAllDevices = connect every source
+    bool openAll() { return openDevice(kAllDevices); }
     void closeDevice();
     bool isOpen() const { return m_open; }
     int deviceIndex() const { return m_deviceIdx; }
+    bool isAllDevices() const { return m_open && m_deviceIdx == kAllDevices; }
+    // Human label for the current selection ("All devices", the device name,
+    // or "None"). Never indexes out of range.
+    std::string currentDeviceLabel();
+    // Platform read callbacks / notify procs flag a topology change here; the
+    // main thread applies it in pollEvents().
+    void markSetupChanged() { m_setupChanged = true; }
+    void handleHotplug();
 
     // Poll events (call from main thread)
     std::vector<MIDIEvent> pollEvents();
@@ -121,6 +136,9 @@ private:
 #endif
     bool m_open = false;
     int m_deviceIdx = -1;
+    std::string m_deviceName;              // single-device mode: re-resolve by name after hot-plug
+    std::atomic<bool> m_setupChanged{false};
+    int m_lastSourceCount = -1;            // fallback hot-plug detection (poll)
 
     mutable std::mutex m_eventMutex;
     std::vector<MIDIEvent> m_pendingEvents;

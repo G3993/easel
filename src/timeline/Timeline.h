@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -7,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 class LayerStack;
+class ContentSource;
 
 // Per-clip type — drives color coding in the UI and is auto-detected from
 // sourcePath when left as Auto. Stored in JSON so explicit user overrides
@@ -198,6 +200,12 @@ public:
     // Drive layer visibility / source swaps based on clips at current playhead.
     // Call once per frame AFTER advance() and BEFORE CompositeEngine::composite().
     void applyToLayers(LayerStack& layers);
+
+    // Fired right after a clip-enter hot-loads a new source, before it is
+    // handed to the layer. The app hooks this to re-apply saved per-shader
+    // params + show-preset param overrides, so timeline shows play with the
+    // exact parameter looks the user saved — not shader defaults.
+    std::function<void(const std::string& path, ContentSource& src)> onSourceLoaded;
 
     // Track management
     TimelineTrack* findTrack(uint32_t layerId);

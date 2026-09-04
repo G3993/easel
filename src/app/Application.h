@@ -3,6 +3,7 @@
 #include "app/MappingProfile.h"
 #include "app/ProjectorOutput.h"
 #include "app/UndoStack.h"
+#include "app/CameraEnumerator.h"
 #include "compositing/CompositeEngine.h"
 #include "compositing/LayerStack.h"
 #include "compositing/MaskRenderer.h"
@@ -36,6 +37,7 @@
 #include "sources/ShaderClawBridge.h"
 #include "sources/ShaderRatings.h"
 #include "sources/ShaderPresets.h"
+#include "app/ShowPresets.h"
 #include "sources/ShaderImprover.h"
 #include "sources/ParticleSource.h"
 #include "sources/MovingCompanySource.h"
@@ -427,7 +429,15 @@ private:
     void addHologramModel(const std::string& path = ""); // upload 3D model → glitchy hologram; empty path opens the picker
     void addMovingCompany();   // F-117 flying through space (mesh source)
 #ifdef HAS_OPENCV
-    void addWebcam(int cameraIndex);
+    void addWebcam(int cameraIndex, const std::string& deviceName = std::string());
+#endif
+#ifdef __APPLE__
+    // Cached AVFoundation device list for the camera pickers; index order
+    // matches OpenCV VideoCapture indices. Rescans at most every 2s (so
+    // hot-plugged capture cards appear) unless force is set.
+    void refreshCameraDevices(bool force = false);
+    std::vector<CameraDeviceInfo> m_cameraDevices;
+    double m_cameraDevicesLastScan = -1.0;
 #endif
 #ifdef _WIN32
     void addWindowCapture(HWND hwnd, const std::string& title);
@@ -444,6 +454,19 @@ private:
     ShaderRatings    m_shaderRatings;
     ShaderPresets    m_shaderPresets;
     ShaderImprover   m_shaderImprover;
+
+    // Saved show playlists (shader list + per-shader param snapshots),
+    // persisted app-wide. m_showParamOverrides holds the ACTIVE show's param
+    // snapshots keyed by full shader path — applied (after per-shader
+    // presets) whenever the timeline hot-loads a clip source, and to the
+    // first shader startShow() loads directly.
+    ShowPresets m_showPresets;
+    std::unordered_map<std::string, nlohmann::json> m_showParamOverrides;
+
+    // Build + start a show: one SHOW layer whose track carries one clip per
+    // picked shader, laid end-to-end dividing minutes evenly. Shared by the
+    // gallery's START SHOW button and the SHOWS preset menu.
+    void startShow(const std::vector<std::string>& sel, float minutes);
 
     // Push Further (AI shader improve) — styled top-level panel state.
     bool        m_pushOpen = false;
@@ -466,6 +489,19 @@ private:
     std::shared_ptr<ShaderSource> m_scThumbRenderer; // temp shader for generating thumbnails
     std::string m_scThumbRenderPath; // currently rendering thumbnail for this shader
     int m_scThumbRenderFrame = 0;
+
+    // GALLERY — fullscreen shader gallery overlay: every shader as a big
+    // thumbnail tile in one scrollable page. Opened from the top-nav
+    // GALLERY tab (UIManager::sGalleryOpen); Esc closes. Click adds a
+    // shader; right-click = Duplicate / Push Further / Delete Permanently;
+    // BUILD SHOW turns a selection into a rotating shader playlist.
+    void renderShaderGallery();
+
+    // Gallery shader show: built as REAL timeline clips (one layer, one
+    // clip per picked shader, fades between) — the timeline renders and
+    // drives it; these just remember the show layer for STOP/rebuild.
+    uint32_t m_showLayerId = 0;
+    bool     m_showRunning = false;
 
 #ifdef HAS_OPENCV
     SceneScanner m_scanner;
