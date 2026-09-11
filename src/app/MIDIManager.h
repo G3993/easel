@@ -35,7 +35,8 @@ struct MIDIMapping {
     // Target
     enum class Target {
         LayerOpacity, LayerVisible, LayerPosX, LayerPosY, LayerScale, LayerRotation,
-        SceneRecall, BPMSet, BPMTap
+        SceneRecall, BPMSet, BPMTap,
+        None // appended: "no target assigned" (e.g. an unassigned knob)
     };
     Target target = Target::LayerOpacity;
     int layerIndex = 0; // for layer targets

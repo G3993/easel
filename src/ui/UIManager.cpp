@@ -655,8 +655,8 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
                       ImGuiWindowFlags_NoScrollWithMouse);
     const float pillR = 18.0f;
     const float pillW = pillR * 2.0f;
-    const float gap   = 9.0f;                  // 6 pills (Mapping is its own workspace now)
-    const float groupW = 6.0f * pillW + 5.0f * gap;
+    const float gap   = 9.0f;                  // 6 nav pills + 1 collapse pill
+    const float groupW = 7.0f * pillW + 6.0f * gap;
     float availW = ImGui::GetContentRegionAvail().x;
     float startX = (availW - groupW) * 0.5f;
     ImGui::SetCursorPosY((kBarH - pillW) * 0.5f);
@@ -751,6 +751,18 @@ void UIManager::renderRightDockNavBar(QuickNavTab active) {
     // Mapping pill removed — Mapping is now its own top-level workspace
     // (CANVAS · MAPPING · STAGE · PLAY), so it no longer belongs in the
     // parameters-panel quick-nav.
+
+    // Collapse/expand — folds the whole right dock down to just this nav
+    // strip (same underlying m_rightDockCollapsed the "click the active
+    // pill again" idiom already used, just as an explicit, always-visible
+    // affordance). Chevron points the direction the panel travels.
+    ImGui::SameLine(0, gap);
+    pill("##rdCollapse", false, folded ? &lucide::chevronLeft : &lucide::chevronRight,
+         folded ? "Expand panel" : "Collapse panel",
+         [this]() {
+             if (m_rightDockCollapsed) m_forceDockRebuild = true;
+             m_rightDockCollapsed = !m_rightDockCollapsed;
+         });
 
     // Hairline divider under the bar.
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1449,23 +1461,39 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         // m_rightDockCollapsed mid-frame, but panel visibility must not
         // change until the DockSpace submission matches (see header note).
         m_rightDockCollapsedApplied = dockCollapsed;
-        // Collapsed → the canvas reclaims the panel width (the icon strip
-        // still floats at the top-right, which is fine to overlap).
+        // True current footprint — shrunk to a sliver (not just visually
+        // shorter) when collapsed, so every consumer of rightRailWidth()/
+        // getRightPanelLeft() (canvas fit, the ShowDeck mixer, the
+        // timeline/pill width clamp) actually reclaims the space instead of
+        // still reserving a full-width-but-empty strip. Kept non-zero
+        // (rather than skipping the host/DockSpace submission outright) so
+        // the existing "docked windows must not Begin() into an unsubmitted
+        // node" hazard (see isPanelVisible's comment) stays avoided exactly
+        // as it was before — only the SIZE changes. The always-visible
+        // floating edge tab (Application::renderRightPanelCollapseTab) is
+        // the primary way back in now, so the inner pill bar doesn't need
+        // to render while folded either.
+        const float kCollapsedW = 8.0f;
+        float rightWActual = dockCollapsed ? kCollapsedW : rightW;
+        m_rightFloatW = rightWActual;
+        // Collapsed → the canvas reclaims (almost) all the panel width; the
+        // floating edge tab is the visible affordance, drawn separately.
         m_rightFloatLeft = (rightHasContent && !dockCollapsed)
-            ? viewport->WorkPos.x + dockSize.x - rightW - kRightInset
+            ? viewport->WorkPos.x + dockSize.x - rightWActual - kRightInset
             : 0.0f;
-        // Folded: isPanelVisible() hides every right-dock panel, so
-        // rightHasContent reads false — but the strip host must still render
-        // or there'd be nothing left to click to reopen the dock.
+        // Unlike m_rightFloatLeft (zeroed when collapsed, a "no panel"
+        // signal for canvas-fit consumers), these stay valid in EVERY
+        // state so an external collapse-tab widget can find the panel's
+        // actual edge/center regardless of fold state.
+        m_rightFloatLeftRaw = viewport->WorkPos.x + dockSize.x - rightWActual - kRightInset;
+        m_rightFloatCenterY = floatY + floatH * 0.5f;
         if (rightHasContent || dockCollapsed) {
-            // Collapsed height = just the pill bar (42) + a little breathing
-            // room, so the strip stays clickable to reopen a panel.
-            const float kCollapsedH = 54.0f;
+            const float kCollapsedH = 8.0f;
             ImGui::SetNextWindowPos (
-                ImVec2(viewport->WorkPos.x + dockSize.x - rightW - kRightInset,
+                ImVec2(viewport->WorkPos.x + dockSize.x - rightWActual - kRightInset,
                        floatY),
                 ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(rightW, dockCollapsed ? kCollapsedH : floatH),
+            ImGui::SetNextWindowSize(ImVec2(rightWActual, dockCollapsed ? kCollapsedH : floatH),
                                      ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             // Zero vertical item-spacing so the pill bar sits FLUSH against
@@ -1507,8 +1535,11 @@ void UIManager::setupDockspace(float bottomBarHeight) {
                 // Mapping mode hosts ONLY the Mapping panel (and Zones only
                 // the Zones panel), so the pill switcher would just be a row
                 // of dead/duplicate icons — skip it and let the panel body
-                // start at the top.
-                if (navStripHere) {
+                // start at the top. Also skipped while collapsed: the host
+                // is a tiny sliver now, and the floating edge tab
+                // (Application::renderRightPanelCollapseTab) is the primary
+                // way back in.
+                if (navStripHere && !dockCollapsed) {
                     renderRightDockNavBar(QuickNavTab::None);
                 }
                 // Collapsed: no DockSpace this frame — ImGui then hides every

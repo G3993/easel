@@ -234,10 +234,6 @@ private:
     // Swap interval currently applied to the main context (-1 = unset). Driven
     // each frame from m_targetFPS so toggling the Canvas Target flips vsync.
     int m_appliedSwapInterval = -1;
-    // Last workspace mode observed in renderUI. Used to detect transitions
-    // (e.g. user clicks PLAY tab) so we can auto-open the timeline and
-    // reset show-specific UI state without polling every frame.
-    UIManager::WorkspaceMode m_prevWorkspaceMode = UIManager::WorkspaceMode::Canvas;
     // glfwGetTime() instant until which the PLAY workspace's PUBLISH
     // button shows the "Published" confirmation caption. 0 = no flash.
     double m_publishFlashUntil = 0.0;
@@ -327,6 +323,83 @@ private:
     MIDIManager m_midiManager;
     // Latest normalized MIDI CC values, indexed [channel][cc]. Updated each frame from polled events.
     float m_midiCCValues[16][128] = {};
+
+    // Canvas-mode knob/fader bank under the main viewport — 3 rows of 8
+    // knobs + 8 faders, mirroring a Launch Control XL. Each mirrors its
+    // assigned CC's live value and mouse-drags as a fallback until that CC
+    // is touched. Pushed into DataBus every frame as "midi.knob1".."midi.knob24"
+    // / "midi.fader1".."midi.fader8" so any shader text param can bind to
+    // one. The dot next to each "Effect N" label opens a picker that wires
+    // the knob straight into a global target (layer opacity/position/scale/
+    // rotation/visibility, scene recall, BPM) via MIDIManager's mapping
+    // system instead.
+    static const int kKnobBankCount = 24;
+    float m_knobValue[kKnobBankCount] = {};
+    MIDIMapping::Target m_knobTarget[kKnobBankCount];
+    int m_knobTargetLayer[kKnobBankCount] = {};
+    // Shader-parameter binding (mutually exclusive with m_knobTarget's
+    // global MIDIMapping targets) — e.g. a knob bound straight to a
+    // shader's "ribbonRadius" ISF input via DataBus. Empty param = none;
+    // the actual binding lives in DataBus (m_dataBus.bind), these just
+    // remember which layer/param so the picker can show the current
+    // selection and clear the old binding on reassignment.
+    uint32_t    m_knobBoundLayerId[kKnobBankCount] = {};
+    std::string m_knobBoundParam[kKnobBankCount];
+    static const int kFaderBankCount = 8;
+    float m_faderValue[kFaderBankCount] = {};
+
+    // SHOW-mode deck (Application.cpp: renderShowDeck()) — a self-contained
+    // shader mixer docked under the Program/Preview monitors in Show mode.
+    // Two slots — A (green) and B (red) — each run their own live ISF
+    // shader, independent of the projector-output Zones above. m_deckSlider
+    // [0] is the A/B crossfader (blends slot A and slot B via gl-transitions
+    // "fade" into m_deckMixFBO) — currently unrouted; the deck's Main Output
+    // (orange box) mirrors the real Program feed instead. Left/right
+    // thumbnail rails single-click into m_deckPreviewL/R for a preview,
+    // double-click to commit into slot B/A.
+    static const int kDeckKnobCount   = 12;
+    static const int kDeckButtonCount = 4;
+    static const int kDeckSliderCount = 9;
+    std::string m_deckShaderPathA, m_deckShaderPathB;
+    std::shared_ptr<ShaderSource> m_deckShaderA, m_deckShaderB;
+    float m_deckKnobA[kDeckKnobCount]     = {};
+    float m_deckKnobB[kDeckKnobCount]     = {};
+    bool  m_deckButtonA[kDeckButtonCount] = {};
+    bool  m_deckButtonB[kDeckButtonCount] = {};
+    float m_deckSlider[kDeckSliderCount]  = { 0.5f };
+    // Per-widget shader-parameter binding, keyed by ISFInput::name — empty
+    // = unassigned (the widget's value has no effect). Knobs are already
+    // split into full A/B arrays above, so each gets its own bound-name
+    // array; the slider bank is one shared row (left half binds into
+    // m_deckShaderB, right half into m_deckShaderA — see renderShowDeck).
+    std::string m_deckKnobBoundParamA[kDeckKnobCount];
+    std::string m_deckKnobBoundParamB[kDeckKnobCount];
+    std::string m_deckSliderBoundParam[kDeckSliderCount];
+    // Horizontal A/B crossfader — separate from the free per-slot sliders
+    // above. 0 = full B (left), 1 = full A (right). m_deckBlendMode indexes
+    // the kShowDeckBlendModes table in renderShowDeck (fade/cut/channel-key).
+    float m_deckCrossfade = 0.5f;
+    int   m_deckBlendMode = 0;
+    Framebuffer m_deckMixFBO;
+    std::string m_deckPreviewPathL, m_deckPreviewPathR;
+    std::shared_ptr<ShaderSource> m_deckPreviewL, m_deckPreviewR;
+    // Named subsets of the shader catalog, filterable per thumbnail rail —
+    // lets a user narrow "all shaders" down to a curated set for a show.
+    // Persisted to ~/.easel/show_deck_playlists.json (shared across
+    // projects, like the shader-thumbnail cache).
+    struct DeckPlaylist {
+        std::string name;
+        std::vector<std::string> shaderPaths;   // ShaderEntry::fullPath values
+    };
+    std::vector<DeckPlaylist> m_deckPlaylists;
+    bool m_deckPlaylistsLoaded = false;
+    // -1 = "All Shaders" (unfiltered); >=0 indexes m_deckPlaylists. Per rail
+    // (0 = left/B, 1 = right/A) so each side can browse independently.
+    int  m_deckPlaylistSel[2] = { -1, -1 };
+    void loadDeckPlaylists();
+    void saveDeckPlaylists();
+    void renderShowDeck(float width, float height, GLuint programTex);
+
     StageView m_stageView;
     ProDJLink m_prodjlink;
     TimecodePanel m_timecodePanel;
@@ -631,6 +704,21 @@ private:
     void refreshAudioDevicesIfChanged();
     void renderTransportBar();
     void renderTimelinePanel();
+    // Always-rendered collapse/expand tab straddling the seam between the
+    // transport pill and the timeline's top edge. Independent of
+    // renderTimelinePanel() itself, which stops being called at all once
+    // the timeline is fully minimized — without this, there would be no
+    // way to bring it back.
+    void renderTimelineCollapseTab();
+    // Always-rendered collapse/expand tab straddling the LEFT edge of the
+    // right Properties/Audio/MIDI dock, vertically centered. Same
+    // standalone-floating-window approach as renderTimelineCollapseTab —
+    // the nav-bar pill version (renderRightDockNavBar) wasn't visible
+    // enough, so this always sits right on the panel's edge instead.
+    void renderRightPanelCollapseTab();
+    // Knob/fader bank docked directly under the Canvas-mode viewport
+    // ("Canvas" window) — see m_knobValue / m_faderValue above.
+    void renderCanvasKnobBank();
     // Phase 5 — floating transport pill at viewport bottom-center. Draws
     // play/stop/loop + timecode in a single rounded pill that overlays the
     // canvas, matching reference B's minimal control surface. Independent

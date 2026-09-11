@@ -1969,14 +1969,14 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
         const float kPillH       = 28.0f;
         const float kSegGap      = 26.0f;   // breathing room between segments
-        // Play hidden from the workspace switcher per Lu's request — the
-        // mode/panel code is untouched (still reachable over OSC), just not
-        // exposed as a tab here.
-        const int   kNumTabs     = 4;
-        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "ZONES", "GALLERY"};
+        // SHOW re-added to the right of GALLERY — the ShowDeck mixer lives
+        // there now. (Previously hidden per Lu's request; mode/panel code
+        // was untouched the whole time, still reachable over OSC too.)
+        const int   kNumTabs     = 5;
+        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "ZONES", "GALLERY", "SHOW"};
         // GALLERY (index 3) is not a workspace mode -- it toggles the
         // fullscreen shader gallery overlay instead.
-        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Zones, Mode::Zones};
+        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Zones, Mode::Zones, Mode::Show};
 
         // Each segment = label width. Icons removed — the workspace tabs
         // now read as text-only, mirroring the rest of the nav row's
