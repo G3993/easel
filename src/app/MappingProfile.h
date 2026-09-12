@@ -15,6 +15,7 @@ struct MappingMask {
     MaskPath path;
     std::shared_ptr<Texture> texture; // rendered by MaskRenderer
     float feather = 0.0f;
+    float renderedFeather = -1.0f;   // feather baked into `texture`
     bool invert = false;
 };
 

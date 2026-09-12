@@ -74,6 +74,14 @@ public:
     // channel = -1 matches any channel.
     float getCCValue(int channel, int ccNum) const;
 
+    // Forget every stored CC value: bindings read "no value yet" until the
+    // hardware speaks again. Used by the SHOW page's Shift-reset so restored
+    // defaults aren't immediately overwritten by stale knob positions.
+    void clearCCValues() {
+        std::lock_guard<std::mutex> lock(m_eventMutex);
+        m_ccValues.clear();
+    }
+
     // Every CC the controller has actually sent since the device opened, as
     // {channel, ccNum} sorted by (channel, cc). Powers the bind dropdown so a
     // user can pick a knob/fader instead of typing its CC number.

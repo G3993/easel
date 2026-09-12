@@ -161,11 +161,15 @@ struct TimelineTransition {
 
 class Timeline {
 public:
-    // Transport
-    void play()  { m_playing = true; }
+    // Transport. play() at (or past) the end rewinds first — otherwise the
+    // very next advance() re-stops playback and the play button appears dead.
+    void play()  {
+        if (m_playhead >= m_duration - 1e-6) { m_playhead = 0.0; m_runtime.clear(); }
+        m_playing = true;
+    }
     void pause() { m_playing = false; }
     void stop()  { m_playing = false; m_playhead = 0.0; m_runtime.clear(); }
-    void togglePlay() { m_playing = !m_playing; }
+    void togglePlay() { if (m_playing) pause(); else play(); }
     bool isPlaying() const { return m_playing; }
 
     double playhead() const { return m_playhead; }

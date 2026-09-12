@@ -590,7 +590,9 @@ void Timeline::applyToLayers(LayerStack& layers) {
                     layer->transitionProgress = 1.0f;
                 }
                 // If clip has a sourcePath different from current, hot-load + optionally transition.
-                if (!active->sourcePath.empty()) {
+                if (!active->sourcePath.empty()
+                    && !(layer->source && layer->source->sourcePath() == active->sourcePath)) {
+                    // (a layer already holding this exact file keeps it: no recompile)
                     auto src = loadSourceForPath(active->sourcePath);
                     if (src) {
                         // Let the app re-apply saved params / show-preset
@@ -696,12 +698,17 @@ void Timeline::applyToLayers(LayerStack& layers) {
         // With this, visibility always tracks "is the playhead inside a clip
         // on this track?" regardless of how the playhead got here.
         if (curActiveId != 0) {
-            if (!layer->userHidden) layer->visible = true;
-            // If a fade-out was in flight from a prior edge, cancel it —
-            // the user has re-entered the clip's window (via drag or seek).
-            if (layer->transitionActive && !layer->transitionDirection) {
-                layer->transitionActive   = false;
-                layer->transitionProgress = 1.0f;
+            // A user-hidden layer stays out of the show entirely: no re-show
+            // and no fade-cancel, so a manual fade-out (e.g. the SHOW page's
+            // number-button switch) can complete even under an active clip.
+            if (!layer->userHidden) {
+                layer->visible = true;
+                // If a fade-out was in flight from a prior edge, cancel it —
+                // the user has re-entered the clip's window (via drag or seek).
+                if (layer->transitionActive && !layer->transitionDirection) {
+                    layer->transitionActive   = false;
+                    layer->transitionProgress = 1.0f;
+                }
             }
         } else if (m_playing &&
                    !layer->transitionActive && !layer->shaderTransitionActive) {

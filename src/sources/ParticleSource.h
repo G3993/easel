@@ -1,5 +1,7 @@
 #pragma once
 #include "sources/ContentSource.h"
+#include "sources/AudioBinding.h"
+#include <map>
 #include "render/Framebuffer.h"
 #include "render/ShaderProgram.h"
 #include "render/Mesh.h"
@@ -130,6 +132,16 @@ public:
     ParticleEmitter& emitter()             { return m_emitter; }
     const ParticleEmitter& emitter() const { return m_emitter; }
 
+    // Audio/MIDI parameter bindings — the same model FluidSource uses (pid →
+    // AudioBinding), applied each frame onto the emitter's float fields, so
+    // particles work on the SHOW surface / LCXL exactly like shaders do.
+    std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
+    const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
+    void applyAudioBindings(float level, float bass, float mid, float high,
+                            float beat, float dt, class MIDIManager* midi,
+                            float energy, float build, float drop,
+                            float silence, float momentum);
+
     // Helpers for the UI
     void addModule(ParticleModuleType t);
     void removeModule(int index);
@@ -172,6 +184,7 @@ private:
 
     // Emitter + simulation state
     ParticleEmitter       m_emitter;
+    std::map<std::string, AudioBinding> m_audioBindings;
     std::vector<Particle> m_particles;
     float                 m_spawnAccumulator = 0.0f; // fractional leftover spawn budget
     uint32_t              m_nextSeed         = 1;

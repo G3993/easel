@@ -29,6 +29,10 @@
 #include "stb_image_write.h"
 #include <iostream>
 #include <fstream>
+#include <ctime>
+
+// SHOW deck layer keys (managedKey on the two mixer decks)
+static const char* kDeckKey[2] = {"show:A", "show:B"};
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -47,6 +51,30 @@
 // WhisperSpeech uses <filesystem> (already included above)
 
 using json = nlohmann::json;
+
+// Launch Control XL layouts, shared by the SHOW page surface and the MIDI
+// event loop (the bottom button rows select the target shader). Two
+// generations speak different CC maps:
+//  - classic XL factory template: knobs 13-20 / 29-36 / 49-56, faders 77-84,
+//    track buttons as notes 41-44,57-60 / 73-76,89-92.
+//  - XL 3 (device name "LCXL3", per Novation's programmer's reference):
+//    knobs 13-20 / 21-28 / 29-36, faders 5-12, buttons notes 37-52.
+// The layout is auto-picked from the connected device names; the SHOW header
+// carries a manual toggle.
+namespace {
+constexpr int kLCXLKnobA[8]    = {13, 14, 15, 16, 17, 18, 19, 20};
+constexpr int kLCXLKnobB[8]    = {29, 30, 31, 32, 33, 34, 35, 36};
+constexpr int kLCXLKnobC[8]    = {49, 50, 51, 52, 53, 54, 55, 56};
+constexpr int kLCXLFader[8]    = {77, 78, 79, 80, 81, 82, 83, 84};
+constexpr int kLCXLBtnFocus[8] = {41, 42, 43, 44, 57, 58, 59, 60};  // Track Focus notes
+constexpr int kLCXLBtnCtrl[8]  = {73, 74, 75, 76, 89, 90, 91, 92};  // Track Control notes
+constexpr int kMk3KnobA[8]     = {13, 14, 15, 16, 17, 18, 19, 20};
+constexpr int kMk3KnobB[8]     = {21, 22, 23, 24, 25, 26, 27, 28};
+constexpr int kMk3KnobC[8]     = {29, 30, 31, 32, 33, 34, 35, 36};
+constexpr int kMk3Fader[8]     = { 5,  6,  7,  8,  9, 10, 11, 12};
+constexpr int kMk3BtnRow1[8]   = {37, 38, 39, 40, 41, 42, 43, 44};
+constexpr int kMk3BtnRow2[8]   = {45, 46, 47, 48, 49, 50, 51, 52};
+}
 
 static void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
@@ -107,6 +135,10 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
 extern "C" int  EaselMac_IsNativeFullScreen(GLFWwindow*);
 extern "C" void EaselMac_ExitNativeFullScreen(GLFWwindow*);
 extern "C" int  EaselMac_ConsumeZoomFullscreenRequest();
+extern "C" void macFullscreenDockPeek(bool peek);
+extern "C" void macInstallActivationHooks(void* nsWindow);
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -620,6 +652,11 @@ bool Application::init() {
 }
 
 void Application::run() {
+    // automation / screenshot hook: land on the SHOW page at launch
+    if (const char* e = getenv("EASEL_OPEN_SHOW")) if (*e && *e != '0') {
+        UIManager::sShowOpen = true;
+        UIManager::sGalleryOpen = false;
+    }
     while (!glfwWindowShouldClose(m_window)) {
         double frameStart = glfwGetTime();
         glfwPollEvents();
@@ -747,6 +784,30 @@ void Application::run() {
         if (EaselMac_ConsumeZoomFullscreenRequest()) {
             m_presentMode = false;
             toggleEditorFullscreen();
+        }
+        // Dock peek in borderless fullscreen: cursor resting on the bottom
+        // edge for a beat shows the Dock; leaving the bottom band hides it.
+        {
+            static double sEdgeSince = -1.0;
+            static bool sHooksInstalled = false;
+            if (!sHooksInstalled) {
+                macInstallActivationHooks(glfwGetCocoaWindow(m_window));
+                sHooksInstalled = true;
+            }
+            if (m_editorFullscreen) {
+                double cx, cy; int ww, wh;
+                glfwGetCursorPos(m_window, &cx, &cy);
+                glfwGetWindowSize(m_window, &ww, &wh);
+                bool focused = glfwGetWindowAttrib(m_window, GLFW_FOCUSED) == GLFW_TRUE;
+                bool atEdge = focused && cy >= wh - 2 && cx >= 0 && cx <= ww;
+                double now = glfwGetTime();
+                if (atEdge) { if (sEdgeSince < 0) sEdgeSince = now; }
+                else sEdgeSince = -1.0;
+                if (atEdge && now - sEdgeSince > 0.2) macFullscreenDockPeek(true);
+                else if (cy < wh - 110 || !focused) macFullscreenDockPeek(false);
+            } else {
+                sEdgeSince = -1.0;
+            }
         }
 #endif
 
@@ -1009,6 +1070,17 @@ void Application::run() {
             if (tlDt > 0.1f) tlDt = 1.0f / 60.0f;
             m_timeline.advance(tlDt);
             m_timeline.applyToLayers(m_layerStack);
+            // A running show mixes its two decks with the crossfader
+            // (deckTick), so the timeline's fade rows must not ALSO run the
+            // compositor's between-row crossfade on the incoming deck.
+            if (m_showRunning)
+                for (int dk = 0; dk < 2; dk++)
+                    if (Layer* DL = deckLayer(dk)) {
+                        DL->betweenRowActive = false;
+                        DL->betweenRowProgress = 0.0f;
+                        DL->betweenRowGLName.clear();
+                        DL->betweenRowShaderPath.clear();
+                    }
 
             // Phase C: sample animation lanes once per frame, apply resolved
             // values back to the layer fields the lanes target. For v1 we
@@ -1721,6 +1793,8 @@ void Application::updateSources() {
     double s_nowBindTime = glfwGetTime();
     float audioBindDt = (float)(s_nowBindTime - s_lastBindTime);
     s_lastBindTime = s_nowBindTime;
+    usageTick(audioBindDt);
+    deckTick(audioBindDt);
 
     // ── "Listening" signals (time-aware musical dynamics) ─────────────────
     // Computed once per frame from the analyzer's structure layer, shared by
@@ -1967,6 +2041,19 @@ void Application::updateSources() {
                     m_audioAnalyzer.treble(),
                     m_audioAnalyzer.beatDecay()
                 );
+                // Per-param audio/MIDI bindings on the emitter fields — the
+                // same binding model shaders and fluids use.
+                ps->applyAudioBindings(
+                    m_audioAnalyzer.smoothedRMS(),
+                    m_audioAnalyzer.bass(),
+                    midAvg,
+                    m_audioAnalyzer.treble(),
+                    m_audioAnalyzer.beatDecay(),
+                    audioBindDt,
+                    &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop,
+                    audioSigSilence, audioSigMomentum
+                );
             }
 
             // Audio/MIDI-reactive fluid params — same per-parameter binding
@@ -2205,28 +2292,43 @@ void Application::compositeAndWarp() {
     }
 #endif
 
-    // Re-render any dirty masks on layers
-    for (int i = 0; i < m_layerStack.count(); i++) {
-        auto& layer = m_layerStack[i];
-        for (auto& mask : layer->masks) {
-            if (mask.path.isDirty() && mask.path.count() >= 3) {
-                if (!mask.texture) {
-                    mask.texture = std::make_shared<Texture>();
+    // Re-render any dirty masks on layers. The feather is baked into the
+    // mask texture (a real blur that follows the shape), so a feather change
+    // re-renders too — never per frame, only when the slider moves.
+    {
+        OutputZone& az = activeZone();
+        float aspect = az.height > 0 ? (float)az.width / (float)az.height : 16.0f / 9.0f;
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& layer = m_layerStack[i];
+            for (auto& mask : layer->masks) {
+                bool featherChanged = std::fabs(mask.feather - mask.renderedFeather) > 1e-5f;
+                if ((mask.path.isDirty() || featherChanged) && mask.path.count() >= 3) {
+                    if (!mask.texture) {
+                        mask.texture = std::make_shared<Texture>();
+                    }
+                    m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture, mask.feather, aspect);
+                    mask.renderedFeather = mask.feather;
+                    mask.path.clearDirty();
                 }
-                m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture);
-                mask.path.clearDirty();
             }
         }
     }
 
     // Re-render any dirty canvas-level masks (MappingProfile)
     for (auto& mp : m_mappings) {
+        float aspect = 16.0f / 9.0f;
+        for (auto& zp : m_zones)
+            if (zp && mappingForZone(*zp) == mp.get() && zp->height > 0) {
+                aspect = (float)zp->width / (float)zp->height; break;
+            }
         for (auto& mask : mp->masks) {
-            if (mask.path.isDirty() && mask.path.count() >= 3) {
+            bool featherChanged = std::fabs(mask.feather - mask.renderedFeather) > 1e-5f;
+            if ((mask.path.isDirty() || featherChanged) && mask.path.count() >= 3) {
                 if (!mask.texture) {
                     mask.texture = std::make_shared<Texture>();
                 }
-                m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture);
+                m_maskRenderer.render(mask.path, 1024, 1024, *mask.texture, mask.feather, aspect);
+                mask.renderedFeather = mask.feather;
                 mask.path.clearDirty();
             }
         }
@@ -2698,7 +2800,8 @@ void Application::compositeZone(OutputZone& zone) {
         m_passthroughShader.setFloat("uTileY", 1.0f);
         m_passthroughShader.setInt("uMosaicMode", 0);
         m_passthroughShader.setFloat("uFeather", 0.0f);
-        m_passthroughShader.setFloat("uMaskFeather", maskFeather);
+        m_passthroughShader.setFloat("uMaskFeather", 0.0f);   // feather is baked into the mask texture
+        (void)maskFeather;
         m_passthroughShader.setBool("uMaskInvert", maskInvert);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, zone.warpFBO.textureId());
@@ -3758,8 +3861,81 @@ void Application::renderUI() {
             if (ev.type == 0 && ev.channel >= 0 && ev.channel < 16 &&
                 ev.number >= 0 && ev.number < 128) {
                 m_midiCCValues[ev.channel][ev.number] = ev.value / 127.0f;
+                // First sighting of each CC number goes to the log once — the
+                // breadcrumb that tells us what a controller actually sends.
+                static bool sSeen[128] = {};
+                if (!sSeen[ev.number]) {
+                    sSeen[ev.number] = true;
+                    std::cerr << "[MIDI] first contact: CC " << ev.number
+                              << " (ch " << (ev.channel + 1) << ")" << std::endl;
+                }
             }
         }
+        // SHOW page: the XL's bottom button rows pick which shader layer the
+        // surface drives — press a button, get that shader's controls. Any
+        // OTHER button on the surface (the side/transport cluster) means
+        // "bind now": auto-map the current target onto the sliders + knobs.
+        if (UIManager::sShowOpen) {
+            for (const auto& ev : events) {
+                // Shift (CC 63 per the XL3 feature-control spec) = RESET: the
+                // target shader's params go back to their defaults, and the
+                // stored knob positions are forgotten so the reset holds
+                // until a control is physically touched again.
+                if (ev.type == 0 && ev.number == 63 && ev.value > 0) {
+                    if (Layer* t = resolveShowTarget()) {
+                        // Shaders reset to their ISF defaults; fluids and
+                        // particles keep their current look but the knob
+                        // memory clears either way, so nothing snaps back.
+                        if (auto* ssr = dynamic_cast<ShaderSource*>(t->source.get())) {
+                            for (auto& in : ssr->inputs()) {
+                                if (in.type == "float" || in.type == "long")
+                                    in.value = in.defaultFloat;
+                            }
+                        }
+                        m_midiManager.clearCCValues();
+                        std::cerr << "[Show] SHIFT -> reset \"" << t->name
+                                  << "\"" << std::endl;
+                    }
+                    continue;
+                }
+                if (ev.type == 0 && m_deckXfadeLearn) {
+                    m_deckXfadeCC = ev.number;
+                    m_deckXfadeLearn = false;
+                    deckXfadeSave();
+                    std::cerr << "[Show] crossfader learned: CC " << ev.number << std::endl;
+                    if (Layer* t = resolveShowTarget()) autoMapShaderToLCXL(t->source.get());
+                    continue;
+                }
+                if (ev.type != 1 || ev.value == 0) continue;   // NoteOn only
+                int slot = -1;
+                for (int i = 0; i < 8; i++) {
+                    // top button row = slots 1-8, bottom row = 9-16 (both XLs)
+                    if (ev.number == kLCXLBtnFocus[i] || ev.number == kMk3BtnRow1[i]) {
+                        slot = i; break;
+                    }
+                    if (ev.number == kLCXLBtnCtrl[i] || ev.number == kMk3BtnRow2[i]) {
+                        slot = i + 8; break;
+                    }
+                }
+                if (slot >= 0) {
+                    // button 1 = deck A, 2 = deck B, 3-16 = the extras in order
+                    if (slot < 2) {
+                        deckTakeSurface(slot, true);
+                        std::cerr << "[Show] button " << (slot + 1) << " -> deck " << (slot ? "B" : "A") << std::endl;
+                    } else {
+                        auto ex = showExtraLayers();
+                        int ei = slot - 2;
+                        if (ei < (int)ex.size()) showTakeExtra(ex[ei]);
+                        else std::cerr << "[Show] button " << (slot + 1) << ": no layer there" << std::endl;
+                    }
+                } else if (Layer* t = resolveShowTarget()) {
+                    std::cerr << "[Show] bind button (note " << ev.number
+                              << ") -> auto-map \"" << t->name << "\"" << std::endl;
+                    autoMapShaderToLCXL(t->source.get());
+                }
+            }
+        }
+
         auto actions = m_midiManager.processEvents(events);
         for (const auto& act : actions) {
             switch (act.target) {
@@ -5126,8 +5302,11 @@ void Application::renderUI() {
         if (m_maskEditMode && selectedLayer && selectedLayer->activeMaskIndex >= 0 &&
             selectedLayer->activeMaskIndex < (int)selectedLayer->masks.size()) {
             editMaskPath = &selectedLayer->masks[selectedLayer->activeMaskIndex].path;
-            // Build the same transform the compositor uses
-            editMaskXform = selectedLayer->getTransformMatrix();
+            // Build the same transform the compositor uses (incl. the
+            // aspect-true rotation, or dragged mask points drift under
+            // rotated layers)
+            editMaskXform = selectedLayer->getTransformMatrix(
+                (zone.height > 0) ? (float)zone.width / (float)zone.height : 1.0f);
             bool mosaicFill = (selectedLayer->tileX > 1.0f || selectedLayer->tileY > 1.0f ||
                                selectedLayer->mosaicMode != MosaicMode::Mirror);
             if (!mosaicFill) {
@@ -8876,6 +9055,7 @@ void Application::renderUI() {
     // it takes focus on open and Esc closes it. The show runner ticks the
     // rotating shader playlist regardless of whether the gallery is open.
     renderShaderGallery();
+    renderShowPanel();
 
     // Overlay inspector tab icons (Properties/Mapping/Audio/MIDI) after all
     // panels have rendered so the icon painting lands on top of ImGui's
@@ -9456,6 +9636,8 @@ void Application::startRecording(const std::string& overridePath) {
 // Interactions: click ruler to seek, drag playhead to scrub, drag clip body to
 // move, drag clip edges to trim, right-click track for +Clip at cursor.
 void Application::renderFloatingTransportPill() {
+    // The gallery/show pages are full-screen: no overlays sit on top of them.
+    if (UIManager::sGalleryOpen || UIManager::sShowOpen) return;
     // Floating transport pill — reference design:
     //   [⏮] [▶ accent] [⏹] [∞] | [MM:SS / DUR ns] | [🎙] [System Audio ▾] [🔊] [▮▮▮▮▮]
     // Single long pill with grouped sections separated by hairlines. Play
@@ -10659,6 +10841,9 @@ void Application::renderFloatingActionPills() {
 static constexpr bool kLanesUiEnabled = false;
 
 void Application::renderTimelinePanel() {
+    // The gallery/show pages are full-screen: the floating timeline would
+    // draw on top of them (last-focused ImGui window wins), so it sits out.
+    if (UIManager::sGalleryOpen || UIManager::sShowOpen) return;
     // Fix 2: the timeline is a FLOATING overlay (not docked) so it can slide
     // smoothly. Its rect is fully derived from the single source of truth:
     //   top    = m_timelineTopY  (also the bottom-nav's top edge)
@@ -14482,6 +14667,7 @@ void Application::loadShader(const std::string& path) {
               << " | texId=" << source->textureId()
               << " | size=" << source->width() << "x" << source->height()
               << std::endl;
+    usageNoteLoad(path);
 
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
@@ -14663,6 +14849,7 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
             return;
         }
         m_shaderPresets.apply(basename(shaderPath), *src);
+        usageNoteLoad(shaderPath);
         m_undoStack.pushState(m_layerStack, m_selectedLayer);
         l->source = src;
         l->name = basename(shaderPath);
@@ -14684,6 +14871,7 @@ void Application::ensureManagedShaderLayer(const std::string& slot,
         return;
     }
     m_shaderPresets.apply(basename(shaderPath), *src);
+    usageNoteLoad(shaderPath);
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
@@ -17373,59 +17561,1889 @@ void Application::renderEdgeBlendInline(OutputZone& zone) {
 // Build + start a show: one SHOW layer whose track carries one clip per
 // picked shader, laid end-to-end, DIVIDING the requested minutes equally —
 // the whole show is visible and editable on the timeline, never stacked.
+void Application::teardownShow() {
+    // Gather every layer id the show owns (stacked layers + legacy single).
+    std::vector<uint32_t> ids = m_showLayerIds;
+    if (m_showLayerId != 0) ids.push_back(m_showLayerId);
+    for (uint32_t id : ids) {
+        m_timeline.removeTrackForLayer(id);
+        // The decks stay: a show is played THROUGH them, and whatever they
+        // hold when it stops is what's on the mixer. Any other show layer
+        // (older, one-layer-per-shader shows) goes with its track.
+        for (int li = 0; li < m_layerStack.count(); li++)
+            if (m_layerStack[li]->id == id) {
+                auto& L = m_layerStack[li];
+                if (L->managedKey != kDeckKey[0] && L->managedKey != kDeckKey[1])
+                    m_layerStack.removeLayer(li);
+                break;
+            }
+        // Drop the cross-layer fades that reference this layer.
+        auto& trs = m_timeline.transitions();
+        for (int ti = (int)trs.size() - 1; ti >= 0; ti--)
+            if (trs[ti].fromLayerId == id || trs[ti].toLayerId == id)
+                trs.erase(trs.begin() + ti);
+    }
+    for (uint32_t id : m_showExtraTrackIds) m_timeline.removeTrackForLayer(id);
+    m_showExtraTrackIds.clear();
+    m_showLayerIds.clear();
+    m_showLayerId = 0;
+}
+
 void Application::startShow(const std::vector<std::string>& sel, float minutes) {
     if (sel.empty()) return;
     float slot = minutes * 60.0f / (float)sel.size();
-    float slotS = (slot < 3.0f) ? 3.0f : slot;
+    double S = (slot < 4.0f) ? 4.0 : (double)slot;   // each shader's time on air
+    double F = std::min(2.0, S * 0.25);               // the fade at every seam
 
-    // Tear down any previous show layer/track.
-    if (m_showLayerId != 0) {
-        m_timeline.removeTrackForLayer(m_showLayerId);
-        for (int li = 0; li < m_layerStack.count(); li++)
-            if (m_layerStack[li]->id == m_showLayerId) {
-                m_layerStack.removeLayer(li); break;
-            }
-        m_showLayerId = 0;
-    }
+    teardownShow();
 
-    int before = m_layerStack.count();
-    loadShader(sel[0]);
-    if (m_layerStack.count() <= before) return;
-
-    auto& nl = m_layerStack[m_layerStack.count() - 1];
-    nl->name = "SHOW";
-    m_showLayerId = nl->id;
-
-    // Show-preset param override for the first shader (loadShader only
-    // applies the per-shader preset; the override carries the SAVED look).
-    {
-        auto ov = m_showParamOverrides.find(sel[0]);
-        if (ov != m_showParamOverrides.end()) {
-            if (auto* ss = dynamic_cast<ShaderSource*>(nl->source.get()))
-                ShaderPresets::applyJson(ov->second, *ss);
-        }
-    }
-
-    for (int ci = 0; ci < (int)sel.size(); ci++) {
-        std::string title = sel[ci];
+    auto titleOf = [&](const std::string& path) {
         for (const auto& shh : m_shaderClaw.shaders())
-            if (shh.fullPath == sel[ci]) { title = shh.title; break; }
-        TimelineClip* c = m_timeline.addClip(
-            nl->id, (double)ci * (double)slotS, (double)slotS, title, sel[ci]);
-        if (c) {
-            c->kind = ClipKind::Shader;
-            c->transitionInName = "fade";
-            c->transitionInDuration = 1.0;
-        }
+            if (shh.fullPath == path) return shh.title;
+        size_t sl = path.find_last_of("/\\");
+        return sl == std::string::npos ? path : path.substr(sl + 1);
+    };
+    auto applyOverride = [&](Layer* L, const std::string& path) {
+        auto ov = m_showParamOverrides.find(path);
+        if (ov == m_showParamOverrides.end() || !L) return;
+        if (auto* ss = dynamic_cast<ShaderSource*>(L->source.get()))
+            ShaderPresets::applyJson(ov->second, *ss);
+    };
+
+    // A show plays through the two decks, like a two-deck mixer: shaders
+    // alternate A, B, A, B on two timeline tracks. Both decks render the
+    // whole time (so both sides are always visible on the SHOW page) and
+    // the crossfader is the output: the timeline's fades steer it, a hand
+    // on the fader overrides until the next fade.
+    deckLoad(0, sel[0], titleOf(sel[0]));
+    if (sel.size() > 1) deckLoad(1, sel[1], titleOf(sel[1]));
+    Layer* A = deckLayer(0);
+    Layer* B = sel.size() > 1 ? deckLayer(1) : nullptr;
+    if (!A) return;
+    applyOverride(A, sel[0]);
+    if (B) applyOverride(B, sel[1]);
+    for (Layer* L : {A, B}) if (L) { L->visible = true; L->userHidden = false; L->muted = false; }
+
+    m_showLayerIds = {A->id};
+    if (B) m_showLayerIds.push_back(B->id);
+    m_timeline.ensureTrack(A->id, "A");
+    if (B) m_timeline.ensureTrack(B->id, "B");
+
+    // Shader i is on air over [i(S-F), i(S-F)+S). Its clip on its deck's
+    // track starts as soon as that deck is free (the previous shader on the
+    // deck has faded out), so the next shader is cued and visible on the
+    // idle deck well before its fade — exactly like cueing a record.
+    uint32_t prevLayer = 0;
+    const int n = (int)sel.size();
+    for (int i = 0; i < n; i++) {
+        Layer* L = (B && (i % 2 == 1)) ? B : A;
+        double onAir = i * (S - F);
+        double cs = B ? (i >= 2 ? (i - 2) * (S - F) + S : 0.0) : onAir;
+        double ce = onAir + S;
+        TimelineClip* c = m_timeline.addClip(L->id, cs, ce - cs, titleOf(sel[i]), sel[i]);
+        if (c) c->kind = ClipKind::Shader;
+        if (i > 0 && B && prevLayer != 0)
+            m_timeline.addTransition(prevLayer, L->id, onAir, F, "fade");
+        prevLayer = L->id;
     }
-    double showLen = (double)sel.size() * (double)slotS;
+
+    double showLen = (n - 1) * (S - F) + S;
     m_timeline.setDuration(showLen);
     m_timeline.setWorkArea(0.0, showLen);
     m_timeline.setLooping(true);
     m_timeline.seek(0.0);
     m_timeline.play();
     m_showRunning = true;
-    m_timelineMinimized = false;  // show the show
+    m_timelineMinimized = false;
+
+    // Deck A opens on air; the fader sits on A; the knobs follow the air.
+    m_deckBlend = 0.0f;
+    m_deckAnim = false;
+    m_deckHand = false;
+    m_showMixTrId = 0;
+    m_showMixFrom = 0.0f;
+    m_deckSrcSeen[0] = A->source.get();
+    m_deckSrcSeen[1] = B ? B->source.get() : nullptr;
+    m_showTargetLayerId = 0;
+    m_deckTargetPinned = false;
+    m_deckTarget = 0;
+    m_showMapPage = 0;
+    autoMapShaderToLCXL(A->source.get());
+    m_showTab = 2;
+    UIManager::sGalleryOpen = false;
+    UIManager::sShowOpen = true;
+}
+
+// ── SHOW page ──────────────────────────────────────────────────────────────
+
+// The binding map of any SHOW-bindable source — shaders, 2D fluid, 3D
+// fluid, particles — or null for everything else (video, NDI, …).
+std::map<std::string, AudioBinding>* Application::showBindingsFor(ContentSource* src) {
+    if (!src) return nullptr;
+    if (auto* ss = dynamic_cast<ShaderSource*>(src))   return &ss->audioBindings();
+    if (auto* fs = dynamic_cast<FluidSource*>(src))    return &fs->audioBindings();
+    if (auto* f3 = dynamic_cast<FluidSource3D*>(src))  return &f3->audioBindings();
+    if (auto* ps = dynamic_cast<ParticleSource*>(src)) return &ps->audioBindings();
+    return nullptr;
+}
+
+// The curated float params of a SHOW-bindable source. The fluid/particle
+// tables mirror the pid → member maps in each source's applyAudioBindings.
+std::vector<Application::ShowParam> Application::showParamsFor(ContentSource* src) {
+    std::vector<ShowParam> out;
+    if (!src) return out;
+    if (auto* ss = dynamic_cast<ShaderSource*>(src)) {
+        for (const auto& in : ss->inputs()) {
+            if (in.type != "float" && in.type != "long") continue;
+            float cur = std::holds_alternative<float>(in.value)
+                      ? std::get<float>(in.value) : in.minVal;
+            out.push_back({in.name, in.label.empty() ? in.name : in.label,
+                           cur, in.minVal, in.maxVal});
+        }
+        return out;
+    }
+    struct T { const char* id; const char* lbl; float lo, hi; };
+    const T* tab = nullptr; int n = 0;
+    if (dynamic_cast<FluidSource*>(src)) {
+        static const T kFluid[] = {
+            {"curl","curl",0,60}, {"splatRadius","splat radius",0.05f,1.5f},
+            {"splatIntensity","splat intensity",0.1f,4}, {"autoRate","auto rate",0,60},
+            {"autoSpeed","auto speed",0,4}, {"autoScale","auto scale",0,0.5f},
+            {"densityDissipation","density fade",0,4}, {"velocityDissipation","velocity fade",0,4},
+            {"pressure","pressure",0,1}, {"bloomIntensity","bloom",0,2},
+            {"bloomThreshold","bloom threshold",0,1.5f}, {"sunraysWeight","sunrays",0,2},
+            {"imageIntensity","image intensity",0,1}, {"reformRate","reform rate",0,2}};
+        tab = kFluid; n = (int)(sizeof(kFluid) / sizeof(kFluid[0]));
+    } else if (dynamic_cast<FluidSource3D*>(src)) {
+        static const T kF3[] = {
+            {"rotateSpeed","rotate speed",0,2}, {"brightness","brightness",0,6},
+            {"tilt","tilt",-1.57f,1.57f}, {"sphereScale","sphere scale",0.05f,1.5f},
+            {"zoom","zoom",0.5f,4}, {"gravity","gravity",0,4},
+            {"vortex","vortex",0,3}, {"turbulence","turbulence",0,2},
+            {"forceScale","force scale",0.1f,4}, {"sphereShape","sphere shape",0,1},
+            {"lightIntensity","light",0,3}, {"ambient","ambient",0,1},
+            {"specular","specular",0,3}, {"rim","rim",0,1},
+            {"saturation","saturation",0,2}, {"imageMix","image mix",0,1},
+            {"bgAlpha","bg alpha",0,1}, {"audioIntensity","audio intensity",0,1}};
+        tab = kF3; n = (int)(sizeof(kF3) / sizeof(kF3[0]));
+    } else if (dynamic_cast<ParticleSource*>(src)) {
+        static const T kPart[] = {
+            {"spawnRate","spawn rate",0,2000}, {"initialSize","size",0.005f,0.3f},
+            {"sizeJitter","size jitter",0,1}, {"velocityJitter","velocity jitter",0,2},
+            {"lifetimeMax","lifetime",0.2f,10}, {"motionBlur","motion blur",0,2},
+            {"minStretch","stretch",0,1}, {"audioSpawnRateMul","audio spawn",0,4},
+            {"audioSizeMul","audio size",0,4}, {"audioVelocityMul","audio velocity",0,4},
+            {"audioBeatBurst","beat burst",0,300}};
+        tab = kPart; n = (int)(sizeof(kPart) / sizeof(kPart[0]));
+    }
+    for (int i = 0; i < n; i++)
+        out.push_back({tab[i].id, tab[i].lbl, tab[i].lo, tab[i].lo, tab[i].hi});
+    return out;
+}
+
+// The first 16 SHOW-bindable layers in the order they were added (stack
+// bottom first) — the numbered slots, matching the XL's 1-16 buttons.
+std::vector<Layer*> Application::showShaderSlots() {
+    std::vector<Layer*> out;
+    for (int i = 0; i < m_layerStack.count() && (int)out.size() < 16; i++) {
+        auto& l = m_layerStack[i];
+        if (l && showBindingsFor(l->source.get())) out.push_back(l.get());
+    }
+    return out;
+}
+
+// The active layout's control banks: 0 = faders, 1-3 = knob rows top down.
+// First call sniffs the connected device names — a "LCXL3" anywhere means
+// the Mk3 map; the classic factory template otherwise.
+const int* Application::lcxlBank(int idx) {
+    if (!m_showLCXLDetected) {
+        m_showLCXLDetected = true;
+        for (const auto& n : m_midiManager.listDevices()) {
+            if (n.find("LCXL3") != std::string::npos ||
+                n.find("XL 3") != std::string::npos ||
+                n.find("XL3") != std::string::npos) { m_showLCXLMk3 = true; break; }
+        }
+        std::cerr << "[Show] XL layout: " << (m_showLCXLMk3 ? "Mk3" : "classic")
+                  << " (auto-detected)" << std::endl;
+    }
+    static const int* kClassic[4] = {kLCXLFader, kLCXLKnobA, kLCXLKnobB, kLCXLKnobC};
+    static const int* kMk3[4]     = {kMk3Fader,  kMk3KnobA,  kMk3KnobB,  kMk3KnobC};
+    return (m_showLCXLMk3 ? kMk3 : kClassic)[idx & 3];
+}
+
+// Bind every fader + knob to this shader's float params, in order:
+// faders 1-8, then the knob rows top to bottom. Same MidiCC AudioBinding
+// path as the bolt popover, so Properties can retune each one.
+void Application::autoMapShaderToLCXL(ContentSource* src) {
+    auto* bmapP = showBindingsFor(src);
+    if (!bmapP) {
+        std::cerr << "[Show] AUTO-MAP refused: source '"
+                  << (src ? src->typeName() : "none")
+                  << "' has no bindable params" << std::endl;
+        return;
+    }
+    std::cerr << "[Show] AUTO-MAP on " << src->typeName() << std::endl;
+    auto& bmap = *bmapP;
+    auto params = showParamsFor(src);
+    if (!m_midiManager.isOpen()) {
+        auto devs = m_midiManager.listDevices();
+        if (!devs.empty()) m_midiManager.openAll();
+    }
+    // AUTO-MAP always leaves the shader listening: if nothing is audio-
+    // reactive yet, pick one param — the most motion/intensity-flavoured
+    // name wins, else the first float — and bind it to Bass with the house
+    // calm defaults (smoothing 0.85, 4s ease-in, upper-half swing from the
+    // param's current value). The knob mapping below routes around it.
+    {
+        bool hasAudio = false;
+        for (const auto& kv : bmap)
+            if (kv.second.signal != AudioSignal::None &&
+                kv.second.signal != AudioSignal::MidiCC) { hasAudio = true; break; }
+        if (!hasAudio && !params.empty()) {
+            static const char* kWants[] = {"intensity", "amount", "glow", "bright",
+                                           "energy", "pulse", "speed", "strength",
+                                           "amp", "warp", "flow", "size", "scale",
+                                           "rate", "turbulence", "vortex"};
+            const ShowParam* pick = &params[0];
+            int bestRank = 999;
+            for (const auto& p : params) {
+                std::string lower = p.name;
+                for (auto& ch : lower) ch = (char)tolower(ch);
+                for (int w = 0; w < (int)(sizeof(kWants) / sizeof(kWants[0])); w++) {
+                    if (w < bestRank && lower.find(kWants[w]) != std::string::npos) {
+                        pick = &p; bestRank = w; break;
+                    }
+                }
+            }
+            AudioBinding b;
+            b.signal   = AudioSignal::Bass;
+            b.rangeMin = pick->cur;
+            b.rangeMax = std::min(pick->hi, pick->cur + (pick->hi - pick->lo) * 0.5f);
+            bmap[pick->name] = b;
+            std::cerr << "[Show] audio pick: \"" << pick->name
+                      << "\" <- Bass" << std::endl;
+        }
+    }
+
+    // Eligible = every param not claimed by an audio signal (the controller
+    // maps around those, never over them). The surface holds 32 controls;
+    // a source with more params gets PAGES of 32 — MORE steps through them.
+    std::vector<const ShowParam*> elig;
+    for (const auto& p : params) {
+        auto it = bmap.find(p.name);
+        if (it != bmap.end() &&
+            it->second.signal != AudioSignal::None &&
+            it->second.signal != AudioSignal::MidiCC) continue;
+        elig.push_back(&p);
+    }
+    // The old page's knob claims come off first — one param per control.
+    for (auto it = bmap.begin(); it != bmap.end();) {
+        if (it->second.signal == AudioSignal::MidiCC) it = bmap.erase(it);
+        else ++it;
+    }
+    // 31 controls per page: the crossfader's CC stays out of every page.
+    const int xfCC = deckXfadeCC();
+    int pages = elig.empty() ? 1 : ((int)elig.size() + 30) / 31;
+    if (m_showMapPage >= pages) m_showMapPage = 0;   // MORE wraps to page 1
+    size_t off = (size_t)m_showMapPage * 31;
+
+    // Knobs first, top row down, faders last: the XL3's encoders are
+    // endless, so they pick up a fresh shader with no stale position —
+    // faders carry the params where an absolute throw makes sense.
+    const int* banks[4] = {lcxlBank(1), lcxlBank(2), lcxlBank(3), lcxlBank(0)};
+    int bi = 0, ki = 0;
+    for (size_t i = off; i < elig.size() && bi < 4; i++) {
+        while (bi < 4 && banks[bi][ki] == xfCC) { if (++ki == 8) { ki = 0; bi++; } }
+        if (bi >= 4) break;
+        const ShowParam& p = *elig[i];
+        AudioBinding& b = bmap[p.name];
+        b.signal      = AudioSignal::MidiCC;
+        b.midiCC      = banks[bi][ki];
+        b.midiChannel = -1;                 // any channel: every template works
+        b.rangeMin    = p.lo;
+        b.rangeMax    = p.hi;
+        b.rampTime    = 0.0f;               // a hand on a knob wants NOW
+        b.smoothing   = 0.0f;               // 1:1 — the param IS the control
+        b.character   = 0.0f;
+        if (++ki == 8) { ki = 0; bi++; }
+    }
+    std::cerr << "[Show] AUTO-MAP: bound " << (bi * 8 + ki)
+              << " params (page " << (m_showMapPage + 1) << "/" << pages
+              << ")" << std::endl;
+}
+
+// The layer the SHOW surface drives: the button-picked layer wins, then the
+// selected layer if it's a shader, then the topmost visible shader layer.
+Layer* Application::resolveShowTarget() {
+    if (m_showExtraTargetId != 0) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& l = m_layerStack[i];
+            if (l && l->id == m_showExtraTargetId && showBindingsFor(l->source.get())) return l.get();
+        }
+        m_showExtraTargetId = 0;   // the extra went away; the decks take over again
+    }
+    if (Layer* d = deckLayer(m_deckTarget))     return d;
+    if (Layer* d = deckLayer(1 - m_deckTarget)) return d;
+    if (m_showTargetLayerId != 0) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& l = m_layerStack[i];
+            if (l && l->id == m_showTargetLayerId &&
+                showBindingsFor(l->source.get())) return l.get();
+        }
+        m_showTargetLayerId = 0;   // layer went away
+    }
+    if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+        auto& l = m_layerStack[m_selectedLayer];
+        if (l && showBindingsFor(l->source.get())) return l.get();
+    }
+    for (int i = m_layerStack.count() - 1; i >= 0; i--) {
+        auto& l = m_layerStack[i];
+        if (l && l->visible && showBindingsFor(l->source.get())) return l.get();
+    }
+    return nullptr;
+}
+
+// Point the SHOW surface at numbered slot `slot` (0-15, XL buttons 1-16).
+// The knobs edit ONE shader at a time: the previous target's MIDI bindings
+// come off and the new target is mapped on arrival, so the same physical
+// controls always mean "the shader whose number is lit".
+void Application::selectShowTarget(int slot) {
+    auto slots = showShaderSlots();
+    if (slot < 0 || slot >= (int)slots.size()) return;
+    Layer* l = slots[slot];
+    if (l->id != m_showTargetLayerId && m_showTargetLayerId != 0) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& p = m_layerStack[i];
+            if (!p || p->id != m_showTargetLayerId) continue;
+            if (auto* pb = showBindingsFor(p->source.get())) {
+                for (auto it = pb->begin(); it != pb->end();) {
+                    if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it);
+                    else ++it;
+                }
+            }
+            break;
+        }
+    }
+    if (m_showTargetLayerId != l->id) m_showMapPage = 0;   // fresh target, page 1
+    m_showTargetLayerId = l->id;
+    for (int i = 0; i < m_layerStack.count(); i++)
+        if (m_layerStack[i] && m_layerStack[i]->id == l->id) { m_selectedLayer = i; break; }
+    autoMapShaderToLCXL(l->source.get());
+
+    // ── the SWITCH: the number doesn't just take the knobs, it takes the
+    // screen — crossfade the output from whatever shader is up to this one.
+    const float kSwitchFade = 1.0f;
+    for (Layer* o : slots) {
+        if (o == l || !o->visible) continue;
+        o->transitionDuration  = kSwitchFade;
+        o->transitionDirection = false;      // fade out; ends in visible=false
+        o->transitionActive    = true;
+        if (!m_showRunning) o->userHidden = true;   // solo the pick outside a show
+    }
+    l->userHidden = false;
+    if (!l->visible) {
+        l->visible = true;
+        l->transitionProgress = 0.0f;
+    }
+    l->transitionDuration  = kSwitchFade;
+    l->transitionDirection = true;           // fade in
+    l->transitionActive    = true;
+
+    if (m_showRunning) {
+        // A running show keeps running — jumped into this shader's clip,
+        // landing just past its authored seam so the rotation carries on
+        // from the chosen shader.
+        if (auto* tr = m_timeline.findTrack(l->id)) {
+            if (!tr->clips.empty()) {
+                const TimelineClip& c0 = tr->clips.front();
+                double at = c0.startTime + 0.02;
+                for (const auto& t2 : m_timeline.transitions())
+                    if (t2.toLayerId == l->id && t2.endTime() > at &&
+                        t2.endTime() < c0.endTime())
+                        at = t2.endTime() + 0.01;
+                m_timeline.seek(at);
+            }
+        }
+    }
+    std::cerr << "[Show] switch -> slot " << (slot + 1)
+              << " \"" << l->name << "\"" << std::endl;
+}
+
+// ── shader usage history ───────────────────────────────────────────────
+// Every explicit load (gallery click, picker, OSC ensure) bumps `loads`;
+// every frame a shader layer is on screen adds to `seconds`. Persisted to
+// ~/.easel/shader_usage.json so "which shaders do I actually use" has an
+// answer next time — Easel never kept one before 2026-09-11.
+static std::string usageFilePath() {
+    const char* home = getenv("HOME");
+    return std::string(home ? home : ".") + "/.easel/shader_usage.json";
+}
+static std::string usageKey(const std::string& path) {
+    size_t s = path.find_last_of("/\\");
+    return s == std::string::npos ? path : path.substr(s + 1);
+}
+static std::string usageNow() {
+    char buf[32];
+    time_t t = time(nullptr);
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", localtime(&t));
+    return buf;
+}
+
+void Application::usageNoteLoad(const std::string& path) {
+    if (path.empty()) return;
+    if (!m_usageLoaded) usageFlush(false);   // first touch loads the file
+    auto& u = m_shaderUsage[usageKey(path)];
+    u.loads++;
+    u.last = usageNow();
+    usageFlush(true);
+}
+
+void Application::usageTick(float dt) {
+    if (!(dt > 0.0f) || dt > 0.5f) return;
+    bool any = false;
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& l = m_layerStack[i];
+        if (!l || !l->visible || l->userHidden || !l->source || !l->source->isShader()) continue;
+        if (l->opacity <= 0.001f) continue;
+        const std::string& p = l->source->sourcePath();
+        if (p.empty()) continue;
+        if (!m_usageLoaded) usageFlush(false);
+        m_shaderUsage[usageKey(p)].seconds += dt;
+        any = true;
+    }
+    if (any && m_usageDirtyT < 0.0) m_usageDirtyT = glfwGetTime();
+    if (m_usageDirtyT >= 0.0 && glfwGetTime() - m_usageDirtyT > 60.0) usageFlush(true);
+}
+
+// force=false: (re)load from disk if not loaded yet. force=true: write.
+void Application::usageFlush(bool force) {
+    const std::string path = usageFilePath();
+    if (!m_usageLoaded) {
+        m_usageLoaded = true;
+        std::ifstream in(path);
+        if (in.is_open()) {
+            try {
+                nlohmann::json j; in >> j;
+                for (auto it = j.begin(); it != j.end(); ++it) {
+                    ShaderUsage u;
+                    u.loads   = it.value().value("loads", 0);
+                    u.seconds = it.value().value("seconds", 0.0);
+                    u.last    = it.value().value("last", "");
+                    m_shaderUsage[it.key()] = u;
+                }
+            } catch (...) {}
+        }
+    }
+    if (!force) return;
+    nlohmann::json j;
+    for (const auto& [k, u] : m_shaderUsage)
+        j[k] = {{"loads", u.loads}, {"seconds", (int)u.seconds}, {"last", u.last}};
+    std::ofstream out(path);
+    if (out.is_open()) out << j.dump(1);
+    m_usageDirtyT = -1.0;
+}
+
+// ── SHOW decks ──────────────────────────────────────────────────────────
+// Two managed shader layers, A and B, keyed "show:A"/"show:B". The layer
+// stack stays the source of truth: the crossfader only writes opacity /
+// visibility / blend mode onto those two layers every frame.
+
+Layer* Application::deckLayer(int deck) {
+    int i = deckLayerIndex(deck);
+    return i >= 0 ? m_layerStack[i].get() : nullptr;
+}
+
+int Application::deckLayerIndex(int deck) {
+    if (deck < 0 || deck > 1) return -1;
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& l = m_layerStack[i];
+        if (l && l->managedKey == kDeckKey[deck]) return i;
+    }
+    return -1;
+}
+
+// Every SHOW-bindable layer that is not a deck, stack order, up to 14 (the
+// XL's remaining numbered buttons).
+std::vector<Layer*> Application::showExtraLayers() {
+    std::vector<Layer*> out;
+    for (int i = 0; i < m_layerStack.count() && (int)out.size() < 14; i++) {
+        auto& l = m_layerStack[i];
+        if (!l || !showBindingsFor(l->source.get())) continue;
+        if (l->managedKey == kDeckKey[0] || l->managedKey == kDeckKey[1]) continue;
+        out.push_back(l.get());
+    }
+    return out;
+}
+
+// An extra takes the knobs + MIDI: the deck (or previous extra) gives its
+// MIDI bindings back, this layer is mapped on arrival. The deck follow-the-
+// air logic stays out of the way until a deck is picked again.
+void Application::showTakeExtra(Layer* l) {
+    if (!l) return;
+    auto strip = [&](Layer* o) {
+        if (!o) return;
+        if (auto* pb = showBindingsFor(o->source.get()))
+            for (auto it = pb->begin(); it != pb->end();)
+                if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it); else ++it;
+    };
+    strip(deckLayer(m_deckTarget));
+    if (m_showExtraTargetId != 0 && m_showExtraTargetId != l->id)
+        for (int i = 0; i < m_layerStack.count(); i++)
+            if (m_layerStack[i] && m_layerStack[i]->id == m_showExtraTargetId) { strip(m_layerStack[i].get()); break; }
+    m_showExtraTargetId = l->id;
+    m_deckTargetPinned = true;
+    m_showMapPage = 0;
+    layerToFront(l);   // it is the output now, not just the knobs
+    autoMapShaderToLCXL(l->source.get());
+    std::cerr << "[Show] extra takes the knobs: " << l->name << std::endl;
+}
+
+// A running show adopts every extra as it appears: a track with one clip
+// spanning the show, so it rolls (and loops) with the decks. Layers are
+// never removed by the show — only these tracks come off at teardown.
+void Application::showReconcileExtras() {
+    if (!m_showRunning) return;
+    for (Layer* l : showExtraLayers()) {
+        bool has = false;
+        for (const auto& tr : m_timeline.tracks()) if (tr.layerId == l->id) { has = true; break; }
+        if (has) continue;
+        m_timeline.ensureTrack(l->id, l->name);
+        TimelineClip* c = m_timeline.addClip(l->id, 0.0, m_timeline.duration(), l->name, "");
+        if (c) c->kind = ClipKind::Auto;
+        m_showExtraTrackIds.push_back(l->id);
+        l->visible = true; l->userHidden = false;
+        std::cerr << "[Show] extra joined the show: " << l->name << std::endl;
+    }
+}
+
+// "What you touch last is on screen": a picked layer rises to the top of the
+// stack; touching the crossfader or GO lifts both decks above everything so
+// the A/B mix is what the output shows.
+void Application::layerToFront(Layer* l) {
+    if (!l) return;
+    int n = m_layerStack.count();
+    for (int i = 0; i < n; i++)
+        if (m_layerStack[i] && m_layerStack[i]->id == l->id) {
+            if (i != n - 1) m_layerStack.moveLayer(i, n - 1);
+            break;
+        }
+    for (int i = 0; i < m_layerStack.count(); i++)
+        if (m_layerStack[i] && m_layerStack[i]->id == l->id) { m_selectedLayer = i; break; }
+}
+void Application::decksToFront() {
+    int ia = deckLayerIndex(0), ib = deckLayerIndex(1);
+    Layer* lo = (ia >= 0 && ib >= 0) ? (ia < ib ? deckLayer(0) : deckLayer(1)) : (ia >= 0 ? deckLayer(0) : deckLayer(1));
+    Layer* hi = (ia >= 0 && ib >= 0) ? (ia < ib ? deckLayer(1) : deckLayer(0)) : nullptr;
+    int n = m_layerStack.count();
+    if (!lo || n < 1) return;
+    bool onTop = hi ? (deckLayerIndex(hi == deckLayer(0) ? 0 : 1) == n - 1 && deckLayerIndex(lo == deckLayer(0) ? 0 : 1) == n - 2)
+                    : (deckLayerIndex(lo == deckLayer(0) ? 0 : 1) == n - 1);
+    if (onTop) return;
+    layerToFront(lo);
+    if (hi) layerToFront(hi);
+}
+
+// Back to the shader's own defaults (the ISF DEFAULT of every input).
+void Application::resetShowParams(ContentSource* src) {
+    auto* ss = dynamic_cast<ShaderSource*>(src);
+    if (!ss) return;
+    for (auto& in : ss->inputs()) {
+        if (in.type == "float" || in.type == "long") ss->setFloat(in.name, in.defaultFloat);
+        else if (in.type == "color") in.value = in.defaultColor;
+        else if (in.type == "bool")  in.value = in.defaultBool;
+    }
+    std::cerr << "[Show] params reset on " << ss->typeName() << std::endl;
+}
+
+void Application::deckLoad(int deck, const std::string& path, const std::string& title) {
+    if (deck < 0 || deck > 1 || path.empty()) return;
+    ensureManagedShaderLayer(kDeckKey[deck], path);
+    Layer* l = deckLayer(deck);
+    if (!l) return;
+    if (!title.empty()) l->name = title;
+    l->userHidden = false;
+    l->muted = false;
+    if (m_deckTarget == deck) {
+        m_showMapPage = 0;
+        autoMapShaderToLCXL(l->source.get());
+    }
+    m_selectedLayer = deckLayerIndex(deck);
+    std::cerr << "[Show] deck " << (deck ? "B" : "A") << " <- " << l->name << std::endl;
+}
+
+// The XL follows one deck at a time: the old deck gives its knobs back, the
+// new one is mapped on arrival.
+void Application::deckTakeSurface(int deck, bool pin) {
+    if (deck < 0 || deck > 1) return;
+    if (m_showExtraTargetId != 0) {
+        for (int i = 0; i < m_layerStack.count(); i++)
+            if (m_layerStack[i] && m_layerStack[i]->id == m_showExtraTargetId) {
+                if (auto* pb = showBindingsFor(m_layerStack[i]->source.get()))
+                    for (auto it = pb->begin(); it != pb->end();)
+                        if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it); else ++it;
+                break;
+            }
+        m_showExtraTargetId = 0;
+        m_showMapPage = 0;
+        if (Layer* l = deckLayer(deck)) { m_deckTarget = deck; m_deckTargetPinned = pin; autoMapShaderToLCXL(l->source.get()); m_selectedLayer = deckLayerIndex(deck); return; }
+    }
+    m_deckTargetPinned = pin;
+    if (deck != m_deckTarget) {
+        if (Layer* old = deckLayer(m_deckTarget)) {
+            if (auto* pb = showBindingsFor(old->source.get())) {
+                for (auto it = pb->begin(); it != pb->end();) {
+                    if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it);
+                    else ++it;
+                }
+            }
+        }
+        m_showMapPage = 0;
+    }
+    m_deckTarget = deck;
+    if (Layer* l = deckLayer(deck)) {
+        autoMapShaderToLCXL(l->source.get());
+        m_selectedLayer = deckLayerIndex(deck);
+    }
+}
+
+// GO: run the chosen transition from wherever the crossfader is to the
+// other side. "cut" snaps; "fade" eases the crossfader; any other name is
+// a gl-transition rendered by the compositor's between-row path, which
+// needs the incoming deck ABOVE the outgoing one in the stack.
+void Application::deckGo() {
+    decksToFront();
+    float to = (m_deckBlend < 0.5f) ? 1.0f : 0.0f;
+    int inDeck = to > 0.5f ? 1 : 0;
+    Layer* in  = deckLayer(inDeck);
+    Layer* out = deckLayer(1 - inDeck);
+    if (!in) return;
+    if (m_deckTransition == "cut" || m_deckTransSecs <= 0.01f) {
+        m_deckAnim = false;
+        m_deckBlend = to;
+        return;
+    }
+    if (out) {
+        int ii = deckLayerIndex(inDeck), io = deckLayerIndex(1 - inDeck);
+        if (ii >= 0 && io >= 0 && ii < io) m_layerStack.moveLayer(ii, io);
+    }
+    m_deckAnim     = true;
+    m_deckAnimGL   = (m_deckTransition != "fade");
+    m_deckAnimFrom = m_deckBlend;
+    m_deckAnimTo   = to;
+    m_deckAnimT    = 0.0f;
+    m_deckAnimDur  = std::max(0.05f, m_deckTransSecs);
+    if (in) { in->betweenRowActive = false; }
+}
+
+void Application::deckTick(float dt) {
+    // A shader (or fluid / particle) layer added to the canvas takes the
+    // knobs + MIDI the moment it appears — no need to open SHOW. The first
+    // frame only records what is already there, so loading a project never
+    // remaps by itself.
+    {
+        static uint32_t sSeenMaxId = 0;
+        static bool sPrimed = false;
+        uint32_t maxId = 0; Layer* newest = nullptr;
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& l = m_layerStack[i];
+            if (!l || !showBindingsFor(l->source.get())) continue;
+            if (l->managedKey == kDeckKey[0] || l->managedKey == kDeckKey[1]) continue;
+            if (l->id > maxId) { maxId = l->id; newest = l.get(); }
+        }
+        if (!sPrimed) { sSeenMaxId = maxId; sPrimed = true; }
+        else if (newest && maxId > sSeenMaxId) {
+            sSeenMaxId = maxId;
+            if (!m_midiManager.isOpen()) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
+            showTakeExtra(newest);
+            std::cerr << "[Show] new layer on the canvas -> knobs + MIDI: " << newest->name << std::endl;
+        }
+    }
+    Layer* A = deckLayer(0);
+    Layer* B = deckLayer(1);
+    if (!A && !B) return;
+
+    // The knobs drive whatever is ON AIR (the crossfader's side) unless a
+    // deck was pinned by hand — clicking its letter or an XL button row.
+    showReconcileExtras();
+    if (!m_deckTargetPinned && m_showExtraTargetId == 0) {
+        int outDeck = m_deckBlend < 0.5f ? 0 : 1;
+        if (!deckLayer(outDeck)) outDeck = 1 - outDeck;
+        if (deckLayer(outDeck) && outDeck != m_deckTarget) deckTakeSurface(outDeck, false);
+    }
+
+    // The crossfader CC (XL fader 8 unless learned). Only a physical move
+    // takes over, so the on-screen slider still works — and a move during a
+    // running show takes the show over by hand.
+    {
+        float v = m_midiManager.getCCValue(-1, deckXfadeCC());
+        if (v >= 0.0f && v != m_deckFaderPrev) {
+            if (m_deckFaderPrev >= 0.0f) {
+                if (m_showRunning) m_deckHand = true;   // hand mix; the show keeps rolling
+                decksToFront();
+                m_deckBlend = v; m_deckAnim = false;
+            }
+            m_deckFaderPrev = v;
+        }
+    }
+    // A running show steers the crossfader from its fades (deckShowSync);
+    // from there on the decks are mixed exactly like a hand-mixed session.
+    if (m_showRunning) { deckShowSync(); A = deckLayer(0); B = deckLayer(1); if (!A && !B) return; }
+
+    float e = 0.0f;
+    bool  glLive = false;
+    if (m_deckAnim) {
+        m_deckAnimT += std::max(0.0f, std::min(dt, 0.1f));
+        float u = std::min(1.0f, m_deckAnimT / m_deckAnimDur);
+        e = u * u * (3.0f - 2.0f * u);
+        m_deckBlend = m_deckAnimFrom + (m_deckAnimTo - m_deckAnimFrom) * e;
+        glLive = m_deckAnimGL && u < 1.0f;
+        if (u >= 1.0f) { m_deckAnim = false; m_deckBlend = m_deckAnimTo; }
+    }
+    m_deckBlend = std::max(0.0f, std::min(1.0f, m_deckBlend));
+
+    if (!A || !B) {
+        Layer* only = A ? A : B;
+        only->opacity = 1.0f;
+        only->visible = true;
+        only->blendMode = BlendMode::Normal;
+        only->betweenRowActive = false;
+        return;
+    }
+
+    int ia = deckLayerIndex(0), ib = deckLayerIndex(1);
+    Layer* top = ia > ib ? A : B;
+    Layer* bot = ia > ib ? B : A;
+    float topAmt = (top == B) ? m_deckBlend : 1.0f - m_deckBlend;
+
+    if (glLive) {
+        // Between-row transition: the compositor blends the stack-so-far
+        // (the outgoing deck, fully up) with the incoming deck's solo render.
+        Layer* in = (m_deckAnimTo > 0.5f) ? B : A;
+        Layer* out = (in == A) ? B : A;
+        out->opacity = 1.0f; out->visible = true; out->blendMode = BlendMode::Normal;
+        out->betweenRowActive = false;
+        in->opacity = 1.0f; in->visible = true; in->blendMode = BlendMode::Normal;
+        in->betweenRowActive = true;
+        in->betweenRowProgress = (m_deckAnimTo > 0.5f) ? m_deckBlend : 1.0f - m_deckBlend;
+        in->betweenRowGLName = m_deckTransition;
+        in->betweenRowShaderPath.clear();
+        return;
+    }
+
+    A->betweenRowActive = false;
+    B->betweenRowActive = false;
+    bot->opacity   = 1.0f;
+    bot->blendMode = BlendMode::Normal;
+    top->opacity   = topAmt;
+    top->blendMode = m_deckBlendMode;
+    top->visible   = topAmt > 0.001f;
+    // A fully-up Normal top deck hides the bottom one entirely; a blend
+    // mode keeps both rendering — that is the whole point of the mode. On
+    // the SHOW page and during a show both decks always render, so both
+    // sides of the mixer stay live even when one is off air.
+    bot->visible   = (m_showRunning || UIManager::sShowOpen)
+                   || !(m_deckBlendMode == BlendMode::Normal && topAmt >= 0.999f);
+    if (m_showRunning || UIManager::sShowOpen) top->visible = true;
+}
+
+// ── crossfader CC: XL fader 8 unless learned; remembered in ~/.easel/show_settings.json
+int Application::deckXfadeCC() {
+    if (!m_deckXfadeLoaded) {
+        m_deckXfadeLoaded = true;
+        const char* home = getenv("HOME");
+        std::ifstream in(std::string(home ? home : ".") + "/.easel/show_settings.json");
+        if (in.is_open()) {
+            try { nlohmann::json j; in >> j; m_deckXfadeCC = j.value("xfadeCC", -1); } catch (...) {}
+        }
+    }
+    return m_deckXfadeCC >= 0 ? m_deckXfadeCC : lcxlBank(0)[7];
+}
+
+void Application::deckXfadeSave() {
+    const char* home = getenv("HOME");
+    std::ofstream out(std::string(home ? home : ".") + "/.easel/show_settings.json");
+    if (out.is_open()) out << nlohmann::json{{"xfadeCC", m_deckXfadeCC}}.dump(1);
+}
+
+// A gallery show is a timeline of clips, one layer per shader. While it
+// runs, the decks mirror it: the clip under the playhead is on air, the
+// next clip is cued in the other deck, and the crossfader shows the fade.
+// Deck letters stay put across seams — the freed deck takes the next clip.
+void Application::deckShowSync() {
+    Layer* A = deckLayer(0);
+    Layer* B = deckLayer(1);
+    if (!A || !B) return;
+
+    // A deck that just hot-swapped its shader (clip edge) gives the knobs
+    // the new source.
+    for (int d = 0; d < 2; d++) {
+        Layer* L = d ? B : A;
+        ContentSource* now = L->source.get();
+        if (now != m_deckSrcSeen[d]) {
+            m_deckSrcSeen[d] = now;
+            if (d == m_deckTarget) { m_showMapPage = 0; autoMapShaderToLCXL(now); }
+        }
+    }
+
+    double t = m_timeline.playhead();
+    const TimelineTransition* act = nullptr;
+    const TimelineTransition* last = nullptr;
+    for (const auto& tr : m_timeline.transitions()) {
+        bool deckTr = (tr.fromLayerId == A->id && tr.toLayerId == B->id)
+                   || (tr.fromLayerId == B->id && tr.toLayerId == A->id);
+        if (!deckTr) continue;
+        if (t >= tr.startTime && t < tr.endTime()) act = &tr;
+        else if (tr.endTime() <= t && (!last || tr.startTime > last->startTime)) last = &tr;
+    }
+    if (act) {
+        // A fade starting takes the fader back from the hand, from wherever
+        // it stands, so nothing ever jumps.
+        if (act->id != m_showMixTrId) {
+            m_showMixTrId = act->id;
+            m_showMixFrom = m_deckBlend;
+            m_deckHand = false;
+            m_deckAnim = false;
+        }
+        if (!m_deckHand && !m_deckAnim) {
+            float p = (float)((t - act->startTime) / std::max(act->duration, 1e-3));
+            p = std::max(0.0f, std::min(1.0f, p));
+            float e = p * p * (3.0f - 2.0f * p);
+            float to = (act->toLayerId == B->id) ? 1.0f : 0.0f;
+            m_deckBlend = m_showMixFrom + (to - m_showMixFrom) * e;
+        }
+    } else {
+        m_showMixTrId = 0;
+        if (!m_deckHand && !m_deckAnim)
+            m_deckBlend = last ? ((last->toLayerId == B->id) ? 1.0f : 0.0f) : 0.0f;
+    }
+}
+
+// ── the SHOW page: a two-deck video mixer ────────────────────────────────
+//   title A ─────────────   SHOW · LIBRARY   ───────────────── title B
+//   ┌ A preview ┐   ┌──── main output ────┐   ┌ B preview ┐
+//   SPEED ‹ 1.00 ›        KNOBS · TRANSITION · TIMELINE        ‹ 1.00 › SPEED
+//   (▶) [KNOBS|GO›]   A ───────●─────── B  [transition ▾]   [‹GO|KNOBS] (▶)
+//   ┌ tab content ┐
+void Application::renderShowPanel() {
+    static bool s_wasOpen = false;
+    if (!UIManager::sShowOpen) { s_wasOpen = false; return; }
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float pageTop = std::max(vp->Pos.y, UIManager::sNavBandBottom);
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, pageTop));
+    ImGui::SetNextWindowSize(ImVec2(vp->Size.x, vp->Size.y - (pageTop - vp->Pos.y)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(22, 14));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.030f, 0.040f, 0.060f, 0.99f));
+    ImGuiWindowFlags fl = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                          ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoScrollbar;
+    // the workspace tabs above the page must always win the click
+    if (ImGui::GetIO().MousePos.y < UIManager::sNavBandBottom + 2.0f) fl |= ImGuiWindowFlags_NoInputs;
+    bool open = ImGui::Begin("###ShowPage", nullptr, fl);
+    bool justOpened = !s_wasOpen;
+    if (!s_wasOpen) { ImGui::SetWindowFocus(); s_wasOpen = true; }
+    if (open) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) UIManager::sShowOpen = false;
+
+        // The layer you selected (canvas, layer panel, anywhere) is what the
+        // knobs + MIDI drive: on opening SHOW, and whenever the selection
+        // changes while it is open. Decks and extras alike.
+        {
+            static int sFollowedSel = -2;
+            if (justOpened) sFollowedSel = -2;
+            if (m_selectedLayer != sFollowedSel) {
+                sFollowedSel = m_selectedLayer;
+                if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+                    Layer* sel = m_layerStack[m_selectedLayer].get();
+                    if (sel && showBindingsFor(sel->source.get())) {
+                        if (sel->managedKey == kDeckKey[0])      deckTakeSurface(0, true);
+                        else if (sel->managedKey == kDeckKey[1]) deckTakeSurface(1, true);
+                        else if (m_showExtraTargetId != sel->id) showTakeExtra(sel);
+                        sFollowedSel = m_selectedLayer;   // showTakeExtra re-selects; keep in sync
+                    }
+                }
+            }
+        }
+
+        // Adopt: outside a running show, the shader you were looking at
+        // becomes deck A the first time the page opens.
+        if (!m_showRunning && !deckLayer(0)) {
+            Layer* cand = nullptr;
+            if (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) {
+                auto& l = m_layerStack[m_selectedLayer];
+                if (l && l->managedKey != kDeckKey[1] && l->source && l->source->isShader()) cand = l.get();
+            }
+            if (!cand) {
+                for (int i = m_layerStack.count() - 1; i >= 0 && !cand; i--) {
+                    auto& l = m_layerStack[i];
+                    if (l && l->visible && l->managedKey != kDeckKey[1] && l->source && l->source->isShader()) cand = l.get();
+                }
+            }
+            if (cand) { cand->managedKey = kDeckKey[0]; cand->userHidden = false; }
+        }
+        Layer* decks[2] = {deckLayer(0), deckLayer(1)};
+        if (!decks[m_deckTarget] && decks[1 - m_deckTarget]) m_deckTarget = 1 - m_deckTarget;
+        // what the knobs drive: an extra / the selected layer when one holds
+        // them, else the target deck
+        Layer* target = resolveShowTarget();
+        if (!target) target = decks[m_deckTarget];
+        auto* bmap = target ? showBindingsFor(target->source.get()) : nullptr;
+        auto sparams = target ? showParamsFor(target->source.get()) : std::vector<ShowParam>{};
+        {
+            static uint32_t sMappedId = 0;
+            if (target && bmap && target->id != sMappedId) {
+                bool hasMidi = false;
+                for (const auto& kv : *bmap)
+                    if (kv.second.signal == AudioSignal::MidiCC) { hasMidi = true; break; }
+                if (!hasMidi) autoMapShaderToLCXL(target->source.get());
+                sMappedId = target->id;
+            }
+        }
+        int onAirDeck = m_deckBlend < 0.5f ? 0 : 1;
+        if (!decks[onAirDeck] && decks[1 - onAirDeck]) onAirDeck = 1 - onAirDeck;
+        int cueDeck = 1 - onAirDeck;
+        if (!decks[0]) cueDeck = 0;
+
+        // shared modulation popover state
+        static std::string sBindKey, sBindLabel;
+        static float sBindLo = 0.0f, sBindHi = 1.0f;
+        static ImVec2 sBindPos;
+        static std::map<std::string, AudioBinding>* sBindMap = nullptr;
+        bool openBind = false;
+        static const char* sigTag[] = {"", "LVL", "BASS", "MID", "HIGH", "BEAT", "MIDI",
+                                       "ENERGY", "BUILD", "DROP", "SILENCE", "MOMENTUM"};
+
+        const ImU32 kDim  = IM_COL32(120, 128, 142, 200);
+        const ImU32 kText = IM_COL32(214, 220, 230, 230);
+        const ImU32 kBlue = IM_COL32(61, 120, 217, 235);
+        const ImU32 kGreen = IM_COL32(72, 214, 96, 255);
+        const ImVec4 kGhostBtn(1, 1, 1, 0.07f), kGhostBtnHov(1, 1, 1, 0.16f);
+
+        ImVec2 avail  = ImGui::GetContentRegionAvail();
+        ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        const float gap = 16.0f;
+        const float headerH = 42.0f, barH = 44.0f, transportH = 74.0f;
+        float previewH = std::max(150.0f, std::min(avail.y * 0.36f, 420.0f));
+        float sideW = std::max(200.0f, std::min(avail.x * 0.27f, previewH * 16.0f / 9.0f));
+        float mainW = avail.x - 2.0f * (sideW + gap);
+        float xA = origin.x, xM = origin.x + sideW + gap, xB = xM + mainW + gap;
+        float y = origin.y;
+        const char* pickId[2] = {"##pickA", "##pickB"};
+
+        auto entryFor = [&](Layer* L) -> const ShaderClawBridge::ShaderEntry* {
+            if (!L || !L->source) return nullptr;
+            const std::string& p = L->source->sourcePath();
+            for (const auto& e : m_shaderClaw.shaders()) if (e.fullPath == p) return &e;
+            return nullptr;
+        };
+        auto shaderOf = [&](Layer* L) -> ShaderSource* {
+            return L ? dynamic_cast<ShaderSource*>(L->source.get()) : nullptr;
+        };
+        auto paramVal = [&](ShaderSource* ss, const char* name, float fb) -> float {
+            if (!ss) return fb;
+            for (const auto& in : ss->inputs())
+                if (in.name == name && std::holds_alternative<float>(in.value)) return std::get<float>(in.value);
+            return fb;
+        };
+        // Grabbing the crossfader during a running show takes over from the
+        // timeline: the show pauses and the decks become yours.
+        auto takeOverFromShow = [&]() {
+            if (m_showRunning) m_deckHand = true;   // mix by hand; the next fade takes it back
+        };
+
+        // ── the library: every shader as a thumbnail tile, per deck ──────
+        auto libraryPopup = [&](int di) {
+            Layer* L = decks[di];
+            float pickW = std::min(1180.0f, vp->Size.x - 60.0f);
+            float pickH = std::min(760.0f, vp->Size.y - 80.0f);
+            ImGui::SetNextWindowSize(ImVec2(pickW, pickH));
+            ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + (vp->Size.x - pickW) * 0.5f, vp->Pos.y + (vp->Size.y - pickH) * 0.5f), ImGuiCond_Appearing);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
+            ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 10.0f);
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.040f, 0.050f, 0.075f, 0.99f));
+            if (ImGui::BeginPopup(pickId[di])) {
+                static char sFilter[2][64] = {{0}, {0}};
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("LIBRARY  ->  deck %s", di == 0 ? "A" : "B");
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 18);
+                if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.06f));
+                ImGui::SetNextItemWidth(320.0f);
+                ImGui::InputTextWithHint("##f", "search shaders", sFilter[di], sizeof(sFilter[di]));
+                ImGui::PopStyleColor();
+                ImGui::PopStyleVar();
+                std::string q = sFilter[di];
+                for (auto& ch : q) ch = (char)tolower((unsigned char)ch);
+                ImGui::Dummy(ImVec2(0, 6));
+                ImGui::BeginChild("##grid", ImVec2(0, 0), false);
+                ImDrawList* gd = ImGui::GetWindowDrawList();
+                float gridW = ImGui::GetContentRegionAvail().x;
+                const float tileW = 168.0f, thumbH = tileW * 9.0f / 16.0f, tileH = thumbH + 22.0f, tgap = 10.0f;
+                int cols = std::max(1, (int)((gridW + tgap) / (tileW + tgap)));
+                const char* home = getenv("HOME");
+                std::string thumbDir = std::string(home ? home : ".") + "/.easel/shader_thumbs/";
+                int n = 0, cacheLoads = 0;
+                for (const auto& e : m_shaderClaw.shaders()) {
+                    if (e.type == "transition") continue;
+                    std::string t = e.title.empty() ? e.file : e.title;
+                    if (!q.empty()) {
+                        std::string lt = t;
+                        for (auto& ch : lt) ch = (char)tolower((unsigned char)ch);
+                        if (lt.find(q) == std::string::npos) continue;
+                    }
+                    GLuint ttex = 0;
+                    auto tit = m_scThumbnails.find(e.fullPath);
+                    if (tit != m_scThumbnails.end() && tit->second.ready && tit->second.texture)
+                        ttex = tit->second.texture->id();
+                    else if (cacheLoads < 6) {
+                        std::string stem = e.file;
+                        size_t dot = stem.find_last_of('.');
+                        if (dot != std::string::npos) stem = stem.substr(0, dot);
+                        std::string png = thumbDir + stem + ".png";
+                        std::error_code ec;
+                        if (std::filesystem::exists(png, ec)) {
+                            auto& en = m_scThumbnails[e.fullPath];
+                            if (!en.texture) en.texture = std::make_shared<Texture>();
+                            if (en.texture->loadFromFile(png)) { en.ready = true; ttex = en.texture->id(); }
+                            cacheLoads++;
+                        }
+                    }
+                    if (n % cols != 0) ImGui::SameLine(0, tgap);
+                    ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    ImGui::PushID(n);
+                    bool clicked = ImGui::InvisibleButton("##tile", ImVec2(tileW, tileH));
+                    bool thov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    bool cur = L && L->source && L->source->sourcePath() == e.fullPath;
+                    ImVec2 tmin = p0, tmax(p0.x + tileW, p0.y + thumbH);
+                    if (ttex) gd->AddImageRounded((ImTextureID)(intptr_t)ttex, tmin, tmax, ImVec2(0, 1), ImVec2(1, 0),
+                                                  IM_COL32(255, 255, 255, thov ? 255 : 225), 5.0f);
+                    else      gd->AddRectFilled(tmin, tmax, IM_COL32(255, 255, 255, thov ? 30 : 16), 5.0f);
+                    if (cur || thov)
+                        gd->AddRect(tmin, tmax, cur ? kBlue : IM_COL32(255, 255, 255, 120), 5.0f, 0, cur ? 2.0f : 1.0f);
+                    std::string lbl = t;
+                    if (lbl.size() > 22) lbl = lbl.substr(0, 21) + "…";
+                    gd->AddText(ImVec2(p0.x + 2, p0.y + thumbH + 5),
+                                IM_COL32(214, 220, 230, thov || cur ? 255 : 170), lbl.c_str());
+                    if (clicked) {
+                        // A pick during an auto-built show JOINS the show instead of
+                        // fighting it: the clip this deck is playing (or is cued to
+                        // play next) becomes the picked shader, so the timeline keeps
+                        // rolling with the pick in the rotation rather than swapping
+                        // it back out at the next clip edge.
+                        if (m_showRunning && L) {
+                            double ph = m_timeline.playhead();
+                            TimelineClip* hit = nullptr; TimelineClip* next = nullptr;
+                            for (auto& tr : m_timeline.tracks()) {
+                                if (tr.layerId != L->id) continue;
+                                for (auto& c : tr.clips) {
+                                    if (ph >= c.startTime && ph < c.startTime + c.duration) hit = &c;
+                                    else if (c.startTime >= ph && (!next || c.startTime < next->startTime)) next = &c;
+                                }
+                            }
+                            if (TimelineClip* c = hit ? hit : next) { c->sourcePath = e.fullPath; c->name = t; }
+                        }
+                        deckLoad(di, e.fullPath, t);
+                        deckTakeSurface(di, true);   // a fresh pick lands on the knobs + MIDI
+                        ImGui::CloseCurrentPopup();
+                    }
+                    n++;
+                }
+                ImGui::EndChild();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(2);
+        };
+
+        // ── header row: title A (click = library) ─ SHOW · LIBRARY ─ title B
+        {
+            ImGuiWindow* w = ImGui::GetCurrentWindow();
+            for (int di = 0; di < 2; di++) {
+                Layer* L = decks[di];
+                const auto* e = entryFor(L);
+                std::string title = L ? L->name : "choose a shader";
+                std::string sub = e ? (e->categories.empty() ? e->type : e->categories[0]) : (L ? "" : "click to open the library");
+                if (e && e->categories.size() > 1) sub += " · " + e->categories[1];
+                float prev = w->FontWindowScale; w->FontWindowScale = 1.35f;
+                ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+                w->FontWindowScale = prev;
+                ImVec2 ss = ImGui::CalcTextSize(sub.c_str());
+                float x0 = di == 0 ? xA : xB + sideW - ts.x;
+                bool onAir = (di == onAirDeck) && L;
+                // click target over title + subtitle
+                ImGui::SetCursorScreenPos(ImVec2(x0 - 4, y));
+                ImGui::PushID(4000 + di);
+                bool clicked = ImGui::InvisibleButton("##title", ImVec2(std::max(ts.x, ss.x) + 8, headerH - 4));
+                bool hov = ImGui::IsItemHovered();
+                ImGui::PopID();
+                if (hov) ImGui::SetTooltip("open the library for deck %s", di == 0 ? "A" : "B");
+                if (clicked) ImGui::OpenPopup(pickId[di]);
+                w->FontWindowScale = 1.35f;
+                d->AddText(ImVec2(x0, y + 2), L ? (onAir || hov ? IM_COL32(255, 255, 255, 255) : kText) : (hov ? kText : kDim), title.c_str());
+                w->FontWindowScale = prev;
+                if (hov) d->AddLine(ImVec2(x0, y + 2 + ts.y + 1), ImVec2(x0 + ts.x, y + 2 + ts.y + 1), IM_COL32(255, 255, 255, 120), 1.0f);
+                float sx = di == 0 ? xA : xB + sideW - ss.x;
+                d->AddText(ImVec2(sx, y + 24), kDim, sub.c_str());
+            }
+            // centre: SHOW · LIBRARY button (cues into the deck that's not on air)
+            const char* mid = "SHOW";
+            ImVec2 ms = ImGui::CalcTextSize(mid);
+            float libW = ImGui::CalcTextSize("LIBRARY").x + 24.0f;
+            float cx = xM + (mainW - (ms.x + 14.0f + libW)) * 0.5f;
+            d->AddText(ImVec2(cx, y + 8), IM_COL32(120, 128, 142, 140), mid);
+            ImGui::SetCursorScreenPos(ImVec2(cx + ms.x + 14.0f, y + 2));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            if (ImGui::Button("LIBRARY", ImVec2(libW, 28))) ImGui::OpenPopup(pickId[cueDeck]);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("every shader with a preview — loads into deck %s", cueDeck == 0 ? "A" : "B");
+            ImGui::SameLine(0, 6);
+            if (ImGui::Button("AUTO-MAP", ImVec2(0, 28)) && target) { m_showMapPage = 0; autoMapShaderToLCXL(target->source.get()); }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("map every knob + fader to %s again", target ? target->name.c_str() : "the active layer");
+            ImGui::SameLine(0, 6);
+            {
+                bool canReset = target && dynamic_cast<ShaderSource*>(target->source.get());
+                if (!canReset) ImGui::BeginDisabled();
+                if (ImGui::Button("RESET", ImVec2(0, 28)) && canReset) resetShowParams(target->source.get());
+                if (!canReset) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(canReset ? "every parameter of %s back to the shader's defaults" : "reset works on shader layers", target ? target->name.c_str() : "");
+            }
+            ImGui::SameLine(0, 0);
+            ImGui::SetCursorScreenPos(ImVec2(xM + mainW - 56, y + 2));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.50f, 0.56f, 1));
+            if (ImGui::Button("close", ImVec2(52, 28))) UIManager::sShowOpen = false;
+            ImGui::PopStyleColor(4);
+            ImGui::PopStyleVar();
+        }
+        y += headerH;
+
+        // ── previews: A | main | B (full-bleed, crop to fill, click = library)
+        auto deckPreview = [&](int di, float x) {
+            Layer* L = decks[di];
+            float pw = sideW, ph = previewH;
+            ImVec2 p0(x, y), p1(x + pw, y + ph);
+            ImGui::SetCursorScreenPos(p0);
+            ImGui::PushID(4100 + di);
+            bool clicked = ImGui::InvisibleButton("##preview", ImVec2(pw, ph));
+            bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+            // click the picture = this deck is the ACTIVE one: knobs + MIDI go here
+            if (clicked) {
+                if (L) deckTakeSurface(di, true);
+                else   ImGui::OpenPopup(pickId[di]);   // empty deck: pick something first
+            }
+            GLuint tex = (L && L->source) ? L->source->textureId() : 0;
+            d->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255), 6.0f);
+            if (tex) {
+                int sw = L->source->width(), sh = L->source->height();
+                float sa = (sh > 0) ? (float)sw / (float)sh : 16.0f / 9.0f;
+                float ba = pw / ph;
+                // crop the source so it fills the box
+                float u0 = 0, u1 = 1, v0 = 1, v1 = 0;
+                if (sa > ba) { float k = ba / sa; u0 = 0.5f - k * 0.5f; u1 = 0.5f + k * 0.5f; }
+                else         { float k = sa / ba; v0 = 0.5f + k * 0.5f; v1 = 0.5f - k * 0.5f; }
+                d->AddImageRounded((ImTextureID)(intptr_t)tex, p0, p1, ImVec2(u0, v0), ImVec2(u1, v1),
+                                   IM_COL32(255, 255, 255, 255), 6.0f);
+            } else {
+                const char* hint = "click to choose a shader";
+                ImVec2 ts = ImGui::CalcTextSize(hint);
+                d->AddText(ImVec2(p0.x + (pw - ts.x) * 0.5f, p0.y + (ph - ts.y) * 0.5f), hov ? kText : kDim, hint);
+            }
+            bool onAir = L && di == onAirDeck;
+            bool isT = L && target == L;
+            d->AddRect(p0, p1, onAir ? IM_COL32(255, 255, 255, hov ? 200 : 150) : IM_COL32(255, 255, 255, hov ? 90 : 30), 6.0f, 0, onAir ? 1.5f : 1.0f);
+            if (isT) d->AddRect(ImVec2(p0.x + 3, p0.y + 3), ImVec2(p1.x - 3, p1.y - 3), kBlue, 5.0f, 0, 1.5f);
+            // ACTIVE tag on the deck the knobs drive
+            if (isT) {
+                const char* tag = "KNOBS + MIDI";
+                ImVec2 ts = ImGui::CalcTextSize(tag);
+                ImVec2 t1(p1.x - 10, p1.y - 8), t0(t1.x - ts.x - 14, p1.y - ts.y - 14);
+                d->AddRectFilled(t0, t1, kBlue, 999.0f);
+                d->AddText(ImVec2(t0.x + 7, t0.y + 3), IM_COL32(255, 255, 255, 255), tag);
+            }
+            // library icon, top-right of the picture: opens the shader library for this deck
+            {
+                float r = 15.0f;
+                ImVec2 c(p1.x - r - 10, p0.y + r + 10);
+                ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
+                ImGui::PushID(4200 + di);
+                bool lib = ImGui::InvisibleButton("##lib", ImVec2(r * 2, r * 2));
+                bool lhov = ImGui::IsItemHovered();
+                ImGui::PopID();
+                d->AddCircleFilled(c, r, IM_COL32(0, 0, 0, lhov ? 200 : 140));
+                d->AddCircle(c, r, IM_COL32(255, 255, 255, lhov ? 160 : 60), 0, 1.0f);
+                lucide::layers(d, c.x, c.y, 15.0f, IM_COL32(255, 255, 255, lhov ? 255 : 200));
+                if (lhov) ImGui::SetTooltip("shader library -> deck %s", di == 0 ? "A" : "B");
+                if (lib) ImGui::OpenPopup(pickId[di]);
+                if (lhov) hov = false;   // the icon owns the hover, not the picture
+            }
+            if (hov) ImGui::SetTooltip(isT ? "this deck has the knobs + MIDI" : "click: knobs + MIDI on this deck");
+        };
+        deckPreview(0, xA);
+        deckPreview(1, xB);
+        libraryPopup(0);
+        libraryPopup(1);
+        {
+            OutputZone& z = activeZone();
+            GLuint tex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
+            float aspect = (z.height > 0) ? (float)z.width / (float)z.height : 16.0f / 9.0f;
+            float ph = previewH, pw = ph * aspect;
+            if (pw > mainW) { pw = mainW; ph = pw / aspect; }
+            ImVec2 p0(xM + (mainW - pw) * 0.5f, y + (previewH - ph) * 0.5f);
+            // click the main picture = the LAST layer you added takes the knobs
+            // + MIDI (the newest extra; with no extras, the deck on air)
+            Layer* newest = nullptr;
+            for (Layer* l : showExtraLayers()) if (!newest || l->id > newest->id) newest = l;
+            ImGui::SetCursorScreenPos(ImVec2(xM, y));
+            bool mainClick = ImGui::InvisibleButton("##mainpreview", ImVec2(mainW, previewH));
+            bool mainHov = ImGui::IsItemHovered();
+            if (mainClick) {
+                Layer* sel = (m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count()) ? m_layerStack[m_selectedLayer].get() : nullptr;
+                if (sel && showBindingsFor(sel->source.get()) && sel->managedKey != kDeckKey[0] && sel->managedKey != kDeckKey[1]) showTakeExtra(sel);
+                else if (newest) showTakeExtra(newest);
+                else deckTakeSurface(onAirDeck, true);
+            }
+            d->AddRectFilled(ImVec2(xM, y), ImVec2(xM + mainW, y + previewH), IM_COL32(0, 0, 0, 255), 6.0f);
+            if (tex) d->AddImageRounded((ImTextureID)(intptr_t)tex, p0, ImVec2(p0.x + pw, p0.y + ph), ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 6.0f);
+            bool mainActive = newest && target == newest;
+            d->AddRect(ImVec2(xM, y), ImVec2(xM + mainW, y + previewH), IM_COL32(255, 255, 255, mainHov ? 90 : 30), 6.0f);
+            if (mainActive) d->AddRect(ImVec2(xM + 3, y + 3), ImVec2(xM + mainW - 3, y + previewH - 3), kBlue, 5.0f, 0, 1.5f);
+            if (mainActive) {
+                std::string tag = "KNOBS + MIDI  ·  " + newest->name;
+                ImVec2 ts = ImGui::CalcTextSize(tag.c_str());
+                ImVec2 t1(xM + mainW - 10, y + previewH - 8), t0(t1.x - ts.x - 14, t1.y - ts.y - 6);
+                d->AddRectFilled(t0, t1, kBlue, 999.0f);
+                d->AddText(ImVec2(t0.x + 7, t0.y + 3), IM_COL32(255, 255, 255, 255), tag.c_str());
+            }
+            if (mainHov) ImGui::SetTooltip(newest ? "click: knobs + MIDI on the last layer you added (%s)" : "click: knobs + MIDI on the deck on air", newest ? newest->name.c_str() : "");
+            ImGui::SetCursorScreenPos(ImVec2(xM + 10, y + 10));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0.55f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.25f));
+            if (ImGui::Button("AB", ImVec2(36, 30))) m_showTab = 1;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("transition");
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar();
+        }
+        y += previewH + 10.0f;
+
+        // ── extras: the other layers in the show (3D Fluid, panel shaders…),
+        // one chip each. Click = that layer takes the knobs + MIDI. XL buttons
+        // 3-16 pick them in this order. ──
+        {
+            auto ex = showExtraLayers();
+            if (!ex.empty()) {
+                float x = origin.x;
+                const char* cap = "ALSO IN THE SHOW";
+                ImVec2 cs = ImGui::CalcTextSize(cap);
+                d->AddText(ImVec2(x, y + 6), IM_COL32(120, 128, 142, 140), cap);
+                x += cs.x + 14.0f;
+                for (size_t i = 0; i < ex.size(); i++) {
+                    Layer* l = ex[i];
+                    bool act = target == l;
+                    char num[8]; snprintf(num, sizeof(num), "%d", (int)i + 3);
+                    std::string nm = l->name; if (nm.size() > 16) nm = nm.substr(0, 15) + "…";
+                    ImVec2 ns = ImGui::CalcTextSize(num), ts = ImGui::CalcTextSize(nm.c_str());
+                    float cw = ns.x + ts.x + 26.0f, ch = 26.0f;
+                    if (x + cw > origin.x + avail.x) break;
+                    ImGui::SetCursorScreenPos(ImVec2(x, y));
+                    ImGui::PushID(4300 + (int)i);
+                    bool clicked = ImGui::InvisibleButton("##extra", ImVec2(cw, ch));
+                    bool hov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    d->AddRectFilled(ImVec2(x, y), ImVec2(x + cw, y + ch), act ? kBlue : IM_COL32(255, 255, 255, hov ? 34 : 14), 13.0f);
+                    d->AddText(ImVec2(x + 10, y + (ch - ns.y) * 0.5f), IM_COL32(255, 255, 255, act ? 255 : 120), num);
+                    d->AddText(ImVec2(x + 10 + ns.x + 6, y + (ch - ts.y) * 0.5f), act ? IM_COL32(255, 255, 255, 255) : IM_COL32(214, 220, 230, hov ? 255 : 190), nm.c_str());
+                    if (hov) ImGui::SetTooltip(act ? "this layer has the knobs + MIDI" : "click (or XL button %d): knobs + MIDI on %s", (int)i + 3, l->name.c_str());
+                    if (clicked) showTakeExtra(l);
+                    x += cw + 6.0f;
+                }
+                y += 26.0f + 8.0f;
+            }
+        }
+
+        // ── speed bar: SPEED ‹ 1.00 › (left on A, right on B) · tabs ──────
+        {
+            d->AddRectFilled(ImVec2(origin.x, y), ImVec2(origin.x + avail.x, y + barH), IM_COL32(255, 255, 255, 8), 6.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            const float clusterW = ImGui::CalcTextSize("SPEED").x + 10 + 28 + 4 + 64 + 4 + 28;
+            for (int di = 0; di < 2; di++) {
+                ShaderSource* ss = shaderOf(decks[di]);
+                float sp = paramVal(ss, "motionClock", 1.0f);
+                ImGui::PushID(4200 + di);
+                float bx = di == 0 ? xA : xB + sideW - clusterW;
+                ImGui::SetCursorScreenPos(ImVec2(bx, y + 7));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.50f, 0.56f, 1));
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("SPEED");
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 10);
+                if (ImGui::Button("<", ImVec2(28, 30)) && ss) ss->setFloat("motionClock", std::max(0.0f, sp - 0.1f));
+                ImGui::SameLine(0, 4);
+                char sb[16]; snprintf(sb, sizeof(sb), "%.2fx", sp);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0.35f));
+                if (ImGui::Button(sb, ImVec2(64, 30)) && ss) ss->setFloat("motionClock", 1.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("click: back to 1.00x");
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 4);
+                if (ImGui::Button(">", ImVec2(28, 30)) && ss) ss->setFloat("motionClock", std::min(3.0f, sp + 0.1f));
+                ImGui::PopID();
+            }
+            const char* tabs[3] = {"KNOBS", "TRANSITION", "TIMELINE"};
+            float tw = 0; for (int i = 0; i < 3; i++) tw += ImGui::CalcTextSize(tabs[i]).x + 26.0f;
+            tw += 2 * 6.0f;
+            float tx = xM + (mainW - tw) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(tx, y + 7));
+            for (int i = 0; i < 3; i++) {
+                bool act = m_showTab == i;
+                ImGui::PushStyleColor(ImGuiCol_Button, act ? ImVec4(1, 1, 1, 0.16f) : ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_Text, act ? ImVec4(1, 1, 1, 1) : ImVec4(0.55f, 0.58f, 0.64f, 1));
+                if (ImGui::Button(tabs[i], ImVec2(ImGui::CalcTextSize(tabs[i]).x + 26.0f, 30))) m_showTab = i;
+                ImGui::PopStyleColor(2);
+                if (i < 2) ImGui::SameLine(0, 6);
+            }
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar();
+        }
+        y += barH + 8.0f;
+
+        // ── transport: (▶) [KNOBS|GO›]  crossfader [transition ▾] [MIDI]  [‹GO|KNOBS] (▶)
+        {
+            float cy = y + transportH * 0.5f;
+            auto playButton = [&](int di, float cx) {
+                ShaderSource* ss = shaderOf(decks[di]);
+                bool playing = m_showRunning ? m_timeline.isPlaying() : (ss && !ss->isPaused());
+                float r = 26.0f;
+                ImGui::SetCursorScreenPos(ImVec2(cx - r, cy - r));
+                ImGui::PushID(4300 + di);
+                bool clicked = ImGui::InvisibleButton("##play", ImVec2(r * 2, r * 2));
+                bool hov = ImGui::IsItemHovered();
+                ImGui::PopID();
+                if (clicked) {
+                    if (m_showRunning) m_timeline.togglePlay();
+                    else if (ss) ss->setPaused(!ss->isPaused());
+                }
+                d->AddCircleFilled(ImVec2(cx, cy), r, IM_COL32(255, 255, 255, hov ? 22 : 12), 48);
+                d->AddCircle(ImVec2(cx, cy), r, playing ? kGreen : IM_COL32(255, 255, 255, 70), 48, 2.5f);
+                ImU32 ic = (ss || m_showRunning) ? IM_COL32(255, 255, 255, 240) : IM_COL32(255, 255, 255, 60);
+                if (playing) {
+                    d->AddRectFilled(ImVec2(cx - 7, cy - 8), ImVec2(cx - 2, cy + 8), ic, 1.5f);
+                    d->AddRectFilled(ImVec2(cx + 2, cy - 8), ImVec2(cx + 7, cy + 8), ic, 1.5f);
+                } else {
+                    d->AddTriangleFilled(ImVec2(cx - 6, cy - 9), ImVec2(cx + 9, cy), ImVec2(cx - 6, cy + 9), ic);
+                }
+                if (hov) ImGui::SetTooltip(m_showRunning ? (playing ? "pause the show" : "play the show")
+                                                         : (playing ? "pause deck %s (freeze its clock)" : "play deck %s"), di == 0 ? "A" : "B");
+            };
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            auto deckCue = [&](int di, float x, bool rightAlign) {
+                Layer* L = decks[di];
+                bool isT = L && target == L;
+                float bw = 78.0f, bh = 44.0f;
+                float bx = rightAlign ? x - bw * 2 - 4 : x;
+                ImGui::PushID(4400 + di);
+                ImGui::SetCursorScreenPos(ImVec2(bx, cy - bh * 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_Button, isT ? ImVec4(0.24f, 0.47f, 0.85f, m_deckTargetPinned ? 0.85f : 0.45f) : kGhostBtn);
+                if (ImGui::Button("KNOBS", ImVec2(bw, bh)) && L) {
+                    if (isT && m_deckTargetPinned) m_deckTargetPinned = false;
+                    else deckTakeSurface(di, true);
+                }
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(isT ? (m_deckTargetPinned ? "the XL is pinned here — click to follow the output again"
+                                                                : "the XL drives this deck (on air)")
+                                          : "pin the XL knobs to this deck");
+                ImGui::SameLine(0, 4);
+                bool canGo = L && onAirDeck != di;
+                ImGui::PushStyleColor(ImGuiCol_Button, canGo ? ImVec4(1, 1, 1, 0.12f) : ImVec4(1, 1, 1, 0.04f));
+                ImGui::PushStyleColor(ImGuiCol_Text, canGo ? ImVec4(1, 1, 1, 1) : ImVec4(1, 1, 1, 0.35f));
+                const char* go = di == 0 ? "< GO" : "GO >";
+                if (ImGui::Button(go, ImVec2(bw, bh)) && canGo) { takeOverFromShow(); deckGo(); }
+                ImGui::PopStyleColor(2);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(canGo ? "bring this deck on air with the chosen transition" : "already on air");
+                ImGui::PopID();
+            };
+            playButton(0, xA + 30);
+            deckCue(0, xA + 72, false);
+            playButton(1, xB + sideW - 30);
+            deckCue(1, xB + sideW - 72, true);
+
+            float xfW = std::min(mainW - 220.0f, 520.0f);
+            float xfX = xM + (mainW - xfW - 190.0f) * 0.5f;
+            for (int i = 0; i <= 4; i++) {
+                float tx = xfX + xfW * i / 4.0f;
+                d->AddLine(ImVec2(tx, cy - 22), ImVec2(tx, cy - 14), IM_COL32(255, 255, 255, 60), 1.0f);
+                d->AddLine(ImVec2(tx, cy + 14), ImVec2(tx, cy + 22), IM_COL32(255, 255, 255, 60), 1.0f);
+            }
+            ImGui::SetCursorScreenPos(ImVec2(xfX, cy - 12));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 14.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 3.0f);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.07f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(1, 1, 1, 0.12f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.95f, 0.96f, 0.98f, 1));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(1, 1, 1, 1));
+            ImGui::SetNextItemWidth(xfW);
+            float xf = m_deckBlend;
+            if (ImGui::SliderFloat("##xfade", &xf, 0.0f, 1.0f, "")) { takeOverFromShow(); decksToFront(); m_deckBlend = xf; m_deckAnim = false; }
+            ImGui::PopStyleColor(5);
+            ImGui::PopStyleVar(3);
+            ImGui::SameLine(0, 12);
+            ImGui::SetNextItemWidth(108.0f);
+            std::string trLabel = m_deckTransition == "cut" ? "cut" : m_deckTransition == "fade" ? "crossfade" : m_deckTransition;
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.07f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
+            if (ImGui::BeginCombo("##trans", trLabel.c_str())) {
+                if (ImGui::Selectable("cut", m_deckTransition == "cut")) m_deckTransition = "cut";
+                if (ImGui::Selectable("crossfade", m_deckTransition == "fade")) m_deckTransition = "fade";
+                ImGui::Separator();
+                for (const auto& n : GLTransitionLibrary::instance().names())
+                    if (ImGui::Selectable(n.c_str(), m_deckTransition == n)) m_deckTransition = n;
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("transition used by GO (%.1fs — set in the TRANSITION tab)", m_deckTransSecs);
+            // MIDI learn for the crossfader
+            ImGui::SameLine(0, 8);
+            ImGui::PushStyleColor(ImGuiCol_Button, m_deckXfadeLearn ? ImVec4(0.24f, 0.47f, 0.85f, 0.9f) : kGhostBtn);
+            char ml[24];
+            if (m_deckXfadeLearn) snprintf(ml, sizeof(ml), "move it…");
+            else snprintf(ml, sizeof(ml), "MIDI %d", deckXfadeCC());
+            if (ImGui::Button(ml, ImVec2(80, 0))) m_deckXfadeLearn = !m_deckXfadeLearn;
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(m_deckXfadeLearn ? "move any knob or fader — it becomes the crossfader"
+                                                   : "the CC that drives this crossfader (XL fader 8 by default). Click to learn another.");
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar();
+        }
+        y += transportH + 6.0f;
+
+        // ── tab content ──────────────────────────────────────────────────
+        float contentH = origin.y + avail.y - y;
+        ImGui::SetCursorScreenPos(ImVec2(origin.x, y));
+        ImGui::BeginChild("##showTab", ImVec2(avail.x, contentH), false, ImGuiWindowFlags_NoScrollbar);
+        ImDrawList* cd = ImGui::GetWindowDrawList();
+
+        // a deck's parameters: react dot · label · slider, every row on one
+        // centre line, label column fixed so the sliders line up
+        auto paramList = [&](int di, float x, float w, float h) {
+            Layer* L = decks[di];
+            ImGui::SetCursorScreenPos(ImVec2(x, y));
+            ImGui::PushID(4500 + di);
+            ImGui::BeginChild("##params", ImVec2(w, h), false);
+            if (L) {
+                auto* bm = showBindingsFor(L->source.get());
+                auto ps = showParamsFor(L->source.get());
+                auto* ss = shaderOf(L);
+                const float rowH = ImGui::GetFrameHeight() + 6.0f;
+                const float dotW = 18.0f, labelW = std::floor(w * 0.40f), sliderX = dotW + labelW + 8.0f;
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 6.0f);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(1, 1, 1, 0.05f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.09f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(1, 1, 1, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab,       ImVec4(0.84f, 0.86f, 0.90f, 0.9f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(1, 1, 1, 1));
+                ImDrawList* pd = ImGui::GetWindowDrawList();
+                ImVec2 base = ImGui::GetCursorScreenPos();
+                std::string lastGroup;
+                float ry = base.y;
+                for (size_t i = 0; i < ps.size(); i++) {
+                    const auto& sp = ps[i];
+                    auto it = bm ? bm->find(sp.name) : std::map<std::string, AudioBinding>::iterator{};
+                    bool bound = bm && it != bm->end();
+                    bool audio = bound && it->second.signal != AudioSignal::None && it->second.signal != AudioSignal::MidiCC;
+                    bool midi  = bound && it->second.signal == AudioSignal::MidiCC;
+                    ImGui::PushID((int)i);
+                    float cyy = ry + rowH * 0.5f;
+                    // react dot, centred on the row
+                    ImGui::SetCursorScreenPos(ImVec2(base.x, ry));
+                    ImGui::InvisibleButton("##dot", ImVec2(dotW, rowH));
+                    bool dh = ImGui::IsItemHovered();
+                    ImVec2 cc(base.x + dotW * 0.5f, cyy);
+                    if (audio)      pd->AddCircleFilled(cc, 4.0f, IM_COL32(61, 120, 217, dh ? 255 : 220));
+                    else if (midi)  pd->AddCircle(cc, 4.0f, IM_COL32(214, 220, 230, dh ? 230 : 150), 0, 1.5f);
+                    else            pd->AddCircleFilled(cc, 2.5f, IM_COL32(120, 128, 142, dh ? 220 : 90));
+                    if (dh) ImGui::SetTooltip(audio ? "reacts to %s — click to change" :
+                                              midi  ? "on a knob — click to put it on the music" :
+                                                      "click: react to the beat",
+                                              audio ? sigTag[(int)it->second.signal] : "");
+                    if (ImGui::IsItemClicked() && bm) {
+                        AudioBinding& ab = (*bm)[sp.name];
+                        if (ab.signal == AudioSignal::None) {
+                            ab.signal = AudioSignal::Beat;
+                            ab.rangeMin = sp.lo; ab.rangeMax = sp.hi; ab.rampAge = 0.0f;
+                        }
+                        sBindKey = sp.name; sBindLabel = sp.label.empty() ? sp.name : sp.label;
+                        sBindLo = sp.lo; sBindHi = sp.hi; sBindMap = bm;
+                        sBindPos = ImVec2(base.x + dotW + 2, ry + rowH);
+                        openBind = true;
+                    }
+                    // label, vertically centred, clipped to its column
+                    std::string lbl = sp.label.empty() ? sp.name : sp.label;
+                    ImVec2 ls = ImGui::CalcTextSize(lbl.c_str());
+                    while (ls.x > labelW - 6 && lbl.size() > 3) { lbl = lbl.substr(0, lbl.size() - 2) + "…"; ls = ImGui::CalcTextSize(lbl.c_str()); }
+                    pd->AddText(ImVec2(base.x + dotW + 2, cyy - ls.y * 0.5f),
+                                audio ? IM_COL32(140, 178, 255, 255) : IM_COL32(140, 148, 163, 255), lbl.c_str());
+                    // slider on the same centre line
+                    ImGui::SetCursorScreenPos(ImVec2(base.x + sliderX, cyy - ImGui::GetFrameHeight() * 0.5f));
+                    ImGui::SetNextItemWidth(w - sliderX - 4.0f);
+                    float v = sp.cur;
+                    if (ImGui::SliderFloat("##v", &v, sp.lo, sp.hi, "%.2f") && ss) ss->setFloat(sp.name, v);
+                    ImGui::PopID();
+                    ry += rowH;
+                }
+                ImGui::SetCursorScreenPos(ImVec2(base.x, ry));
+                ImGui::Dummy(ImVec2(1, 1));
+                ImGui::PopStyleColor(5);
+                ImGui::PopStyleVar(2);
+            } else {
+                ImGui::TextDisabled("empty deck");
+            }
+            ImGui::EndChild();
+            ImGui::PopID();
+        };
+
+        if (m_showTab == 0) {
+            // ── KNOBS: A params | the XL surface | B params ──────────────
+            paramList(0, xA, sideW, contentH);
+            paramList(1, xB, sideW, contentH);
+
+            auto ccParam = [&](int cc) -> std::pair<std::string, std::string> {
+                if (!bmap) return {};
+                for (const auto& kv : *bmap) {
+                    if (kv.second.signal == AudioSignal::MidiCC && kv.second.midiCC == cc) {
+                        for (const auto& p : sparams)
+                            if (p.name == kv.first) return {kv.first, p.label};
+                        return {kv.first, kv.first};
+                    }
+                }
+                return {};
+            };
+            static float  sPrevCC[128];
+            static double sMoveT[128];
+            static bool   sFlashInit = false;
+            if (!sFlashInit) {
+                for (int i = 0; i < 128; i++) { sPrevCC[i] = -1.0f; sMoveT[i] = -10.0; }
+                sFlashInit = true;
+            }
+            double nowT = ImGui::GetTime();
+            auto ccState = [&](int cc, float& v, float& flash, bool& seen) {
+                v = m_midiManager.getCCValue(-1, cc);
+                seen = (v >= 0.0f);
+                if (!seen) v = 0.0f;
+                if (seen && v != sPrevCC[cc]) {
+                    if (sPrevCC[cc] >= 0.0f) sMoveT[cc] = nowT;
+                    sPrevCC[cc] = v;
+                }
+                flash = (float)std::max(0.0, 1.0 - (nowT - sMoveT[cc]) / 0.8);
+            };
+            const float kLabelH = 16.0f;
+            float kKnobRow = std::max(48.0f, std::min(72.0f, (contentH - 60.0f - 4 * kLabelH) / 4.6f));
+            float kFaderH  = kKnobRow * 1.6f;
+            float colW = std::min(mainW / 8.0f, 140.0f);
+            float surfW = colW * 8.0f;
+            float x0 = xM + (mainW - surfW) * 0.5f;
+            float sy = y + 6.0f;
+            const int xfCC = deckXfadeCC();
+            {
+                char cap[96];
+                snprintf(cap, sizeof(cap), "XL  ->  %s%s", target ? target->name.c_str() : "nothing",
+                         m_deckTargetPinned ? "  (pinned)" : "  (on air)");
+                ImVec2 ts = ImGui::CalcTextSize(cap);
+                cd->AddText(ImVec2(x0 + (surfW - ts.x) * 0.5f, sy), IM_COL32(120, 128, 142, 170), cap);
+                sy += kLabelH + 4.0f;
+            }
+            auto drawLabel = [&](float cx, float cyy, int cc, bool seen) {
+                std::string key, lbl;
+                if (cc == xfCC) lbl = "A / B";
+                else { auto kp = ccParam(cc); key = kp.first; lbl = kp.second; }
+                bool mapped = !key.empty();
+                char fall[16];
+                if (lbl.empty()) { snprintf(fall, sizeof(fall), "CC %d", cc); lbl = fall; }
+                if (lbl.size() > 14) lbl = lbl.substr(0, 13) + "…";
+                ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+                ImVec2 lmin(cx - ts.x * 0.5f, cyy);
+                bool hov = false;
+                if (mapped && bmap) {
+                    ImGui::SetCursorScreenPos(ImVec2(lmin.x - 4, lmin.y - 2));
+                    ImGui::PushID(7000 + cc);
+                    bool clicked = ImGui::InvisibleButton("##plabel", ImVec2(ts.x + 8, ts.y + 4));
+                    hov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    if (hov) ImGui::SetTooltip("click: audio reactivity / modulation");
+                    if (clicked) {
+                        sBindKey = key; sBindLabel = lbl; sBindMap = bmap;
+                        sBindLo = 0.0f; sBindHi = 1.0f;
+                        for (const auto& p : sparams)
+                            if (p.name == key) { sBindLo = p.lo; sBindHi = p.hi; break; }
+                        sBindPos = ImVec2(lmin.x, lmin.y);
+                        openBind = true;
+                    }
+                }
+                ImU32 col = cc == xfCC ? IM_COL32(120, 190, 255, 220)
+                          : !mapped ? IM_COL32(120, 128, 142, seen ? 150 : 80)
+                                    : IM_COL32(214, 220, 230, hov ? 255 : 220);
+                cd->AddText(lmin, col, lbl.c_str());
+                if (hov) cd->AddLine(ImVec2(lmin.x, lmin.y + ts.y + 1), ImVec2(lmin.x + ts.x, lmin.y + ts.y + 1), IM_COL32(214, 220, 230, 180), 1.0f);
+            };
+            const int* rows[3] = {lcxlBank(1), lcxlBank(2), lcxlBank(3)};
+            for (int r = 0; r < 3; r++) {
+                for (int c = 0; c < 8; c++) {
+                    int cc = rows[r][c];
+                    float v, flash; bool seen;
+                    ccState(cc, v, flash, seen);
+                    float cx = x0 + colW * (c + 0.5f);
+                    float cyy = sy + kKnobRow * 0.5f;
+                    float rad = kKnobRow * 0.34f;
+                    cd->PathArcTo(ImVec2(cx, cyy), rad, 2.356f, 7.069f, 32);
+                    cd->PathStroke(IM_COL32(255, 255, 255, seen ? 34 : 18), 0, 3.0f);
+                    if (seen && v > 0.001f) {
+                        int alpha = 150 + (int)(105.0f * flash);
+                        cd->PathArcTo(ImVec2(cx, cyy), rad, 2.356f, 2.356f + 4.712f * v, 32);
+                        cd->PathStroke(IM_COL32(255, 255, 255, alpha), 0, 3.0f);
+                    }
+                    float ang = 2.356f + 4.712f * v;
+                    cd->AddCircleFilled(ImVec2(cx + cosf(ang) * rad * 0.66f, cyy + sinf(ang) * rad * 0.66f), 2.5f, IM_COL32(255, 255, 255, seen ? 200 : 60));
+                    if (flash > 0.0f) cd->AddCircle(ImVec2(cx, cyy), rad + 5.0f, IM_COL32(90, 160, 255, (int)(180 * flash)), 0, 2.0f);
+                    drawLabel(cx, sy + kKnobRow - 2.0f, cc, seen);
+                }
+                sy += kKnobRow + kLabelH;
+            }
+            sy += 6.0f;
+            for (int c = 0; c < 8; c++) {
+                int cc = lcxlBank(0)[c];
+                float v, flash; bool seen;
+                ccState(cc, v, flash, seen);
+                if (cc == xfCC && !seen) v = m_deckBlend;
+                float cx = x0 + colW * (c + 0.5f);
+                float top = sy, bot = sy + kFaderH - 14.0f;
+                cd->AddLine(ImVec2(cx, top), ImVec2(cx, bot), IM_COL32(255, 255, 255, seen ? 40 : 20), 3.0f);
+                float fy = bot - (bot - top) * v;
+                if (seen || cc == xfCC) cd->AddLine(ImVec2(cx, fy), ImVec2(cx, bot), IM_COL32(255, 255, 255, 130 + (int)(90 * flash)), 3.0f);
+                ImU32 capCol = flash > 0.0f
+                    ? IM_COL32(90 + (int)(165 * (1 - flash)), 160 + (int)(95 * (1 - flash)), 255, 255)
+                    : IM_COL32(235, 238, 244, (seen || cc == xfCC) ? 255 : 90);
+                cd->AddRectFilled(ImVec2(cx - 13, fy - 5), ImVec2(cx + 13, fy + 5), capCol, 2.0f);
+                drawLabel(cx, bot + 6.0f, cc, seen);
+            }
+            sy += kFaderH + kLabelH + 4.0f;
+            ImGui::SetCursorScreenPos(ImVec2(x0, sy));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.50f, 0.56f, 1));
+            if (ImGui::SmallButton("re-map") && target) autoMapShaderToLCXL(target->source.get());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("knob rows top to bottom, then the faders. The crossfader's control is skipped.");
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("more") && target) { m_showMapPage++; autoMapShaderToLCXL(target->source.get()); }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("next page of parameters onto the surface");
+            ImGui::SameLine(0, 4);
+            lcxlBank(0);
+            if (ImGui::SmallButton(m_showLCXLMk3 ? "xl 3" : "xl classic")) m_showLCXLMk3 = !m_showLCXLMk3;
+            ImGui::SameLine(0, 14);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("midi: %s", m_midiManager.currentDeviceLabel().c_str());
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar();
+        } else if (m_showTab == 1) {
+            // ── TRANSITION ───────────────────────────────────────────────
+            float cx0 = xA + 6.0f;
+            ImGui::SetCursorScreenPos(ImVec2(cx0, y + 6.0f));
+            ImGui::BeginChild("##trTab", ImVec2(avail.x - 12.0f, contentH - 6.0f), false);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.07f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("DURATION");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 12);
+            ImGui::SetNextItemWidth(260.0f);
+            ImGui::SliderFloat("##secs", &m_deckTransSecs, 0.0f, 10.0f, "%.1f s");
+            ImGui::SameLine(0, 30);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("BLEND");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 12);
+            for (int i = 0; i < (int)BlendMode::COUNT; i++) {
+                bool sel = (int)m_deckBlendMode == i;
+                ImGui::PushStyleColor(ImGuiCol_Button, sel ? ImVec4(0.24f, 0.47f, 0.85f, 0.85f) : kGhostBtn);
+                if (ImGui::SmallButton(blendModeName((BlendMode)i))) m_deckBlendMode = (BlendMode)i;
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 4);
+            }
+            ImGui::NewLine();
+            ImGui::Dummy(ImVec2(0, 8));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
+            ImGui::TextUnformatted("TRANSITION");
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0, 4));
+            std::vector<std::string> names = {"cut", "fade"};
+            for (const auto& n : GLTransitionLibrary::instance().names()) names.push_back(n);
+            float tileW = 128.0f, tileH = 44.0f, tg = 6.0f;
+            int cols = std::max(1, (int)((ImGui::GetContentRegionAvail().x + tg) / (tileW + tg)));
+            for (size_t i = 0; i < names.size(); i++) {
+                if (i % cols) ImGui::SameLine(0, tg);
+                bool sel = m_deckTransition == names[i];
+                std::string lbl = names[i] == "fade" ? "crossfade" : names[i];
+                ImGui::PushStyleColor(ImGuiCol_Button, sel ? ImVec4(0.24f, 0.47f, 0.85f, 0.85f) : kGhostBtn);
+                ImGui::PushStyleColor(ImGuiCol_Text, sel ? ImVec4(1, 1, 1, 1) : ImVec4(0.84f, 0.86f, 0.90f, 1));
+                ImGui::PushID((int)i);
+                if (ImGui::Button(lbl.c_str(), ImVec2(tileW, tileH))) m_deckTransition = names[i];
+                ImGui::PopID();
+                ImGui::PopStyleColor(2);
+            }
+            ImGui::NewLine();
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.24f, 0.47f, 0.85f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+            const char* go = onAirDeck == 0 ? "GO  A > B" : "GO  B > A";
+            if (ImGui::Button(go, ImVec2(160, 40))) { takeOverFromShow(); deckGo(); }
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar();
+            ImGui::EndChild();
+        } else {
+            // ── TIMELINE: the show as built in GALLERY — one row per shader,
+            //    clips, the fades between them and the playhead. Click the
+            //    ruler to seek. Empty until a show is built.
+            const auto& tracks = m_timeline.tracks();
+            std::vector<const TimelineTrack*> rowsT;
+            for (uint32_t id : m_showLayerIds)
+                if (const TimelineTrack* t = m_timeline.findTrack(id)) rowsT.push_back(t);
+            if (rowsT.empty())
+                for (const auto& t : tracks) if (!t.clips.empty()) rowsT.push_back(&t);
+            float nameW = 150.0f, rulerH = 22.0f, rowH = 34.0f;
+            float tlX = xA + nameW, tlW = avail.x - nameW - 4.0f;
+            double dur = std::max(1.0, m_timeline.duration());
+            double ph = m_timeline.playhead();
+            auto tx = [&](double t) { return tlX + (float)(t / dur) * tlW; };
+            float ty = y + 4.0f;
+            // transport strip
+            {
+                ImGui::SetCursorScreenPos(ImVec2(xA, ty));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+                if (ImGui::Button(m_timeline.isPlaying() ? "pause" : "play", ImVec2(64, 26))) m_timeline.togglePlay();
+                ImGui::SameLine(0, 6);
+                if (ImGui::Button("restart", ImVec2(70, 26))) { m_timeline.seek(0.0); m_timeline.play(); m_showRunning = !m_showLayerIds.empty(); }
+                ImGui::SameLine(0, 14);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
+                ImGui::AlignTextToFramePadding();
+                int pm = (int)ph / 60, psec = (int)ph % 60, dm = (int)dur / 60, ds = (int)dur % 60;
+                ImGui::Text("%d:%02d / %d:%02d   %s%s", pm, psec, dm, ds,
+                            m_timeline.looping() ? "loop" : "",
+                            m_showRunning ? (m_deckHand ? "  ·  show running, fader in hand" : "  ·  show running") : (m_showLayerIds.empty() ? "  ·  build a show in GALLERY" : "  ·  stopped"));
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar();
+                ty += 34.0f;
+            }
+            // ruler (click / drag to seek)
+            {
+                ImGui::SetCursorScreenPos(ImVec2(tlX, ty));
+                ImGui::InvisibleButton("##ruler", ImVec2(tlW, rulerH + rowH * std::max<size_t>(1, rowsT.size())));
+                if (ImGui::IsItemActive() && ImGui::IsMouseDown(0)) {
+                    float mx = ImGui::GetIO().MousePos.x;
+                    double t = (double)((mx - tlX) / tlW) * dur;
+                    m_timeline.seek(std::max(0.0, std::min(dur, t)));
+                }
+                cd->AddRectFilled(ImVec2(tlX, ty), ImVec2(tlX + tlW, ty + rulerH), IM_COL32(255, 255, 255, 10), 3.0f);
+                double stepS = dur > 600 ? 60 : dur > 120 ? 30 : dur > 40 ? 10 : 5;
+                for (double t = 0; t <= dur + 0.01; t += stepS) {
+                    float x = tx(t);
+                    cd->AddLine(ImVec2(x, ty + rulerH - 6), ImVec2(x, ty + rulerH), IM_COL32(255, 255, 255, 60));
+                    char lb[16]; snprintf(lb, sizeof(lb), "%d:%02d", (int)t / 60, (int)t % 60);
+                    cd->AddText(ImVec2(x + 3, ty + 3), IM_COL32(120, 128, 142, 170), lb);
+                }
+                ty += rulerH + 2.0f;
+            }
+            // rows
+            float rowsTop = ty;
+            for (size_t r = 0; r < rowsT.size(); r++) {
+                const TimelineTrack* t = rowsT[r];
+                Layer* L = nullptr;
+                for (int i = 0; i < m_layerStack.count(); i++)
+                    if (m_layerStack[i] && m_layerStack[i]->id == t->layerId) { L = m_layerStack[i].get(); break; }
+                bool live = false;
+                for (const auto& c : t->clips) if (c.contains(ph)) live = true;
+                std::string nm = L ? L->name : t->name;
+                if (nm.size() > 20) nm = nm.substr(0, 19) + "…";
+                cd->AddText(ImVec2(xA, ty + (rowH - ImGui::GetTextLineHeight()) * 0.5f), live ? IM_COL32(255, 255, 255, 240) : kText, nm.c_str());
+                // deck badge
+                if (L && (L == decks[0] || L == decks[1])) {
+                    const char* b = L == decks[0] ? "A" : "B";
+                    ImVec2 bs = ImGui::CalcTextSize(b);
+                    float bx = xA + nameW - 26;
+                    cd->AddRectFilled(ImVec2(bx, ty + 8), ImVec2(bx + bs.x + 10, ty + rowH - 8), IM_COL32(61, 120, 217, 160), 4.0f);
+                    cd->AddText(ImVec2(bx + 5, ty + (rowH - bs.y) * 0.5f), IM_COL32(255, 255, 255, 255), b);
+                }
+                cd->AddRectFilled(ImVec2(tlX, ty), ImVec2(tlX + tlW, ty + rowH), IM_COL32(255, 255, 255, r % 2 ? 6 : 10));
+                for (const auto& c : t->clips) {
+                    float x0c = tx(c.startTime), x1c = tx(c.endTime());
+                    bool on = c.contains(ph);
+                    cd->AddRectFilled(ImVec2(x0c, ty + 5), ImVec2(x1c, ty + rowH - 5),
+                                      on ? IM_COL32(61, 120, 217, 200) : IM_COL32(120, 150, 210, 90), 4.0f);
+                    cd->AddRect(ImVec2(x0c, ty + 5), ImVec2(x1c, ty + rowH - 5), IM_COL32(255, 255, 255, on ? 120 : 40), 4.0f);
+                    std::string cn = c.name.empty() ? nm : c.name;
+                    ImVec2 cs = ImGui::CalcTextSize(cn.c_str());
+                    if (cs.x < x1c - x0c - 12) cd->AddText(ImVec2(x0c + 6, ty + (rowH - cs.y) * 0.5f), IM_COL32(255, 255, 255, on ? 255 : 170), cn.c_str());
+                }
+                ty += rowH;
+            }
+            if (rowsT.empty()) {
+                const char* hint = "no show yet — open GALLERY, pick your shaders and a length, then START";
+                ImVec2 ts = ImGui::CalcTextSize(hint);
+                cd->AddText(ImVec2(tlX + (tlW - ts.x) * 0.5f, ty + 12), kDim, hint);
+                ty += rowH;
+            }
+            // transitions: a slanted band across the seam between two rows
+            for (const auto& tr : m_timeline.transitions()) {
+                int rf = -1, rt = -1;
+                for (size_t r = 0; r < rowsT.size(); r++) {
+                    if (rowsT[r]->layerId == tr.fromLayerId) rf = (int)r;
+                    if (rowsT[r]->layerId == tr.toLayerId)   rt = (int)r;
+                }
+                if (rf < 0 || rt < 0) continue;
+                float x0t = tx(tr.startTime), x1t = tx(tr.endTime());
+                float yf = rowsTop + rf * rowH + rowH * 0.5f, ytt = rowsTop + rt * rowH + rowH * 0.5f;
+                cd->AddLine(ImVec2(x0t, yf), ImVec2(x1t, ytt), IM_COL32(255, 255, 255, 140), 2.0f);
+                cd->AddRectFilled(ImVec2(x0t, std::min(yf, ytt)), ImVec2(x1t, std::max(yf, ytt)), IM_COL32(255, 255, 255, 14));
+            }
+            // playhead
+            {
+                float x = tx(ph);
+                cd->AddLine(ImVec2(x, rowsTop - rulerH - 2), ImVec2(x, ty), IM_COL32(255, 255, 255, 230), 2.0f);
+                cd->AddTriangleFilled(ImVec2(x - 6, rowsTop - rulerH - 2), ImVec2(x + 6, rowsTop - rulerH - 2), ImVec2(x, rowsTop - rulerH + 6), IM_COL32(255, 255, 255, 230));
+            }
+        }
+        ImGui::EndChild();
+
+        if (openBind) ImGui::OpenPopup("##showBind");
+        if (sBindMap && !sBindKey.empty())
+            audioBindPopup("##showBind", sBindLabel.c_str(), *sBindMap,
+                           sBindKey, sBindLo, sBindHi, &m_midiManager, sBindPos);
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void Application::renderShaderGallery() {
@@ -17433,8 +19451,11 @@ void Application::renderShaderGallery() {
     if (!UIManager::sGalleryOpen) { s_wasOpen = false; return; }
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
+    // Start below the nav band: the workspace tabs stay clickable, so the
+    // gallery behaves like a tab you can leave, not a modal.
+    float pageTop = std::max(vp->Pos.y, UIManager::sNavBandBottom);
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, pageTop));
+    ImGui::SetNextWindowSize(ImVec2(vp->Size.x, vp->Size.y - (pageTop - vp->Pos.y)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30, 24));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.030f, 0.040f, 0.060f, 0.99f));
@@ -17442,6 +19463,7 @@ void Application::renderShaderGallery() {
                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                           ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
                           ImGuiWindowFlags_NoScrollbar;
+    if (ImGui::GetIO().MousePos.y < UIManager::sNavBandBottom + 2.0f) fl |= ImGuiWindowFlags_NoInputs;
     bool open = ImGui::Begin("###BabyGallery", nullptr, fl);
     if (!s_wasOpen) { ImGui::SetWindowFocus(); s_wasOpen = true; }
     if (open) {
@@ -17673,12 +19695,32 @@ void Application::renderShaderGallery() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.18f));
                 if (ImGui::Button("SHUFFLE")) {
                     const auto& all = m_shaderClaw.shaders();
-                    if (!all.empty())
-                        addShaderRouted(all[(size_t)(ImGui::GetTime() * 997.0)
-                                            % all.size()].fullPath);
+                    if (!all.empty()) {
+                        if (s_building) {
+                            // Building a show: deal a fresh random hand of
+                            // six distinct shaders into the selection.
+                            s_showSel.clear();
+                            size_t want = std::min<size_t>(6, all.size());
+                            uint32_t seed = (uint32_t)(ImGui::GetTime() * 997.0) + 1;
+                            int guard = 0;
+                            while (s_showSel.size() < want && guard++ < 4096) {
+                                seed = seed * 1664525u + 1013904223u;
+                                const std::string& cand = all[seed % all.size()].fullPath;
+                                if (std::find(s_showSel.begin(), s_showSel.end(), cand)
+                                        == s_showSel.end())
+                                    s_showSel.push_back(cand);
+                            }
+                        } else {
+                            addShaderRouted(all[(size_t)(ImGui::GetTime() * 997.0)
+                                                % all.size()].fullPath);
+                        }
+                    }
                 }
                 ImGui::PopStyleColor(2);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add a random shader");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(s_building
+                        ? "Deal 6 random shaders into the show\n(press START to play them)"
+                        : "Add a random shader");
 
                 ImGui::SameLine(0, 8);
                 if (s_building) {
@@ -17744,14 +19786,7 @@ void Application::renderShaderGallery() {
                         m_showRunning = false;
                         m_timeline.pause();
                         m_timeline.setLooping(false);
-                        if (m_showLayerId != 0) {
-                            m_timeline.removeTrackForLayer(m_showLayerId);
-                            for (int li = 0; li < m_layerStack.count(); li++)
-                                if (m_layerStack[li]->id == m_showLayerId) {
-                                    m_layerStack.removeLayer(li); break;
-                                }
-                            m_showLayerId = 0;
-                        }
+                        teardownShow();
                     }
                     ImGui::PopStyleColor(2);
                 }

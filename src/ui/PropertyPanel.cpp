@@ -994,21 +994,27 @@ static bool rangeSlider(const char* id, const char* label,
 //      and the same row rhythm as the inspector.
 // Caller opens it with ImGui::OpenPopup(popupId) from the slider's bolt; this
 // lazily creates bindings[key] only while the popover is open.
-static void audioBindPopup(const char* popupId, const char* paramLabel,
-                           std::map<std::string, AudioBinding>& bindings,
-                           const std::string& key, float lo, float hi,
-                           MIDIManager* midi, ImVec2 boltPos) {
+void audioBindPopup(const char* popupId, const char* paramLabel,
+                    std::map<std::string, AudioBinding>& bindings,
+                    const std::string& key, float lo, float hi,
+                    MIDIManager* midi, ImVec2 boltPos) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     const float kNavReserve = 78.0f;   // transport-nav band + breathing margin
+    const float kW = 254.0f, kMargin = 8.0f;
+    float top = vp->WorkPos.y + kMargin;
     float maxBottom = vp->WorkPos.y + vp->WorkSize.y - kNavReserve;
-    float anchorY = boltPos.y;
-    if (anchorY > maxBottom) anchorY = maxBottom;
-    // pivot (0,1): the popover's BOTTOM-left sits at the anchor and it grows
-    // upward — guaranteeing it never extends down into the nav.
-    ImGui::SetNextWindowPos(ImVec2(boltPos.x, anchorY),
-                            ImGuiCond_Appearing, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowSizeConstraints(
-        ImVec2(254.0f, 0.0f), ImVec2(254.0f, vp->WorkSize.y * 0.82f));
+    // Always fully on screen: open DOWNWARD from the anchor when there is
+    // more room below it than above, otherwise UPWARD; cap the height to the
+    // room on that side and keep the left edge inside the viewport.
+    float anchorX = std::min(std::max(boltPos.x, vp->WorkPos.x + kMargin),
+                             vp->WorkPos.x + vp->WorkSize.x - kW - kMargin);
+    float anchorY = std::min(std::max(boltPos.y, top), maxBottom);
+    float roomBelow = maxBottom - anchorY, roomAbove = anchorY - top;
+    bool downward = roomBelow >= roomAbove;
+    float maxH = std::max(120.0f, (downward ? roomBelow : roomAbove));
+    ImGui::SetNextWindowPos(ImVec2(anchorX, anchorY), ImGuiCond_Appearing,
+                            ImVec2(0.0f, downward ? 0.0f : 1.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kW, 0.0f), ImVec2(kW, maxH));
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 13));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 11.0f);
@@ -1044,23 +1050,76 @@ static void audioBindPopup(const char* popupId, const char* paramLabel,
             ImGui::Dummy(ImVec2(0, 4));
         }
 
-        // Order MUST match the AudioSignal enum (the combo maps index->enum).
-        static const char* signalNames[] = {
-            "None", "Level", "Bass", "Mid", "High", "Beat", "MIDI",
-            "Energy", "Build", "Drop", "Silence", "Momentum" };
+        // ── SOURCE: three plain choices. SOUND lands on Beat and shows the
+        // other signals as chips underneath; MIDI arms learn; OFF clears. ──
         dimLabel("SOURCE", kRowLabel, false);
-        int sigIdx = (int)ab.signal;
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::Combo("##sig", &sigIdx, signalNames, IM_ARRAYSIZE(signalNames))) {
-            ab.signal = (AudioSignal)sigIdx;
-            // Pick MIDI -> connect a controller if needed and ARM LEARN, so the
-            // user can just move a knob and it binds (no extra clicks).
-            if (ab.signal == AudioSignal::MidiCC && midi) {
-                if (!midi->isOpen()) {
-                    auto devs = midi->listDevices();
-                    if (!devs.empty()) midi->openAll();
+        {
+            bool isMidi = ab.signal == AudioSignal::MidiCC;
+            bool isOff  = ab.signal == AudioSignal::None;
+            bool isSnd  = !isMidi && !isOff;
+            const char* segs[3] = {"SOUND", "MIDI", "OFF"};
+            bool on[3] = {isSnd, isMidi, isOff};
+            float segW = (ImGui::GetContentRegionAvail().x - 2 * 4.0f) / 3.0f;
+            for (int i = 0; i < 3; i++) {
+                if (i) ImGui::SameLine(0, 4);
+                ImGui::PushStyleColor(ImGuiCol_Button, on[i] ? ImVec4(0.24f, 0.47f, 0.85f, 0.85f)
+                                                             : ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on[i] ? ImVec4(0.28f, 0.52f, 0.90f, 0.95f)
+                                                                    : ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.28f, 0.52f, 0.90f, 1.0f));
+                if (ImGui::Button(segs[i], ImVec2(segW, 0))) {
+                    if (i == 0 && !isSnd) ab.signal = AudioSignal::Beat;
+                    else if (i == 1 && !isMidi) {
+                        ab.signal = AudioSignal::MidiCC;
+                        // connect a controller if needed and ARM LEARN, so the
+                        // user can just move a knob and it binds (no extra clicks)
+                        if (midi) {
+                            if (!midi->isOpen()) {
+                                auto devs = midi->listDevices();
+                                if (!devs.empty()) midi->openAll();
+                            }
+                            midi->startLearn();
+                        }
+                    } else if (i == 2) ab.signal = AudioSignal::None;
                 }
-                midi->startLearn();
+                ImGui::PopStyleColor(3);
+            }
+            if (ab.signal != AudioSignal::MidiCC && ab.signal != AudioSignal::None) {
+                // the sound signals as chips: Beat first, then feel, then the song's arc
+                struct Sig { const char* name; AudioSignal sig; const char* tip; };
+                static const Sig sigs[] = {
+                    {"Beat",     AudioSignal::Beat,     "pulses on every beat"},
+                    {"Level",    AudioSignal::Level,    "overall loudness"},
+                    {"Bass",     AudioSignal::Bass,     "low end"},
+                    {"Mid",      AudioSignal::Mid,      "vocals, chords"},
+                    {"High",     AudioSignal::High,     "hats, air"},
+                    {"Energy",   AudioSignal::Energy,   "the song's slow high-low journey"},
+                    {"Build",    AudioSignal::Build,    "rises through a build-up"},
+                    {"Drop",     AudioSignal::Drop,     "hits when a drop lands"},
+                    {"Silence",  AudioSignal::Silence,  "rises when the track goes quiet"},
+                    {"Momentum", AudioSignal::Momentum, "energy rising vs falling"},
+                };
+                ImGui::Dummy(ImVec2(0, 4));
+                float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+                bool first = true;
+                for (const auto& sg : sigs) {
+                    ImVec2 ts = ImGui::CalcTextSize(sg.name);
+                    float cw = ts.x + 16.0f;
+                    if (!first && ImGui::GetCursorScreenPos().x + cw > right) ImGui::NewLine();
+                    else if (!first) ImGui::SameLine(0, 4);
+                    first = false;
+                    bool sel = ab.signal == sg.sig;
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, sel ? ImVec4(1, 1, 1, 0.22f) : ImVec4(1, 1, 1, 0.05f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.16f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1, 1, 1, 0.26f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, sel ? ImVec4(1, 1, 1, 1) : ImVec4(0.8f, 0.83f, 0.88f, 0.8f));
+                    if (ImGui::SmallButton(sg.name)) ab.signal = sg.sig;
+                    ImGui::PopStyleColor(4);
+                    ImGui::PopStyleVar();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sg.tip);
+                }
+                ImGui::NewLine();
             }
         }
 

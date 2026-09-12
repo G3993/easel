@@ -1913,6 +1913,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
     // can drift if ImGui adds an internal title-bar reserve to the docked
     // window, so we use the live cursor instead.
     const float navRowScreenY = ImGui::GetCursorScreenPos().y;
+    UIManager::sNavBandBottom = navRowScreenY + kNavRowH;
 
     // The top nav must visually win against EVERY other surface — no
     // floating panel, no docked window, no overlay should ever paint over
@@ -1972,11 +1973,11 @@ void ViewportPanel::renderNavBar(bool stageActive,
         // Play hidden from the workspace switcher per Lu's request — the
         // mode/panel code is untouched (still reachable over OSC), just not
         // exposed as a tab here.
-        const int   kNumTabs     = 4;
-        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "ZONES", "GALLERY"};
-        // GALLERY (index 3) is not a workspace mode -- it toggles the
-        // fullscreen shader gallery overlay instead.
-        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Zones, Mode::Zones};
+        const int   kNumTabs     = 5;
+        const char* labels[kNumTabs] = {"CANVAS", "MAPPING", "ZONES", "GALLERY", "SHOW"};
+        // GALLERY (index 3) and SHOW (index 4) are not workspace modes --
+        // they toggle their fullscreen pages instead.
+        Mode      modes[kNumTabs]    = {Mode::Canvas, Mode::Mapping, Mode::Zones, Mode::Zones, Mode::Zones};
 
         // Each segment = label width. Icons removed — the workspace tabs
         // now read as text-only, mirroring the rest of the nav row's
@@ -2025,12 +2026,25 @@ void ViewportPanel::renderNavBar(bool stageActive,
             bool hov     = ImGui::IsItemHovered();
             ImGui::PopID();
             if (clicked) {
-                if (i == 3) UIManager::sGalleryOpen = !UIManager::sGalleryOpen;
-                else        UIManager::setMode(modes[i]);
+                if (i == 3) {
+                    UIManager::sGalleryOpen = !UIManager::sGalleryOpen;
+                    UIManager::sShowOpen = false;
+                } else if (i == 4) {
+                    UIManager::sShowOpen = !UIManager::sShowOpen;
+                    UIManager::sGalleryOpen = false;
+                } else {
+                    // The fullscreen pages behave like tabs: stepping to any
+                    // workspace tab closes them.
+                    UIManager::sGalleryOpen = false;
+                    UIManager::sShowOpen = false;
+                    UIManager::setMode(modes[i]);
+                }
             }
 
             ImVec2 ts = ImGui::CalcTextSize(labels[i]);
-            bool isActive = (i == 3) ? UIManager::sGalleryOpen : (i == activeIdx);
+            bool isActive = (i == 3) ? UIManager::sGalleryOpen
+                          : (i == 4) ? UIManager::sShowOpen
+                                     : (i == activeIdx);
             ImU32 fg = isActive
                 ? IM_COL32(255, 255, 255, 255)
                 : (hov ? IM_COL32(200, 208, 220, 230)

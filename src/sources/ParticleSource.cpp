@@ -670,3 +670,57 @@ void ParticleSource::update() {
     uploadInstances();
     renderParticles();
 }
+
+// ── Audio/MIDI parameter bindings ──────────────────────────────────────────
+// Same model as FluidSource::applyAudioBindings: each bound pid maps to an
+// emitter float, the binding's follower conditions the raw signal, and the
+// result is clamped to the same range the UI slider offers.
+#include "app/MIDIManager.h"
+
+void ParticleSource::applyAudioBindings(float level, float bass, float mid,
+                                        float high, float beat, float dt,
+                                        MIDIManager* midi,
+                                        float energy, float build, float drop,
+                                        float silence, float momentum) {
+    if (m_audioBindings.empty()) return;
+    for (auto& [name, b] : m_audioBindings) {
+        if (b.signal == AudioSignal::None) continue;
+        float raw = 0.0f; bool have = true;
+        switch (b.signal) {
+            case AudioSignal::Level: raw = level; break;
+            case AudioSignal::Bass:  raw = bass;  break;
+            case AudioSignal::Mid:   raw = mid;   break;
+            case AudioSignal::High:  raw = high;  break;
+            case AudioSignal::Beat:  raw = beat;  break;
+            case AudioSignal::Energy:   raw = energy;   break;
+            case AudioSignal::Build:    raw = build;    break;
+            case AudioSignal::Drop:     raw = drop;     break;
+            case AudioSignal::Silence:  raw = silence;  break;
+            case AudioSignal::Momentum: raw = momentum; break;
+            case AudioSignal::MidiCC: {
+                if (midi && b.midiCC >= 0) {
+                    float v = midi->getCCValue(b.midiChannel, b.midiCC);
+                    if (v < 0.0f) have = false; else raw = v;
+                } else have = false;
+                break;
+            }
+            default: have = false; break;
+        }
+        if (!have) continue;
+        float mapped = b.follow(raw, dt);
+        ParticleEmitter& e = m_emitter;
+        float* dst = nullptr; float lo = 0.0f, hi = 1.0f;
+        if      (name == "spawnRate")        { dst = &e.spawnRate;        lo = 0.0f;  hi = 2000.0f; }
+        else if (name == "lifetimeMax")      { dst = &e.lifetimeMax;      lo = 0.2f;  hi = 10.0f; }
+        else if (name == "velocityJitter")   { dst = &e.velocityJitter;   lo = 0.0f;  hi = 2.0f; }
+        else if (name == "initialSize")      { dst = &e.initialSize;      lo = 0.005f; hi = 0.3f; }
+        else if (name == "sizeJitter")       { dst = &e.sizeJitter;       lo = 0.0f;  hi = 1.0f; }
+        else if (name == "motionBlur")       { dst = &e.motionBlur;       lo = 0.0f;  hi = 2.0f; }
+        else if (name == "minStretch")       { dst = &e.minStretch;       lo = 0.0f;  hi = 1.0f; }
+        else if (name == "audioSpawnRateMul"){ dst = &e.audioSpawnRateMul; lo = 0.0f; hi = 4.0f; }
+        else if (name == "audioSizeMul")     { dst = &e.audioSizeMul;     lo = 0.0f;  hi = 4.0f; }
+        else if (name == "audioVelocityMul") { dst = &e.audioVelocityMul; lo = 0.0f;  hi = 4.0f; }
+        else if (name == "audioBeatBurst")   { dst = &e.audioBeatBurst;   lo = 0.0f;  hi = 300.0f; }
+        if (dst) { if (mapped < lo) mapped = lo; if (mapped > hi) mapped = hi; *dst = mapped; }
+    }
+}

@@ -7,6 +7,7 @@ MaskRenderer::~MaskRenderer() {
 }
 
 void MaskRenderer::destroy() {
+    if (m_blurFbo) { glDeleteFramebuffers(1, &m_blurFbo); m_blurFbo = 0; }
     if (m_fbo) { glDeleteFramebuffers(1, &m_fbo); m_fbo = 0; }
     if (m_rbo) { glDeleteRenderbuffers(1, &m_rbo); m_rbo = 0; }
     if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
@@ -65,7 +66,83 @@ void MaskRenderer::ensureFBO(int width, int height, GLuint colorTex) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& outTexture) {
+// ── feather: blur the filled mask so its edge falls off smoothly ─────
+// Four separable passes (H, V, then H, V at 60% radius) with a tent kernel
+// each — the product is close to a gaussian, with no visible steps even at
+// the largest feather. Runs only when a mask is (re)rendered, never per frame.
+void MaskRenderer::featherPass(Texture& tex, int width, int height, float feather, float aspect) {
+    if (feather <= 0.0005f || tex.id() == 0) return;
+    if (!m_blurReady) {
+        static const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "out vec2 vUV;\n"
+            "void main() { vUV = aPos; gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0); }\n";
+        static const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV; out vec4 FragColor;\n"
+            "uniform sampler2D uTex; uniform vec2 uDir;\n"
+            "void main() {\n"
+            "    float s = 0.0, ws = 0.0;\n"
+            "    for (int i = -14; i <= 14; i++) {\n"
+            "        float f = float(i) / 14.0;\n"
+            "        float w = 1.0 - abs(f);\n"
+            "        vec2 uv = clamp(vUV + uDir * f, 0.0, 1.0);\n"
+            "        s += texture(uTex, uv).r * w; ws += w;\n"
+            "    }\n"
+            "    float v = s / ws;\n"
+            "    FragColor = vec4(v, v, v, 1.0);\n"
+            "}\n";
+        if (!m_blurShader.loadFromSource(kVS, kFS)) {
+            std::cerr << "[Mask] feather blur shader failed to compile" << std::endl;
+            return;
+        }
+        glGenFramebuffers(1, &m_blurFbo);
+        m_blurReady = true;
+    }
+    if (m_blurScratch.id() == 0 || m_blurScratch.width() != width || m_blurScratch.height() != height)
+        m_blurScratch.createEmpty(width, height);
+    // clamp both textures so the blur never wraps the far edge in
+    for (GLuint id : {tex.id(), m_blurScratch.id()}) {
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glm::vec2 quadVerts[] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+    glBindVertexArray(m_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr);
+    m_blurShader.use();
+    m_blurShader.setInt("uTex", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_blurFbo);
+    glViewport(0, 0, width, height);
+    float ax = (aspect > 0.01f) ? 1.0f / aspect : 1.0f;
+    const float scales[2] = {1.0f, 0.6f};
+    for (float sc : scales) {
+        float r = feather * sc;
+        // horizontal: tex -> scratch
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_blurScratch.id(), 0);
+        glBindTexture(GL_TEXTURE_2D, tex.id());
+        m_blurShader.setVec2("uDir", glm::vec2(r * ax, 0.0f));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        // vertical: scratch -> tex
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id(), 0);
+        glBindTexture(GL_TEXTURE_2D, m_blurScratch.id());
+        m_blurShader.setVec2("uDir", glm::vec2(0.0f, r));
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindVertexArray(0);
+}
+
+void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& outTexture,
+                          float feather, float aspect) {
     if (path.count() < 3 || !path.closed()) {
         // Less than 3 points or path not closed yet - fully white (no clip)
         if (outTexture.id() == 0) outTexture.createEmpty(width, height);
@@ -154,6 +231,8 @@ void MaskRenderer::render(const MaskPath& path, int width, int height, Texture& 
 
     glDisable(GL_STENCIL_TEST);
     glBindVertexArray(0);
+
+    featherPass(outTexture, width, height, feather, aspect);
 
     // Restore GL state
     glColorMask(prevColorMask[0], prevColorMask[1], prevColorMask[2], prevColorMask[3]);

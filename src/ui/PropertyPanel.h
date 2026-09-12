@@ -1,5 +1,8 @@
 #pragma once
 #include "compositing/Layer.h"
+#include "sources/AudioBinding.h"
+#include "imgui.h"
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +15,14 @@ class BPMSync;
 class SceneManager;
 class MIDIManager;
 struct OutputZone;
+
+// Shared audio/MIDI modulation popover (defined in PropertyPanel.cpp; also
+// used by the SHOW page's parameter labels). Caller OpenPopup(popupId)s it;
+// it lazily creates bindings[key] only while open.
+void audioBindPopup(const char* popupId, const char* paramLabel,
+                    std::map<std::string, AudioBinding>& bindings,
+                    const std::string& key, float lo, float hi,
+                    MIDIManager* midi, ImVec2 boltPos);
 
 // Speech-to-text state shared between PropertyPanel and Application
 struct SpeechState {

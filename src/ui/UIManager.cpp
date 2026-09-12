@@ -19,6 +19,8 @@
 
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 bool UIManager::sGalleryOpen = false;
+bool UIManager::sShowOpen = false;
+float UIManager::sNavBandBottom = 44.0f;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
 double UIManager::sModeTransitionStart = -1.0;
 

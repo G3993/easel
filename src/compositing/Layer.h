@@ -145,6 +145,7 @@ public:
         MaskPath path;
         std::shared_ptr<Texture> texture; // rendered by MaskRenderer
         float feather = 0.0f;   // 0-1 UV units, softens mask edges
+        float renderedFeather = -1.0f;   // feather baked into `texture`
         bool invert = false;    // swap inside/outside
     };
     std::vector<LayerMask> masks;
@@ -219,7 +220,9 @@ public:
         }
     }
 
-    glm::mat3 getTransformMatrix() const;
+    // canvasAspect (w/h) keeps rotation shear-free on non-square canvases;
+    // 1.0 = legacy behavior (rotate in raw normalized space).
+    glm::mat3 getTransformMatrix(float canvasAspect = 1.0f) const;
 
     GLuint textureId() const { return source ? source->textureId() : 0; }
     int width() const { return source ? source->width() : 0; }

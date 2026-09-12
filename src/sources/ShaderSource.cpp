@@ -172,6 +172,8 @@ bool ShaderSource::parseISF(const std::string& source) {
             }
         }
 
+        appendMotionKitInputs();
+
         // Parse PASSES — multi-pass buffer names
         m_passBuffers.clear();
         if (j.contains("PASSES") && j["PASSES"].is_array()) {
@@ -679,6 +681,8 @@ bool ShaderSource::reload(const std::string& isfSource) {
 void ShaderSource::suspend() {
     if (!m_initialized) return;
     m_fbo.destroy();
+    if (m_motionFbo.width() > 0) m_motionFbo.destroy();
+    m_motionActive = false;
     m_passes.clear();   // frees each pass's ping-pong Framebuffers
     m_initialized = false;
     m_suspended = true;
@@ -699,6 +703,19 @@ void ShaderSource::update() {
     }
 
     m_shader.use();
+
+    // Integrated clock — once per frame, not per pass. Speed (motionClock)
+    // scales the step, so the phase stays continuous under a moving knob.
+    {
+        float now = (float)glfwGetTime();
+        if (!m_clockInit) { m_clock = now; m_lastTime = now; m_clockInit = true; }
+        float dtw = now - m_lastTime;
+        if (!(dtw > 0.0f)) dtw = 0.0f;
+        if (dtw > 0.1f) dtw = 0.1f;
+        m_lastTime = now;
+        m_clockDelta = m_paused ? 0.0f : dtw * kitValue("motionClock", 1.0f);
+        m_clock += m_clockDelta;
+    }
 
     if (m_passes.empty()) {
         // Single-pass shader (no PASSES in ISF header)
@@ -769,6 +786,8 @@ void ShaderSource::update() {
         glViewport(0, 0, m_width, m_height);
     }
 
+    renderMotionPass();
+
     // Restore default GL state so other sources (NDI, etc.) aren't affected
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -777,15 +796,126 @@ void ShaderSource::update() {
     m_frameIndex++;
 }
 
+// ── MOTION kit ────────────────────────────────────────────────────────
+// Five float inputs every shader gets, placed FIRST so the SHOW surface's
+// top knob row reads the same on every shader: Speed · Drift · Spin ·
+// Breath · Sway. Defaults are identity (Speed 1, the rest 0), so a shader
+// looks exactly as authored until a knob moves. A shader that declares one
+// of these names itself keeps its own definition.
+void ShaderSource::appendMotionKitInputs() {
+    struct K { const char* name; const char* label; float lo, hi, def; };
+    static const K kKit[] = {
+        {"motionClock",  "Speed",  0.0f, 3.0f, 1.0f},
+        {"motionDrift",  "Drift",  0.0f, 1.0f, 0.0f},
+        {"motionSpin",   "Spin",  -1.0f, 1.0f, 0.0f},
+        {"motionBreath", "Breath", 0.0f, 1.0f, 0.0f},
+        {"motionSway",   "Sway",   0.0f, 1.0f, 0.0f},
+    };
+    std::vector<ISFInput> kit;
+    for (const auto& k : kKit) {
+        bool have = false;
+        for (const auto& in : m_inputs) if (in.name == k.name) { have = true; break; }
+        if (have) continue;
+        ISFInput p;
+        p.name = k.name; p.label = k.label; p.group = "Motion"; p.type = "float";
+        p.minVal = k.lo; p.maxVal = k.hi; p.defaultFloat = k.def; p.value = k.def;
+        kit.push_back(std::move(p));
+    }
+    m_inputs.insert(m_inputs.begin(), std::make_move_iterator(kit.begin()),
+                    std::make_move_iterator(kit.end()));
+}
+
+float ShaderSource::kitValue(const char* name, float fallback) const {
+    for (const auto& in : m_inputs) {
+        if (in.name != name) continue;
+        if (std::holds_alternative<float>(in.value)) return std::get<float>(in.value);
+        return fallback;
+    }
+    return fallback;
+}
+
+// Drift / Spin / Breath / Sway: a single resample of the finished frame,
+// mirrored at the edges so nothing ever shows a border. Skipped entirely
+// (zero cost, textureId() falls through to m_fbo) while all four sit at 0.
+void ShaderSource::renderMotionPass() {
+    float drift  = kitValue("motionDrift",  0.0f);
+    float spin   = kitValue("motionSpin",   0.0f);
+    float breath = kitValue("motionBreath", 0.0f);
+    float sway   = kitValue("motionSway",   0.0f);
+    bool active = std::fabs(drift) > 1e-4f || std::fabs(spin) > 1e-4f ||
+                  std::fabs(breath) > 1e-4f || std::fabs(sway) > 1e-4f;
+    if (!active) { m_motionActive = false; return; }
+
+    static ShaderProgram* sProg = nullptr;
+    static bool sTried = false;
+    if (!sProg && !sTried) {
+        sTried = true;
+        static const char* kVS =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPos;\n"
+            "layout(location = 1) in vec2 aTexCoord;\n"
+            "out vec2 vUV;\n"
+            "void main() { gl_Position = vec4(aPos, 0.0, 1.0); vUV = aTexCoord; }\n";
+        static const char* kFS =
+            "#version 330 core\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "uniform sampler2D uTex;\n"
+            "uniform float uTime, uDrift, uSpin, uBreath, uSway, uAspect;\n"
+            "vec2 mirrorUV(vec2 p) { return 1.0 - abs(fract(p * 0.5) * 2.0 - 1.0); }\n"
+            "void main() {\n"
+            "    float t = uTime;\n"
+            "    vec2 uv = vUV - 0.5; uv.x *= uAspect;\n"
+            "    // breath: slow zoom pulse around centre\n"
+            "    uv /= 1.0 + uBreath * 0.18 * sin(t * 0.9);\n"
+            "    // spin: continuous rotation, signed\n"
+            "    float a = uSpin * t * 0.6; float c = cos(a), s = sin(a);\n"
+            "    uv = mat2(c, -s, s, c) * uv;\n"
+            "    // sway: organic low-frequency wobble of the whole frame\n"
+            "    uv += uSway * 0.035 * vec2(sin(t * 1.3 + uv.y * 3.0), cos(t * 1.1 + uv.x * 3.0));\n"
+            "    // drift: bounded lissajous pan, never runs away\n"
+            "    uv += uDrift * 0.25 * vec2(sin(t * 0.23), cos(t * 0.19));\n"
+            "    uv.x /= uAspect; uv += 0.5;\n"
+            "    fragColor = texture(uTex, mirrorUV(uv));\n"
+            "}\n";
+        auto* p = new ShaderProgram();
+        if (p->loadFromSource(kVS, kFS)) sProg = p;
+        else { delete p; std::cerr << "[Motion] kit pass failed to compile" << std::endl; }
+    }
+    if (!sProg) { m_motionActive = false; return; }
+
+    if (m_motionFbo.width() != m_width || m_motionFbo.height() != m_height) {
+        bool ok = (m_motionFbo.width() == 0) ? m_motionFbo.create(m_width, m_height)
+                                              : (m_motionFbo.resize(m_width, m_height), true);
+        if (!ok) { m_motionActive = false; return; }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, m_motionFbo.fboId());
+    glViewport(0, 0, m_width, m_height);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    sProg->use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_fbo.textureId());
+    sProg->setInt("uTex", 0);
+    sProg->setFloat("uTime", m_clock);
+    sProg->setFloat("uDrift", drift);
+    sProg->setFloat("uSpin", spin);
+    sProg->setFloat("uBreath", breath);
+    sProg->setFloat("uSway", sway);
+    sProg->setFloat("uAspect", m_height > 0 ? (float)m_width / (float)m_height : 1.0f);
+    m_quad.draw();
+    Framebuffer::unbind();
+    glViewport(0, 0, m_width, m_height);
+    m_motionActive = true;
+}
+
 void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) {
     if (passWidth <= 0) passWidth = m_width;
     if (passHeight <= 0) passHeight = m_height;
 
-    // ISF built-ins
-    float now = (float)glfwGetTime();
-    m_shader.setFloat("TIME", now);
-    m_shader.setFloat("TIMEDELTA", now - m_lastTime);
-    m_lastTime = now;
+    // ISF built-ins — the integrated clock (see update()).
+    m_shader.setFloat("TIME", m_clock);
+    m_shader.setFloat("TIMEDELTA", m_clockDelta);
     m_shader.setVec2("RENDERSIZE", glm::vec2((float)passWidth, (float)passHeight));
     m_shader.setInt("PASSINDEX", passIndex);
     m_shader.setInt("FRAMEINDEX", m_frameIndex);

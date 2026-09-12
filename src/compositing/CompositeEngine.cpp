@@ -717,7 +717,8 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 nativeScale[1][1] = 1.0f;
             }
         }
-        glm::mat3 layerXform = layer->getTransformMatrix() * nativeScale;
+        float canvasAspectRot = (m_height > 0) ? (float)m_width / (float)m_height : 1.0f;
+        glm::mat3 layerXform = layer->getTransformMatrix(canvasAspectRot) * nativeScale;
 
         // --- Drop shadow pre-pass ---
         // Render layer silhouette → blur → composite with offset BEFORE the main layer draw
@@ -915,7 +916,8 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(GL_TEXTURE_2D, layerMaskTex);
                 m_passthroughShader.setInt("uMask", 2);
-                m_passthroughShader.setFloat("uMaskFeather", layerMaskFeather);
+                m_passthroughShader.setFloat("uMaskFeather", 0.0f);   // baked into the mask texture
+                (void)layerMaskFeather;
                 m_passthroughShader.setBool("uMaskInvert", layerMaskInvert);
             } else {
                 m_passthroughShader.setBool("uHasMask", false);
@@ -963,7 +965,7 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(GL_TEXTURE_2D, layerMaskTex);
                 m_compositeShader.setInt("uMask", 2);
-                m_compositeShader.setFloat("uMaskFeather", layerMaskFeather);
+                m_compositeShader.setFloat("uMaskFeather", 0.0f);   // baked into the mask texture
                 m_compositeShader.setBool("uMaskInvert", layerMaskInvert);
             } else {
                 m_compositeShader.setBool("uHasMask", false);

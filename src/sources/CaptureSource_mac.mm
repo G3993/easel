@@ -216,18 +216,40 @@ void CaptureSource::update() {
 
     if (!surface) return;
 
-    // Ensure GL texture exists
-    if (!m_texture.id()) {
-        m_texture.createEmpty(m_width, m_height, GL_RGBA8);
+    // CGLTexImageIOSurface2D only accepts RECTANGLE texture targets —
+    // against GL_TEXTURE_2D it fails silently and display capture shows
+    // black. Locked CPU upload instead, sized from the ACTUAL surface
+    // (retina streams deliver pixel-sized frames regardless of the
+    // configured point size), exactly like the window-capture path.
+    int sw = (int)IOSurfaceGetWidth(surface);
+    int sh = (int)IOSurfaceGetHeight(surface);
+    static bool sLoggedFirst = false;
+    if (sw > 0 && sh > 0) {
+        m_width = sw;
+        m_height = sh;
+        if (!m_texture.id() || m_texture.width() != sw || m_texture.height() != sh)
+            m_texture.createEmpty(sw, sh, GL_RGBA8);
+        IOReturn lockRet = IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr);
+        if (lockRet == kIOReturnSuccess) {
+            const void* base = IOSurfaceGetBaseAddress(surface);
+            size_t rowBytes = IOSurfaceGetBytesPerRow(surface);
+            glBindTexture(GL_TEXTURE_2D, m_texture.id());
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(rowBytes / 4));
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, sw, sh,
+                            GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, base);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+            if (!sLoggedFirst) {
+                sLoggedFirst = true;
+                std::cout << "[CaptureSource] first frame on screen: "
+                          << sw << "x" << sh << std::endl;
+            }
+        } else if (!sLoggedFirst) {
+            sLoggedFirst = true;
+            std::cerr << "[CaptureSource] IOSurfaceLock failed: " << lockRet << std::endl;
+        }
     }
-
-    // Zero-copy: bind IOSurface directly as GL texture backing
-    CGLContextObj cgl_ctx = CGLGetCurrentContext();
-    glBindTexture(GL_TEXTURE_2D, m_texture.id());
-    CGLTexImageIOSurface2D(cgl_ctx, GL_TEXTURE_2D, GL_RGBA8,
-                           m_width, m_height,
-                           GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
-                           surface, 0);
 
     IOSurfaceDecrementUseCount(surface);
     CFRelease(surface);

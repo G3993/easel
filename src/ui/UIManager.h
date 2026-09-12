@@ -84,6 +84,11 @@ public:
     // Fullscreen shader GALLERY overlay -- toggled by the top-nav GALLERY
     // tab (next to ZONES) and rendered by Application::renderShaderGallery.
     static bool sGalleryOpen;
+    static bool sShowOpen;
+    // Screen-space Y where the top nav band ends (set by ViewportPanel each
+    // frame). Fullscreen pages (gallery / show) start below it so the
+    // workspace tabs stay clickable while a page is open.
+    static float sNavBandBottom;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
     // with an ease-out cubic. Set via setMode() — never write sMode directly

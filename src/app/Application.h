@@ -463,10 +463,14 @@ private:
     ShowPresets m_showPresets;
     std::unordered_map<std::string, nlohmann::json> m_showParamOverrides;
 
-    // Build + start a show: one SHOW layer whose track carries one clip per
-    // picked shader, laid end-to-end dividing minutes evenly. Shared by the
-    // gallery's START SHOW button and the SHOWS preset menu.
+    // Build + start a show: one layer PER picked shader, each on its own
+    // timeline track, clips staggered so consecutive shaders overlap by the
+    // fade window, with a cross-layer "fade" transition on every seam. Each
+    // shader stays independently editable (its own layer, its own params).
+    // Shared by the gallery's START SHOW button and the SHOWS preset menu.
     void startShow(const std::vector<std::string>& sel, float minutes);
+    // Remove every show layer/track/transition built by startShow.
+    void teardownShow();
 
     // Push Further (AI shader improve) — styled top-level panel state.
     bool        m_pushOpen = false;
@@ -497,10 +501,81 @@ private:
     // BUILD SHOW turns a selection into a rotating shader playlist.
     void renderShaderGallery();
 
-    // Gallery shader show: built as REAL timeline clips (one layer, one
-    // clip per picked shader, fades between) — the timeline renders and
-    // drives it; these just remember the show layer for STOP/rebuild.
-    uint32_t m_showLayerId = 0;
+    // SHOW — fullscreen performance page (top-nav SHOW tab): the live output
+    // preview above a Launch Control XL surface whose knobs/faders animate
+    // with the hardware. AUTO-MAP binds the whole surface to the target
+    // shader's float params through the standard AudioBinding MidiCC path.
+    // The XL's bottom button rows (and the drawn buttons) pick which shader
+    // layer the surface drives; a fresh target auto-maps on arrival.
+    void renderShowPanel();
+    std::vector<Layer*> showShaderSlots();
+    // A SHOW-bindable source: shaders, 2D fluid, 3D fluid, particles.
+    struct ShowParam { std::string name, label; float cur, lo, hi; };
+    std::map<std::string, AudioBinding>* showBindingsFor(ContentSource* src);
+    std::vector<ShowParam> showParamsFor(ContentSource* src);
+    void autoMapShaderToLCXL(ContentSource* src);
+    void selectShowTarget(int slot);
+    Layer* resolveShowTarget();
+    // bank 0 = faders, 1-3 = knob rows top to bottom, in the active layout.
+    const int* lcxlBank(int idx);
+    // ── SHOW decks: two managed shader layers (A/B) under a crossfader ──
+    float       m_deckBlend = 0.0f;         // 0 = A on screen, 1 = B
+    int         m_deckTarget = 0;           // which deck the XL knobs drive
+    BlendMode   m_deckBlendMode = BlendMode::Normal;   // the top deck's mode
+    std::string m_deckTransition = "fade";  // "cut" | "fade" | gl-transition name
+    float       m_deckTransSecs = 1.5f;
+    bool  m_deckAnim = false, m_deckAnimGL = false;
+    float m_deckAnimFrom = 0.0f, m_deckAnimTo = 0.0f, m_deckAnimT = 0.0f, m_deckAnimDur = 1.0f;
+    float m_deckFaderPrev = -1.0f;          // XL fader 8 = crossfader; last seen value
+    Layer* deckLayer(int deck);
+    int    deckLayerIndex(int deck);
+    void   deckLoad(int deck, const std::string& path, const std::string& title);
+    void   deckGo();
+    void   deckTick(float dt);
+    void   deckTakeSurface(int deck, bool pin);
+    bool   m_deckTargetPinned = false;   // false = knobs follow whatever is on air
+    // ── show extras: bindable layers that are NOT decks (3D Fluid, a shader
+    // added from the panel, particles…). They play alongside the decks, get a
+    // track in a running show, and can take the knobs like a deck can.
+    uint32_t m_showExtraTargetId = 0;          // an extra currently holding the knobs
+    std::vector<uint32_t> m_showExtraTrackIds; // tracks a show added for extras (layers stay)
+    std::vector<Layer*> showExtraLayers();
+    void showTakeExtra(Layer* l);
+    void showReconcileExtras();
+    void resetShowParams(ContentSource* src);
+    void layerToFront(Layer* l);   // the layer becomes the top of the stack (the output)
+    void decksToFront();           // both decks on top, order kept — the crossfade is the output
+    int    m_showTab = 0;                // 0 KNOBS · 1 TRANSITION · 2 TIMELINE
+    int    m_deckXfadeCC = -1;           // learned crossfader CC (-1 = XL fader 8)
+    bool   m_deckXfadeLearn = false;     // next CC that moves becomes the crossfader
+    bool   m_deckXfadeLoaded = false;
+    int    deckXfadeCC();
+    void   deckXfadeSave();
+    void   deckShowSync();               // a running show drives the crossfader from its fades
+    bool   m_deckHand = false;           // the fader was grabbed mid-show: hand mix until the next fade
+    uint32_t m_showMixTrId = 0;          // the fade currently steering the crossfader
+    float  m_showMixFrom = 0.0f;         // where the fader stood when that fade began
+    ContentSource* m_deckSrcSeen[2] = {nullptr, nullptr};  // re-map the knobs when a deck swaps shader
+
+    // ── shader usage history (~/.easel/shader_usage.json) ──
+    struct ShaderUsage { int loads = 0; double seconds = 0.0; std::string last; };
+    std::map<std::string, ShaderUsage> m_shaderUsage;
+    bool   m_usageLoaded = false;
+    double m_usageDirtyT = -1.0;   // wall time of the first unflushed change
+    void usageNoteLoad(const std::string& path);
+    void usageTick(float dt);
+    void usageFlush(bool force);
+
+    uint32_t m_showTargetLayerId = 0;   // 0 = automatic (selected / topmost)
+    int m_showMapPage = 0;              // which page of 32 params is on the XL
+    bool m_showLCXLMk3      = false;    // which XL generation the surface speaks
+    bool m_showLCXLDetected = false;    // auto-detect ran (from device names)
+
+    // Gallery shader show: built as REAL timeline clips (one layer + one
+    // track per picked shader, cross-layer fades between) — the timeline
+    // renders and drives it; these remember the show layers for STOP/rebuild.
+    uint32_t m_showLayerId = 0;                 // legacy single-layer shows
+    std::vector<uint32_t> m_showLayerIds;       // stacked per-shader layers
     bool     m_showRunning = false;
 
 #ifdef HAS_OPENCV

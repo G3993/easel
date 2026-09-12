@@ -110,6 +110,13 @@ std::vector<WindowInfo> WindowCaptureSource::enumerateWindows() {
                 if (w.title)
                     windowTitle = w.title.UTF8String;
 
+                // Only real, OPEN windows make the list: everything on
+                // screen, plus TITLED windows on other Spaces (a Meet on
+                // Desktop 2 stays pickable). Untitled off-screen entries
+                // are app plumbing — they were flooding the picker with
+                // windows nobody has open.
+                if (!w.onScreen && windowTitle.empty()) continue;
+
                 std::string name;
                 if (!ownerName.empty() && !windowTitle.empty())
                     name = ownerName + " — " + windowTitle;
@@ -409,13 +416,26 @@ void WindowCaptureSource::update() {
         if (!m_texture.id() || m_texture.width() != sw || m_texture.height() != sh) {
             m_texture.createEmpty(sw, sh, GL_RGBA8);
         }
-        // Zero-copy: bind the IOSurface directly as the GL texture backing.
-        CGLContextObj cgl_ctx = CGLGetCurrentContext();
-        glBindTexture(GL_TEXTURE_2D, m_texture.id());
-        CGLTexImageIOSurface2D(cgl_ctx, GL_TEXTURE_2D, GL_RGBA8,
-                               sw, sh,
-                               GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV,
-                               surface, 0);
+        // CGLTexImageIOSurface2D only accepts RECTANGLE texture targets —
+        // against GL_TEXTURE_2D it fails silently and the layer stays
+        // black forever ("capture started but nothing shows"). Locked CPU
+        // upload instead: BGRA/REV matches the surface's native packing.
+        if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, nullptr) == kIOReturnSuccess) {
+            const void* base = IOSurfaceGetBaseAddress(surface);
+            size_t rowBytes = IOSurfaceGetBytesPerRow(surface);
+            glBindTexture(GL_TEXTURE_2D, m_texture.id());
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(rowBytes / 4));
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, sw, sh,
+                            GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, base);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
+            if (!m_loggedFirstFrame) {
+                m_loggedFirstFrame = true;
+                std::cout << "[WindowCapture] first frame on screen: "
+                          << sw << "x" << sh << std::endl;
+            }
+        }
     }
 
     IOSurfaceDecrementUseCount(surface);

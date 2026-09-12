@@ -2,7 +2,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 
-glm::mat3 Layer::getTransformMatrix() const {
+glm::mat3 Layer::getTransformMatrix(float canvasAspect) const {
     float rad = glm::radians(rotation);
     float c = std::cos(rad);
     float s = std::sin(rad);
@@ -15,10 +15,22 @@ glm::mat3 Layer::getTransformMatrix() const {
     m[0][0] = scale.x * (flipH ? -1.0f : 1.0f);
     m[1][1] = scale.y * (flipV ? -1.0f : 1.0f);
 
-    // Rotate
+    // Rotate. Normalized canvas space is ANISOTROPIC on a non-square
+    // canvas (an x-unit spans `aspect` times the physical distance of a
+    // y-unit), and a rotation applied there SHEARS — rotated content
+    // visibly skews and loses its proportions. Conjugating the rotation
+    // through the aspect (stretch to physically-square space, rotate,
+    // stretch back) keeps the turn true at every angle, while position
+    // and scale keep their normalized meaning exactly as before.
     glm::mat3 rot(1.0f);
     rot[0][0] = c;  rot[1][0] = -s;
     rot[0][1] = s;  rot[1][1] = c;
+    if (canvasAspect > 0.0f && canvasAspect != 1.0f) {
+        glm::mat3 A(1.0f), Ai(1.0f);
+        A[0][0]  = canvasAspect;
+        Ai[0][0] = 1.0f / canvasAspect;
+        rot = Ai * rot * A;
+    }
     m = rot * m;
 
     // Translate: position + anchor compensation

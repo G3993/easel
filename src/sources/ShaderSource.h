@@ -120,7 +120,12 @@ public:
     // compiled program. update() lazily rebuilds the FBO storage.
     void suspend() override;
 
-    GLuint textureId() const override { return m_initialized ? m_fbo.textureId() : 0; }
+    // The MOTION kit's post pass (drift/spin/breath/sway) writes to a second
+    // FBO; when it ran this frame the composite reads that instead.
+    GLuint textureId() const override {
+        if (!m_initialized) return 0;
+        return m_motionActive ? m_motionFbo.textureId() : m_fbo.textureId();
+    }
     bool isInitialized() const { return m_initialized; }
     int width() const override { return m_width; }
     int height() const override { return m_height; }
@@ -203,6 +208,25 @@ private:
     bool m_suspended = false;   // FBOs dropped by suspend(); update() revives
     int m_frameIndex = 0;
     float m_lastTime = 0;
+
+    // ── MOTION kit (host-side, every shader) ──────────────────────────
+    // TIME is an integrated clock: m_clock += dt * motionClock, so turning
+    // the Speed knob never jumps the phase the way scaling wall-clock would.
+    // Drift/Spin/Breath/Sway are a post pass over the finished frame.
+    float m_clock = 0.0f, m_clockDelta = 0.0f;
+    bool  m_clockInit = false;
+    Framebuffer m_motionFbo;
+    bool  m_motionActive = false;
+    bool  m_paused = false;
+public:
+    // Deck transport: paused freezes the shader's clock (TIME stops, no
+    // TIMEDELTA) — persistent sims hold still, the frame keeps rendering.
+    void setPaused(bool p) { m_paused = p; }
+    bool isPaused() const { return m_paused; }
+private:
+    float kitValue(const char* name, float fallback) const;
+    void  renderMotionPass();
+    void  appendMotionKitInputs();
 
     // ISF metadata
     std::string m_description;
