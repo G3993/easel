@@ -118,13 +118,13 @@ public:
     // live on a still-present device this is a no-op.
     void notifyDevicesChanged() { m_captureFailed = false; }
 
-    // Opt-in gate for macOS ScreenCaptureKit system-audio capture. macOS
-    // triggers a "Screen Recording" TCC prompt the first time SCShareableContent
-    // is called; for self-signed dev builds the grant is keyed to the binary's
-    // cdhash and evaporates on every rebuild, so the prompt fires repeatedly.
-    // Gating the call behind an explicit opt-in means the prompt only appears
-    // when the user actually picks System Audio / starts recording, not on
-    // every app launch.
+    // Opt-in gate for macOS system-audio capture. The backend is a Core Audio
+    // process tap (macOS 14.2+, "System Audio Recording Only" grant) with
+    // ScreenCaptureKit as fallback; either one prompts for a TCC grant the
+    // first time, and for self-signed dev builds the grant is keyed to the
+    // binary's cdhash and evaporates on every rebuild. Gating behind an
+    // explicit opt-in means the prompt only appears when the user actually
+    // picks System Audio / starts recording, not on every app launch.
     void setWantsSystemAudio(bool v) { m_wantsSystemAudio = v; }
     bool wantsSystemAudio() const    { return m_wantsSystemAudio; }
 

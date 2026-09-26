@@ -1,3 +1,4 @@
+#include <iostream>
 #include "ui/ViewportPanel.h"
 #include "ui/UIManager.h"
 #include "ui/ParamRow.h"
@@ -2026,6 +2027,8 @@ void ViewportPanel::renderNavBar(bool stageActive,
             bool hov     = ImGui::IsItemHovered();
             ImGui::PopID();
             if (clicked) {
+                std::cerr << "[Nav] tab " << i << " (" << labels[i] << ") clicked; gallery=" << UIManager::sGalleryOpen
+                          << " show=" << UIManager::sShowOpen << std::endl;
                 if (i == 3) {
                     UIManager::sGalleryOpen = !UIManager::sGalleryOpen;
                     UIManager::sShowOpen = false;

@@ -5,6 +5,9 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #import  <AVFoundation/AVFoundation.h>   // AVCaptureDevice — microphone TCC grant
+#import  <CoreAudio/CATapDescription.h>    // Core Audio process tap (macOS 14.2+)
+#import  <CoreAudio/AudioHardwareTapping.h>
+#include <unistd.h>
 #include <iostream>
 #include <mutex>
 #include <vector>
@@ -64,6 +67,11 @@ struct MacAudioState {
     // CoreAudio AudioUnit (microphone input)
     AudioComponentInstance audioUnit = nullptr;
 
+    // Core Audio process tap (system audio loopback, preferred backend)
+    AudioObjectID tapID = kAudioObjectUnknown;
+    AudioObjectID aggID = kAudioObjectUnknown;
+    AudioDeviceIOProcID tapProc = nullptr;
+
     // Shared buffer
     std::mutex bufferMutex;
     std::vector<float> sampleBuffer;
@@ -112,6 +120,149 @@ static OSStatus audioInputCallback(void* inRefCon,
     }
 
     return noErr;
+}
+
+// ─── Core Audio process tap (system audio loopback) ─────────────
+//
+// Why not ScreenCaptureKit: ANY SCStream — even a 2x2 audio-only one — makes
+// the Window Server draw the screen-capture privacy dot at the top-right of
+// EVERY display, at a window level nothing can cover. On stage that dot sits
+// on the projector image. A Core Audio process tap (macOS 14.2+) delivers the
+// same system mix without touching the screen-capture path, so no dot. It is
+// gated by the "System Audio Recording Only" privacy grant, which macOS
+// prompts for on first use (NSAudioCaptureUsageDescription in Info.plist).
+// SCK remains as a fallback for when the tap can't be created.
+
+static OSStatus systemTapIOProc(AudioObjectID, const AudioTimeStamp*,
+                                const AudioBufferList* inInputData, const AudioTimeStamp*,
+                                AudioBufferList*, const AudioTimeStamp*, void* clientData) {
+    auto* state = (MacAudioState*)clientData;
+    if (!state || !inInputData || inInputData->mNumberBuffers == 0) return noErr;
+
+    const AudioBuffer& b0 = inInputData->mBuffers[0];
+    const float* data = (const float*)b0.mData;
+    int ch = (int)b0.mNumberChannels;
+    if (ch < 1) ch = 1;
+    int frames = (int)(b0.mDataByteSize / sizeof(float)) / ch;
+    if (!data || frames <= 0) return noErr;
+
+    std::lock_guard<std::mutex> lock(state->bufferMutex);
+    if (ch >= 2 || inInputData->mNumberBuffers == 1) {
+        // interleaved (the stereo tap's normal layout) → mono mix, same as
+        // the SCK delegate produced
+        for (int i = 0; i < frames; i++) {
+            float mono = 0.0f;
+            for (int c = 0; c < ch; c++) mono += data[i * ch + c];
+            state->sampleBuffer.push_back(mono / ch);
+        }
+    } else {
+        // planar: one mono buffer per channel → average the buffers
+        int nb = (int)inInputData->mNumberBuffers;
+        for (int i = 0; i < frames; i++) {
+            float mono = 0.0f; int cnt = 0;
+            for (int bi = 0; bi < nb; bi++) {
+                const AudioBuffer& b = inInputData->mBuffers[bi];
+                const float* d = (const float*)b.mData;
+                if (d && (int)(b.mDataByteSize / sizeof(float)) > i) { mono += d[i]; cnt++; }
+            }
+            state->sampleBuffer.push_back(cnt ? mono / cnt : 0.0f);
+        }
+    }
+    return noErr;
+}
+
+static void stopSystemAudioTap(MacAudioState* state) {
+    if (!state) return;
+    if (state->aggID == kAudioObjectUnknown && state->tapID == kAudioObjectUnknown) return;
+    OSStatus s1 = noErr, s2 = noErr, s3 = noErr, s4 = noErr;
+    if (state->aggID != kAudioObjectUnknown) {
+        if (state->tapProc) {
+            s1 = AudioDeviceStop(state->aggID, state->tapProc);
+            s2 = AudioDeviceDestroyIOProcID(state->aggID, state->tapProc);
+            state->tapProc = nullptr;
+        }
+        s3 = AudioHardwareDestroyAggregateDevice(state->aggID);
+        state->aggID = kAudioObjectUnknown;
+    }
+    if (state->tapID != kAudioObjectUnknown) {
+        if (@available(macOS 14.2, *)) s4 = AudioHardwareDestroyProcessTap(state->tapID);
+        state->tapID = kAudioObjectUnknown;
+    }
+    std::cout << "[AudioAnalyzer] system audio tap stopped (stop=" << (int)s1
+              << " destroyProc=" << (int)s2 << " destroyAgg=" << (int)s3
+              << " destroyTap=" << (int)s4 << ")" << std::endl;
+}
+
+// Returns true with *outRate set when the tap is live and delivering.
+static bool startSystemAudioTap(MacAudioState* state, double* outRate) {
+    if (@available(macOS 14.2, *)) {
+        @autoreleasepool {
+            CATapDescription* desc =
+                [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
+            desc.name = @"EaselSystemTap";
+            desc.privateTap = YES;
+            desc.muteBehavior = CATapUnmuted;   // listen only — never alter playback
+
+            AudioObjectID tapID = kAudioObjectUnknown;
+            OSStatus err = AudioHardwareCreateProcessTap(desc, &tapID);
+            if (err != noErr || tapID == kAudioObjectUnknown) {
+                std::cerr << "[AudioAnalyzer] process tap create failed (" << (int)err
+                          << ") — check System Settings > Privacy & Security > "
+                             "Screen & System Audio Recording" << std::endl;
+                return false;
+            }
+            state->tapID = tapID;
+
+            NSDictionary* aggDesc = @{
+                @(kAudioAggregateDeviceNameKey): @"Easel Tap Aggregate",
+                @(kAudioAggregateDeviceUIDKey):
+                    [NSString stringWithFormat:@"com.etherealmachine.easel.tapagg.%d", getpid()],
+                @(kAudioAggregateDeviceIsPrivateKey): @YES,
+                @(kAudioAggregateDeviceTapAutoStartKey): @YES,
+                @(kAudioAggregateDeviceTapListKey): @[@{
+                    @(kAudioSubTapUIDKey): desc.UUID.UUIDString,
+                    @(kAudioSubTapDriftCompensationKey): @YES,
+                }],
+            };
+            AudioObjectID aggID = kAudioObjectUnknown;
+            err = AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggDesc, &aggID);
+            if (err != noErr || aggID == kAudioObjectUnknown) {
+                std::cerr << "[AudioAnalyzer] tap aggregate device failed (" << (int)err << ")" << std::endl;
+                stopSystemAudioTap(state);
+                return false;
+            }
+            state->aggID = aggID;
+
+            Float64 rate = 48000;
+            {
+                AudioObjectPropertyAddress addr = {kAudioDevicePropertyNominalSampleRate,
+                                                   kAudioObjectPropertyScopeGlobal,
+                                                   kAudioObjectPropertyElementMain};
+                UInt32 sz = sizeof(rate);
+                if (AudioObjectGetPropertyData(aggID, &addr, 0, nullptr, &sz, &rate) != noErr || rate <= 0)
+                    rate = 48000;
+            }
+
+            AudioDeviceIOProcID procID = nullptr;
+            err = AudioDeviceCreateIOProcID(aggID, systemTapIOProc, state, &procID);
+            if (err != noErr || !procID) {
+                std::cerr << "[AudioAnalyzer] tap IOProc create failed (" << (int)err << ")" << std::endl;
+                stopSystemAudioTap(state);
+                return false;
+            }
+            state->tapProc = procID;
+
+            err = AudioDeviceStart(aggID, procID);
+            if (err != noErr) {
+                std::cerr << "[AudioAnalyzer] tap device start failed (" << (int)err << ")" << std::endl;
+                stopSystemAudioTap(state);
+                return false;
+            }
+            if (outRate) *outRate = rate;
+            return true;
+        }
+    }
+    return false;
 }
 
 // ─── Helper: find AudioDeviceID from UID string ─────────────────
@@ -288,6 +439,22 @@ void AudioAnalyzer::initCapture() {
         return;
     }
 
+    // Preferred: Core Audio process tap — no screen-capture privacy dot on
+    // the projectors (see systemTapIOProc above).
+    {
+        double tapRate = 48000;
+        if (startSystemAudioTap(state, &tapRate)) {
+            m_initialized = true;
+            m_sampleRate = (int)tapRate;
+            m_channels = 2;
+            std::cout << "[AudioAnalyzer] system audio via Core Audio process tap ("
+                      << m_sampleRate << "Hz stereo -> mono)" << std::endl;
+            return;
+        }
+        std::cerr << "[AudioAnalyzer] process tap unavailable — falling back to "
+                     "ScreenCaptureKit (macOS will show the screen-capture dot)" << std::endl;
+    }
+
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block bool success = false;
 
@@ -359,6 +526,9 @@ void AudioAnalyzer::initCapture() {
 void AudioAnalyzer::cleanupCapture() {
     if (m_macAudioImpl) {
         auto* state = (MacAudioState*)m_macAudioImpl;
+        // Tap teardown is synchronous: after AudioDeviceDestroyIOProcID the
+        // IOProc can no longer run, so deleting `state` below is safe.
+        stopSystemAudioTap(state);
         if (state->audioUnit) {
             AudioOutputUnitStop(state->audioUnit);
             AudioUnitUninitialize(state->audioUnit);

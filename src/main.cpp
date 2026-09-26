@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <string>
 
 // Request high-performance GPU on dual-GPU systems (NVIDIA Optimus / AMD Switchable)
 extern "C" {
@@ -12,6 +13,19 @@ extern "C" {
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     // Attach to parent console if launched from terminal
     AttachConsole(ATTACH_PARENT_PROCESS);
+
+    // Run relative to the exe so "shaders/", "assets/", default.easel and the
+    // bundled ShaderClaw3 library resolve wherever the folder was unzipped
+    // (portable install: no installer, no internet, no fixed path).
+    {
+        char exePath[MAX_PATH];
+        DWORD n = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::string dir(exePath, n);
+            size_t slash = dir.find_last_of("\\/");
+            if (slash != std::string::npos) SetCurrentDirectoryA(dir.substr(0, slash).c_str());
+        }
+    }
 
     Application app;
     if (!app.init()) return 1;

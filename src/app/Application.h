@@ -151,7 +151,14 @@ private:
     bool m_voiceBarOpen = true;                // command bar visibility
     std::string m_voicePartial;                // streaming partial transcript while listening
     bool m_voiceListening = false;             // mic gate (push-to-talk)
-    bool m_voiceContinuous = true;             // when true, mic stays on; auto-restart after every final
+    // Continuous mic: when true the recognizer stays on and auto-restarts
+    // after every final. OFF by default and remembered in
+    // ~/.easel/show_settings.json ("voiceMic"): an open mic makes macOS draw
+    // its orange privacy dot on EVERY display — projectors included, above
+    // everything — so the mic is opt-in, not something every launch opens.
+    bool m_voiceContinuous = false;
+    bool m_voicePrefLoaded = false;
+    void setVoiceContinuous(bool on);          // toggle + start/stop + persist
     bool m_voiceRestartPending = false;        // set in onFinal; main loop tears down + restarts
     double m_voiceStartRetryAt = 0.0;          // continuous-mic start backoff (async engine start)
 #ifdef __APPLE__
@@ -681,6 +688,10 @@ private:
 #endif
 
     int m_selectedAudioDevice = -1; // -1 = default loopback
+
+    // Sentinel for m_selectedAudioDevice: no capture at all (-1 = system loopback)
+
+    static constexpr int kAudioInputOff = -2;
 
     // Top-edge screen pos of the transport-pill mic button, captured each
     // frame so ##fp_sound_popup can anchor itself ABOVE the pill (the pill

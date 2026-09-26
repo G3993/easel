@@ -35,3 +35,4 @@ default.easel.bak.*
 smithers.db
 smithers.db-shm
 smithers.db-wal
+.claude/worktrees/

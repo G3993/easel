@@ -1238,6 +1238,31 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         // shared with FluidSource via AudioBinding::follow(). [rangeMin,
         // rangeMax] IS the effective depth/strength (default rangeMin=paramMin,
         // rangeMax=paramMax preserves the original 1:1 mapping).
+        // MIDI as an endless knob: the CC's movement (not its position) drives
+        // the parameter. First sample only records where the knob is; from
+        // then on each turn adds the delta to a target that starts at the
+        // parameter's current value. Full pot travel = full range.
+        if (binding.signal == AudioSignal::MidiCC) {
+            float cur01 = 0.5f;
+            for (auto& input : m_inputs)
+                if (input.name == paramName && (input.type == "float" || input.type == "long")) {
+                    float cv = std::holds_alternative<float>(input.value) ? std::get<float>(input.value) : input.minVal;
+                    float span = binding.rangeMax - binding.rangeMin;
+                    cur01 = std::fabs(span) > 1e-6f ? (cv - binding.rangeMin) / span : 0.5f;
+                    break;
+                }
+            if (binding.ccTarget01 < 0.0f) {
+                binding.ccTarget01 = cur01;
+                binding.ccLastRaw = raw;
+                binding.smoothedValue = cur01; binding.hasSmoothed = true;
+                continue;
+            }
+            float delta = raw - binding.ccLastRaw;
+            binding.ccLastRaw = raw;
+            if (std::fabs(delta) > 0.0f)
+                binding.ccTarget01 = std::max(0.0f, std::min(1.0f, binding.ccTarget01 + delta));
+            raw = binding.ccTarget01;   // the follower glides toward the target
+        }
         float mapped = binding.follow(raw, dt);
 
         // Find the input and set its value

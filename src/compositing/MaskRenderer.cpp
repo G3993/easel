@@ -123,8 +123,12 @@ void MaskRenderer::featherPass(Texture& tex, int width, int height, float feathe
     glBindFramebuffer(GL_FRAMEBUFFER, m_blurFbo);
     glViewport(0, 0, width, height);
     float ax = (aspect > 0.01f) ? 1.0f / aspect : 1.0f;
-    const float scales[2] = {1.0f, 0.6f};
-    for (float sc : scales) {
+    // Feathers past the old 0.15 cap space the 29 taps far enough apart that
+    // two passes alone leave faint terracing; a third, tighter pass smooths it.
+    const float scales[3] = {1.0f, 0.6f, 0.35f};
+    const int   nScales   = (feather > 0.2f) ? 3 : 2;
+    for (int si = 0; si < nScales; si++) {
+        float sc = scales[si];
         float r = feather * sc;
         // horizontal: tex -> scratch
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_blurScratch.id(), 0);

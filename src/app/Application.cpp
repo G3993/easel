@@ -139,6 +139,10 @@ extern "C" void macFullscreenDockPeek(bool peek);
 extern "C" void macInstallActivationHooks(void* nsWindow);
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
+
+// ~/.easel/show_settings.json helpers (defined next to deckXfadeCC below)
+static nlohmann::json easelPrefsLoad();
+static void easelPrefsSet(const char* key, const nlohmann::json& v);
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
 
@@ -565,8 +569,13 @@ bool Application::init() {
         const char* home = getenv("HOME");
 #endif
         if (home) {
+            // The portable package ships the shader library next to the
+            // executable (Windows) / inside Resources (mac bundle). Windows
+            // prefers it; mac prefers the live ~/ShaderClaw3 dev library.
+            const std::string bundled = (std::filesystem::current_path() / "ShaderClaw3" / "shaders").string();
             std::string candidates[] = {
 #ifdef _WIN32
+                bundled,
                 std::string(home) + "\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                 std::string(home) + "\\Documents\\ShaderClaw\\shaders",
@@ -575,6 +584,7 @@ bool Application::init() {
                 std::string(home) + "/Documents/ShaderClaw3/shaders",
                 std::string(home) + "/Documents/ShaderClaw/shaders",
                 std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
+                bundled,
 #endif
             };
             for (const auto& path : candidates) {
@@ -902,7 +912,16 @@ void Application::run() {
                 }
                 // m_audioDevices is only populated when FFmpeg is available
                 // (see Application.h — lives in the HAS_FFMPEG block).
-                if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
+                if (m_selectedAudioDevice == kAudioInputOff) {
+                    // "Off": no capture at all. macOS draws its orange
+                    // privacy dot on EVERY display (projectors included, at a
+                    // level nothing can cover) whenever a process listens to
+                    // audio — mic, interface line-in or system tap alike.
+                    // Programmed shows that don't need reactivity run
+                    // dot-free with this.
+                    m_audioAnalyzer.setDeviceId("", false);
+                    m_audioAnalyzer.setWantsSystemAudio(false);
+                } else if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
                     bool isCapture = m_audioDevices[m_selectedAudioDevice].isCapture;
                     m_audioAnalyzer.setDeviceId(m_audioDevices[m_selectedAudioDevice].id,
                                                 isCapture);
@@ -1321,6 +1340,10 @@ void Application::run() {
         //      we tear down and restart for the next utterance.
         //   2) Mic isn't running yet (initial boot before TCC granted, or
         //      a manual stop) — try to start once permission is available.
+        if (!m_voicePrefLoaded) {
+            m_voicePrefLoaded = true;
+            m_voiceContinuous = easelPrefsLoad().value("voiceMic", false);
+        }
         if (m_voiceContinuous) {
             if (m_voiceRestartPending && m_voiceListening) {
                 m_voiceRestartPending = false;
@@ -1764,6 +1787,8 @@ void Application::refreshAudioDevicesIfChanged() {
             m_pendingAudioDeviceUID = curUID;
             m_selectedAudioDevice = -1;
         }
+    } else if (m_selectedAudioDevice == kAudioInputOff) {
+        // Off is a deliberate choice — never auto-restore a device over it.
     } else if (!m_pendingAudioDeviceUID.empty()) {
         int idx = findByUID(m_pendingAudioDeviceUID);
         if (idx >= 0) {
@@ -4022,6 +4047,9 @@ void Application::renderUI() {
                     m_selectedAudioDevice = -1;
                     std::cout << "[OSC] audio device -> System Audio (loopback)"
                               << std::endl;
+                } else if (wantLower == "off" || wantLower == "none") {
+                    m_selectedAudioDevice = kAudioInputOff;
+                    std::cout << "[OSC] audio device -> Off (no capture)" << std::endl;
                 } else {
                     if (m_audioDevices.empty())
                         m_audioDevices = VideoRecorder::enumerateAudioDevices();
@@ -5014,12 +5042,13 @@ void Application::renderUI() {
                 }
                 ImGui::PopStyleColor(2);
 
-                // Feather + Invert inline (when active)
-                if (isActive) {
-                    ImGui::SetNextItemWidth(-1);
-                    ImGui::SliderFloat("Feather##cmf", &mask.feather, 0.0f, 0.15f, "%.3f");
-                    ImGui::Checkbox("Invert##cmi", &mask.invert);
-                }
+                // Feather + Invert inline — always reachable, not only while
+                // the mask is being edited. Feather softens the drawn shape's
+                // edge (baked blur that follows the path), independent of the
+                // layer's canvas-edge Feather in the Property panel.
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("Feather##cmf", &mask.feather, 0.0f, 0.5f, "%.3f");
+                ImGui::Checkbox("Invert##cmi", &mask.invert);
 
                 ImGui::PopID();
             }
@@ -5122,6 +5151,12 @@ void Application::renderUI() {
                     goto masks_panel_done;
                 }
                 ImGui::PopStyleColor(2);
+
+                // Feather + Invert inline per mask (softens the mask shape's
+                // own edge; the canvas-edge Feather lives in Properties)
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("Feather##mf", &mask.feather, 0.0f, 0.5f, "%.3f");
+                ImGui::Checkbox("Invert##mi", &mask.invert);
                 ImGui::PopID();
             }
 
@@ -5158,12 +5193,6 @@ void Application::renderUI() {
                 ImGui::SameLine();
                 if (ImGui::Button("Star", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
                 ImGui::PopStyleColor(4);
-
-                // Feather + Invert controls (per-mask)
-                ImGui::Dummy(ImVec2(0, 3));
-                ImGui::SetNextItemWidth(-1);
-                ImGui::SliderFloat("Feather##mf", &mask.feather, 0.0f, 0.15f, "%.3f");
-                ImGui::Checkbox("Invert##mi", &mask.invert);
 
                 // Alignment tools (visible when 2+ points selected)
                 auto& selPts = m_viewportPanel.maskSelectedPoints();
@@ -5763,13 +5792,7 @@ void Application::renderUI() {
             tdl->AddCircleFilled(ImVec2(knobX, sp.y + switchH * 0.5f), knobR,
                                  IM_COL32(240, 244, 250, 255));
             if (clicked) {
-                m_voiceContinuous = !m_voiceContinuous;
-                if (m_voiceContinuous) {
-                    if (!m_voiceListening) startVoiceRecording();
-                } else {
-                    if (m_voiceListening) stopVoiceRecording();
-                    m_voiceRestartPending = false;
-                }
+                setVoiceContinuous(!m_voiceContinuous);
             }
             ImGui::Dummy(ImVec2(0, 14));
         }
@@ -5839,8 +5862,10 @@ void Application::renderUI() {
 #endif
                 if (home) {
                     // Try known ShaderClaw locations
+                    const std::string bundled = (std::filesystem::current_path() / "ShaderClaw3" / "shaders").string();
                     std::string candidates[] = {
 #ifdef _WIN32
+                        bundled,
                         std::string(home) + "\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw3\\shaders",
                         std::string(home) + "\\Documents\\ShaderClaw\\shaders",
@@ -5849,6 +5874,7 @@ void Application::renderUI() {
                         std::string(home) + "/ShaderClaw3/shaders",
                         std::string(home) + "/Documents/ShaderClaw3/shaders",
                         std::string(home) + "/conductor/workspaces/macbook-migration/doha/ShaderClaw3/shaders",
+                        bundled,
 #endif
                     };
                     for (const auto& tryPath : candidates) {
@@ -8198,6 +8224,8 @@ void Application::renderUI() {
         const char* currentName = "System Audio (loopback)";
         if (m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()) {
             currentName = m_audioDevices[m_selectedAudioDevice].name.c_str();
+        } else if (m_selectedAudioDevice == kAudioInputOff) {
+            currentName = "Off";
         }
 
         // Label-left + combo (taking remaining width minus refresh button) + Refresh.
@@ -8216,6 +8244,14 @@ void Application::renderUI() {
             if (ImGui::Selectable("System Audio (loopback)", m_selectedAudioDevice == -1)) {
                 m_selectedAudioDevice = -1;
             }
+            if (ImGui::Selectable("Off  (no capture — no macOS privacy dot)",
+                                  m_selectedAudioDevice == kAudioInputOff)) {
+                m_selectedAudioDevice = kAudioInputOff;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Releases every audio input. macOS shows an orange dot on\n"
+                                  "every display (projectors too) while any app listens to\n"
+                                  "audio; Off is the only way to run without it.");
             for (int i = 0; i < (int)m_audioDevices.size(); i++) {
                 const auto& d = m_audioDevices[i];
                 char label[256];
@@ -9778,13 +9814,7 @@ void Application::renderFloatingTransportPill() {
             if (m_voiceContinuous) lucide::mic   (dl, cx, cy, kGlyphSize, micCol);
             else                   lucide::micOff(dl, cx, cy, kGlyphSize, micCol);
         })) {
-            m_voiceContinuous = !m_voiceContinuous;
-            if (m_voiceContinuous) {
-                if (!m_voiceListening) startVoiceRecording();
-            } else {
-                if (m_voiceListening) stopVoiceRecording();
-                m_voiceRestartPending = false;
-            }
+            setVoiceContinuous(!m_voiceContinuous);
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(m_voiceListening
@@ -10474,13 +10504,7 @@ void Application::renderFloatingTransportPill() {
                     tdl->AddCircleFilled(ImVec2(knobX, sp.y + switchH * 0.5f), knobR,
                                          IM_COL32(240, 244, 250, 255));
                     if (clicked) {
-                        m_voiceContinuous = !m_voiceContinuous;
-                        if (m_voiceContinuous) {
-                            if (!m_voiceListening) startVoiceRecording();
-                        } else {
-                            if (m_voiceListening) stopVoiceRecording();
-                            m_voiceRestartPending = false;
-                        }
+                        setVoiceContinuous(!m_voiceContinuous);
                     }
                     ImGui::Dummy(ImVec2(0, 14));
                 }
@@ -18346,23 +18370,47 @@ void Application::deckTick(float dt) {
     if (m_showRunning || UIManager::sShowOpen) top->visible = true;
 }
 
+// ── ~/.easel/show_settings.json: small per-user prefs (crossfader CC, mic) ──
+static std::string easelPrefsPath() {
+    const char* home = getenv("HOME");
+    return std::string(home ? home : ".") + "/.easel/show_settings.json";
+}
+static nlohmann::json easelPrefsLoad() {
+    nlohmann::json j = nlohmann::json::object();
+    std::ifstream in(easelPrefsPath());
+    if (in.is_open()) { try { in >> j; } catch (...) { j = nlohmann::json::object(); } }
+    if (!j.is_object()) j = nlohmann::json::object();
+    return j;
+}
+static void easelPrefsSet(const char* key, const nlohmann::json& v) {
+    nlohmann::json j = easelPrefsLoad();
+    j[key] = v;
+    std::ofstream out(easelPrefsPath());
+    if (out.is_open()) out << j.dump(1);
+}
+
+void Application::setVoiceContinuous(bool on) {
+    m_voiceContinuous = on;
+    if (on) {
+        if (!m_voiceListening) startVoiceRecording();
+    } else {
+        if (m_voiceListening) stopVoiceRecording();
+        m_voiceRestartPending = false;
+    }
+    easelPrefsSet("voiceMic", on);
+}
+
 // ── crossfader CC: XL fader 8 unless learned; remembered in ~/.easel/show_settings.json
 int Application::deckXfadeCC() {
     if (!m_deckXfadeLoaded) {
         m_deckXfadeLoaded = true;
-        const char* home = getenv("HOME");
-        std::ifstream in(std::string(home ? home : ".") + "/.easel/show_settings.json");
-        if (in.is_open()) {
-            try { nlohmann::json j; in >> j; m_deckXfadeCC = j.value("xfadeCC", -1); } catch (...) {}
-        }
+        m_deckXfadeCC = easelPrefsLoad().value("xfadeCC", -1);
     }
     return m_deckXfadeCC >= 0 ? m_deckXfadeCC : lcxlBank(0)[7];
 }
 
 void Application::deckXfadeSave() {
-    const char* home = getenv("HOME");
-    std::ofstream out(std::string(home ? home : ".") + "/.easel/show_settings.json");
-    if (out.is_open()) out << nlohmann::json{{"xfadeCC", m_deckXfadeCC}}.dump(1);
+    easelPrefsSet("xfadeCC", m_deckXfadeCC);
 }
 
 // A gallery show is a timeline of clips, one layer per shader. While it
@@ -19449,6 +19497,7 @@ void Application::renderShowPanel() {
 void Application::renderShaderGallery() {
     static bool s_wasOpen = false;
     if (!UIManager::sGalleryOpen) { s_wasOpen = false; return; }
+    if (!s_wasOpen) std::cerr << "[Gallery] page opening" << std::endl;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
     // Start below the nav band: the workspace tabs stay clickable, so the

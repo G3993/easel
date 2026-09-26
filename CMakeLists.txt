@@ -551,6 +551,38 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )
 
+# Portable layout (Windows/Linux): everything the app loads relative to its
+# working directory lives next to the exe, so the build folder can be zipped
+# and run from any path with no installer. main.cpp chdirs to the exe dir.
+if(NOT APPLE)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>/resources
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/resources/icon.png $<TARGET_FILE_DIR:${PROJECT_NAME}>/resources/icon.png
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/default.easel $<TARGET_FILE_DIR:${PROJECT_NAME}>/default.easel
+    )
+endif()
+
+# Bundled ShaderClaw3 shader library (git submodule external/ShaderClaw3).
+# Application.cpp auto-connects to <cwd>/ShaderClaw3/shaders when no live
+# ~/ShaderClaw3 checkout exists (Windows prefers the bundled copy).
+set(EASEL_SC3_SHADERS "${CMAKE_SOURCE_DIR}/external/ShaderClaw3/shaders")
+if(EXISTS "${EASEL_SC3_SHADERS}/manifest.json")
+    if(APPLE)
+        set(EASEL_SC3_DEST "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Resources/ShaderClaw3/shaders")
+    else()
+        set(EASEL_SC3_DEST "$<TARGET_FILE_DIR:${PROJECT_NAME}>/ShaderClaw3/shaders")
+    endif()
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${EASEL_SC3_SHADERS}" "${EASEL_SC3_DEST}"
+        COMMENT "Bundling ShaderClaw3 shader library")
+else()
+    message(STATUS "external/ShaderClaw3 not checked out - shader library not bundled (git submodule update --init)")
+endif()
+
 # macOS: re-sign with the stable "Easel Dev" self-signed cert so the Mach-O
 # CDHash is identical across rebuilds. TCC grants (Screen Recording / Mic /
 # Camera) are keyed to CDHash, not path, so without this every rebuild looks

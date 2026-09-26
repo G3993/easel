@@ -650,18 +650,18 @@
   "version": 2,
   "zones": [
     {
-      "height": 1080,
+      "height": 2160,
       "mappingIndex": 0,
       "name": "Main",
-      "ndiStreamName": "",
-      "outputDest": 0,
+      "ndiStreamName": "Lu 4K",
+      "outputDest": 2,
       "outputMonitor": -1,
       "rawNdiName": false,
       "showAllLayers": false,
       "visibleLayerIds": [
         62
       ],
-      "width": 1920
+      "width": 3840
     },
     {
       "height": 1080,

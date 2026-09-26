@@ -3117,7 +3117,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     }
 
     // --- Feather (inside Tiling collapsible) ---
+    // "Feather" = the layer's canvas edge. "Mask Feather" = the edge of the
+    // mask shape(s) drawn on this layer — a baked blur that follows the path.
+    // One pill drives every mask on the layer; per-mask values live in
+    // Mapping > Masks.
     pillSlider("Feather", &layer->feather, 0.0f, 0.5f, "%.3f");
+    if (!layer->masks.empty()) {
+        float mf = layer->masks[0].feather;
+        if (pillSlider("Mask Feather", &mf, 0.0f, 0.5f, "%.3f"))
+            for (auto& m : layer->masks) m.feather = mf;
+    }
     } // end sectionHeader("Tiling")
     }; // end emitTilingSection
 

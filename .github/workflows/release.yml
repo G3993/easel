@@ -1,0 +1,90 @@
+name: Release
+
+# Builds the portable Windows package and attaches it to a GitHub Release.
+# Trigger manually (Actions → Release → Run workflow, tag = vYYYY.MM.DD) or
+# by pushing a v* tag. The macOS zip is built locally (needs the NDI dylib
+# and the "Easel Dev" signing identity) and attached with `gh release upload`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2026.09.26)"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows portable (MSVC x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true   # external/ShaderClaw3 = bundled shader library
+
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath external
+          Remove-Item ffmpeg.zip
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release -j --target Easel
+
+      - name: Package portable folder
+        shell: pwsh
+        run: |
+          $out = "package/Easel"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          # Everything the exe loads relative to itself is already in build/Release
+          # (CMake POST_BUILD: shaders/, assets/, resources/, default.easel,
+          # ShaderClaw3/shaders, FFmpeg DLLs).
+          Copy-Item build/Release/* -Destination $out -Recurse -Force
+          Get-ChildItem $out -Include *.pdb,*.lib,*.exp,*.ilk,*.manifest -Recurse | Remove-Item -Force
+          Get-ChildItem $out -Filter "test_*.exe" | Remove-Item -Force
+
+          # App-local Visual C++ runtime so a fresh, offline PC needs no redistributable install.
+          $vc = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Directory |
+                Where-Object { Test-Path "$($_.FullName)\x64\Microsoft.VC143.CRT" } |
+                Sort-Object Name -Descending | Select-Object -First 1
+          if ($vc) {
+            Copy-Item "$($vc.FullName)\x64\Microsoft.VC143.CRT\*.dll" $out -Force
+            $redistExe = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" -Recurse -Filter vc_redist.x64.exe | Select-Object -First 1
+            if ($redistExe) { Copy-Item $redistExe.FullName "$out\vc_redist.x64.exe" -Force }
+            Write-Host "VC runtime from $($vc.Name)"
+          } else {
+            Write-Warning "VC143 CRT redist folder not found - package will need vc_redist installed"
+          }
+
+          Copy-Item packaging/windows/README.txt $out -Force
+          Get-ChildItem $out | Format-Table Name, Length
+          Compress-Archive -Path $out -DestinationPath Easel-windows-x64.zip -Force
+          (Get-Item Easel-windows-x64.zip).Length / 1MB
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Easel-windows-x64
+          path: Easel-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Attach to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "Easel $tag" --notes "Portable builds. Windows: unzip, run Easel.exe (see README.txt inside)."
+          }
+          gh release upload $tag Easel-windows-x64.zip --clobber

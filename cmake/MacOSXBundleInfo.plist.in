@@ -30,6 +30,8 @@
     <string>NSApplication</string>
     <key>NSCameraUsageDescription</key>
     <string>Easel uses the camera for webcam-based projector calibration scanning.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Easel listens to the system audio mix to drive audio-reactive visuals. Only audio is captured, never the screen.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Easel captures audio to drive audio-reactive shaders and effects, and to listen for voice commands when you hold the mic.</string>
     <key>NSSpeechRecognitionUsageDescription</key>

@@ -54,6 +54,15 @@ struct AudioBinding {
     // MIDI fields (used when signal == MidiCC)
     int midiCC = -1;        // CC number 0-127, -1 = unassigned
     int midiChannel = -1;   // MIDI channel 0-15, -1 = any
+    // Soft takeover: a knob that sits somewhere else than the parameter must
+    // first reach the parameter's position before it takes it — no jump on
+    // the first touch after a (re)map. ccLastRaw = previous CC sample.
+    bool  ccPickedUp = false;
+    float ccLastRaw  = -1.0f;
+    // Endless-knob mode: the CC is read as MOTION. Each change nudges a
+    // target position from wherever the parameter is, so a knob never jumps
+    // and its physical position is irrelevant. ccTarget01 = that position.
+    float ccTarget01 = -1.0f;
 
     // Shared EaselAudio conditioning block (gate→attack→hold→release→
     // hard-change→character→remap→micro-slew). The legacy smoothing slider
@@ -80,7 +89,7 @@ struct AudioBinding {
             float s = smoothing;
             if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
             if (!hasSmoothed) { smoothedValue = raw; hasSmoothed = true; }
-            float tau = s * 0.06f;
+            float tau = s * 0.13f;
             float a = (tau > 1e-4f) ? (1.0f - std::exp(-dt / tau)) : 1.0f;
             smoothedValue += (raw - smoothedValue) * a;
             return rangeMin + smoothedValue * (rangeMax - rangeMin);
