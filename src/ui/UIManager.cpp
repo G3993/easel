@@ -19,6 +19,7 @@
 
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 bool UIManager::sGalleryOpen = false;
+bool UIManager::sShowDarkMode = true;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
 double UIManager::sModeTransitionStart = -1.0;
 

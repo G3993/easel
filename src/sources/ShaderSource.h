@@ -75,6 +75,10 @@ struct ISFPass {
     std::string target;     // buffer name, empty for final pass
     bool persistent = false;
     int simWidth = 0, simHeight = 0; // downscaled size for simulation passes
+    // ISF per-pass WIDTH/HEIGHT expressions (e.g. "1024", "$HEIGHT/2",
+    // "floor($simRes*$HEIGHT/$WIDTH)"). Empty = canvas size.
+    std::string widthExpr, heightExpr;
+    bool floatTarget = false;   // ISF "FLOAT": true -> RGBA32F buffers
     std::unique_ptr<PingPongFBO> ppFBO; // only for passes with a target
 };
 
@@ -222,6 +226,11 @@ private:
 
     // Create ping-pong FBOs for multi-pass
     void createPassFBOs();
+    // Resolve a pass's buffer size from its WIDTH/HEIGHT expressions (or the
+    // canvas-size default), and re-allocate any pass whose size changed.
+    void passSize(const ISFPass& pass, int& pw, int& ph) const;
+    float evalSizeExpr(const std::string& expr, float fallback) const;
+    void refreshPassSizes();
 
     // Translate ISF GLSL to OpenGL 3.3 core
     std::string translateFragment(const std::string& isfBody);

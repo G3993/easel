@@ -67,6 +67,16 @@ public:
     // main thread applies it in pollEvents().
     void markSetupChanged() { m_setupChanged = true; }
     void handleHotplug();
+    // True when a Novation Launch Control XL 3 ("LCXL3 ...") is among the
+    // connected inputs. Its factory CC layout differs from the original XL's
+    // (knobs 13-36, faders 5-12), so ShowDeck/Canvas pick their default CC
+    // tables from this. Main thread only (reads the hot-plug device list).
+    bool isLaunchControlXL3() const {
+        for (const auto& n : m_lastDeviceNames)
+            if (n.find("LCXL3") != std::string::npos || n.find("Launch Control XL 3") != std::string::npos)
+                return true;
+        return false;
+    }
 
     // Poll events (call from main thread)
     std::vector<MIDIEvent> pollEvents();
@@ -128,7 +138,17 @@ public:
 
 private:
 #ifdef _WIN32
-    HMIDIIN m_midiIn = nullptr;
+    // One handle per opened device — "All devices" (kAllDevices) opens every
+    // enumerated input and pushes all of them here, since Win32 has no
+    // native "open all" device id (unlike CoreMIDI's virtual "all sources").
+    // Single-device mode just ends up with one entry.
+    std::vector<HMIDIIN> m_midiIns;
+    std::vector<int> m_midiInIds;          // device id of each m_midiIns entry
+    // "All devices" mode: ports that failed to open (typically a controller
+    // that was just plugged in and whose driver/midisrv endpoint isn't ready
+    // yet) are retried on this timer instead of being given up on forever.
+    ULONGLONG m_nextRetryMs = 0;
+    bool openPort(int id);
     static void CALLBACK midiCallback(HMIDIIN hMidiIn, UINT wMsg, DWORD_PTR dwInstance,
                                        DWORD_PTR dwParam1, DWORD_PTR dwParam2);
 #endif
@@ -140,6 +160,10 @@ private:
     std::string m_deviceName;              // single-device mode: re-resolve by name after hot-plug
     std::atomic<bool> m_setupChanged{false};
     int m_lastSourceCount = -1;            // fallback hot-plug detection (poll)
+    // Windows hot-plug detection: the full device name list as of the last
+    // handleHotplug() call. Compared (not just counted) so swapping one
+    // controller for another of the same total count still gets noticed.
+    std::vector<std::string> m_lastDeviceNames;
 
     mutable std::mutex m_eventMutex;
     std::vector<MIDIEvent> m_pendingEvents;

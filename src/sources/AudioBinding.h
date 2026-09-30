@@ -51,6 +51,39 @@ struct AudioBinding {
     // across knob re-scales so only a true enable restarts the ramp.
     float rampAge  = 0.0f;
     float rampTime = 4.0f;
+    // Response curve (cubic bezier from (0,0) to (1,1), control points P1/P2).
+    // x = conditioned audio level (how much the selected signal is hitting),
+    // y = fraction of the parameter's range that level produces. Linear
+    // (the default) is the identity, i.e. exactly the legacy behavior; the
+    // curve only applies once the user edits it (curveOn). Audio signals only.
+    bool  curveOn = false;
+    // Per-parameter input trim and decay speed (audio signals only). Both are
+    // 1.0 = the legacy behavior. gain scales the raw signal before conditioning;
+    // fall scales the release rate (>1 = drops back to 0 faster, so the
+    // parameter pops up and down quicker; <1 = lingers).
+    float gain = 1.0f;
+    float fall = 1.0f;
+    float lastRaw = 0.0f;   // gained raw level of the last sample (for UI meters)
+    float curveP1x = 0.33f, curveP1y = 0.33f;
+    float curveP2x = 0.66f, curveP2y = 0.66f;
+    void resetCurve() { curveOn = false; curveP1x = 0.33f; curveP1y = 0.33f; curveP2x = 0.66f; curveP2y = 0.66f; }
+    // Map x in [0,1] through the bezier (solve t for B_x(t)=x by bisection).
+    float shape(float x) const {
+        if (x <= 0.0f) return 0.0f;
+        if (x >= 1.0f) return 1.0f;
+        float x1 = curveP1x < 0.0f ? 0.0f : (curveP1x > 1.0f ? 1.0f : curveP1x);
+        float x2 = curveP2x < 0.0f ? 0.0f : (curveP2x > 1.0f ? 1.0f : curveP2x);
+        float lo = 0.0f, hi = 1.0f, t = x;
+        for (int i = 0; i < 20; i++) {
+            t = 0.5f * (lo + hi);
+            float u = 1.0f - t;
+            float bx = 3.0f * u * u * t * x1 + 3.0f * u * t * t * x2 + t * t * t;
+            if (bx < x) lo = t; else hi = t;
+        }
+        float u = 1.0f - t;
+        float by = 3.0f * u * u * t * curveP1y + 3.0f * u * t * t * curveP2y + t * t * t;
+        return by < 0.0f ? 0.0f : (by > 1.0f ? 1.0f : by);
+    }
     // MIDI fields (used when signal == MidiCC)
     int midiCC = -1;        // CC number 0-127, -1 = unassigned
     int midiChannel = -1;   // MIDI channel 0-15, -1 = any
@@ -86,6 +119,10 @@ struct AudioBinding {
             return rangeMin + smoothedValue * (rangeMax - rangeMin);
         }
 
+        raw *= gain;
+        if (raw > 1.0f) raw = 1.0f; else if (raw < 0.0f) raw = 0.0f;
+        lastRaw = raw;
+
         // Legacy smoothing-slider → rate mapping (fast ends roughly halved
         // vs the original 28/14 so even a snappy binding glides rather than
         // strobes — the "way too fast" fix). Unchanged math, now expressed
@@ -95,13 +132,14 @@ struct AudioBinding {
         float s = smoothing;
         if (s < 0.0f) s = 0.0f; else if (s > 1.0f) s = 1.0f;
         cond.p.setRates(kAttackFast  + (kAttackSlow  - kAttackFast)  * s,
-                        kReleaseFast + (kReleaseSlow - kReleaseFast) * s);
+                        (kReleaseFast + (kReleaseSlow - kReleaseFast) * s) * fall);
         cond.p.character = character;
 
         if (!hasSmoothed) { cond.reset(); hasSmoothed = true; }
         smoothedValue = cond.process(raw, dt);
 
-        float out = rangeMin + smoothedValue * (rangeMax - rangeMin);
+        float shaped = curveOn ? shape(smoothedValue) : smoothedValue;
+        float out = rangeMin + shaped * (rangeMax - rangeMin);
         // Depth ramp: swing grows from 0 → full around the range midpoint
         // with a smoothstep ease, so reactivity ALWAYS arrives gradually.
         if (rampTime > 0.0f && rampAge < rampTime) {

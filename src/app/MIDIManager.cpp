@@ -22,18 +22,55 @@ std::vector<std::string> MIDIManager::listDevices() {
     return devices;
 }
 
+#ifdef _WIN32
+bool MIDIManager::openPort(int id) {
+    HMIDIIN h = nullptr;
+    MMRESULT result = midiInOpen(&h, id, (DWORD_PTR)midiCallback,
+                                  (DWORD_PTR)this, CALLBACK_FUNCTION);
+    if (result != MMSYSERR_NOERROR) return false;
+    midiInStart(h);
+    m_midiIns.push_back(h);
+    m_midiInIds.push_back(id);
+    return true;
+}
+#endif
+
 bool MIDIManager::openDevice(int index) {
 #ifdef _WIN32
     closeDevice();
-    MMRESULT result = midiInOpen(&m_midiIn, index, (DWORD_PTR)midiCallback,
-                                  (DWORD_PTR)this, CALLBACK_FUNCTION);
-    if (result != MMSYSERR_NOERROR) {
+    m_lastDeviceNames = listDevices();
+    // kAllDevices (-1) is not a real Win32 device id — midiInOpen has no
+    // "open everything" concept (unlike CoreMIDI's virtual all-sources
+    // input), so passing -1 straight through used to silently do nothing
+    // useful: it neither failed loudly nor actually subscribed to any
+    // real device, leaving "Connected" showing with zero events ever
+    // arriving. Open every enumerated input ourselves instead.
+    if (index == kAllDevices) {
+        int count = (int)m_lastDeviceNames.size();
+        for (int i = 0; i < count; i++) {
+            if (!openPort(i))
+                std::cerr << "[MIDI] Failed to open device " << i
+                          << " (" << m_lastDeviceNames[i] << "), will retry" << std::endl;
+        }
+        if (m_midiIns.empty()) return false;
+        m_open = true;
+        m_deviceIdx = kAllDevices;
+        m_nextRetryMs = GetTickCount64() + 250;
+        std::cout << "[MIDI] Opened all devices (" << m_midiIns.size() << "/"
+                  << count << ")" << std::endl;
+        return true;
+    }
+    if (!openPort(index)) {
         std::cerr << "[MIDI] Failed to open device " << index << std::endl;
         return false;
     }
-    midiInStart(m_midiIn);
     m_open = true;
     m_deviceIdx = index;
+    // Recorded so handleHotplug() can find this same physical device again
+    // by name after a topology change moves it to a different index (or
+    // it's unplugged and replugged) — Win32 device indices aren't stable
+    // across a hot-plug event, but the name is.
+    m_deviceName = (index < (int)m_lastDeviceNames.size()) ? m_lastDeviceNames[index] : std::string();
     std::cout << "[MIDI] Opened device " << index << std::endl;
     return true;
 #else
@@ -42,18 +79,59 @@ bool MIDIManager::openDevice(int index) {
 }
 
 void MIDIManager::handleHotplug() {
-    // Windows: no topology tracking yet — auto-connect in Application covers
-    // the "nothing open" case.
+#ifdef _WIN32
+    // Win32's midiIn API doesn't reliably notify an open handle when its
+    // device is unplugged (behavior varies by driver, and most USB-MIDI
+    // class-compliant controllers never fire it) — the handle just goes
+    // quiet forever, which is exactly the "loses connection until I
+    // restart Easel" bug. Detect the topology change by polling the
+    // device name list instead (not just count, so swapping one
+    // controller for another of the same total count is still caught).
+    // Enumeration is cheap (~0.03ms once winmm is warm) so every frame is fine.
+    auto current = listDevices();
+    if (m_open && current != m_lastDeviceNames) {
+        // Whatever was open is holding stale handle(s) to a topology that
+        // no longer matches reality. Reopen right away in the same mode
+        // (rather than dropping to "closed" and waiting for Application's
+        // ~1s auto-connect poll) so a freshly plugged controller is live
+        // immediately.
+        bool wasAll = (m_deviceIdx == kAllDevices);
+        std::string name = m_deviceName;
+        closeDevice();
+        int idx = -1;
+        if (!wasAll) {
+            auto it = std::find(current.begin(), current.end(), name);
+            if (it != current.end()) idx = (int)(it - current.begin());
+        }
+        if (idx >= 0) openDevice(idx);
+        else if (!current.empty()) openAll();
+    } else if (m_open && m_deviceIdx == kAllDevices &&
+               m_midiIns.size() < current.size() && GetTickCount64() >= m_nextRetryMs) {
+        // Some ports failed to open. A just-plugged controller often shows
+        // up in the device list a moment before Windows (midisrv) will let
+        // it be opened; without this retry the virtual/other ports that did
+        // open made us look "connected" and the controller never came up.
+        for (int i = 0; i < (int)current.size(); i++) {
+            if (std::find(m_midiInIds.begin(), m_midiInIds.end(), i) != m_midiInIds.end())
+                continue;
+            if (openPort(i))
+                std::cout << "[MIDI] Opened device " << i << " (" << current[i] << ") on retry" << std::endl;
+        }
+        m_nextRetryMs = GetTickCount64() + 250;
+    }
+    m_lastDeviceNames = current;
+#endif
     m_setupChanged = false;
 }
 
 void MIDIManager::closeDevice() {
 #ifdef _WIN32
-    if (m_midiIn) {
-        midiInStop(m_midiIn);
-        midiInClose(m_midiIn);
-        m_midiIn = nullptr;
+    for (HMIDIIN h : m_midiIns) {
+        midiInStop(h);
+        midiInClose(h);
     }
+    m_midiIns.clear();
+    m_midiInIds.clear();
 #endif
     m_open = false;
     m_deviceIdx = -1;

@@ -287,6 +287,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject iphlpapi
+        ole32 mf mfplat mfuuid
     )
 elseif(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -550,6 +551,19 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
 )
+
+# Non-Apple: assets/ (gl-transitions, icons, models) never got a post-build
+# copy step — only macOS bundles it (MACOSX_PACKAGE_LOCATION above). Without
+# this, GLTransitionLibrary::scan("assets/transitions/gl") finds the
+# directory missing at runtime, loads zero transitions, and every ShowDeck
+# blend mode (Fade included) silently falls back to its hard-cut path —
+# "Fade isn't fading, it's cutting" traces straight back to this.
+if(NOT APPLE)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+    )
+endif()
 
 # macOS: re-sign with the stable "Easel Dev" self-signed cert so the Mach-O
 # CDHash is identical across rebuilds. TCC grants (Screen Recording / Mic /

@@ -3,38 +3,38 @@
     {
       "audioBindings": [
         {
-          "param": "autoSpeed",
-          "rangeMax": 1.5466054677963257,
-          "rangeMin": 0.8570054769515991,
+          "param": "camBob",
+          "rangeMax": 0.26520001888275146,
+          "rangeMin": 0.1348000019788742,
+          "signal": 1,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "camHeight",
+          "rangeMax": 1.964463710784912,
+          "rangeMin": 1.4950237274169922,
+          "signal": 3,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "paletteShift",
+          "rangeMax": 0.1081954687833786,
+          "rangeMin": 0.23859547078609467,
+          "signal": 1,
+          "smoothing": 0.9071999788284302
+        },
+        {
+          "param": "ringDensity",
+          "rangeMax": 1.9521231651306152,
+          "rangeMin": 2.434603214263916,
           "signal": 4,
           "smoothing": 0.9071999788284302
         },
         {
-          "param": "bloomIntensity",
-          "rangeMax": 0.8143168091773987,
-          "rangeMin": 1.1591167449951172,
-          "signal": 8,
-          "smoothing": 0.9071999788284302
-        },
-        {
-          "param": "curl",
-          "rangeMax": 37.88935852050781,
-          "rangeMin": 27.54535675048828,
-          "signal": 8,
-          "smoothing": 0.9071999788284302
-        },
-        {
-          "param": "densityDissipation",
-          "rangeMax": 1.9773643016815186,
-          "rangeMin": 2.666964292526245,
-          "signal": 7,
-          "smoothing": 0.9071999788284302
-        },
-        {
-          "param": "splatRadius",
-          "rangeMax": 0.8404502272605896,
-          "rangeMin": 1.0904302597045898,
-          "signal": 1,
+          "param": "wobble",
+          "rangeMax": 0.23480001091957092,
+          "rangeMin": 0.365200012922287,
+          "signal": 3,
           "smoothing": 0.9071999788284302
         }
       ],
@@ -44,106 +44,16 @@
       "feather": 0.0,
       "flipH": false,
       "flipV": false,
-      "fluidConfig": {
-        "autoMovement": true,
-        "autoPattern": 0,
-        "autoRate": 24.0,
-        "autoScale": 0.30000001192092896,
-        "autoSpeed": 0.8570054769515991,
-        "bloom": true,
-        "bloomIntensity": 1.1591167449951172,
-        "bloomSoftKnee": 0.699999988079071,
-        "bloomThreshold": 0.6000000238418579,
-        "curl": 27.54535675048828,
-        "densityDissipation": 2.666964292526245,
-        "hdrDye": true,
-        "imageEnabled": false,
-        "imageIntensity": 0.10000000149011612,
-        "imageReform": false,
-        "imageSourceLayerId": 0,
-        "pressure": 0.800000011920929,
-        "pressureIters": 20,
-        "reformRate": 0.4000000059604645,
-        "shading": true,
-        "splatIntensity": 0.15000000596046448,
-        "splatRadius": 1.0904302597045898,
-        "sunrays": true,
-        "sunraysWeight": 1.0,
-        "velocityDissipation": 0.20000000298023224
-      },
-      "id": 62,
+      "id": 1,
       "mosaicDensity": 4.0,
       "mosaicMode": 0,
       "mosaicSpin": 0.0,
-      "name": "Fluid Simulation",
+      "name": "Ripple",
       "ndiEnabled": false,
       "opacity": 1.0,
       "position": [
-        0.0,
-        0.0
-      ],
-      "rotation": 0.0,
-      "scale": [
-        1.0,
-        1.0
-      ],
-      "sourcePath": "__fluid__",
-      "sourceType": "Fluid",
-      "tileX": 1.0,
-      "tileY": 1.0,
-      "transitionDuration": 0.5,
-      "transitionType": 0,
-      "visible": true
-    },
-    {
-      "audioReactive": false,
-      "audioStrength": 0.15000000596046448,
-      "blendMode": 0,
-      "feather": 0.0,
-      "flipH": false,
-      "flipV": false,
-      "id": 70,
-      "mosaicDensity": 4.0,
-      "mosaicMode": 0,
-      "mosaicSpin": 0.0,
-      "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
-      "ndiEnabled": false,
-      "opacity": 1.0,
-      "position": [
-        0.0,
-        0.0
-      ],
-      "rotation": 0.0,
-      "scale": [
-        1.0,
-        1.0
-      ],
-      "sourcePath": "DAISYHQ (ETHEREA FluxRT)",
-      "sourceType": "NDI",
-      "sourceUrl": "192.168.1.151:5964",
-      "tileX": 1.0,
-      "tileY": 1.0,
-      "transitionDuration": 0.5,
-      "transitionType": 0,
-      "visible": true
-    },
-    {
-      "audioReactive": false,
-      "audioStrength": 0.15000000596046448,
-      "blendMode": 0,
-      "feather": 0.0,
-      "flipH": false,
-      "flipV": false,
-      "id": 63,
-      "mosaicDensity": 4.0,
-      "mosaicMode": 0,
-      "mosaicSpin": 0.0,
-      "name": "text_typewriter.fs",
-      "ndiEnabled": false,
-      "opacity": 2.426103310426697e-05,
-      "position": [
-        0.007563531398773193,
-        -0.15080714225769043
+        -0.05447465181350708,
+        0.38276416063308716
       ],
       "rotation": 0.0,
       "scale": [
@@ -152,155 +62,86 @@
       ],
       "shaderParams": [
         {
-          "name": "msg",
-          "type": "text",
-          "value": "WATERCOLOUR PENGUIN EMERGES, SYMBOLIZING PLAYFUL RESILIENCE"
-        },
-        {
-          "name": "fontFamily",
-          "type": "long",
-          "value": 0.0
-        },
-        {
-          "name": "speed",
-          "type": "float",
-          "value": 12.0
-        },
-        {
-          "name": "cursorBlink",
-          "type": "float",
-          "value": 2.0
-        },
-        {
-          "name": "textScale",
-          "type": "float",
-          "value": 0.6710000038146973
-        },
-        {
-          "name": "kerning",
+          "name": "amp",
           "type": "float",
           "value": 1.0
         },
         {
-          "name": "oscSpeed",
+          "name": "waveSpeed",
           "type": "float",
-          "value": 0.0
+          "value": 1.0
         },
         {
-          "name": "oscAmount",
+          "name": "ringDensity",
           "type": "float",
-          "value": 0.0
+          "value": 2.4240527153015137
         },
         {
-          "name": "oscSpread",
+          "name": "decay",
           "type": "float",
-          "value": 0.5
+          "value": 0.44999998807907104
         },
         {
-          "name": "textColor",
-          "type": "color",
-          "value": [
-            1.0,
-            1.0,
-            1.0,
-            1.0
-          ]
+          "name": "idle",
+          "type": "float",
+          "value": 0.3689570128917694
         },
         {
-          "name": "bgColor",
-          "type": "color",
-          "value": [
-            0.019999999552965164,
-            0.019999999552965164,
-            0.03999999910593033,
-            1.0
-          ]
+          "name": "wobble",
+          "type": "float",
+          "value": 0.3156857490539551
         },
         {
-          "name": "voiceSync",
-          "type": "bool",
-          "value": false
+          "name": "camOrbit",
+          "type": "float",
+          "value": 0.11610373854637146
         },
         {
-          "name": "transparentBg",
-          "type": "bool",
-          "value": true
+          "name": "camHeight",
+          "type": "float",
+          "value": 1.673275113105774
         },
         {
-          "name": "loop",
-          "type": "bool",
-          "value": false
+          "name": "camDist",
+          "type": "float",
+          "value": 4.199999809265137
+        },
+        {
+          "name": "camBob",
+          "type": "float",
+          "value": 0.24731984734535217
+        },
+        {
+          "name": "lineAmt",
+          "type": "float",
+          "value": 0.5517937541007996
+        },
+        {
+          "name": "glow",
+          "type": "float",
+          "value": 1.0
+        },
+        {
+          "name": "paletteShift",
+          "type": "float",
+          "value": 0.1260756403207779
+        },
+        {
+          "name": "brightness",
+          "type": "float",
+          "value": 1.0599571466445923
+        },
+        {
+          "name": "audioReact",
+          "type": "float",
+          "value": 0.699999988079071
         }
       ],
-      "sourcePath": "C:\\Users\\Daisy\\ShaderClaw3\\shaders/text_typewriter.fs",
+      "sourcePath": "C:\\Users\\ddane\\ShaderClaw3\\shaders/ripple.fs",
       "sourceType": "Shader",
       "tileX": 1.0,
       "tileY": 1.0,
-      "transitionDuration": 0.5,
-      "transitionType": 0,
-      "visible": true
-    },
-    {
-      "audioReactive": false,
-      "audioStrength": 0.15000000596046448,
-      "blendMode": 0,
-      "feather": 0.0,
-      "flipH": false,
-      "flipV": false,
-      "id": 71,
-      "managedKey": "screen1",
-      "mosaicDensity": 4.0,
-      "mosaicMode": 0,
-      "mosaicSpin": 0.0,
-      "name": "NDI: DAISYHQ (Easel)",
-      "ndiEnabled": false,
-      "opacity": 1.0,
-      "position": [
-        0.0,
-        0.0
-      ],
-      "rotation": 0.0,
-      "scale": [
-        1.0,
-        1.0
-      ],
-      "sourcePath": "DAISYHQ (Easel)",
-      "sourceType": "NDI",
-      "tileX": 1.0,
-      "tileY": 1.0,
-      "transitionDuration": 0.5,
-      "transitionType": 0,
-      "visible": true
-    },
-    {
-      "audioReactive": false,
-      "audioStrength": 0.15000000596046448,
-      "blendMode": 0,
-      "feather": 0.0,
-      "flipH": false,
-      "flipV": false,
-      "id": 72,
-      "mosaicDensity": 4.0,
-      "mosaicMode": 0,
-      "mosaicSpin": 0.0,
-      "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
-      "ndiEnabled": false,
-      "opacity": 1.0,
-      "position": [
-        0.0,
-        0.0
-      ],
-      "rotation": 0.0,
-      "scale": [
-        1.0,
-        1.0
-      ],
-      "sourcePath": "DAISYHQ (ETHEREA FluxRT)",
-      "sourceType": "NDI",
-      "sourceUrl": "192.168.1.151:5964",
-      "tileX": 1.0,
-      "tileY": 1.0,
-      "transitionDuration": 0.5,
+      "transitionDuration": 1.2000000476837158,
       "transitionType": 0,
       "visible": true
     }
@@ -327,6 +168,33 @@
       ],
       "meshWarp": {
         "cols": 5,
+        "corners": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
         "points": [
           [
             -1.0,
@@ -453,8 +321,120 @@
           1.0
         ]
       ],
+      "masks": [
+        {
+          "closed": true,
+          "feather": 0.0,
+          "invert": false,
+          "name": "Canvas 1",
+          "points": [
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                0.0,
+                0.0
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                1.0,
+                0.0
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                1.0,
+                0.7513330578804016
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                0.0,
+                0.813589870929718
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                0.0,
+                1.0
+              ],
+              "smooth": true
+            }
+          ]
+        }
+      ],
       "meshWarp": {
         "cols": 5,
+        "corners": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
         "points": [
           [
             -1.0,
@@ -559,7 +539,232 @@
         ],
         "rows": 5
       },
-      "name": "Zone 2",
+      "name": "Zone 3",
+      "warpMode": 0
+    },
+    {
+      "cornerPin": [
+        [
+          -1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          -1.0,
+          1.0
+        ]
+      ],
+      "masks": [
+        {
+          "closed": true,
+          "feather": 0.0,
+          "invert": false,
+          "name": "Canvas 1",
+          "points": [
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                0.12775617837905884,
+                0.0
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                1.0,
+                0.0
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                1.0,
+                1.0
+              ],
+              "smooth": false
+            },
+            {
+              "in": [
+                0.0,
+                0.0
+              ],
+              "out": [
+                0.0,
+                0.0
+              ],
+              "pos": [
+                0.15434500575065613,
+                1.0
+              ],
+              "smooth": false
+            }
+          ]
+        }
+      ],
+      "meshWarp": {
+        "cols": 5,
+        "corners": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "points": [
+          [
+            -1.0,
+            -1.0
+          ],
+          [
+            -0.5,
+            -1.0
+          ],
+          [
+            0.0,
+            -1.0
+          ],
+          [
+            0.5,
+            -1.0
+          ],
+          [
+            1.0,
+            -1.0
+          ],
+          [
+            -1.0,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            0.0,
+            -0.5
+          ],
+          [
+            0.5,
+            -0.5
+          ],
+          [
+            1.0,
+            -0.5
+          ],
+          [
+            -1.0,
+            0.0
+          ],
+          [
+            -0.5,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.5,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            -1.0,
+            0.5
+          ],
+          [
+            -0.5,
+            0.5
+          ],
+          [
+            0.0,
+            0.5
+          ],
+          [
+            0.5,
+            0.5
+          ],
+          [
+            1.0,
+            0.5
+          ],
+          [
+            -1.0,
+            1.0
+          ],
+          [
+            -0.5,
+            1.0
+          ],
+          [
+            0.0,
+            1.0
+          ],
+          [
+            0.5,
+            1.0
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ],
+        "rows": 5
+      },
+      "name": "2",
       "warpMode": 0
     }
   ],
@@ -575,7 +780,7 @@
     "duration": 60.0,
     "lanes": [],
     "loop": false,
-    "nextClipId": 188,
+    "nextClipId": 256,
     "nextLaneId": 1,
     "nextSectionId": 1,
     "nextTransitionId": 1,
@@ -586,61 +791,13 @@
         "clips": [
           {
             "duration": 60.0,
-            "id": 165,
-            "name": "Fluid Simulation",
+            "id": 254,
+            "name": "Ripple",
             "startTime": 0.0
           }
         ],
-        "layerId": 62,
-        "name": "Fluid Simulation"
-      },
-      {
-        "clips": [
-          {
-            "duration": 60.0,
-            "id": 166,
-            "name": "text_typewriter.fs",
-            "startTime": 0.0
-          }
-        ],
-        "layerId": 63,
-        "name": "text_typewriter.fs"
-      },
-      {
-        "clips": [
-          {
-            "duration": 60.0,
-            "id": 173,
-            "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
-            "startTime": 0.0
-          }
-        ],
-        "layerId": 70,
-        "name": "NDI: DAISYHQ (ETHEREA FluxRT)"
-      },
-      {
-        "clips": [
-          {
-            "duration": 60.0,
-            "id": 177,
-            "name": "NDI: DAISYHQ (Easel)",
-            "startTime": 0.0
-          }
-        ],
-        "layerId": 71,
-        "name": "NDI: DAISYHQ (Easel)"
-      },
-      {
-        "clips": [
-          {
-            "duration": 60.0,
-            "id": 182,
-            "name": "NDI: DAISYHQ (ETHEREA FluxRT)",
-            "startTime": 0.0
-          }
-        ],
-        "layerId": 72,
-        "name": "NDI: DAISYHQ (ETHEREA FluxRT)"
+        "layerId": 1,
+        "name": "Ripple"
       }
     ],
     "transitions": [],
@@ -652,6 +809,8 @@
     {
       "height": 1080,
       "mappingIndex": 0,
+      "micDeviceId": "",
+      "micEnabled": false,
       "name": "Main",
       "ndiStreamName": "",
       "outputDest": 0,
@@ -659,25 +818,40 @@
       "rawNdiName": false,
       "showAllLayers": false,
       "visibleLayerIds": [
+        1,
+        2,
+        3,
+        4,
         62
       ],
       "width": 1920
     },
     {
-      "height": 1080,
+      "height": 2160,
       "mappingIndex": 1,
-      "name": "Zone 2",
+      "micDeviceId": "",
+      "micEnabled": false,
+      "name": "Zone 3",
       "ndiStreamName": "",
-      "outputDest": 0,
-      "outputMonitor": -1,
+      "outputDest": 1,
+      "outputMonitor": 2,
       "rawNdiName": false,
-      "showAllLayers": false,
-      "visibleLayerIds": [
-        62,
-        63,
-        70,
-        72
-      ],
+      "showAllLayers": true,
+      "visibleLayerIds": [],
+      "width": 3840
+    },
+    {
+      "height": 1080,
+      "mappingIndex": 2,
+      "micDeviceId": "",
+      "micEnabled": false,
+      "name": "2",
+      "ndiStreamName": "",
+      "outputDest": 1,
+      "outputMonitor": 1,
+      "rawNdiName": false,
+      "showAllLayers": true,
+      "visibleLayerIds": [],
       "width": 1920
     }
   ]

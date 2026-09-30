@@ -67,6 +67,7 @@
 #include "app/OSCManager.h"
 #include "timeline/Timeline.h"
 #include "app/MIDIManager.h"
+#include "app/AudioInputDevices.h"
 #include "app/DataBus.h"
 #include "stage/StageView.h"
 #include "app/ProDJLink.h"
@@ -228,9 +229,12 @@ private:
     // active projector for the monitor, or nullptr if it isn't ready yet.
     ProjectorOutput* ensureProjector(int monitorIndex);
     // Target frame-rate cap shown/edited in the Canvas section. 0 = vsync
-    // (loop runs at the editor display's refresh). >0 disables vsync and
-    // busy-waits after swap to hold the frame to ~1/target sec.
-    float m_targetFPS = 0.0f;
+    // (loop runs at the editor display's refresh, which on a high-refresh
+    // monitor is well above 60 and just burns extra GPU/heat for no visual
+    // gain). >0 disables vsync and busy-waits after swap to hold the frame
+    // to ~1/target sec. Defaults to a real 60fps cap regardless of the
+    // editor display's own refresh rate.
+    float m_targetFPS = 60.0f;
     // Swap interval currently applied to the main context (-1 = unset). Driven
     // each frame from m_targetFPS so toggling the Canvas Target flips vsync.
     int m_appliedSwapInterval = -1;
@@ -276,7 +280,14 @@ private:
     // Scratch FBOs for the post chain (edge blend, mask union, bloom, warp
     // supersample) live per-zone on OutputZone — sharing them across
     // mixed-resolution zones caused a destroy/realloc cycle every frame.
-    Texture m_testPattern;
+    // Default "nothing loaded" test pattern, rendered live each frame from
+    // two real images the user supplied — a broadcast-style test card
+    // background (assets/testcard.png) and a duck sprite chroma-keyed out
+    // of its own photo (assets/duck.png), which bounces around the frame.
+    ShaderProgram m_testPatternShader;
+    Framebuffer   m_testPatternFBO;
+    Texture       m_testCardTex;
+    Texture       m_duckTex;
     Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
 
     // MAPPING-workspace calibration patterns (black & white). In Mapping mode
@@ -351,36 +362,117 @@ private:
     // SHOW-mode deck (Application.cpp: renderShowDeck()) — a self-contained
     // shader mixer docked under the Program/Preview monitors in Show mode.
     // Two slots — A (green) and B (red) — each run their own live ISF
-    // shader, independent of the projector-output Zones above. m_deckSlider
-    // [0] is the A/B crossfader (blends slot A and slot B via gl-transitions
-    // "fade" into m_deckMixFBO) — currently unrouted; the deck's Main Output
-    // (orange box) mirrors the real Program feed instead. Left/right
+    // shader. m_deckSlider[0] is the A/B crossfader (blends slot A and slot
+    // B via gl-transitions "fade" into m_deckMixFBO); the blended, post-fx'd
+    // result is PROGRAM (see m_showProgramTex below), which replaces the
+    // active zone's normal layer-stack composite — Show's decks are the
+    // actual live output, not a page-local-only preview. Left/right
     // thumbnail rails single-click into m_deckPreviewL/R for a preview,
     // double-click to commit into slot B/A.
     static const int kDeckKnobCount   = 12;
     static const int kDeckButtonCount = 4;
-    static const int kDeckSliderCount = 9;
+    // 7 vertical faders, each a fixed PROGRAM-monitor post-fx (brightness/
+    // saturation/contrast/hue-rotate/vmirror/qmirror/kaleidoscope — see
+    // showdeck_postfx.frag) rather than a free shader-param binding. Live-
+    // mirrored from MIDI faders 2-8 of whatever controller is connected,
+    // same convention as the horizontal crossfader below and the Canvas
+    // knob bank's kFaderCC.
+    static const int kDeckSliderCount = 7;
     std::string m_deckShaderPathA, m_deckShaderPathB;
     std::shared_ptr<ShaderSource> m_deckShaderA, m_deckShaderB;
     float m_deckKnobA[kDeckKnobCount]     = {};
     float m_deckKnobB[kDeckKnobCount]     = {};
-    bool  m_deckButtonA[kDeckButtonCount] = {};
-    bool  m_deckButtonB[kDeckButtonCount] = {};
-    float m_deckSlider[kDeckSliderCount]  = { 0.5f };
-    // Per-widget shader-parameter binding, keyed by ISFInput::name — empty
-    // = unassigned (the widget's value has no effect). Knobs are already
-    // split into full A/B arrays above, so each gets its own bound-name
-    // array; the slider bank is one shared row (left half binds into
-    // m_deckShaderB, right half into m_deckShaderA — see renderShowDeck).
+    // Memory banks — the 2 button rows x (B+A) are save/recall slots for a
+    // named snapshot of the 12 knob positions, per user request. A memory
+    // is just a name + 12 floats, kept in one shared list so any memory can
+    // be recalled into either side's knob bank; each slot below is just an
+    // index into that list (-1 = empty, shows a "+" to save the current
+    // knobs as a new memory there).
+    struct DeckKnobMemory {
+        std::string name;
+        float knobs[kDeckKnobCount] = {};
+    };
+    std::vector<DeckKnobMemory> m_deckKnobMemories;
+    int m_deckMemSlotB[kDeckButtonCount]  = { -1, -1, -1, -1 };
+    int m_deckMemSlotA[kDeckButtonCount]  = { -1, -1, -1, -1 };
+    int m_deckMemSlotB2[kDeckButtonCount] = { -1, -1, -1, -1 };
+    int m_deckMemSlotA2[kDeckButtonCount] = { -1, -1, -1, -1 };
+    // Transient state for the two memory-bank popups (name-new and
+    // pick-existing) — only one of either can be open at a time, so this is
+    // shared across all 16 slots rather than per-slot.
+    int*  m_deckMemPendingSlots = nullptr;
+    int   m_deckMemPendingIdx   = -1;
+    float m_deckMemPendingKnobs[kDeckKnobCount] = {};
+    char  m_deckMemNameBuf[64] = {};
+    int*  m_deckMemPickSlots = nullptr;
+    int   m_deckMemPickIdx   = -1;
+    // 0.5 default for Brightness/Saturation/Contrast (identity slots 0-2)
+    // matches their neutral midpoint on the 3-point curves (extreme low ..
+    // unity .. extreme high); the rest default to 0.
+    float m_deckSlider[kDeckSliderCount]  = { 0.5f, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f };
+    // Which global effect (index into kGlobalEffectNames, Application.cpp)
+    // each physical fader drives — identity by default, i.e. today's fixed
+    // Bright/Sat/Contrast/... layout. Reassignable via the small cog next
+    // to each fader's caption.
+    int m_deckFaderEffect[kDeckSliderCount] = { 0, 1, 2, 3, 4, 5, 6 };
+    // Per-knob shader-parameter binding, keyed by ISFInput::name — empty =
+    // unassigned (the knob has no effect). Knobs are split into full A/B
+    // arrays above, so each gets its own bound-name array.
     std::string m_deckKnobBoundParamA[kDeckKnobCount];
     std::string m_deckKnobBoundParamB[kDeckKnobCount];
-    std::string m_deckSliderBoundParam[kDeckSliderCount];
-    // Horizontal A/B crossfader — separate from the free per-slot sliders
-    // above. 0 = full B (left), 1 = full A (right). m_deckBlendMode indexes
-    // the kShowDeckBlendModes table in renderShowDeck (fade/cut/channel-key).
-    float m_deckCrossfade = 0.5f;
+    // PARAMETERS panel's Auto-Map switch, per slot — knobs no longer
+    // auto-map the instant a shader loads (that kept clobbering hand-set
+    // assignments); flipping this on re-derives all 12 from scratch instead.
+    bool m_deckAutoMapOnA = false, m_deckAutoMapOnB = false;
+    // Per-knob physical MIDI CC override, set via "Learn MIDI CC" in the
+    // knob's dot popup — -1 (the init() default) means "use the
+    // position-based Launch Control XL factory CC" (kShowKnobCC in
+    // renderShowDeck); >=0 means the user explicitly mapped a physical
+    // control onto this knob, for a controller that isn't on the factory
+    // template (or isn't a Launch Control XL at all) and so doesn't match
+    // the assumed layout.
+    int m_deckKnobCCOverrideA[kDeckKnobCount];
+    int m_deckKnobCCOverrideB[kDeckKnobCount];
+    // Which knob (if any) is currently waiting to capture the next MIDI CC
+    // via Learn MIDI CC — -1/-1 = not learning. side: 0 = B, 1 = A.
+    int m_deckKnobLearnSide = -1, m_deckKnobLearnIdx = -1;
+    // Horizontal A/B crossfader — separate from the effect sliders above.
+    // 0 = full B (left), 1 = full A (right). Defaults all the way to B
+    // (left), per user request, rather than centered. Live-mirrored from
+    // MIDI fader 1. m_deckBlendMode indexes kShowDeckBlendModes
+    // (fade/cut/channel-key).
+    float m_deckCrossfade = 0.0f;
     int   m_deckBlendMode = 0;
+    // "Fade" duration shown/edited next to the blend-mode dropdown, per the
+    // reference mockup. Drives the animated auto-crossfade double-clicking
+    // the crossfader track triggers (animates from the current position to
+    // the opposite end over this many seconds) — see m_deckCrossfadeAnim*.
+    float m_deckCrossfadeDuration = 2.0f;
+    bool  m_deckCrossfadeAnimating = false;
+    float m_deckCrossfadeAnimFrom = 0.0f, m_deckCrossfadeAnimTo = 1.0f, m_deckCrossfadeAnimT = 0.0f;
     Framebuffer m_deckMixFBO;
+    // PROGRAM-monitor post-fx pass (showdeck_postfx.frag) driven by the 7
+    // effect sliders above.
+    ShaderProgram m_deckPostFxShader;
+    Framebuffer   m_deckProgramFxFBO;
+    // Kaleidoscope trails — a simple feedback loop (ping-pong FBOs, blended
+    // via the same "fade" gl-transition used by the A/B crossfader) that
+    // gives the kaleidoscope effect motion-trail echoes, Resolume-style.
+    // On by default; toggled off via the "Trails" checkbox in the
+    // Kaleidoscope fader's reassign popup.
+    bool        m_deckKaleidoTrails = true;
+    Framebuffer m_deckTrailFBO[2];
+    int         m_deckTrailIdx = 0;
+    bool        m_deckKaleidoWasActive = false;
+    // What PROGRAM is showing right now, published by renderShowDeck() each
+    // frame it runs and read back by compositeZone() to replace the active
+    // zone's normal layer-stack composite with it — this is what actually
+    // routes Show's B/A mix out to the viewport, present/fullscreen output,
+    // and any NDI/Spout/RTMP consumers of the active zone. Zero when
+    // neither deck slot has a shader loaded, which lets compositeZone fall
+    // straight back to the normal layer-stack composite.
+    GLuint m_showProgramTex  = 0;
+    int    m_showProgramTexW = 0, m_showProgramTexH = 0;
     std::string m_deckPreviewPathL, m_deckPreviewPathR;
     std::shared_ptr<ShaderSource> m_deckPreviewL, m_deckPreviewR;
     // Named subsets of the shader catalog, filterable per thumbnail rail —
@@ -396,9 +488,13 @@ private:
     // -1 = "All Shaders" (unfiltered); >=0 indexes m_deckPlaylists. Per rail
     // (0 = left/B, 1 = right/A) so each side can browse independently.
     int  m_deckPlaylistSel[2] = { -1, -1 };
+    // Free-text filter typed above the playlist dropdown, per rail — narrows
+    // the thumbnail grid to shaders whose name contains the query.
+    char m_deckSearchQuery[2][64] = { { 0 }, { 0 } };
     void loadDeckPlaylists();
     void saveDeckPlaylists();
-    void renderShowDeck(float width, float height, GLuint programTex);
+    void renderShowDeck(float width, float height, GLuint programTex,
+                        int programTexW, int programTexH);
 
     StageView m_stageView;
     ProDJLink m_prodjlink;
@@ -477,6 +573,7 @@ private:
     // Inline brand mark + overflow menu drawn at the start of the workspace
     // nav row. Replaces the standalone main menu bar so we have ONE chrome
     // row instead of two stacked ones.
+    void renderAudioSettingsMenu();   // hamburger-menu "Audio Settings" submenu (mic input picker)
     void renderNavBarPrefix();
     void toggleEditorFullscreen();
 #ifdef HAS_FFMPEG
@@ -490,6 +587,16 @@ private:
     void addZone();
     void removeZone(int index);
     void duplicateZone(int index);
+    // Decodes an add/duplicate/remove request a zone-tab strip encoded into
+    // m_activeZone as a negative "signal" (see ViewportPanel's zone tabs).
+    // Must run before ANYTHING else touches m_activeZone this frame —
+    // activeZone() clamps a negative value to 0 on read, which silently
+    // destroys an unconsumed signal. Called at the very top of run()'s loop
+    // (before compositeAndWarp()) so a signal set by any zone-tab strip,
+    // in any workspace mode, survives to be consumed here; also called
+    // again inside renderUI() so Canvas's own tabs (rendered later in the
+    // same frame) still act immediately rather than waiting a frame.
+    void consumeZoneTabSignal();
     void setupMultiGPUProjection(const std::vector<std::string>& ndiSourceNames);
     void loadImage(const std::string& path);
     void loadVideo(const std::string& path);
@@ -504,10 +611,11 @@ private:
 #ifdef HAS_OPENCV
     void addWebcam(int cameraIndex, const std::string& deviceName = std::string());
 #endif
-#ifdef __APPLE__
-    // Cached AVFoundation device list for the camera pickers; index order
-    // matches OpenCV VideoCapture indices. Rescans at most every 2s (so
-    // hot-plugged capture cards appear) unless force is set.
+#if defined(__APPLE__) || (defined(_WIN32) && defined(HAS_OPENCV))
+    // Cached device list (AVFoundation on Mac, Media Foundation on Windows)
+    // for the camera pickers; index order matches OpenCV VideoCapture
+    // indices. Rescans at most every 2s (so hot-plugged capture cards
+    // appear) unless force is set.
     void refreshCameraDevices(bool force = false);
     std::vector<CameraDeviceInfo> m_cameraDevices;
     double m_cameraDevicesLastScan = -1.0;
@@ -562,6 +670,14 @@ private:
     std::shared_ptr<ShaderSource> m_scThumbRenderer; // temp shader for generating thumbnails
     std::string m_scThumbRenderPath; // currently rendering thumbnail for this shader
     int m_scThumbRenderFrame = 0;
+    // Background thumbnail generation, independent of the Sources panel —
+    // that panel's own generator above only runs while it's visible, so a
+    // shader with no cached thumb yet (e.g. a freshly added one) never got
+    // one otherwise, per user request. Same render-to-PNG approach, just
+    // driven every frame in updateSources() regardless of what's open.
+    std::shared_ptr<ShaderSource> m_bgThumbRenderer;
+    std::string m_bgThumbRenderPath;
+    int m_bgThumbRenderFrame = 0;
 
     // GALLERY — fullscreen shader gallery overlay: every shader as a big
     // thumbnail tile in one scrollable page. Opened from the top-nav
@@ -580,6 +696,22 @@ private:
     SceneScanner m_scanner;
     WebcamSource m_webcam;
     ScanPanel m_scanPanel;
+
+    // Dedicated webcam capture for Show-deck shader Image inputs (see
+    // renderShowDeck's PARAMETERS panel). Deliberately separate from
+    // m_webcam above (the Scene Scanner's own camera handle, which the
+    // scanner opens/closes/reads on its own schedule) so Show works without
+    // an active scan and doesn't fight it for the same capture session.
+    // Shared by both A and B deck slots — one physical camera either deck
+    // can bind an Image input to, same as one Canvas webcam layer can feed
+    // multiple shaders there.
+    std::shared_ptr<WebcamSource> m_deckWebcam;
+    // Which cv::VideoCapture index m_deckWebcam currently has open (-1 =
+    // none yet). Shown/picked by name via m_cameraDevices (see below) —
+    // important when virtual capture devices are installed alongside a real
+    // camera (e.g. NDI Tools registers an "NDI Webcam Video" device that
+    // silently produces black frames until something feeds it over NDI).
+    int m_deckWebcamIndex = -1;
 #endif
 
     SpeechState m_speechState;
@@ -679,6 +811,10 @@ private:
 #endif
 
     int m_selectedAudioDevice = -1; // -1 = default loopback
+    // FFmpeg-free mic picker state (used when HAS_FFMPEG is off — see
+    // AudioInputDevices.h). Empty id = System Audio (loopback).
+    std::vector<AudioInputDevice> m_micDevices;
+    std::string m_selectedMicId;
 
     // Top-edge screen pos of the transport-pill mic button, captured each
     // frame so ##fp_sound_popup can anchor itself ABOVE the pill (the pill
@@ -702,6 +838,8 @@ private:
     // the moment the device reappears.
     std::string m_pendingAudioDeviceUID;
     void refreshAudioDevicesIfChanged();
+#endif
+
     void renderTransportBar();
     void renderTimelinePanel();
     // Always-rendered collapse/expand tab straddling the seam between the
@@ -724,6 +862,11 @@ private:
     // canvas, matching reference B's minimal control surface. Independent
     // of the docked timeline panel which still hosts tracks/audio lane.
     void renderFloatingTransportPill();
+    // Show-mode's own flush-bottom bar — just the MIDI device picker +
+    // connection status, moved here out of the ShowDeck panel itself per
+    // user request (that grey strip across the bottom of the whole window
+    // was sitting blank in Show mode, unlike Canvas's transport pill above).
+    void renderShowMidiBar();
     // Floating REC + LIVE pills at viewport bottom-right — two separate
     // rounded surfaces matching the reference's split record/broadcast
     // affordances. Independent of the docked timeline.
@@ -769,6 +912,7 @@ private:
     float  m_timelineTargetH = 220.0f;
     void   updateTimelineAnim();
 
+#ifdef HAS_FFMPEG
     // Audio level meter (WASAPI IAudioMeterInformation)
     void* m_audioMeterInfo = nullptr;
     void* m_audioMeterDevice = nullptr;

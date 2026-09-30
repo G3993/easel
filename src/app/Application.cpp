@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <set>
 #include <unordered_set>
+#include <unordered_map>
 #include <chrono>
 #include <thread>
 
@@ -147,10 +148,25 @@ static std::string saveFileDialog(const char* filter, const char* defaultExt) {
     return "";
 }
 
-// Rotary knob widget for the Canvas-mode MIDI bank. Drag vertically to
-// change value in [0,1]. When midiBound is true, a hardware controller
-// currently owns this CC — the ring renders in the "live" color and mouse
-// drag is disabled so the widget doesn't fight the physical knob's position.
+// Per-widget "just changed" state, keyed by the widget's own id string —
+// shared by all three widgets below to drive their flash-on-change ring/
+// highlight (ported from the newer build's Show-page MIDI surface, which
+// flashes a knob/fader blue for ~0.8s whenever its value moves, from any
+// source — mouse drag or a live-bound MIDI controller).
+static float knobFaderFlash(const char* id, float value) {
+    static std::unordered_map<std::string, std::pair<float, double>> sState;
+    auto& st = sState[id];
+    double now = ImGui::GetTime();
+    if (st.first != value) { st.first = value; st.second = now; }
+    return (float)std::max(0.0, 1.0 - (now - st.second) / 0.8);
+}
+
+// Rotary knob widget for the Canvas-mode MIDI bank and ShowDeck. Drag
+// vertically to change value in [0,1]. When midiBound is true, a hardware
+// controller currently owns this CC — mouse drag is disabled and the arc/
+// dot render in the "live" color so the widget doesn't fight the physical
+// knob's position. Bare arc + traveling dot (no knob-face disk) — matches
+// the newer build's minimal Show-page MIDI surface look.
 static bool drawKnobWidget(const char* id, float* value, bool midiBound, const char* label, float kSize = 40.0f) {
     ImGui::PushID(id);
     ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -165,23 +181,29 @@ static bool drawKnobWidget(const char* id, float* value, bool midiBound, const c
             changed = true;
         }
     }
+    float v = std::clamp(*value, 0.0f, 1.0f);
+    float flash = knobFaderFlash(id, v);
+
     ImDrawList* d = ImGui::GetWindowDrawList();
     ImVec2 c(pos.x + kSize * 0.5f, pos.y + kSize * 0.5f);
     float  r = kSize * 0.44f;
-    d->AddCircleFilled(c, r, IM_COL32(22, 24, 30, 255), 24);
-    d->AddCircle(c, r, IM_COL32(255, 255, 255, hov ? 90 : 50), 24, 1.2f);
 
     const float angMin = 0.75f * 3.14159265f; // 135°, pointer at rest (value 0)
     const float angMax = 2.25f * 3.14159265f; // 405°, full sweep (value 1)
-    d->PathArcTo(c, r - 3.0f, angMin, angMax, 32);
-    d->PathStroke(IM_COL32(55, 58, 68, 255), 0, 3.0f);
+    d->PathArcTo(c, r, angMin, angMax, 32);
+    d->PathStroke(IM_COL32(255, 255, 255, midiBound ? 34 : (hov ? 60 : 18)), 0, 3.0f);
 
-    float valAng = angMin + (angMax - angMin) * std::clamp(*value, 0.0f, 1.0f);
-    ImU32 ringCol = midiBound ? IM_COL32(110, 190, 255, 255) : IM_COL32(235, 235, 240, 255);
-    d->PathArcTo(c, r - 3.0f, angMin, valAng, 32);
-    d->PathStroke(ringCol, 0, 3.0f);
-    d->AddLine(c, ImVec2(c.x + cosf(valAng) * (r - 3.0f), c.y + sinf(valAng) * (r - 3.0f)),
-               ringCol, 2.0f);
+    if (v > 0.001f) {
+        int alpha = 150 + (int)(105.0f * flash);
+        d->PathArcTo(c, r, angMin, angMin + (angMax - angMin) * v, 32);
+        d->PathStroke(IM_COL32(255, 255, 255, alpha), 0, 3.0f);
+    }
+    float valAng = angMin + (angMax - angMin) * v;
+    ImU32 dotCol = midiBound ? IM_COL32(110, 190, 255, 255) : IM_COL32(255, 255, 255, hov ? 220 : 170);
+    d->AddCircleFilled(ImVec2(c.x + cosf(valAng) * r * 0.66f, c.y + sinf(valAng) * r * 0.66f),
+                       2.5f, dotCol);
+    if (flash > 0.0f)
+        d->AddCircle(c, r + 5.0f, IM_COL32(90, 160, 255, (int)(180 * flash)), 0, 2.0f);
 
     if (label && label[0]) {
         ImVec2 ts = ImGui::CalcTextSize(label);
@@ -192,8 +214,9 @@ static bool drawKnobWidget(const char* id, float* value, bool midiBound, const c
     return changed;
 }
 
-// Vertical fader widget for the Canvas-mode MIDI bank. Same midiBound
-// convention as drawKnobWidget.
+// Vertical fader — bare track line + flat cap (no background bar), matching
+// the newer build's Show-page MIDI surface. Same midiBound/flash convention
+// as drawKnobWidget.
 static bool drawVSliderWidget(const char* id, float* value, bool midiBound, float w, float h) {
     ImGui::PushID(id);
     ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -206,55 +229,163 @@ static bool drawVSliderWidget(const char* id, float* value, bool midiBound, floa
         float nv = std::clamp(t, 0.0f, 1.0f);
         if (nv != *value) { *value = nv; changed = true; }
     }
+    float val = std::clamp(*value, 0.0f, 1.0f);
+    float flash = knobFaderFlash(id, val);
+
     ImDrawList* d = ImGui::GetWindowDrawList();
-    float trackW = std::max(6.0f, w * 0.28f);
-    ImVec2 trackMin(pos.x + (w - trackW) * 0.5f, pos.y);
-    ImVec2 trackMax(trackMin.x + trackW, pos.y + h);
-    d->AddRectFilled(trackMin, trackMax, IM_COL32(28, 30, 38, 255), trackW * 0.4f);
-    d->AddRect(trackMin, trackMax, IM_COL32(255, 255, 255, hov ? 90 : 50), trackW * 0.4f, 0, 1.0f);
+    float cx = pos.x + w * 0.5f;
+    float top = pos.y, bot = pos.y + h;
+    // Track line 3x thicker and the cap half as wide, per user request.
+    d->AddLine(ImVec2(cx, top), ImVec2(cx, bot), IM_COL32(255, 255, 255, midiBound ? 40 : (hov ? 55 : 20)), 9.0f);
 
-    float val   = std::clamp(*value, 0.0f, 1.0f);
-    float fillY = trackMax.y - val * h;
-    ImU32 fillCol = midiBound ? IM_COL32(110, 190, 255, 220) : IM_COL32(200, 204, 214, 220);
-    if (fillY < trackMax.y) d->AddRectFilled(ImVec2(trackMin.x, fillY), trackMax, fillCol, trackW * 0.4f);
+    float fy = bot - (bot - top) * val;
+    d->AddLine(ImVec2(cx, fy), ImVec2(cx, bot), IM_COL32(255, 255, 255, 130 + (int)(90 * flash)), 9.0f);
 
-    float capH = 8.0f;
-    d->AddRectFilled(ImVec2(pos.x + 1.0f, fillY - capH * 0.5f),
-                     ImVec2(pos.x + w - 1.0f, fillY + capH * 0.5f),
-                     IM_COL32(255, 255, 255, 235), 2.0f);
+    ImU32 capCol = flash > 0.0f
+        ? IM_COL32(90 + (int)(165 * (1 - flash)), 160 + (int)(95 * (1 - flash)), 255, 255)
+        : IM_COL32(235, 238, 244, midiBound ? 255 : (hov ? 235 : 190));
+    d->AddRectFilled(ImVec2(cx - 6.5f, fy - 5.0f), ImVec2(cx + 6.5f, fy + 5.0f), capCol, 2.0f);
     ImGui::PopID();
     return changed;
 }
 
-// Horizontal fader — same drag convention as drawVSliderWidget, used by the
-// ShowDeck A/B crossfader (left = 0, right = 1).
-static bool drawHSliderWidget(const char* id, float* value, float w, float h) {
+// Horizontal fader — used only by the ShowDeck A/B crossfader (left = 0,
+// right = 1), so it's safe to carry the light-theme restyle directly
+// (nothing else references it). Track is a static orange->green gradient
+// (A->B) per the reference mockup, with a white puck marking the live value,
+// rather than a plain value-fill bar.
+static bool drawHSliderWidget(const char* id, float* value, bool midiBound, float w, float h) {
     ImGui::PushID(id);
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##hs", ImVec2(w, h));
     bool hov    = ImGui::IsItemHovered();
     bool active = ImGui::IsItemActive();
     bool changed = false;
-    if (active) {
+    if (active && !midiBound) {
         float t = (ImGui::GetIO().MousePos.x - pos.x) / w;
         float nv = std::clamp(t, 0.0f, 1.0f);
         if (nv != *value) { *value = nv; changed = true; }
     }
-    ImDrawList* d = ImGui::GetWindowDrawList();
-    float trackH = std::max(6.0f, h * 0.5f);
-    ImVec2 trackMin(pos.x, pos.y + (h - trackH) * 0.5f);
-    ImVec2 trackMax(pos.x + w, trackMin.y + trackH);
-    d->AddRectFilled(trackMin, trackMax, IM_COL32(28, 30, 38, 255), trackH * 0.4f);
-    d->AddRect(trackMin, trackMax, IM_COL32(255, 255, 255, hov ? 90 : 50), trackH * 0.4f, 0, 1.0f);
-
+    // Right-click resets to full-B (this fader's own documented default),
+    // per user request.
+    if (hov && !midiBound && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        *value = 0.0f;
+        changed = true;
+    }
     float val = std::clamp(*value, 0.0f, 1.0f);
-    float fillX = trackMin.x + val * w;
-    d->AddRectFilled(trackMin, ImVec2(fillX, trackMax.y), IM_COL32(200, 204, 214, 220), trackH * 0.4f);
+    float flash = knobFaderFlash(id, val);
 
-    float capW = 8.0f;
-    d->AddRectFilled(ImVec2(fillX - capW * 0.5f, pos.y + 1.0f),
-                     ImVec2(fillX + capW * 0.5f, pos.y + h - 1.0f),
-                     IM_COL32(255, 255, 255, 235), 2.0f);
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    float cy = pos.y + h * 0.5f;
+    float left = pos.x, right = pos.x + w;
+    const ImU32 kTrackA = IM_COL32(230, 148, 58, 210);   // orange (A)
+    const ImU32 kTrackB = IM_COL32(70, 175, 80, 210);    // green  (B)
+    float trackH = h * 0.5f;
+    d->AddRectFilledMultiColor(ImVec2(left, cy - trackH * 0.5f), ImVec2(right, cy + trackH * 0.5f),
+                               kTrackA, kTrackB, kTrackB, kTrackA);
+
+    float fx = left + (right - left) * val;
+    ImU32 puckCol = flash > 0.0f
+        ? IM_COL32(90 + (int)(165 * (1 - flash)), 160 + (int)(95 * (1 - flash)), 255, 255)
+        : IM_COL32(255, 255, 255, midiBound ? 255 : (hov ? 250 : 235));
+    d->AddCircleFilled(ImVec2(fx, cy), h * 0.55f, puckCol, 20);
+    d->AddCircle(ImVec2(fx, cy), h * 0.55f, IM_COL32(0, 0, 0, 45), 20, 1.0f);
+    ImGui::PopID();
+    return changed;
+}
+
+// Show-only light-theme rotary knob — light face disk + colored value arc
+// (accent supplied per side: orange for slot A's half of the grid, green
+// for slot B's), used ONLY by ShowDeck's drawKnobGrid. The original
+// drawKnobWidget (bare-arc, dark theme) is untouched and still used by the
+// Canvas knob bank.
+static bool drawKnobWidgetLight(const char* id, float* value, bool midiBound, float kSize, ImU32 accent, bool dark = false, float resetValue = 0.5f) {
+    ImGui::PushID(id);
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##k", ImVec2(kSize, kSize));
+    bool hov    = ImGui::IsItemHovered();
+    bool active = ImGui::IsItemActive();
+    bool changed = false;
+    if (active && !midiBound) {
+        float dy = ImGui::GetIO().MouseDelta.y;
+        if (dy != 0.0f) {
+            *value = std::clamp(*value - dy * 0.005f, 0.0f, 1.0f);
+            changed = true;
+        }
+    }
+    // Right-click resets to the "equilibrium" value, per user request.
+    if (hov && !midiBound && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        *value = resetValue;
+        changed = true;
+    }
+    float v = std::clamp(*value, 0.0f, 1.0f);
+    float flash = knobFaderFlash(id, v);
+
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    ImVec2 c(pos.x + kSize * 0.5f, pos.y + kSize * 0.5f);
+    float  r = kSize * 0.44f;
+
+    d->AddCircleFilled(c, r, dark ? IM_COL32(44, 45, 49, 255) : IM_COL32(250, 249, 246, 255), 28);
+    d->AddCircle(c, r, dark ? IM_COL32(66, 67, 72, 255) : IM_COL32(214, 211, 205, 255), 28, 1.5f);
+
+    const float angMin = 0.75f * 3.14159265f;
+    const float angMax = 2.25f * 3.14159265f;
+    d->PathArcTo(c, r - 3.0f, angMin, angMax, 32);
+    d->PathStroke(dark ? IM_COL32(60, 61, 65, 255) : IM_COL32(222, 219, 213, 255), 0, 2.5f);
+
+    if (v > 0.001f) {
+        int alpha = 200 + (int)(55.0f * flash);
+        d->PathArcTo(c, r - 3.0f, angMin, angMin + (angMax - angMin) * v, 32);
+        d->PathStroke((accent & 0x00FFFFFF) | ((ImU32)alpha << 24), 0, 2.5f);
+    }
+    float valAng = angMin + (angMax - angMin) * v;
+    ImU32 dotCol = midiBound ? IM_COL32(90, 150, 230, 255) : accent;
+    d->AddCircleFilled(ImVec2(c.x + cosf(valAng) * r * 0.66f, c.y + sinf(valAng) * r * 0.66f),
+                       2.5f, dotCol);
+    if (flash > 0.0f)
+        d->AddCircle(c, r + 5.0f, IM_COL32(90, 160, 255, (int)(180 * flash)), 0, 2.0f);
+    if (hov && !midiBound) d->AddCircle(c, r + 2.0f, IM_COL32(0, 0, 0, 30), 28, 1.0f);
+    ImGui::PopID();
+    return changed;
+}
+
+// Show-only light-theme vertical fader — light track well + colored fill,
+// used ONLY by ShowDeck's effect-fader bank. Original drawVSliderWidget
+// (dark theme) untouched, still used by the Canvas knob bank.
+static bool drawVSliderWidgetLight(const char* id, float* value, bool midiBound, float w, float h, ImU32 accent, bool dark = false, float resetValue = 0.5f) {
+    ImGui::PushID(id);
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##vs", ImVec2(w, h));
+    bool hov    = ImGui::IsItemHovered();
+    bool active = ImGui::IsItemActive();
+    bool changed = false;
+    if (active && !midiBound) {
+        float t = 1.0f - (ImGui::GetIO().MousePos.y - pos.y) / h;
+        float nv = std::clamp(t, 0.0f, 1.0f);
+        if (nv != *value) { *value = nv; changed = true; }
+    }
+    // Right-click resets to the "equilibrium" value, per user request.
+    if (hov && !midiBound && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        *value = resetValue;
+        changed = true;
+    }
+    float val = std::clamp(*value, 0.0f, 1.0f);
+    float flash = knobFaderFlash(id, val);
+
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    float cx = pos.x + w * 0.5f;
+    float top = pos.y, bot = pos.y + h;
+    d->AddLine(ImVec2(cx, top), ImVec2(cx, bot), dark ? IM_COL32(60, 61, 65, 255) : IM_COL32(222, 219, 213, 255), 9.0f);
+
+    float fy = bot - (bot - top) * val;
+    d->AddLine(ImVec2(cx, fy), ImVec2(cx, bot), (accent & 0x00FFFFFF) | ((ImU32)(190 + (int)(65 * flash)) << 24), 9.0f);
+
+    ImU32 capCol = flash > 0.0f
+        ? IM_COL32(90 + (int)(165 * (1 - flash)), 160 + (int)(95 * (1 - flash)), 255, 255)
+        : (dark ? IM_COL32(220, 220, 222, midiBound ? 255 : (hov ? 250 : 225))
+                : IM_COL32(255, 255, 255, midiBound ? 255 : (hov ? 250 : 235)));
+    d->AddRectFilled(ImVec2(cx - 6.5f, fy - 5.0f), ImVec2(cx + 6.5f, fy + 5.0f), capCol, 2.0f);
+    d->AddRect(ImVec2(cx - 6.5f, fy - 5.0f), ImVec2(cx + 6.5f, fy + 5.0f), IM_COL32(0, 0, 0, 35), 2.0f);
     ImGui::PopID();
     return changed;
 }
@@ -266,8 +397,66 @@ MappingProfile* Application::mappingForZone(OutputZone& z) {
 }
 
 
+// Session restore ("open where I last was"). Written in
+// Application::shutdown() right before the window is destroyed, read back
+// here in init() before/right after window creation. Missing/corrupt file
+// just means "use defaults" (fresh install, or a manually deleted file) —
+// never fatal.
+namespace {
+struct WindowState {
+    int x = 0, y = 0, w = 1280, h = 720;
+    bool maximized = false;
+    int mode = 0; // UIManager::WorkspaceMode, Canvas=0
+};
+
+// Resolved next to the running .exe (NOT a bare relative path against
+// whatever the current working directory happens to be) — unlike
+// recent_projects.txt/default.easel, which are seeded into build/Release at
+// build time and so happen to work either way, this file is written at
+// runtime with nothing to copy. The real launch path (taskbar/desktop
+// shortcut) starts in build/Release; a dev launch from a terminal in the
+// repo root does not — a bare relative "window_state.txt" silently landed
+// in the repo root during testing and was never seen by the shortcut launch,
+// which is why the restore worked in every manual test but not for the user.
+std::string windowStateFilePath() {
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        std::filesystem::path exePath(buf);
+        return (exePath.parent_path() / "window_state.txt").string();
+    }
+#endif
+    return "window_state.txt";
+}
+
+bool loadWindowState(WindowState& s) {
+    std::ifstream f(windowStateFilePath());
+    if (!f.is_open()) return false;
+    int maxFlag = 0;
+    f >> s.x >> s.y >> s.w >> s.h >> maxFlag >> s.mode;
+    if (f.fail()) return false;
+    s.maximized = (maxFlag != 0);
+    // Sanity-clamp — a corrupt/stale file shouldn't be able to create a
+    // zero-size or absurdly huge window.
+    if (s.w < 320 || s.h < 240 || s.w > 16000 || s.h > 16000) return false;
+    return true;
+}
+
+void saveWindowState(const WindowState& s) {
+    std::ofstream f(windowStateFilePath());
+    if (!f.is_open()) return;
+    f << s.x << " " << s.y << " " << s.w << " " << s.h << " "
+      << (s.maximized ? 1 : 0) << " " << s.mode;
+}
+} // namespace
+
 bool Application::init() {
     for (int i = 0; i < kKnobBankCount; i++) m_knobTarget[i] = MIDIMapping::Target::None;
+    for (int i = 0; i < kDeckKnobCount; i++) {
+        m_deckKnobCCOverrideA[i] = -1;
+        m_deckKnobCCOverrideB[i] = -1;
+    }
 
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
@@ -288,15 +477,30 @@ bool Application::init() {
 #endif
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 
+    // "Open where I last was" — restore size before creation (avoids a
+    // visible resize flicker), position/maximize/workspace after.
+    WindowState savedWin;
+    bool haveSavedWin = loadWindowState(savedWin);
+    if (haveSavedWin) {
+        m_windowWidth = savedWin.w;
+        m_windowHeight = savedWin.h;
+    }
+
     m_window = glfwCreateWindow(m_windowWidth, m_windowHeight, "Easel", nullptr, nullptr);
     if (!m_window) {
         std::cerr << "Failed to create window" << std::endl;
         return false;
     }
 
+    if (haveSavedWin) {
+        glfwSetWindowPos(m_window, savedWin.x, savedWin.y);
+        if (savedWin.maximized) glfwMaximizeWindow(m_window);
+    }
+
     // EASEL_WINDOW_POS="x,y" pins the editor window — companion to
     // EASEL_PROJECTOR_RECT on single-head appliances, parking the editor in
-    // the framebuffer region the physical output doesn't scan out.
+    // the framebuffer region the physical output doesn't scan out. Takes
+    // priority over the restored position (explicit per-launch override).
     if (const char* wp = getenv("EASEL_WINDOW_POS")) {
         int wx, wy;
         if (sscanf(wp, "%d,%d", &wx, &wy) == 2) glfwSetWindowPos(m_window, wx, wy);
@@ -361,6 +565,14 @@ bool Application::init() {
 
     if (!m_ui.init(m_window)) return false;
 
+    // Restore last workspace tab (Canvas/Mapping/Stage/Show/Zones) — the
+    // rest of "open where I last was". setMode() (not a direct sMode write)
+    // so the normal glassy transition animation plays here too.
+    if (haveSavedWin && savedWin.mode >= (int)UIManager::WorkspaceMode::Canvas &&
+        savedWin.mode <= (int)UIManager::WorkspaceMode::Zones) {
+        UIManager::setMode((UIManager::WorkspaceMode)savedWin.mode);
+    }
+
     // Scan bundled gl-transitions shaders. Lazy-compile on first use.
     GLTransitionLibrary::instance().scan("assets/transitions/gl");
 
@@ -421,6 +633,13 @@ bool Application::init() {
         std::cerr << "Failed to load warp_downsample.frag — falling back "
                      "to linear_copy for warp SS downsample\n";
     }
+    // Show Deck PROGRAM-monitor post-fx (the 7 effect faders). Best-effort:
+    // renderShowDeck() falls back to the raw programTex if this fails.
+    if (!m_deckPostFxShader.loadFromFiles("shaders/passthrough.vert",
+                                          "shaders/showdeck_postfx.frag")) {
+        std::cerr << "Failed to load showdeck_postfx.frag — ShowDeck effect "
+                     "sliders will have no visual effect\n";
+    }
 
     if (!m_maskRenderer.init()) return false;
 
@@ -435,28 +654,22 @@ bool Application::init() {
     m_scanner.init(1920, 1080);
 #endif
 
-    // Generate test pattern texture (visible when no layers are loaded)
-    {
-        const int tw = 512, th = 512;
-        std::vector<uint8_t> pixels(tw * th * 4);
-        for (int y = 0; y < th; y++) {
-            for (int x = 0; x < tw; x++) {
-                int idx = (y * tw + x) * 4;
-                bool checker = (((x / 32) + (y / 32)) % 2 == 0);
-                if (checker) {
-                    pixels[idx + 0] = (uint8_t)(x * 255 / tw);
-                    pixels[idx + 1] = (uint8_t)(y * 255 / th);
-                    pixels[idx + 2] = 128;
-                } else {
-                    pixels[idx + 0] = 30;
-                    pixels[idx + 1] = 30;
-                    pixels[idx + 2] = 40;
-                }
-                pixels[idx + 3] = 255;
-            }
-        }
-        m_testPattern.createEmpty(tw, th);
-        m_testPattern.updateData(pixels.data(), tw, th);
+    // Test pattern (visible when no layers are loaded) — classic SMPTE-style
+    // color bars, rendered live each frame with a slow organic swirl rather
+    // than a static upload, per user request. Best-effort: if the shader
+    // fails to load, the FBO is left empty/zero-sized and the 3 call sites
+    // that read m_testPatternFBO fall through to their own "nothing to show"
+    // handling the same way a failed real source would.
+    if (!m_testPatternShader.loadFromFiles("shaders/passthrough.vert",
+                                           "shaders/testpattern.frag")) {
+        std::cerr << "Failed to load testpattern.frag — the default test "
+                     "pattern won't render\n";
+    } else {
+        m_testPatternFBO.create(960, 540);   // 16:9 — matches every box that displays it, per user request
+        if (!m_testCardTex.loadFromFile("assets/testcard.png"))
+            std::cerr << "Failed to load assets/testcard.png\n";
+        if (!m_duckTex.loadFromFile("assets/duck.png"))
+            std::cerr << "Failed to load assets/duck.png\n";
     }
 
     // Generate white alignment grid texture. Shown INSTEAD of the test
@@ -465,8 +678,8 @@ bool Application::init() {
     // Same 512x512 footprint as the test pattern so it stretches 1:1 onto
     // the mapped surface using the exact same convention.
     {
-        const int gw = 512, gh = 512;       // matches m_testPattern footprint
-        const int kGridCellPx = 32;         // cell size; matches test-pattern checker scale (16 cells)
+        const int gw = 512, gh = 512;       // matches the test pattern's footprint
+        const int kGridCellPx = 32;         // cell size
         const int kGridLinePx = 1;          // thin ~1px white lines
         std::vector<uint8_t> pixels(gw * gh * 4);
         for (int y = 0; y < gh; y++) {
@@ -747,6 +960,14 @@ void Application::run() {
         double frameStart = glfwGetTime();
         glfwPollEvents();
 
+        // Consume any pending zone-tab add/duplicate/remove signal before
+        // ANYTHING else this frame can read m_activeZone (compositeAndWarp()
+        // below is the first — its activeZone() call would otherwise clamp
+        // an unconsumed signal to 0 and silently drop it). See
+        // consumeZoneTabSignal()'s comment for why this needs to run here,
+        // not just inside renderUI().
+        consumeZoneTabSignal();
+
         // ── Esc handling ──────────────────────────────────────────────
         // Edge-triggered, deferred-exit. Calling glfwSetWindowMonitor
         // synchronously inside the input branch was crashing on macOS
@@ -982,8 +1203,16 @@ void Application::run() {
                     m_audioAnalyzer.setWantsSystemAudio(true);
                 }
 #else
-                m_audioAnalyzer.setDeviceId("", false);
-                m_audioAnalyzer.setWantsSystemAudio(true);
+                if (!m_selectedMicId.empty()) {
+                    // Explicit mic (FFmpeg-free picker). Device index must not
+                    // be -1 or the analyzer ignores the id and opens loopback.
+                    m_audioAnalyzer.setDevice(0);
+                    m_audioAnalyzer.setDeviceId(m_selectedMicId, true);
+                    m_audioAnalyzer.setWantsSystemAudio(false);
+                } else {
+                    m_audioAnalyzer.setDeviceId("", false);
+                    m_audioAnalyzer.setWantsSystemAudio(true);
+                }
 #endif
             }
             m_audioAnalyzer.update(dt);
@@ -1183,6 +1412,12 @@ void Application::run() {
                 lastAutoSave = now;
             }
         }
+
+        // Fullscreen / present mode: the OS mouse pointer was vanishing (seen
+        // after using the top-right fullscreen icon). Rather than trust the
+        // OS cursor there, have ImGui draw its own pointer into the frame —
+        // the backend then hides the OS one, so there's never both or neither.
+        ImGui::GetIO().MouseDrawCursor = (m_editorFullscreen || m_presentMode);
 
         glViewport(0, 0, m_windowWidth, m_windowHeight);
         glClearColor(0, 0, 0, 1);
@@ -1788,6 +2023,29 @@ void Application::run() {
 }
 
 void Application::shutdown() {
+    // "Open where I last was" — capture window pos/size/maximized + the
+    // active workspace tab before anything is torn down, so the next
+    // launch's init() can restore it. GLFW state queries below need
+    // m_window to still be a live handle, so this must run before
+    // glfwDestroyWindow.
+    if (m_window) {
+        WindowState s;
+        s.maximized = glfwGetWindowAttrib(m_window, GLFW_MAXIMIZED) != 0;
+        // Un-maximized geometry — glfwGetWindowPos/Size return the maximized
+        // rect while maximized, which isn't useful to restore into; GLFW
+        // has no "restored rect while maximized" query, so just keep
+        // whatever the last known windowed geometry was in that case.
+        if (!s.maximized) {
+            glfwGetWindowPos(m_window, &s.x, &s.y);
+            glfwGetWindowSize(m_window, &s.w, &s.h);
+        } else {
+            WindowState prev;
+            if (loadWindowState(prev)) { s.x = prev.x; s.y = prev.y; s.w = prev.w; s.h = prev.h; }
+        }
+        s.mode = (int)UIManager::sMode;
+        saveWindowState(s);
+    }
+
     // GL/GLFW teardown — must run on the main thread after the render loop.
     // All blocking cleanup already completed in the closing animation in run().
     m_prodjlink.stop();
@@ -1852,6 +2110,96 @@ void Application::refreshAudioDevicesIfChanged() {
 void Application::updateSources() {
     // Hot-reload any changed Shader-Claw shaders
     m_shaderClaw.update();
+
+    // Background thumbnail generation — same render-to-PNG approach the
+    // Sources > Shaders tab uses, but driven here unconditionally so a
+    // shader with no cached thumbnail yet gets one even if that panel is
+    // never opened, per user request (this is what was missing for a
+    // freshly-added shader like "Stush"). One shader in flight at a time,
+    // a few frames apart, so it never costs a visible frame-time spike;
+    // skips anything already cached on disk or already handled this
+    // session (by either this or the Sources tab's own generator).
+    {
+        static std::string sBgThumbDir;
+        if (sBgThumbDir.empty()) {
+            const char* home = getenv("HOME");
+            if (!home || !*home) home = getenv("USERPROFILE");
+            sBgThumbDir = std::string(home ? home : "") + "/.easel/shader_thumbs";
+            std::error_code ec;
+            std::filesystem::create_directories(sBgThumbDir, ec);
+        }
+        auto bgThumbPath = [&](const std::string& fullPath) {
+            size_t s = fullPath.find_last_of("/\\");
+            std::string stem = (s == std::string::npos) ? fullPath : fullPath.substr(s + 1);
+            size_t d = stem.find_last_of('.');
+            if (d != std::string::npos) stem = stem.substr(0, d);
+            return sBgThumbDir + "/" + stem + ".png";
+        };
+        const int kBgThumbRes = 160;
+        if (m_bgThumbRenderer) {
+            m_bgThumbRenderer->setResolution(kBgThumbRes, kBgThumbRes);
+            m_bgThumbRenderer->update();
+            m_bgThumbRenderFrame++;
+            if (m_bgThumbRenderFrame > 3) {
+                GLuint tex = m_bgThumbRenderer->textureId();
+                if (tex != 0) {
+                    GLint prevFBO;
+                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+                    GLuint tempFBO;
+                    glGenFramebuffers(1, &tempFBO);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
+                    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+                    std::vector<unsigned char> px((size_t)kBgThumbRes * kBgThumbRes * 4);
+                    glReadPixels(0, 0, kBgThumbRes, kBgThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                    stbi_flip_vertically_on_write(1);
+                    stbi_write_png(bgThumbPath(m_bgThumbRenderPath).c_str(),
+                                   kBgThumbRes, kBgThumbRes, 4, px.data(), kBgThumbRes * 4);
+                    stbi_flip_vertically_on_write(0);
+                    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                    glDeleteFramebuffers(1, &tempFBO);
+                }
+                m_bgThumbRenderer.reset();
+                m_bgThumbRenderPath.clear();
+            }
+        } else {
+            for (const auto& sh : m_shaderClaw.shaders()) {
+                if (m_scThumbnails.count(sh.fullPath)) continue;   // already handled this session
+                if (std::filesystem::exists(bgThumbPath(sh.fullPath))) continue;   // already cached on disk
+                m_bgThumbRenderer = std::make_shared<ShaderSource>();
+                m_bgThumbRenderer->setResolution(kBgThumbRes, kBgThumbRes);
+                if (m_bgThumbRenderer->loadFromFile(sh.fullPath)) {
+                    m_bgThumbRenderPath = sh.fullPath;
+                    m_bgThumbRenderFrame = 0;
+                } else {
+                    m_bgThumbRenderer.reset();
+                }
+                break;
+            }
+        }
+    }
+
+    // Re-render the test pattern (test card image + bouncing duck sprite) —
+    // a live shader each frame so the duck's bounce actually animates.
+    if (m_testPatternShader.id() != 0 && m_testPatternFBO.width() > 0) {
+        GLint viewport[4];
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        m_testPatternFBO.bind();
+        glViewport(0, 0, m_testPatternFBO.width(), m_testPatternFBO.height());
+        m_testPatternShader.use();
+        m_testPatternShader.setMat3("uTransform", glm::mat3(1.0f));
+        m_testPatternShader.setBool("uFlipV", false);
+        m_testPatternShader.setFloat("uTime", (float)glfwGetTime());
+        m_testPatternShader.setInt("uTestCardTex", 0);
+        m_testPatternShader.setInt("uDuckTex", 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_testCardTex.id());
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, m_duckTex.id());
+        glActiveTexture(GL_TEXTURE0);
+        m_quad.draw();
+        Framebuffer::unbind();
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    }
 
     // Real frame dt for per-binding audio smoothing (frame-rate independent).
     // Local static timer mirrors the audio-analyzer dt block in the run loop;
@@ -2321,6 +2669,30 @@ void Application::updateSources() {
         m_dataBus.setNum("vision.face.smile",      vs.smile);
     }
 #endif
+
+    // Show-deck shaders (B/A) aren't part of m_layerStack, so they never hit
+    // the per-layer applyAudioBindings() call above — give them the same
+    // audio-driven modulation here, off the shared global analyzer (decks
+    // have no per-zone mic ownership concept). This is what actually makes
+    // the default reactive recipe set on deck-load (see the shader-commit
+    // code in renderShowDeck) do anything each frame.
+    if (m_deckShaderA || m_deckShaderB) {
+        float midAvg = (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f;
+        if (m_deckShaderA) {
+            m_deckShaderA->applyAudioBindings(
+                m_audioAnalyzer.smoothedRMS(), m_audioAnalyzer.bass(), midAvg,
+                m_audioAnalyzer.treble(), m_audioAnalyzer.beatDecay(), audioBindDt,
+                &m_midiManager, audioSigEnergy, audioSigBuild, audioSigDrop,
+                audioSigSilence, audioSigMomentum);
+        }
+        if (m_deckShaderB) {
+            m_deckShaderB->applyAudioBindings(
+                m_audioAnalyzer.smoothedRMS(), m_audioAnalyzer.bass(), midAvg,
+                m_audioAnalyzer.treble(), m_audioAnalyzer.beatDecay(), audioBindDt,
+                &m_midiManager, audioSigEnergy, audioSigBuild, audioSigDrop,
+                audioSigSilence, audioSigMomentum);
+        }
+    }
 }
 
 void Application::compositeAndWarp() {
@@ -2464,7 +2836,27 @@ void Application::compositeZone(OutputZone& zone) {
 
     GLuint sourceTex = zone.compositor.resultTexture();
     if (layers.empty()) {
-        sourceTex = m_testPattern.id();
+        sourceTex = m_testPatternFBO.textureId();
+    }
+    // Show workspace: PROGRAM (the B/A deck crossfade, published by
+    // renderShowDeck() into m_showProgramTex) replaces the normal
+    // layer-stack composite — Show's decks are the actual live output, not
+    // a page-local-only preview, so they reach the viewport, present/
+    // fullscreen output, and any NDI/Spout/RTMP consumers of this zone.
+    // Applies to the active zone (so the one you're editing always mirrors
+    // what Show is doing) AND every other showAllLayers zone (so mirroring
+    // PROGRAM to a second/third projector — a zone with its own output
+    // monitor but no curated visibleLayerIds — actually shows the live
+    // show instead of falling back to the test pattern above, which only
+    // the active zone used to get). A zone with specific visibleLayerIds
+    // is presumed to be intentionally driving its own separate composite
+    // and is left alone. Zero (neither deck slot loaded) falls straight
+    // back to the layer-stack composite above. The utility overrides below
+    // (mask edit grid, Mapping calibration pattern) still take priority
+    // over this.
+    if (m_showProgramTex && !m_zones.empty() &&
+        (zone.showAllLayers || &zone == &activeZone())) {
+        sourceTex = m_showProgramTex;
     }
     // While a mask (canvas or layer) is being added/edited, swap the
     // displayed surface for a white alignment grid so the user can line up
@@ -3443,6 +3835,50 @@ void Application::duplicateZone(int index) {
     m_zones.push_back(std::move(z));
 }
 
+// Zone-tab strips (ViewportPanel::render's Canvas tabs, ::renderNavBar's
+// Stage/Show tabs, and the disabled ::renderZoneOutputDock) all share one
+// int* activeZone parameter and encode add/duplicate/remove requests by
+// writing a negative "signal" into it rather than taking a callback —
+// signal = -(100 + zones.size()) to add, -(200 + index) to duplicate,
+// -(300 + index) to remove. This decodes that signal.
+//
+// MUST be called before anything else in the frame reads m_activeZone:
+// activeZone() clamps a negative value to 0 as a read side effect, which
+// silently destroys an unconsumed signal. A tab strip rendered later in
+// the same frame than this call (e.g. Stage/Show's renderNavBar, which
+// runs after renderUI()'s own call to this function) leaves its signal
+// sitting in m_activeZone until the top of the NEXT frame — so run() also
+// calls this first thing, before compositeAndWarp() ever touches
+// activeZone(), or that next-frame signal was lost before renderUI() got
+// a chance to see it (this was the cause of zone delete/duplicate/add
+// silently doing nothing when triggered from Stage or Show mode).
+void Application::consumeZoneTabSignal() {
+    if (m_activeZone >= 0) return;
+    int signal = -m_activeZone;
+    if (signal >= 100 && signal < 200) {
+        // Add zone (signal = 100 + zones.size())
+        addZone();
+        m_activeZone = (int)m_zones.size() - 1;
+    } else if (signal >= 200 && signal < 300) {
+        // Duplicate zone (signal = 200 + index)
+        int idx = signal - 200;
+        duplicateZone(idx);
+        m_activeZone = (int)m_zones.size() - 1;
+    } else if (signal >= 300 && signal < 400) {
+        // Remove zone (signal = 300 + index)
+        int idx = signal - 300;
+        removeZone(idx);
+        // m_activeZone was the negative signal — cap to valid range
+        if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size()) {
+            m_activeZone = std::max(0, (int)m_zones.size() - 1);
+        }
+    } else {
+        // Legacy: simple add
+        addZone();
+        m_activeZone = (int)m_zones.size() - 1;
+    }
+}
+
 // V1 voice-driven timeline — dispatch a parsed intent to the existing
 // timeline / layer / shader APIs. Soft matching on layer name (case-insensitive
 // substring) so "the magritte layer" finds "surrealism_magritte". Adds two
@@ -3870,13 +4306,13 @@ void Application::renderUI() {
 
     // Process MIDI events
     {
-        // Auto-connect the first available controller (throttled ~1s) so MIDI
+        // Auto-connect the first available controller (throttled ~0.25s) so MIDI
         // "just works" — no need to open it in the MIDI panel first. Skipped if
         // the user explicitly chose "None".
         static double s_midiScan = 0.0;
         double nowT = glfwGetTime();
         if (!m_midiManager.isOpen() && !m_midiUserDisconnected &&
-            nowT - s_midiScan > 1.0) {
+            nowT - s_midiScan > 0.25) {
             s_midiScan = nowT;
             auto devs = m_midiManager.listDevices();
             if (!devs.empty()) m_midiManager.openAll();
@@ -4580,7 +5016,7 @@ void Application::renderUI() {
         // ImGui overlays drawn on top regardless of the preview texture.
         GLuint previewTex = z.warpFBO.textureId();
         if (!previewTex) previewTex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
-        if (!previewTex) previewTex = m_testPattern.id();
+        if (!previewTex) previewTex = m_testPatternFBO.textureId();
         m_viewportPanel.setLayerSelected(m_selectedLayer >= 0 && m_selectedLayer < m_layerStack.count());
         m_viewportPanel.setEditorFullscreen(m_editorFullscreen);
         // Tell the viewport the actually-visible region so it fits AND centers
@@ -4733,31 +5169,7 @@ void Application::renderUI() {
     }
 
     // Handle signals from viewport tabs
-    if (m_activeZone < 0) {
-        int signal = -m_activeZone;
-        if (signal >= 100 && signal < 200) {
-            // Add zone (signal = 100 + zones.size())
-            addZone();
-            m_activeZone = (int)m_zones.size() - 1;
-        } else if (signal >= 200 && signal < 300) {
-            // Duplicate zone (signal = 200 + index)
-            int idx = signal - 200;
-            duplicateZone(idx);
-            m_activeZone = (int)m_zones.size() - 1;
-        } else if (signal >= 300 && signal < 400) {
-            // Remove zone (signal = 300 + index)
-            int idx = signal - 300;
-            removeZone(idx);
-            // m_activeZone was the negative signal — cap to valid range
-            if (m_activeZone < 0 || m_activeZone >= (int)m_zones.size()) {
-                m_activeZone = std::max(0, (int)m_zones.size() - 1);
-            }
-        } else {
-            // Legacy: simple add
-            addZone();
-            m_activeZone = (int)m_zones.size() - 1;
-        }
-    }
+    consumeZoneTabSignal();
 
     // Re-fetch after viewport render since m_activeZone may have changed
     auto& zone = activeZone();
@@ -5479,78 +5891,12 @@ void Application::renderUI() {
                 }
             }
 
-            // PLAY workspace top toolbar — zoom + PUBLISH split across
-            // two rows. PUBLISH gets its OWN row, left-aligned, so it
-            // doesn't collide with the floating right-cluster (audio/
-            // OUTPUT panels) that overlays the top-right corner of the
-            // workspace area.
-            const float kPad = 14.0f;
-
-            // Single toolbar row — zoom controls on the left, a quiet
-            // "Publish" affordance on the right. The publish action used
-            // to be a loud green pill that fought the chrome; it now reads
-            // as part of the toolbar (ghost background, muted text, accent
-            // only on hover / brief confirmation flash).
-            {
-                ImGui::Dummy(ImVec2(0, 4));
-                float rowTopY = ImGui::GetCursorPosY();
-                float contentRightX = ImGui::GetCursorPosX()
-                                    + ImGui::GetContentRegionAvail().x;
-
-                ImGui::Indent(kPad);
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 4));
-                if (ImGui::SmallButton("-##showzoomout")) {
-                    m_showZoom = std::max(0.05f, m_showZoom / 1.1f);
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("+##showzoomin")) {
-                    m_showZoom = std::min(20.0f, m_showZoom * 1.1f);
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Fit##showzoomfit")) {
-                    m_showZoom = 1.0f;
-                }
-                ImGui::SameLine();
-                ImGui::TextDisabled("%.0f%%", m_showZoom * 100.0f);
-
-                // Quiet publish affordance — left-aligned right after the
-                // zoom controls so it reads as one toolbar cluster and
-                // never collides with the floating audio/OUTPUT panel on
-                // the right. Ghost background, muted text, faint green
-                // accent only on hover / during the post-publish flash.
-                (void)rowTopY; (void)contentRightX;
-                ImGui::SameLine(0, 22);
-                bool flashing = glfwGetTime() < m_publishFlashUntil;
-                const char* pubLabel = flashing
-                    ? "\xe2\x9c\x93 Published"           // ✓ Published
-                    : "\xe2\x86\x91 Publish to Mobile";  // ↑ Publish to Mobile
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                       IM_COL32(255, 255, 255, 10));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                       IM_COL32(0x6E, 0xE7, 0x55, 38));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                                       IM_COL32(0x6E, 0xE7, 0x55, 60));
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                    flashing ? IM_COL32(0x6E, 0xE7, 0x55, 235)
-                             : IM_COL32(150, 156, 168, 235));
-                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-                // SmallButton inherits the zoom row's FramePadding so it
-                // sits flush on the same baseline as - / + / Fit.
-                if (ImGui::SmallButton(pubLabel)) {
-                    publishPlayToAgent();
-                    m_publishFlashUntil = glfwGetTime() + 1.6;
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Push this Show (layers + timeline + "
-                                       "markers + bpm)\n"
-                                       "to paired iPhones via the agent.");
-                }
-                ImGui::PopStyleVar();      // FrameRounding
-                ImGui::PopStyleColor(4);
-
-                ImGui::PopStyleVar();      // FramePadding (zoom row)
-                ImGui::Unindent(kPad);
-            }
+            // The zoom row (-/+/Fit/100%) and "Publish to Mobile" button
+            // used to live here, above the deck. Removed per user request
+            // to reclaim vertical space — the deck now starts flush under
+            // the CANVAS/MAPPING/.../SHOW tab bar. Ctrl +/-/0 zoom
+            // shortcuts (above) still work; publishPlayToAgent() is still
+            // reachable from the File menu's "Publish to Mobile" item.
 
             // The ShowDeck mixer is the whole workspace now — Main Output
             // mirrors the active zone's composited output, and slots B/A
@@ -5565,12 +5911,23 @@ void Application::renderUI() {
             float usableW    = std::max(120.0f, fullAvail.x - rightRailW - 18.0f);
 
             GLuint showOutTex = 0;
-            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size())
-                showOutTex = m_zones[m_activeZone]->warpFBO.textureId();
-            if (!showOutTex) showOutTex = m_testPattern.id();
+            int showOutTexW = 0, showOutTexH = 0;
+            if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) {
+                showOutTex  = m_zones[m_activeZone]->warpFBO.textureId();
+                showOutTexW = m_zones[m_activeZone]->warpFBO.width();
+                showOutTexH = m_zones[m_activeZone]->warpFBO.height();
+            }
+            if (!showOutTex) {
+                showOutTex  = m_testPatternFBO.textureId();
+                showOutTexW = m_testPatternFBO.width();
+                showOutTexH = m_testPatternFBO.height();
+            }
 
-            float deckH = std::max(0.0f, fullAvail.y - 6.0f);
-            renderShowDeck(usableW, deckH, showOutTex);
+            // Reserve room for renderShowMidiBar()'s flush-bottom bar (48px),
+            // which now occupies that strip in Show mode instead of the deck
+            // panel running underneath it.
+            float deckH = std::max(0.0f, fullAvail.y - 6.0f - 48.0f);
+            renderShowDeck(usableW, deckH, showOutTex, showOutTexW, showOutTexH);
 
             ImGui::End();
         }
@@ -7606,7 +7963,7 @@ void Application::renderUI() {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.50f));
         ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
         refreshCameraDevices();
         if (m_cameraDevices.empty()) {
             ImGui::TextWrapped("No cameras detected — plug one in (it rescans automatically).");
@@ -8173,8 +8530,25 @@ void Application::renderUI() {
             m_audioDevices = VideoRecorder::enumerateAudioDevices();
         }
 #else
-        ParamRow::Begin("INPUT");
-        ImGui::TextDisabled("Audio device selection requires FFmpeg build");
+        if (m_micDevices.empty()) m_micDevices = enumerateAudioInputDevices();
+        {
+            std::string curName = "System Audio (loopback)";
+            for (auto& d : m_micDevices) if (d.id == m_selectedMicId) curName = d.name;
+            ParamRow::Begin("INPUT");
+            if (ImGui::BeginCombo("##AudioInput", curName.c_str())) {
+                if (ImGui::Selectable("System Audio (loopback)", m_selectedMicId.empty()))
+                    m_selectedMicId.clear();
+                for (int i = 0; i < (int)m_micDevices.size(); i++) {
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable((m_micDevices[i].name + "  (mic)").c_str(), m_selectedMicId == m_micDevices[i].id))
+                        m_selectedMicId = m_micDevices[i].id;
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Refresh##audio")) m_micDevices = enumerateAudioInputDevices();
+        }
 #endif
 
         ImGui::Dummy(ImVec2(0, 4));
@@ -8901,7 +9275,7 @@ void Application::renderUI() {
 
         // Camera inputs
         ImGui::TextDisabled("CAMERA");
-#if defined(HAS_OPENCV) && defined(__APPLE__)
+#if defined(HAS_OPENCV) && (defined(__APPLE__) || defined(_WIN32))
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.10f));
@@ -8914,7 +9288,7 @@ void Application::renderUI() {
 #ifdef HAS_OPENCV
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.13f,0.15f,0.18f,1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.23f,0.28f,1.0f));
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
         if (m_cameraDevices.empty()) {
             dimText("No cameras detected — plug one in (it rescans automatically).");
         } else {
@@ -8990,6 +9364,7 @@ void Application::renderUI() {
     // play/stop/loop + timecode in a single rounded surface that floats
     // over the canvas, matching reference B's chrome-light vibe.
     renderFloatingTransportPill();
+    renderShowMidiBar();
     // Always rendered (even when the timeline itself is fully minimized and
     // stops being called above) so there's always a way to bring it back.
     // Called AFTER the pill (which re-raises itself to front every frame,
@@ -10786,6 +11161,303 @@ void Application::renderFloatingTransportPill() {
         if (sp->Active) ImGui::BringWindowToDisplayFront(sp);
 }
 
+void Application::renderShowMidiBar() {
+    // Show mode's own flush-bottom bar — the MIDI device picker + status
+    // that used to live inside the ShowDeck panel itself, moved out here
+    // per user request so it fills the blank grey strip across the bottom
+    // of the whole window (the one Canvas mode's transport pill occupies,
+    // but Show mode otherwise leaves empty).
+    if (UIManager::sMode != UIManager::WorkspaceMode::Show) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float barH   = 48.0f;
+    const float insetX = 20.0f;
+    float x = vp->Pos.x;
+    float y = vp->Pos.y + vp->Size.y - barH;
+    float w = vp->Size.x;
+
+    ImGui::SetNextWindowPos (ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(w, barH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize  |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoCollapse|
+        ImGuiWindowFlags_NoDocking  | ImGuiWindowFlags_NoSavedSettings|
+        ImGuiWindowFlags_NoScrollbar;
+
+    // Light or dark theme, matching the rest of Show mode (see
+    // renderShowDeck) — this bar is Show-exclusive (early-returns above for
+    // every other mode), so it's safe to recolor directly. The switch at
+    // the bottom-left of this bar flips UIManager::sShowDarkMode.
+    const bool dark = UIManager::sShowDarkMode;
+    const ImU32 kBarBg      = dark ? IM_COL32(24, 25, 27, 250)  : IM_COL32(234, 231, 226, 250);
+    const ImU32 kBarBorder  = dark ? IM_COL32(60, 61, 65, 255)  : IM_COL32(214, 211, 205, 255);
+    const ImU32 kBarText    = dark ? IM_COL32(228, 228, 230, 255) : IM_COL32(45, 45, 48, 255);
+    const ImU32 kBarTextDim = dark ? IM_COL32(148, 148, 152, 255) : IM_COL32(140, 138, 133, 255);
+    const ImU32 kBarFrame   = dark ? IM_COL32(44, 45, 49, 255)  : IM_COL32(247, 245, 241, 255);
+    const ImU32 kBarFrameHov= dark ? IM_COL32(52, 53, 57, 255)  : IM_COL32(238, 235, 229, 255);
+    const ImU32 kBarFrameAct= dark ? IM_COL32(60, 61, 66, 255)  : IM_COL32(230, 227, 220, 255);
+    const ImU32 kBarPopup   = dark ? IM_COL32(36, 37, 40, 255)  : IM_COL32(255, 255, 255, 255);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(insetX, (barH - 22.0f) * 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,       kBarBg);
+    ImGui::PushStyleColor(ImGuiCol_Border,         kBarBorder);
+    ImGui::PushStyleColor(ImGuiCol_Text,           kBarText);
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,   kBarTextDim);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        kBarFrame);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, kBarFrameHov);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  kBarFrameAct);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,        kBarPopup);
+    ImGui::PushStyleColor(ImGuiCol_Header,         dark ? IM_COL32(52, 62, 78, 255)  : IM_COL32(226, 233, 244, 255));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,  dark ? IM_COL32(60, 74, 94, 255)  : IM_COL32(214, 224, 240, 255));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,   dark ? IM_COL32(68, 84, 108, 255) : IM_COL32(200, 213, 234, 255));
+
+    if (ImGui::Begin("##ShowMidiBar", nullptr, flags)) {
+        {
+            ImVec2 wp = ImGui::GetWindowPos();
+            ImVec2 ws = ImGui::GetWindowSize();
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddLine(ImVec2(wp.x, wp.y), ImVec2(wp.x + ws.x, wp.y), kBarBorder, 1.0f);
+        }
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("MIDI");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(220.0f);
+        auto mdevs = m_midiManager.listDevices();
+        std::string mlabel = m_midiManager.currentDeviceLabel();
+        if (ImGui::BeginCombo("##showMidiDev", mlabel.c_str())) {
+            if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
+                m_midiManager.closeDevice();
+                m_midiUserDisconnected = true;
+            }
+            if (!mdevs.empty() && ImGui::Selectable("All devices", m_midiManager.isAllDevices())) {
+                m_midiManager.openAll();
+                m_midiUserDisconnected = false;
+            }
+            for (int i = 0; i < (int)mdevs.size(); i++) {
+                bool sel = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
+                if (ImGui::Selectable(mdevs[i].c_str(), sel)) {
+                    m_midiManager.openDevice(i);
+                    m_midiUserDisconnected = false;
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::SameLine(0, 20.0f);
+        ImGui::AlignTextToFramePadding();
+        if (mdevs.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kBarTextDim);
+            ImGui::TextUnformatted("No MIDI controller detected \xe2\x80\x94 plug one in, it auto-connects.");
+            ImGui::PopStyleColor();
+        } else if (m_midiManager.isOpen()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(40, 165, 100, 255));
+            ImGui::TextUnformatted("Connected");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, kBarTextDim);
+            int seen = (int)m_midiManager.seenCCs().size();
+            ImGui::Text("\xc2\xb7 %d control%s seen", seen, seen == 1 ? "" : "s");
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 110, 60, 255));
+            ImGui::TextUnformatted("Not connected");
+            ImGui::PopStyleColor();
+        }
+
+        // ── Audio input level meter, right of the MIDI status ──
+        // Live level of whatever input the analyzer is listening to (mic or
+        // System Audio) so it's obvious whether sound is actually arriving.
+        {
+            ImGui::SameLine(0, 28.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, kBarTextDim);
+#ifdef HAS_FFMPEG
+            bool usingMic = m_selectedAudioDevice >= 0 && m_selectedAudioDevice < (int)m_audioDevices.size()
+                            && m_audioDevices[m_selectedAudioDevice].isCapture;
+#else
+            bool usingMic = !m_selectedMicId.empty();
+#endif
+            ImGui::TextUnformatted(usingMic ? "MIC" : "AUDIO");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 8.0f);
+            const float meterW = 140.0f, meterH = 10.0f;
+            float rms = m_audioAnalyzer.smoothedRMS();
+            // Perceptual (dB) scaling: -60 dB..0 dB across the bar, so quiet
+            // room noise and normal speech both visibly register.
+            float db  = 20.0f * log10f(std::max(rms, 1e-6f));
+            float lvl = std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f);
+            static float sMeterHold = 0.0f;   // peak hold, decays slowly
+            sMeterHold = std::max(lvl, sMeterHold - ImGui::GetIO().DeltaTime * 0.5f);
+            ImVec2 mp = ImGui::GetCursorScreenPos();
+            mp.y += (ImGui::GetFrameHeight() - meterH) * 0.5f;
+            ImDrawList* mdl = ImGui::GetWindowDrawList();
+            mdl->AddRectFilled(mp, ImVec2(mp.x + meterW, mp.y + meterH), IM_COL32(128, 128, 128, 60), meterH * 0.5f);
+            ImU32 mcol = lvl > 0.9f ? IM_COL32(220, 70, 60, 240)
+                       : lvl > 0.7f ? IM_COL32(230, 170, 50, 240)
+                                    : IM_COL32(60, 190, 110, 240);
+            if (lvl > 0.0f)
+                mdl->AddRectFilled(mp, ImVec2(mp.x + meterW * lvl, mp.y + meterH), mcol, meterH * 0.5f);
+            float hx = mp.x + meterW * sMeterHold;
+            mdl->AddLine(ImVec2(hx, mp.y - 1.0f), ImVec2(hx, mp.y + meterH + 1.0f), IM_COL32(255, 255, 255, 200), 1.5f);
+            ImGui::Dummy(ImVec2(meterW, meterH));
+        }
+
+        // ── Per-band meters: LOW / MID / HIGH, each with a small gain knob
+        // to its left. The knob edits the same band gains the Audio tab's
+        // drags do (1x at 12 o'clock, 0.25x..4x), so anything bound to that
+        // band in the PARAMETERS panel is driven harder or softer.
+        {
+            struct BandDef { const char* label; const char* id; ImU32 col; };
+            static const BandDef kBands[3] = {
+                { "LOW",  "bandGainLow",  IM_COL32(220, 70, 60, 255)  },
+                { "MID",  "bandGainMid",  IM_COL32(230, 150, 30, 255) },
+                { "HIGH", "bandGainHigh", IM_COL32(30, 190, 210, 255) },
+            };
+            const float bandLevels[3] = {
+                m_audioAnalyzer.bass(),
+                (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                m_audioAnalyzer.treble(),
+            };
+            float* gains[3] = {
+                &m_audioAnalyzer.bassGain(),
+                &m_audioAnalyzer.lowMidGain(),   // MID drives lowMid + highMid together
+                &m_audioAnalyzer.trebleGain(),
+            };
+            const float knobSz = 24.0f, bMeterW = 90.0f, bMeterH = 10.0f;
+            for (int bi = 0; bi < 3; bi++) {
+                ImGui::SameLine(0, 26.0f);
+                // gain <-> knob position: k=0.5 is 1x, each 0.25 of travel is a 4x change
+                float g = std::clamp(*gains[bi], 0.25f, 4.0f);
+                float k = std::clamp(0.5f + log2f(g) / 4.0f, 0.0f, 1.0f);
+                float barYOff = (ImGui::GetFrameHeight() - knobSz) * 0.5f;
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + barYOff);
+                if (drawKnobWidgetLight(kBands[bi].id, &k, false, knobSz, kBands[bi].col,
+                                        UIManager::sShowDarkMode, 0.5f)) {
+                    float ng = powf(2.0f, (k - 0.5f) * 4.0f);
+                    *gains[bi] = ng;
+                    if (bi == 1) m_audioAnalyzer.highMidGain() = ng;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s gain: %.2fx  (drag; right-click = 1x)", kBands[bi].label, *gains[bi]);
+                ImGui::SameLine(0, 6.0f);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - barYOff);
+                ImGui::AlignTextToFramePadding();
+                ImGui::PushStyleColor(ImGuiCol_Text, kBarTextDim);
+                ImGui::TextUnformatted(kBands[bi].label);
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 8.0f);
+                float lvl = std::clamp(powf(std::clamp(bandLevels[bi], 0.0f, 1.0f), 0.7f), 0.0f, 1.0f);
+                ImVec2 mp = ImGui::GetCursorScreenPos();
+                mp.y += (ImGui::GetFrameHeight() - bMeterH) * 0.5f;
+                ImDrawList* mdl = ImGui::GetWindowDrawList();
+                mdl->AddRectFilled(mp, ImVec2(mp.x + bMeterW, mp.y + bMeterH), IM_COL32(128, 128, 128, 60), bMeterH * 0.5f);
+                if (lvl > 0.0f)
+                    mdl->AddRectFilled(mp, ImVec2(mp.x + bMeterW * lvl, mp.y + bMeterH), kBands[bi].col, bMeterH * 0.5f);
+                ImGui::Dummy(ImVec2(bMeterW, bMeterH));
+            }
+        }
+
+        // ── Perf readout (CPU / FPS + frame-time graph), right-aligned ──
+        // Per the reference mockup's "CPU 12% GPU 28% 60 FPS" cluster.
+        // GPU% is intentionally omitted — reading real GPU utilization
+        // needs a vendor API (NVML) this project doesn't link, and this bar
+        // won't show a made-up number. CPU% is real (process CPU time via
+        // GetProcessTimes, sampled 2x/sec); FPS is ImGui's own smoothed
+        // framerate; the trailing bars are a live frame-time history.
+        {
+#ifdef _WIN32
+            static double sLastSampleT = 0.0;
+            static ULONGLONG sLastKernel = 0, sLastUser = 0;
+            static float sCpuPct = 0.0f;
+            double now = ImGui::GetTime();
+            if (now - sLastSampleT > 0.5) {
+                FILETIME ftCreate, ftExit, ftKernel, ftUser;
+                if (GetProcessTimes(GetCurrentProcess(), &ftCreate, &ftExit, &ftKernel, &ftUser)) {
+                    ULONGLONG kernel = (((ULONGLONG)ftKernel.dwHighDateTime) << 32) | ftKernel.dwLowDateTime;
+                    ULONGLONG user   = (((ULONGLONG)ftUser.dwHighDateTime)   << 32) | ftUser.dwLowDateTime;
+                    if (sLastSampleT > 0.0) {
+                        SYSTEM_INFO si; GetSystemInfo(&si);
+                        int cores = std::max(1, (int)si.dwNumberOfProcessors);
+                        double wallDelta100ns = (now - sLastSampleT) * 1e7;
+                        double cpuDelta100ns  = double((kernel - sLastKernel) + (user - sLastUser));
+                        if (wallDelta100ns > 0.0)
+                            sCpuPct = (float)std::clamp(cpuDelta100ns / (wallDelta100ns * cores) * 100.0, 0.0, 999.0);
+                    }
+                    sLastKernel = kernel; sLastUser = user; sLastSampleT = now;
+                }
+            }
+
+            static float sFrameHist[64] = {};
+            static int   sFrameHistIdx = 0;
+            sFrameHist[sFrameHistIdx] = ImGui::GetIO().DeltaTime;
+            sFrameHistIdx = (sFrameHistIdx + 1) % IM_ARRAYSIZE(sFrameHist);
+
+            char cpuBuf[16], fpsBuf[16];
+            snprintf(cpuBuf, sizeof(cpuBuf), "CPU %d%%", (int)(sCpuPct + 0.5f));
+            snprintf(fpsBuf, sizeof(fpsBuf), "%d FPS", (int)(ImGui::GetIO().Framerate + 0.5f));
+
+            const float graphW = 90.0f, graphH = 18.0f;
+            ImVec2 cpuSz = ImGui::CalcTextSize(cpuBuf);
+            ImVec2 fpsSz = ImGui::CalcTextSize(fpsBuf);
+            float clusterW = cpuSz.x + 16.0f + fpsSz.x + 12.0f + graphW;
+            // Light/dark switch, bottom-RIGHT corner (rightmost element in
+            // the bar), per user request — reserve its width + a gap before
+            // the CPU/FPS/graph cluster to its left.
+            const float swW = 30.0f, swH = 16.0f, swGap = 16.0f;
+            ImVec2 winSz = ImGui::GetWindowSize();
+            float rowY = ImGui::GetCursorPosY();
+            ImGui::SetCursorPos(ImVec2(winSz.x - insetX - swW - swGap - clusterW, ImGui::GetCursorPosY() - ImGui::GetFrameHeight()));
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, kBarTextDim);
+            ImGui::TextUnformatted(cpuBuf);
+            ImGui::SameLine(0, 16.0f);
+            ImGui::TextUnformatted(fpsBuf);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 12.0f);
+            ImVec2 gp = ImGui::GetCursorScreenPos();
+            gp.y += (ImGui::GetFrameHeight() - graphH) * 0.5f;
+            ImDrawList* pdl = ImGui::GetWindowDrawList();
+            float maxDt = 1.0f / 24.0f;   // bars saturate at 24fps-equivalent frame time
+            for (int b = 0; b < IM_ARRAYSIZE(sFrameHist); b++) {
+                int idx = (sFrameHistIdx + b) % IM_ARRAYSIZE(sFrameHist);
+                float bw = graphW / (float)IM_ARRAYSIZE(sFrameHist);
+                float bh = std::clamp(sFrameHist[idx] / maxDt, 0.03f, 1.0f) * graphH;
+                float bx = gp.x + b * bw;
+                pdl->AddRectFilled(ImVec2(bx, gp.y + graphH - bh), ImVec2(bx + bw - 1.0f, gp.y + graphH),
+                                   IM_COL32(200, 160, 70, 220));
+            }
+            ImGui::Dummy(ImVec2(graphW, graphH));
+
+            {
+                ImVec2 p0(winSz.x - insetX - swW + ImGui::GetWindowPos().x,
+                          rowY - ImGui::GetFrameHeight() + (ImGui::GetFrameHeight() - swH) * 0.5f + ImGui::GetWindowPos().y);
+                ImGui::SetCursorScreenPos(p0);
+                ImGui::InvisibleButton("##showDarkModeSwitch", ImVec2(swW, swH));
+                if (ImGui::IsItemClicked()) UIManager::sShowDarkMode = !UIManager::sShowDarkMode;
+                bool swHov = ImGui::IsItemHovered();
+                ImU32 trackCol = dark
+                    ? (swHov ? IM_COL32(110, 185, 255, 255) : IM_COL32(90, 165, 245, 220))
+                    : (swHov ? kBarFrameHov : kBarFrame);
+                pdl->AddRectFilled(p0, ImVec2(p0.x + swW, p0.y + swH), trackCol, swH * 0.5f);
+                float knobR = swH * 0.5f - 2.0f;
+                float scx = dark ? (p0.x + swW - swH * 0.5f) : (p0.x + swH * 0.5f);
+                float scy = p0.y + swH * 0.5f;
+                pdl->AddCircleFilled(ImVec2(scx, scy), knobR, dark ? IM_COL32(220, 220, 222, 255) : IM_COL32(255, 255, 255, 255));
+                pdl->AddCircle(ImVec2(scx, scy), knobR, IM_COL32(0, 0, 0, 30), 0, 1.0f);
+                if (swHov) ImGui::SetTooltip(dark ? "Switch to light theme" : "Switch to dark theme");
+            }
+            (void)rowY;
+#endif
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(11);
+    ImGui::PopStyleVar(3);
+}
+
 void Application::renderFloatingActionPills() {
     // Replaced by the REC / STREAM icon buttons in renderFloatingTransportPill.
     // Kept as an empty stub so the existing call sites stay compile-clean and
@@ -10934,12 +11606,22 @@ void Application::renderCanvasKnobBank() {
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(2);
 
-    static const int kKnobCC[Application::kKnobBankCount] = {
+    static const int kKnobCC_XL[Application::kKnobBankCount] = {
         13,14,15,16,17,18,19,20,   // row 1 — "Send A" knobs
         29,30,31,32,33,34,35,36,   // row 2 — "Send B" knobs
         49,50,51,52,53,54,55,56,   // row 3 — "Pan/Device" knobs
     };
-    static const int kFaderCC[Application::kFaderBankCount] = { 77, 78, 79, 80, 81, 82, 83, 84 };
+    // Launch Control XL 3 factory layout (captured from the hardware).
+    static const int kKnobCC_XL3[Application::kKnobBankCount] = {
+        13,14,15,16,17,18,19,20,
+        21,22,23,24,25,26,27,28,
+        29,30,31,32,33,34,35,36,
+    };
+    static const int kFaderCC_XL[Application::kFaderBankCount]  = { 77, 78, 79, 80, 81, 82, 83, 84 };
+    static const int kFaderCC_XL3[Application::kFaderBankCount] = { 5, 6, 7, 8, 9, 10, 11, 12 };
+    const bool isXL3 = m_midiManager.isLaunchControlXL3();
+    const int* kKnobCC  = isXL3 ? kKnobCC_XL3  : kKnobCC_XL;
+    const int* kFaderCC = isXL3 ? kFaderCC_XL3 : kFaderCC_XL;
     static const char* kTargetNames[] = {
         "Layer Opacity", "Layer Visible", "Layer Pos X", "Layer Pos Y",
         "Layer Scale", "Layer Rotation", "Scene Recall", "BPM Set", "BPM Tap"
@@ -11186,7 +11868,24 @@ static const struct { const char* label; const char* transition; } kShowDeckBlen
     { "Green", "greenfade"  },
     { "Blue",  "bluefade"   },
 };
-void Application::renderShowDeck(float width, float height, GLuint programTex) {
+
+// The 7 PROGRAM post-fx uniforms (showdeck_postfx.frag), addressable by a
+// fixed "global effect" index — the cog next to each fader's caption lets
+// that physical fader be reassigned to drive any of these, instead of the
+// uniform always being wired to a fixed fader position. m_deckFaderEffect
+// defaults to the identity mapping (fader i -> effect i), i.e. exactly the
+// original fixed layout, per the user's request to keep today's default.
+static const char* kGlobalEffectNames[7] = {
+    "Brightness", "Saturation", "Contrast", "Hue Rotate", "V-Mirror", "Q-Mirror", "Kaleidoscope"
+};
+// Neutral (no-op) value for each effect when no fader is assigned to it,
+// and what right-clicking that effect's fader resets it to. Brightness is
+// 1.0 (top = unity, per user request — 0 is black, no boost past unity).
+// Saturation/Contrast stay 0.5 (they're still 3-point curves: 0=extreme
+// low, 0.5=unity, 1=extreme high). The rest are 0 = no-op.
+static const float kGlobalEffectNeutral[7] = { 1.0f, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f };
+void Application::renderShowDeck(float width, float height, GLuint programTex,
+                                 int programTexW, int programTexH) {
     if (width < 260.0f || height < 160.0f) return;
 
     if (!m_deckPlaylistsLoaded) { loadDeckPlaylists(); m_deckPlaylistsLoaded = true; }
@@ -11195,11 +11894,71 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
     if (m_deckShaderB)  m_deckShaderB->update();
     if (m_deckPreviewL) m_deckPreviewL->update();
     if (m_deckPreviewR) m_deckPreviewR->update();
+#ifdef HAS_OPENCV
+    if (m_deckWebcam) m_deckWebcam->update();
+#endif
+
+    // Capture a pending "Learn MIDI CC" (started from a knob's dot popup,
+    // below) — the moment the controller sends any CC while we're waiting,
+    // bind THAT physical control to the target knob, overriding the
+    // assumed Launch Control XL factory position for it. This is what
+    // makes mapping work for a controller that isn't on the factory
+    // template, isn't actually a Launch Control XL, or just doesn't line
+    // up with the row/column guess for some other reason.
+    if (m_deckKnobLearnIdx >= 0 && m_midiManager.hasLearnEvent()) {
+        MIDIEvent ev = m_midiManager.lastLearnEvent();
+        if (ev.type == 0) {  // CC only — ignore notes
+            int* overrides = (m_deckKnobLearnSide == 1) ? m_deckKnobCCOverrideA : m_deckKnobCCOverrideB;
+            overrides[m_deckKnobLearnIdx] = ev.number;
+        }
+        m_midiManager.stopLearn();
+        m_deckKnobLearnSide = -1;
+        m_deckKnobLearnIdx  = -1;
+    }
+
+    // Auto-fade — double-clicking the crossfader track (see the overlay
+    // below) starts an eased animation from the current position to the
+    // opposite end over m_deckCrossfadeDuration seconds, per the reference
+    // mockup's "Fade  2.0 s" control. A MIDI-bound fader overrides this
+    // every frame anyway (see just below), so the animation is harmless
+    // when a physical fader is in control — it just never gets to show.
+    if (m_deckCrossfadeAnimating) {
+        float dur = std::max(0.05f, m_deckCrossfadeDuration);
+        m_deckCrossfadeAnimT += ImGui::GetIO().DeltaTime / dur;
+        if (m_deckCrossfadeAnimT >= 1.0f) {
+            m_deckCrossfadeAnimT = 1.0f;
+            m_deckCrossfadeAnimating = false;
+        }
+        float e = m_deckCrossfadeAnimT * m_deckCrossfadeAnimT * (3.0f - 2.0f * m_deckCrossfadeAnimT);
+        m_deckCrossfade = m_deckCrossfadeAnimFrom + (m_deckCrossfadeAnimTo - m_deckCrossfadeAnimFrom) * e;
+    }
+
+    // Whatever MIDI controller is connected right now: fader 1 drives the
+    // A/B crossfader, faders 2-8 drive the 7 PROGRAM effect sliders. Same
+    // Launch Control XL factory CC convention as the Canvas knob bank's
+    // kFaderCC. Read once up top since the crossfade/post-fx compute below
+    // both need the live values; deckFaderMidiBound is consulted again
+    // further down when the widgets themselves are drawn.
+    static const int kDeckFaderCC_XL[8]  = { 77, 78, 79, 80, 81, 82, 83, 84 };
+    static const int kDeckFaderCC_XL3[8] = { 5, 6, 7, 8, 9, 10, 11, 12 };   // Launch Control XL 3
+    const int* kDeckFaderCC = m_midiManager.isLaunchControlXL3() ? kDeckFaderCC_XL3 : kDeckFaderCC_XL;
+    bool deckFaderMidiBound[8] = {};
+    {
+        float live = m_midiManager.getCCValue(-1, kDeckFaderCC[0]);
+        deckFaderMidiBound[0] = (live >= 0.0f);
+        if (deckFaderMidiBound[0]) m_deckCrossfade = live;
+        for (int i = 0; i < kDeckSliderCount; i++) {
+            live = m_midiManager.getCCValue(-1, kDeckFaderCC[i + 1]);
+            deckFaderMidiBound[i + 1] = (live >= 0.0f);
+            if (deckFaderMidiBound[i + 1]) m_deckSlider[i] = live;
+        }
+    }
 
     // Crossfade B -> A into m_deckMixFBO using m_deckCrossfade as progress
     // (0 = pure B/left, 1 = pure A/right) and the selected blend mode.
-    // Drives the PROGRAM monitor below directly (see mixTex usage there) —
-    // still independent of the real projector-output Zones.
+    // This mix IS what PROGRAM shows and is the actual live output signal
+    // — B/A are cue decks that feed forward into PROGRAM via the
+    // crossfader, not side previews independent of it.
     GLuint texA = m_deckShaderA ? m_deckShaderA->textureId() : 0;
     GLuint texB = m_deckShaderB ? m_deckShaderB->textureId() : 0;
     GLuint mixTex = 0;
@@ -11237,13 +11996,205 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
         }
     }
 
+    // PROGRAM-monitor post-fx — the 7 effect sliders (brightness/
+    // saturation/contrast/hue-rotate/vmirror/qmirror/kaleidoscope) run
+    // whichever texture PROGRAM is about to show (the A/B mix if either
+    // slot is loaded, else the real Zone feed) through showdeck_postfx.frag.
+    // Preview-only: grades the deck's own PROGRAM box, not the real
+    // projector/Zone output. Falls back to the ungraded source texture if
+    // the shader failed to load or the source has no known size yet.
+    GLuint programSrcTex = mixTex ? mixTex : programTex;
+    GLuint programDisplayTex = programSrcTex;
+    if (programSrcTex && programTexW > 0 && programTexH > 0 && m_deckPostFxShader.id() != 0) {
+        if (m_deckProgramFxFBO.width() != programTexW || m_deckProgramFxFBO.height() != programTexH) {
+            if (m_deckProgramFxFBO.width() == 0) m_deckProgramFxFBO.create(programTexW, programTexH);
+            else                                 m_deckProgramFxFBO.resize(programTexW, programTexH);
+        }
+        GLint viewport[4];
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        m_deckProgramFxFBO.bind();
+        glViewport(0, 0, programTexW, programTexH);
+        m_deckPostFxShader.use();
+        m_deckPostFxShader.setInt  ("uTexture",    0);
+        m_deckPostFxShader.setMat3 ("uTransform",  glm::mat3(1.0f));
+        m_deckPostFxShader.setBool ("uFlipV",      false);
+        // Faders can be reassigned to any global effect via their cog menu
+        // (see the fader row below), so the value feeding each uniform is
+        // looked up by effect index rather than assumed to be a fixed
+        // fader position. Effects with no fader currently assigned sit at
+        // their neutral (no-op) value.
+        float effectVal[7];
+        for (int e = 0; e < 7; e++) effectVal[e] = kGlobalEffectNeutral[e];
+        for (int i = 0; i < kDeckSliderCount; i++) {
+            int e = m_deckFaderEffect[i];
+            if (e >= 0 && e < 7) effectVal[e] = m_deckSlider[i];
+        }
+        m_deckPostFxShader.setFloat("uBrightness", effectVal[0]);
+        m_deckPostFxShader.setFloat("uSaturation", effectVal[1]);
+        m_deckPostFxShader.setFloat("uContrast",   effectVal[2]);
+        m_deckPostFxShader.setFloat("uHueRotate",  effectVal[3]);
+        m_deckPostFxShader.setFloat("uVMirror",    effectVal[4]);
+        m_deckPostFxShader.setFloat("uQMirror",    effectVal[5]);
+        m_deckPostFxShader.setFloat("uKaleido",    effectVal[6]);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, programSrcTex);
+        m_quad.draw();
+        Framebuffer::unbind();
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        programDisplayTex = m_deckProgramFxFBO.textureId();
+
+        // Kaleidoscope trails — feedback echoes on top of the kaleidoscope
+        // fold, Resolume-style, on by default. Only accumulates while
+        // Kaleidoscope is actually active.
+        bool kaleidoActive = effectVal[6] > 0.001f;
+        if (kaleidoActive && m_deckKaleidoTrails) {
+            bool justActivated = !m_deckKaleidoWasActive;
+            for (int t = 0; t < 2; t++) {
+                if (m_deckTrailFBO[t].width() != programTexW || m_deckTrailFBO[t].height() != programTexH) {
+                    if (m_deckTrailFBO[t].width() == 0) m_deckTrailFBO[t].create(programTexW, programTexH);
+                    else                                m_deckTrailFBO[t].resize(programTexW, programTexH);
+                    justActivated = true;   // freshly (re)created — has stale/undefined content
+                }
+            }
+            auto* fade = GLTransitionLibrary::instance().get("fade");
+            if (fade && fade->isValid()) {
+                int prevIdx = m_deckTrailIdx;
+                int nextIdx = 1 - m_deckTrailIdx;
+                glGetIntegerv(GL_VIEWPORT, viewport);
+                // Right when Kaleidoscope turns on, seed the "previous
+                // trail" side with the current frame too — otherwise the
+                // first blend mixes in whatever garbage/old content was
+                // last left in that buffer.
+                if (justActivated) {
+                    m_deckTrailFBO[prevIdx].bind();
+                    glViewport(0, 0, programTexW, programTexH);
+                    glActiveTexture(GL_TEXTURE0);
+                    glBindTexture(GL_TEXTURE_2D, programDisplayTex);
+                    m_deckPostFxShader.use();
+                    m_deckPostFxShader.setInt  ("uTexture",    0);
+                    m_deckPostFxShader.setMat3 ("uTransform",  glm::mat3(1.0f));
+                    m_deckPostFxShader.setBool ("uFlipV",      false);
+                    m_deckPostFxShader.setFloat("uBrightness", 0.5f);
+                    m_deckPostFxShader.setFloat("uSaturation", 0.5f);
+                    m_deckPostFxShader.setFloat("uContrast",   0.5f);
+                    m_deckPostFxShader.setFloat("uHueRotate",  0.0f);
+                    m_deckPostFxShader.setFloat("uVMirror",    0.0f);
+                    m_deckPostFxShader.setFloat("uQMirror",    0.0f);
+                    m_deckPostFxShader.setFloat("uKaleido",    0.0f);
+                    m_quad.draw();
+                }
+                m_deckTrailFBO[nextIdx].bind();
+                glViewport(0, 0, programTexW, programTexH);
+                // 0.35: how much of the fresh frame replaces the old trail
+                // each frame — low enough to leave a visible echo, high
+                // enough that it doesn't take forever to catch up to a cut.
+                fade->render(m_deckTrailFBO[prevIdx].textureId(), programDisplayTex, 0.35f, programTexW, programTexH);
+                Framebuffer::unbind();
+                glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+                m_deckTrailIdx = nextIdx;
+                programDisplayTex = m_deckTrailFBO[nextIdx].textureId();
+            }
+        }
+        m_deckKaleidoWasActive = kaleidoActive && m_deckKaleidoTrails;
+    }
+
+    // Publish PROGRAM out to compositeZone() — this is what actually routes
+    // Show's B/A mix to the active zone's viewport/present/NDI output.
+    // Zero when neither deck slot has a shader loaded so the active zone
+    // falls straight back to its normal layer-stack composite.
+    m_showProgramTex  = mixTex ? programDisplayTex : 0;
+    m_showProgramTexW = programTexW;
+    m_showProgramTexH = programTexH;
+
     ImGui::PushID("ShowDeck");
     ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float panelBottom = origin.y + height;   // true bottom of the ShowDeck panel, before the top-pad shift below
+    origin.y += 4.0f;   // breathing room above PROGRAM — trimmed further (was 10, originally 24) now that the zoom-row toolbar above the deck is gone too, per feedback to stretch content up to the tab bar
 
+    // ---- SHOW-tab-only theme (light or dark, switch in the footer) ------
+    // Per user request: reskin ShowDeck to a flat look (reference mockup),
+    // function unchanged, scoped to just this tab — the rest of the app
+    // (Canvas/Mapping/Zones/Gallery, shared widgets like drawKnobWidget/
+    // drawVSliderWidget) stays on the existing dark theme regardless of
+    // this toggle. UIManager::sShowDarkMode is flipped by the switch in
+    // Application::renderShowMidiBar's bottom-left corner. These constants
+    // are used by every draw call below; the style-color push covers stock
+    // ImGui widgets (combos, inputs, popups, checkboxes) for the rest of
+    // this function only — popped at the very end.
+    const bool showDark = UIManager::sShowDarkMode;
+    const ImU32 kBg        = showDark ? IM_COL32(24, 25, 27, 255)   : IM_COL32(234, 231, 226, 255);   // page background
+    const ImU32 kCard      = showDark ? IM_COL32(36, 37, 40, 255)   : IM_COL32(255, 255, 255, 255);   // rails / panels / monitor chrome
+    const ImU32 kCardSoft  = showDark ? IM_COL32(44, 45, 49, 255)   : IM_COL32(247, 245, 241, 255);   // recessed surfaces (tracks, wells)
+    const ImU32 kBorder    = showDark ? IM_COL32(60, 61, 65, 255)   : IM_COL32(214, 211, 205, 255);
+    const ImU32 kText      = showDark ? IM_COL32(228, 228, 230, 255) : IM_COL32(45, 45, 48, 255);
+    const ImU32 kTextDim   = showDark ? IM_COL32(148, 148, 152, 255) : IM_COL32(140, 138, 133, 255);
+    const ImU32 kTrack     = showDark ? IM_COL32(54, 55, 59, 255)   : IM_COL32(222, 219, 213, 255);
+    const ImU32 kAccentA   = IM_COL32(230, 148, 58, 255);    // orange — slot A (left rail), same both modes
+    const ImU32 kAccentB   = IM_COL32(70, 175, 80, 255);     // green  — slot B (right rail), same both modes
+    const ImU32 kHoverFill = showDark ? IM_COL32(52, 53, 57, 255)  : IM_COL32(238, 235, 229, 255);
+    const ImU32 kActiveFill= showDark ? IM_COL32(60, 61, 66, 255)  : IM_COL32(230, 227, 220, 255);
+    ImDrawList* bgDl = ImGui::GetWindowDrawList();
+    bgDl->AddRectFilled(ImVec2(origin.x, origin.y - 4.0f), ImVec2(origin.x + width, panelBottom), kBg);
+    ImGui::PushStyleColor(ImGuiCol_Text,                  kText);
+    ImGui::PushStyleColor(ImGuiCol_TextDisabled,          kTextDim);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,               kCardSoft);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,        kHoverFill);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,         kActiveFill);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg,               kCard);
+    ImGui::PushStyleColor(ImGuiCol_Border,                kBorder);
+    ImGui::PushStyleColor(ImGuiCol_Header,                showDark ? IM_COL32(52, 62, 78, 255)  : IM_COL32(226, 233, 244, 255));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,         showDark ? IM_COL32(60, 74, 94, 255)  : IM_COL32(214, 224, 240, 255));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,          showDark ? IM_COL32(68, 84, 108, 255) : IM_COL32(200, 213, 234, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button,                kCardSoft);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,         kHoverFill);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,          kActiveFill);
+    ImGui::PushStyleColor(ImGuiCol_CheckMark,             IM_COL32(90, 150, 230, 255));
+    ImGui::PushStyleColor(ImGuiCol_Separator,             kBorder);
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,           IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab,         showDark ? IM_COL32(255, 255, 255, 30) : IM_COL32(0, 0, 0, 40));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered,  showDark ? IM_COL32(255, 255, 255, 50) : IM_COL32(0, 0, 0, 65));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive,   showDark ? IM_COL32(255, 255, 255, 70) : IM_COL32(0, 0, 0, 90));
+    const int kShowThemeColorCount = 19;
+
+    // Everything below PROGRAM (knob rows, faders, button rows, gaps) was
+    // tuned for a ~1280px-tall window (2560x1440 display). On a shorter
+    // window (e.g. 1080p) those fixed pixel sizes ate the whole height and
+    // squeezed PROGRAM to a sliver, so they all scale down together with the
+    // available height instead. Exactly 1.0 on tall windows = unchanged look.
+    const float deckScale = std::clamp(height / 1250.0f, 0.5f, 1.0f);
     const float railW = 232.0f;   // doubled — wider shader-bank thumbnail columns
-    const float blueW = 184.0f;   // doubled — params column gets more room
     const float gap   = 8.0f;
-    float centerW = std::max(280.0f, width - 2.0f * (railW + blueW + gap * 2.0f));
+    // PROGRAM sizing + param-column width are solved together: mixW is a
+    // fixed target (~20% smaller than the deck used to render it, back
+    // when it filled the whole center span), and blueW is whatever's left
+    // between each rail and PROGRAM's edge — so the param columns grow to
+    // meet PROGRAM exactly flush (no dead gap) instead of sitting at an
+    // arbitrary fixed width. width = 2*railW + 2*gap + 2*blueW + mixW.
+    const float kProgramAspect = 16.0f / 9.0f;   // was 19:9 ("cinematic") — standardized to 16:9 per user request
+    const float kRefBlueW = 184.0f;   // legacy param width, used only as the mixW sizing reference
+    float refCenterW = std::max(280.0f, width - 2.0f * (railW + kRefBlueW + gap * 2.0f));
+    float mixW = refCenterW * 0.97f;   // widened further (was 0.80, then 0.92) so the knob/fader columns have more room to spread out, per user request
+    float mixH = mixW / kProgramAspect;
+    // mixH above was derived purely from width, with no regard for how
+    // much vertical room the panel actually has — on a wide/short window
+    // that let PROGRAM balloon tall enough to push the B/A boxes, knob
+    // grid, and MIDI row past the bottom of the panel (invisible without
+    // scrolling). Re-derive mixW from the *shorter* of the width-based fit
+    // and a height budget that reserves room for everything below it.
+    {
+        const float kSliderRowHEst = 110.0f * deckScale;   // vertical fader travel (101px) + its caption, rough
+        const float kKnobRowHEst   = 3.0f * (70.2f + 4.0f + 40.0f + 25.2f) * deckScale;  // mirrors the real knob rowStride below (knob size 52*1.35, row gap 36*0.7)
+        const float kKnobTopGapEst = 48.0f * deckScale;    // ~half inch of breathing room above the knob grid
+        const float kBottomReserve = 130.0f * deckScale;   // 2 button rows + the audio level meter + their margins (MIDI moved to its own bar)
+        float availH = height - 10.0f - gap * 2.0f - kKnobTopGapEst - kSliderRowHEst - kKnobRowHEst - kBottomReserve;
+        float mixWByHeight = std::max(160.0f, availH) * kProgramAspect;
+        if (mixWByHeight < mixW) {
+            mixW = std::max(200.0f, mixWByHeight);
+            mixH = mixW / kProgramAspect;
+        }
+    }
+    float blueW = std::max(kRefBlueW, (width - 2.0f * railW - 2.0f * gap - mixW) * 0.5f);
+    float mixX  = origin.x + railW + gap + blueW;
 
     // ---- shared per-side click state for the thumbnail rails ----------
     static std::string s_railClickPath[2];
@@ -11286,6 +12237,153 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
         return 0;
     };
 
+    // Small settings-gear badge, top-right corner of a box — added to
+    // every display per user request (the two rail previews, the A/B slot
+    // boxes, and PROGRAM). Decorative/hoverable everywhere except the
+    // shader thumbnail grid, which wires the click into a menu (see
+    // "ThumbCogMenu" below) — returns whether it was clicked this frame so
+    // that one call site can act on it while the rest just ignore it.
+    auto drawCornerCog = [&](const char* id, float boxRight, float boxTop) -> bool {
+        const float sz = 14.0f, margin = 6.0f;
+        float cx = boxRight - margin - sz * 0.5f;
+        float cy = boxTop + margin + sz * 0.5f;
+        // Pure hover-test (no InvisibleButton/SetCursorScreenPos): this is
+        // called mid-row inside auto-flowing grids (the shader thumbnail
+        // rail), and an InvisibleButton here — placed via an explicit
+        // SetCursorScreenPos — hijacks ImGui's "current line height"
+        // bookkeeping to this icon's tiny 14px size instead of the cell's
+        // real size, so every next row started far too soon and rows
+        // visually overlapped (thumbnails reading as tall merged
+        // rectangles instead of a clean square grid). IsMouseHoveringRect
+        // reads hover without touching cursor/layout state at all.
+        ImVec2 bmin(cx - sz * 0.5f, cy - sz * 0.5f), bmax(cx + sz * 0.5f, cy + sz * 0.5f);
+        bool hov = ImGui::IsMouseHoveringRect(bmin, bmax);
+        ImDrawList* cd = ImGui::GetWindowDrawList();
+        // Small dark chip behind the icon (same idea as the letter badge in
+        // drawPreviewBox) so it stays legible against ANY content — light
+        // cards, colorful thumbnails, or PROGRAM's dark video. Three dots
+        // ("...") instead of a gear, matching the reference mockup's menu
+        // button used on every header (PARAMETERS, A/B, PROGRAM).
+        cd->AddCircleFilled(ImVec2(cx, cy), sz * 0.62f, IM_COL32(20, 20, 24, hov ? 190 : 130));
+        {
+            ImU32 dotCol = hov ? IM_COL32(255, 255, 255, 235) : IM_COL32(226, 228, 233, 210);
+            float dotR = 1.15f, dotGap = 3.4f;
+            for (int di = -1; di <= 1; di++)
+                cd->AddCircleFilled(ImVec2(cx + di * dotGap, cy), dotR, dotCol, 8);
+        }
+        if (hov) ImGui::SetTooltip("Settings");
+        (void)id;
+        return hov && ImGui::IsMouseClicked(0);
+    };
+
+    // Overwrites a shader's cached thumbnail (the same
+    // "~/.easel/shader_thumbs/<stem>.png" the auto-generator writes) either
+    // from a live GL texture (screenshotting the rail's pink preview) or
+    // from pixels loaded off disk (a user-picked image). Both the thumbnail
+    // grid's cog menu paths funnel through here so the on-disk cache and
+    // the in-memory m_scThumbnails entry never disagree.
+    auto thumbCachePathFor = [&](const std::string& fullPath) -> std::string {
+        static std::string dir;
+        if (dir.empty()) {
+            const char* home = getenv("HOME");
+            if (!home || !*home) home = getenv("USERPROFILE");
+            dir = std::string(home ? home : "") + "/.easel/shader_thumbs";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+        }
+        size_t s = fullPath.find_last_of("/\\");
+        std::string stem = (s == std::string::npos) ? fullPath : fullPath.substr(s + 1);
+        size_t d = stem.find_last_of('.');
+        if (d != std::string::npos) stem = stem.substr(0, d);
+        return dir + "/" + stem + ".png";
+    };
+    auto setThumbnailFromRGBA = [&](const std::string& fullPath, const unsigned char* rgba,
+                                     int w, int h, bool flipY) {
+        std::string png = thumbCachePathFor(fullPath);
+        if (flipY) stbi_flip_vertically_on_write(1);
+        stbi_write_png(png.c_str(), w, h, 4, rgba, w * 4);
+        if (flipY) stbi_flip_vertically_on_write(0);
+        // Drop the stale in-memory entry and reload immediately so the grid
+        // reflects the new thumbnail this same frame instead of waiting for
+        // lazyLoadCachedThumb to notice the file changed (it never re-stats
+        // a path it's already cached).
+        m_scThumbnails.erase(fullPath);
+        auto& entry = m_scThumbnails[fullPath];
+        entry.texture = std::make_shared<Texture>();
+        entry.ready = entry.texture->loadFromFile(png);
+    };
+    // Screenshots a currently-rendering ShaderSource's texture (same
+    // read-back technique as the background thumbnail generator above:
+    // bind it to a temp FBO and glReadPixels). GL textures read bottom-up,
+    // hence flipY=true to land right-side-up in the PNG.
+    auto captureThumbnailFromTexture = [&](const std::string& fullPath, GLuint tex, int w, int h) {
+        if (!tex || w <= 0 || h <= 0) return;
+        GLint prevFBO;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+        GLuint tempFBO;
+        glGenFramebuffers(1, &tempFBO);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        std::vector<unsigned char> px((size_t)w * h * 4);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevFBO);
+        glDeleteFramebuffers(1, &tempFBO);
+        setThumbnailFromRGBA(fullPath, px.data(), w, h, /*flipY=*/true);
+    };
+    // Loads an arbitrary user-picked image file (png/jpg/bmp/tga via
+    // stb_image) and re-encodes it into the thumbnail cache. Files loaded
+    // this way are already top-down, so flipY=false.
+    auto captureThumbnailFromFile = [&](const std::string& fullPath, const std::string& imgPath) {
+        int w, h, ch;
+        unsigned char* px = stbi_load(imgPath.c_str(), &w, &h, &ch, 4);
+        if (!px) return;
+        setThumbnailFromRGBA(fullPath, px, w, h, /*flipY=*/false);
+        stbi_image_free(px);
+    };
+
+    // Small pill toggle switch, used by the PARAMETERS panel's Auto-Map
+    // control. Purely a hit-test + draw around a caller-owned bool — click
+    // anywhere on the pill to flip it.
+    auto drawToggleSwitch = [&](const char* id, bool& value) {
+        const float w = 30.0f, h = 16.0f;
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton(id, ImVec2(w, h));
+        if (ImGui::IsItemClicked()) value = !value;
+        bool hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 trackCol = value
+            ? (hov ? IM_COL32(110, 185, 255, 255) : IM_COL32(90, 165, 245, 220))
+            : (hov ? kHoverFill : kTrack);
+        dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), trackCol, h * 0.5f);
+        float knobR = h * 0.5f - 2.0f;
+        float cx = value ? (p0.x + w - h * 0.5f) : (p0.x + h * 0.5f);
+        float cy = p0.y + h * 0.5f;
+        dl->AddCircleFilled(ImVec2(cx, cy), knobR, showDark ? IM_COL32(220, 220, 222, 255) : IM_COL32(255, 255, 255, 255));
+        dl->AddCircle(ImVec2(cx, cy), knobR, IM_COL32(0, 0, 0, 30), 0, 1.0f);
+        if (hov) ImGui::SetTooltip(value ? "On" : "Off");
+    };
+
+    // Fills a slot's 12 knobs with its shader's currently-unbound float
+    // params, in the shader's own input order. This used to run
+    // automatically the instant a shader was committed to a slot; per user
+    // request it now only runs when the PARAMETERS panel's Auto-Map switch
+    // is flipped on, since auto-mapping on every load kept clobbering knob
+    // assignments the user had just set up by hand. Always re-derives all
+    // 12 from scratch (clearing any left over from a previous run/shader).
+    auto autoMapKnobs = [&](std::string* boundParams, const std::shared_ptr<ShaderSource>& shader) {
+        int ki = 0;
+        if (shader) {
+            auto& audioBound = shader->audioBindings();
+            for (auto& in : shader->inputs()) {
+                if (in.type != "float") continue;
+                if (audioBound.count(in.name)) continue;
+                if (ki >= kDeckKnobCount) break;
+                boundParams[ki++] = in.name;
+            }
+        }
+        for (; ki < kDeckKnobCount; ki++) boundParams[ki].clear();
+    };
+
     // ---- thumbnail rail (0 = left -> Slot B, 1 = right -> Slot A) ------
     auto renderRail = [&](int side, float x) {
         bool isLeft = (side == 0);
@@ -11299,7 +12397,9 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
         // 16:9 (matches the Slot A/B boxes' aspect) instead of a fixed
         // short-strip height.
         const float pinkH = railW * 9.0f / 16.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
         ImGui::BeginChild("##pink", ImVec2(railW, pinkH), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::PopStyleColor();
         {
             ImDrawList* pd = ImGui::GetWindowDrawList();
             ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -11309,13 +12409,15 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
                 pd->AddImageRounded((ImTextureID)(intptr_t)ptex, p0, p1,
                                     ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
             } else {
-                pd->AddRectFilled(p0, p1, IM_COL32(225, 40, 150, 60), 4.0f);
+                pd->AddRectFilled(p0, p1, kCardSoft, 4.0f);
+                pd->AddRect(p0, p1, kBorder, 4.0f, 0, 1.0f);
                 const char* hint = "preview";
                 ImVec2 ts = ImGui::CalcTextSize(hint);
                 pd->AddText(ImVec2(p0.x + ((p1.x - p0.x) - ts.x) * 0.5f,
                                    p0.y + ((p1.y - p0.y) - ts.y) * 0.5f),
-                           IM_COL32(255, 210, 235, 200), hint);
+                           kTextDim, hint);
             }
+            drawCornerCog(("##previewCog" + std::to_string(side)).c_str(), p0.x + railW, p0.y);
         }
         ImGui::EndChild();
         ImGui::Dummy(ImVec2(0, 4));
@@ -11325,131 +12427,338 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
         ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
 
         // Playlist selector — dropdown narrows the grid below to a named
-        // subset of the catalog; the pencil button opens an editor popup
-        // for creating/deleting playlists and toggling shader membership.
-        const float plRowH = 22.0f, plGap = 4.0f;
+        // subset of the catalog. The last entry in the dropdown, "+ New
+        // Playlist...", opens a small name popup; creating selects the new
+        // (empty) playlist and the grid below then shows a "+" tile (in
+        // place of a thumbnail) that opens a picker popup to add shaders
+        // into it. No standalone delete control while browsing a playlist
+        // (per user request) — a playlist's own remove-shader "x" chips
+        // still work; deleting the whole playlist is a follow-up if needed.
+        const float plGap = 4.0f;
+        float headerTop = ImGui::GetCursorScreenPos().y;
+        // Free-text filter, sitting directly above the playlist dropdown —
+        // narrows the grid below (within the selected playlist, or across
+        // all shaders) to titles containing the typed text.
         {
-            float ddW = railW - plRowH - plGap;
-            ImGui::SetNextItemWidth(ddW);
+            // Magnifying-glass icon inset into the box's left edge, per the
+            // reference mockup — reserve room for it via a wider left
+            // FramePadding (this widget only), then draw it manually over
+            // that reserved strip after the box itself is submitted.
+            ImVec2 searchPos = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(26.0f, ImGui::GetStyle().FramePadding.y));
+            ImGui::SetNextItemWidth(railW);
+            ImGui::InputTextWithHint(("##deckSearch" + std::to_string(side)).c_str(),
+                                     "Search shaders...", m_deckSearchQuery[side],
+                                     sizeof(m_deckSearchQuery[side]));
+            ImGui::PopStyleVar();
+            ImDrawList* sdl = ImGui::GetWindowDrawList();
+            float sr = 4.5f;
+            ImVec2 sc(searchPos.x + 13.0f, searchPos.y + ImGui::GetFrameHeight() * 0.5f);
+            sdl->AddCircle(sc, sr, kTextDim, 12, 1.4f);
+            sdl->AddLine(ImVec2(sc.x + sr * 0.72f, sc.y + sr * 0.72f),
+                        ImVec2(sc.x + sr * 1.5f, sc.y + sr * 1.5f), kTextDim, 1.4f);
+        }
+        ImGui::Dummy(ImVec2(0, plGap));
+        ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+        {
+            ImGui::SetNextItemWidth(railW);
             const char* curLabel = (m_deckPlaylistSel[side] < 0 ||
                                      m_deckPlaylistSel[side] >= (int)m_deckPlaylists.size())
                 ? "All Shaders" : m_deckPlaylists[m_deckPlaylistSel[side]].name.c_str();
+            // Picking "+ New Playlist..." inside the combo can't call
+            // OpenPopup directly: the combo's own popup is on the ID stack
+            // at that point, so the popup ID would hash differently from
+            // the BeginPopup below (and the combo closing on the same click
+            // would tear it down anyway). Latch a flag and open it after
+            // EndCombo, back in the rail's own ID scope.
+            bool wantNewPlaylist = false;
+            // Shrink the dropdown to 2/3 its default height, per user
+            // request — both the closed combo box and its open list share
+            // this padding, so the whole menu scales down together. Popped
+            // right after EndCombo so it doesn't leak into the Delete
+            // button / popups below.
+            ImVec2 defFramePad = ImGui::GetStyle().FramePadding;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(defFramePad.x, defFramePad.y * (2.0f / 3.0f)));
+            // Combo rect, captured up front: on the frame the entry is
+            // clicked, the "last item" after EndCombo is the selectable
+            // inside the (closing) list, not the combo header itself.
+            ImVec2 comboMin = ImGui::GetCursorScreenPos();
+            ImVec2 comboMax = ImVec2(comboMin.x + railW, comboMin.y + ImGui::GetFrameHeight());
             if (ImGui::BeginCombo(("##deckPlaylist" + std::to_string(side)).c_str(), curLabel)) {
-                if (ImGui::Selectable("All Shaders", m_deckPlaylistSel[side] < 0))
+                // Clear the search box on every switch — it was staying set
+                // across playlist changes, silently filtering a playlist
+                // down to whatever old search text was still typed in (a
+                // playlist with several shaders could read as having just
+                // one, or none, depending on what you'd searched for last;
+                // looked like the playlist itself had lost its shaders).
+                if (ImGui::Selectable("All Shaders", m_deckPlaylistSel[side] < 0)) {
                     m_deckPlaylistSel[side] = -1;
-                for (int p = 0; p < (int)m_deckPlaylists.size(); p++) {
-                    if (ImGui::Selectable(m_deckPlaylists[p].name.c_str(), m_deckPlaylistSel[side] == p))
-                        m_deckPlaylistSel[side] = p;
+                    m_deckSearchQuery[side][0] = '\0';
                 }
+                for (int p = 0; p < (int)m_deckPlaylists.size(); p++) {
+                    ImGui::PushID(p);
+                    if (ImGui::Selectable(m_deckPlaylists[p].name.c_str(), m_deckPlaylistSel[side] == p)) {
+                        m_deckPlaylistSel[side] = p;
+                        m_deckSearchQuery[side][0] = '\0';
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::Separator();
+                if (ImGui::Selectable("+ New Playlist..."))
+                    wantNewPlaylist = true;
                 ImGui::EndCombo();
             }
-            ImGui::SameLine(0, plGap);
-            ImVec2 pbPos = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton(("##deckPlaylistEdit" + std::to_string(side)).c_str(),
-                                   ImVec2(plRowH, plRowH));
-            bool pbHov = ImGui::IsItemHovered();
-            ImDrawList* pbd = ImGui::GetWindowDrawList();
-            pbd->AddRectFilled(pbPos, ImVec2(pbPos.x + plRowH, pbPos.y + plRowH),
-                               IM_COL32(255, 255, 255, pbHov ? 40 : 18), 4.0f);
-            lucide::pencil(pbd, pbPos.x + plRowH * 0.5f, pbPos.y + plRowH * 0.5f,
-                           plRowH * 0.6f, IM_COL32(230, 230, 235, 235));
-            if (ImGui::IsItemClicked())
-                ImGui::OpenPopup(("DeckPlaylistEdit" + std::to_string(side)).c_str());
-            if (pbHov) ImGui::SetTooltip("Edit shader playlists");
+            ImGui::PopStyleVar();
+            const std::string newPopupId = "DeckPlaylistNew" + std::to_string(side);
+            if (wantNewPlaylist)
+                ImGui::OpenPopup(newPopupId.c_str());
+            ImGui::Dummy(ImVec2(0, plGap));
+            ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
 
-            if (ImGui::BeginPopup(("DeckPlaylistEdit" + std::to_string(side)).c_str())) {
-                ImGui::TextDisabled("SHADER PLAYLISTS");
+            // Anchor the name popup directly under the dropdown (where the
+            // combo list just was) instead of at the mouse cursor.
+            ImGui::SetNextWindowPos(ImVec2(comboMin.x, comboMax.y + 2.0f), ImGuiCond_Appearing);
+            if (ImGui::BeginPopup(newPopupId.c_str())) {
+                ImGui::TextDisabled("CREATE PLAYLIST");
                 ImGui::Separator();
-
                 static char newName[2][64] = {};
+                if (ImGui::IsWindowAppearing()) {
+                    newName[side][0] = '\0';
+                    ImGui::SetKeyboardFocusHere();   // type the name straight away
+                }
                 ImGui::SetNextItemWidth(180.0f);
-                ImGui::InputTextWithHint(("##deckNewPlaylist" + std::to_string(side)).c_str(),
-                                         "New playlist name", newName[side], sizeof(newName[side]));
+                bool enterPressed = ImGui::InputTextWithHint(
+                    ("##deckNewPlaylist" + std::to_string(side)).c_str(),
+                    "Playlist name", newName[side], sizeof(newName[side]),
+                    ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::SameLine();
                 bool canCreate = newName[side][0] != '\0';
                 if (!canCreate) ImGui::BeginDisabled();
-                if (ImGui::Button(("Create##deckPlCreate" + std::to_string(side)).c_str())) {
+                bool doCreate = ImGui::Button(("Create##deckPlCreate" + std::to_string(side)).c_str());
+                if (!canCreate) ImGui::EndDisabled();
+                if (canCreate && (doCreate || enterPressed)) {
                     m_deckPlaylists.push_back({ std::string(newName[side]), {} });
                     m_deckPlaylistSel[side] = (int)m_deckPlaylists.size() - 1;
                     newName[side][0] = '\0';
                     saveDeckPlaylists();
-                }
-                if (!canCreate) ImGui::EndDisabled();
-
-                ImGui::Dummy(ImVec2(0, 6));
-
-                int sel = m_deckPlaylistSel[side];
-                if (sel < 0 || sel >= (int)m_deckPlaylists.size()) {
-                    ImGui::TextWrapped("Pick a playlist above (or create one) to choose "
-                                       "which shaders belong to it.");
-                } else {
-                    ImGui::Text("Editing: %s", m_deckPlaylists[sel].name.c_str());
-                    ImGui::SameLine();
-                    bool doDelete = ImGui::SmallButton(("Delete##deckPlDel" + std::to_string(side)).c_str());
-                    if (doDelete) {
-                        m_deckPlaylists.erase(m_deckPlaylists.begin() + sel);
-                        m_deckPlaylistSel[side] = -1;
-                        saveDeckPlaylists();
-                    } else {
-                        DeckPlaylist& pl = m_deckPlaylists[sel];
-                        const auto& allShaders = m_shaderClaw.shaders();
-                        ImGui::BeginChild(("##deckPlShaders" + std::to_string(side)).c_str(),
-                                          ImVec2(240, 220), true);
-                        for (int si = 0; si < (int)allShaders.size(); si++) {
-                            const auto& sh = allShaders[si];
-                            bool inPl = std::find(pl.shaderPaths.begin(), pl.shaderPaths.end(),
-                                                  sh.fullPath) != pl.shaderPaths.end();
-                            bool wasIn = inPl;
-                            std::string cbId = sh.title + "##deckPl" + std::to_string(side) +
-                                               "_" + std::to_string(si);
-                            if (ImGui::Checkbox(cbId.c_str(), &inPl)) {
-                                if (inPl && !wasIn) {
-                                    pl.shaderPaths.push_back(sh.fullPath);
-                                } else if (!inPl && wasIn) {
-                                    pl.shaderPaths.erase(std::remove(pl.shaderPaths.begin(),
-                                                                     pl.shaderPaths.end(), sh.fullPath),
-                                                         pl.shaderPaths.end());
-                                }
-                                saveDeckPlaylists();
-                            }
-                        }
-                        ImGui::EndChild();
-                    }
+                    ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndPopup();
             }
         }
-        ImGui::Dummy(ImVec2(0, plRowH + plGap));
+        ImGui::Dummy(ImVec2(0, plGap));
         ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
+        float headerH = ImGui::GetCursorScreenPos().y - headerTop;
 
         // Scrollable 2-column thumbnail grid, sourced from the same
         // ShaderClaw catalog + thumbnail cache as the Canvas shader browser
-        // — narrowed to the selected playlist, if any.
-        float gridH = height - pinkH - plRowH - 16.0f;
+        // — narrowed to the selected playlist, if any. When a playlist is
+        // selected, cell 0 is a "+" tile (opens the add-shaders picker
+        // below) and hovering any real thumbnail reveals a small "x" to
+        // remove it from the playlist.
+        float gridH = height - pinkH - headerH - 8.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kBg);
         ImGui::BeginChild("##grid", ImVec2(railW, gridH), false);
+        ImGui::PopStyleColor();
         const auto& allShaders = m_shaderClaw.shaders();
         std::vector<const ShaderClawBridge::ShaderEntry*> shaders;
         int gridSel = m_deckPlaylistSel[side];
-        if (gridSel >= 0 && gridSel < (int)m_deckPlaylists.size()) {
+        bool onPlaylist = (gridSel >= 0 && gridSel < (int)m_deckPlaylists.size());
+        std::string searchNeedle = m_deckSearchQuery[side];
+        for (auto& c : searchNeedle) c = (char)tolower((unsigned char)c);
+        auto matchesSearch = [&](const ShaderClawBridge::ShaderEntry& sh) {
+            if (searchNeedle.empty()) return true;
+            std::string t = sh.title;
+            for (auto& c : t) c = (char)tolower((unsigned char)c);
+            return t.find(searchNeedle) != std::string::npos;
+        };
+        if (onPlaylist) {
             auto& pl = m_deckPlaylists[gridSel];
             for (auto& sh : allShaders)
-                if (std::find(pl.shaderPaths.begin(), pl.shaderPaths.end(), sh.fullPath) != pl.shaderPaths.end())
+                if (std::find(pl.shaderPaths.begin(), pl.shaderPaths.end(), sh.fullPath) != pl.shaderPaths.end()
+                    && matchesSearch(sh))
                     shaders.push_back(&sh);
         } else {
-            for (auto& sh : allShaders) shaders.push_back(&sh);
+            for (auto& sh : allShaders)
+                if (matchesSearch(sh)) shaders.push_back(&sh);
         }
+        auto addShaderToPlaylist = [&](const std::string& path) {
+            if (!onPlaylist) return;
+            auto& pl = m_deckPlaylists[gridSel];
+            if (std::find(pl.shaderPaths.begin(), pl.shaderPaths.end(), path) == pl.shaderPaths.end()) {
+                pl.shaderPaths.push_back(path);
+                saveDeckPlaylists();
+            }
+        };
         const int cols = 2;
         float cell = floorf((railW - 4.0f) / cols);
-        for (int i = 0; i < (int)shaders.size(); i++) {
+        float cellH = cell;   // square again, per user request (was shortened 15% earlier)
+        int cellIdx = 0;
+
+        if (onPlaylist) {
+            // "+" tile — always cell 0 when browsing a playlist (not just
+            // when it's empty), so more shaders can be added any time.
+            ImVec2 cellPos = ImGui::GetCursorScreenPos();
+            ImGui::PushID("plus");
+            ImGui::InvisibleButton("##plus", ImVec2(cell - 2.0f, cellH - 2.0f));
+            bool plusHov = ImGui::IsItemHovered();
+            bool plusClicked = ImGui::IsItemClicked();
+            ImDrawList* gd = ImGui::GetWindowDrawList();
+            ImVec2 cellMax(cellPos.x + cell - 2.0f, cellPos.y + cellH - 2.0f);
+            gd->AddRectFilled(cellPos, cellMax, plusHov ? kHoverFill : kCardSoft, 8.0f);
+            gd->AddRect(cellPos, cellMax, kBorder, 8.0f, 0, 1.0f);
+            ImVec2 cc((cellPos.x + cellMax.x) * 0.5f, (cellPos.y + cellMax.y) * 0.5f);
+            float armLen = std::min(cell, cell) * 0.18f;
+            gd->AddLine(ImVec2(cc.x - armLen, cc.y), ImVec2(cc.x + armLen, cc.y), kTextDim, 2.0f);
+            gd->AddLine(ImVec2(cc.x, cc.y - armLen), ImVec2(cc.x, cc.y + armLen), kTextDim, 2.0f);
+            if (plusHov) ImGui::SetTooltip("Add shaders to this playlist");
+            ImGui::PopID();
+            cellIdx = 1;
+
+            // OpenPopup/BeginPopup must resolve the same ID, which depends
+            // on the ID stack at the call site — calling OpenPopup while
+            // "plus" was still pushed (above) hashed to a different popup
+            // than this BeginPopup ever finds, so the click silently did
+            // nothing. Deferred the actual OpenPopup call to here, outside
+            // that scope, to match.
+            if (plusClicked)
+                ImGui::OpenPopup(("DeckShaderPicker" + std::to_string(side)).c_str());
+
+            // ---- add-shaders picker popup ----------------------------
+            ImGui::SetNextWindowSize(ImVec2(460, 540), ImGuiCond_Appearing);
+            if (ImGui::BeginPopup(("DeckShaderPicker" + std::to_string(side)).c_str())) {
+                static std::set<std::string> s_pickerPending[2];
+                static std::string s_pickerClickPath[2];
+                static double      s_pickerClickTime[2] = { -1.0, -1.0 };
+                static char        s_pickerSearch[2][64] = { "", "" };
+                if (ImGui::IsWindowAppearing()) {
+                    s_pickerPending[side].clear();
+                    s_pickerSearch[side][0] = '\0';
+                    ImGui::SetKeyboardFocusHere();   // type-to-search right away
+                }
+
+                ImGui::TextDisabled("ADD TO %s", m_deckPlaylists[gridSel].name.c_str());
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                ImGui::InputTextWithHint("##pickerSearch", "Search shaders...",
+                                         s_pickerSearch[side], sizeof(s_pickerSearch[side]));
+                ImGui::Separator();
+                std::string pickNeedle = s_pickerSearch[side];
+                for (auto& c : pickNeedle) c = (char)tolower((unsigned char)c);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+                ImGui::BeginChild("##pickerGrid", ImVec2(0, ImGui::GetContentRegionAvail().y - 40.0f), false);
+                ImGui::PopStyleColor();
+                const int pcols = 4;
+                float pcell = floorf((ImGui::GetContentRegionAvail().x - 4.0f - ImGui::GetStyle().ScrollbarSize) / pcols);
+                const float pNameFont = 12.0f, pNameH = 18.0f;
+                int pShown = 0;
+                for (int i = 0; i < (int)allShaders.size(); i++) {
+                    const auto& sh = allShaders[i];
+                    std::string pname = sh.title.empty() ? sh.file : sh.title;
+                    if (!pickNeedle.empty()) {
+                        std::string lt = pname;
+                        for (auto& c : lt) c = (char)tolower((unsigned char)c);
+                        if (lt.find(pickNeedle) == std::string::npos) continue;
+                    }
+                    if (pShown++ % pcols != 0) ImGui::SameLine(0, 2.0f);
+                    ImGui::PushID(i);
+                    ImVec2 pPos = ImGui::GetCursorScreenPos();
+                    GLuint thumbTex = lazyLoadCachedThumb(sh.fullPath);
+                    // Hit area covers the card plus its caption underneath.
+                    ImGui::InvisibleButton("##pt", ImVec2(pcell - 2.0f, pcell - 2.0f + pNameH));
+                    bool phov = ImGui::IsItemHovered();
+                    bool selected = s_pickerPending[side].count(sh.fullPath) > 0;
+                    if (phov && ImGui::IsMouseClicked(0)) {
+                        double now = ImGui::GetTime();
+                        if (s_pickerClickPath[side] == sh.fullPath &&
+                            (now - s_pickerClickTime[side]) <= ImGui::GetIO().MouseDoubleClickTime) {
+                            // Double-click — add immediately, no need to hit Send.
+                            addShaderToPlaylist(sh.fullPath);
+                            s_pickerPending[side].erase(sh.fullPath);
+                            s_pickerClickPath[side].clear();
+                            s_pickerClickTime[side] = -1.0;
+                        } else {
+                            // Single click — toggle multi-select highlight.
+                            if (selected) s_pickerPending[side].erase(sh.fullPath);
+                            else          s_pickerPending[side].insert(sh.fullPath);
+                            s_pickerClickPath[side] = sh.fullPath;
+                            s_pickerClickTime[side] = now;
+                        }
+                    }
+                    ImDrawList* pd = ImGui::GetWindowDrawList();
+                    ImVec2 pMax(pPos.x + pcell - 2.0f, pPos.y + pcell - 2.0f);
+                    pd->AddRectFilled(pPos, pMax, phov ? kHoverFill : kCardSoft, 3.0f);
+                    if (thumbTex) {
+                        pd->AddImageRounded((ImTextureID)(intptr_t)thumbTex, pPos, pMax,
+                                            ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 3.0f);
+                    }
+                    drawCornerCog("##pickerThumbCog", pMax.x, pPos.y);
+                    if (selected) pd->AddRect(pPos, pMax, IM_COL32(110, 190, 255, 255), 3.0f, 0, 2.0f);
+                    {
+                        // Caption under the card, truncated to one line
+                        // (full title is in the hover tooltip).
+                        ImFont* pf = ImGui::GetFont();
+                        float maxTextW = pcell - 6.0f;
+                        std::string cap = pname;
+                        if (pf->CalcTextSizeA(pNameFont, FLT_MAX, 0.0f, cap.c_str()).x > maxTextW) {
+                            while (!cap.empty() &&
+                                   pf->CalcTextSizeA(pNameFont, FLT_MAX, 0.0f, (cap + "...").c_str()).x > maxTextW)
+                                cap.pop_back();
+                            cap += "...";
+                        }
+                        pd->AddText(pf, pNameFont, ImVec2(pPos.x + 1.0f, pMax.y + 3.0f),
+                                    selected ? IM_COL32(110, 190, 255, 255) : ImGui::GetColorU32(ImGuiCol_Text),
+                                    cap.c_str());
+                    }
+                    if (phov) {
+                        ImGui::SetTooltip("%s\nclick: select  \xc2\xb7  dbl-click: add now",
+                                          sh.title.empty() ? sh.file.c_str() : sh.title.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                if (pShown == 0) ImGui::TextDisabled("No shaders match \"%s\"", s_pickerSearch[side]);
+                ImGui::EndChild();
+                ImGui::Separator();
+                int pendingN = (int)s_pickerPending[side].size();
+                if (pendingN == 0) ImGui::BeginDisabled();
+                std::string sendLabel = "Send " + std::to_string(pendingN) + " Selected";
+                if (ImGui::Button(sendLabel.c_str())) {
+                    for (auto& p : s_pickerPending[side]) addShaderToPlaylist(p);
+                    s_pickerPending[side].clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                if (pendingN == 0) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+        }
+
+        for (int i = 0; i < (int)shaders.size(); i++, cellIdx++) {
             const auto& sh = *shaders[i];
-            if (i % cols != 0) ImGui::SameLine(0, 2.0f);
+            if (cellIdx % cols != 0) ImGui::SameLine(0, 2.0f);
             ImGui::PushID(i);
             ImVec2 cellPos = ImGui::GetCursorScreenPos();
+            ImVec2 cellMax(cellPos.x + cell - 2.0f, cellPos.y + cellH - 2.0f);
             GLuint thumbTex = lazyLoadCachedThumb(sh.fullPath);
+            // Remove-chip hit-test computed up front so the main cell click
+            // handling below can ignore clicks that land on it — otherwise
+            // clicking "x" would also fire the preview/commit logic underneath.
+            ImVec2 xMin(cellMax.x - 16.0f, cellPos.y);
+            ImVec2 xMax(cellPos.x + cell - 2.0f, cellPos.y + 16.0f);
+            bool xHov = onPlaylist && ImGui::IsMouseHoveringRect(xMin, xMax);
+            // Same corner rect drawCornerCog uses below — computed up front,
+            // like xHov above, so a click on the cog doesn't also fall
+            // through to the preview/commit handling underneath it.
+            const float cogSz = 14.0f, cogMargin = 6.0f;
+            float cogCx = cellMax.x - cogMargin - cogSz * 0.5f;
+            float cogCy = cellPos.y + cogMargin + cogSz * 0.5f;
+            ImVec2 cogMin(cogCx - cogSz * 0.5f, cogCy - cogSz * 0.5f);
+            ImVec2 cogMax(cogCx + cogSz * 0.5f, cogCy + cogSz * 0.5f);
+            bool cogHov = !onPlaylist && ImGui::IsMouseHoveringRect(cogMin, cogMax);
 
-            ImGui::InvisibleButton("##t", ImVec2(cell - 2.0f, cell - 2.0f));
+            ImGui::InvisibleButton("##t", ImVec2(cell - 2.0f, cellH - 2.0f));
             bool hov = ImGui::IsItemHovered();
-            if (hov && ImGui::IsMouseClicked(0)) {
+            if (hov && !xHov && !cogHov && ImGui::IsMouseClicked(0)) {
                 double now = ImGui::GetTime();
                 if (s_railClickPath[side] == sh.fullPath &&
                     (now - s_railClickTime[side]) <= ImGui::GetIO().MouseDoubleClickTime) {
@@ -11458,8 +12767,28 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
                     std::shared_ptr<ShaderSource>& slotShader = isLeft ? m_deckShaderB : m_deckShaderA;
                     slotPath = sh.fullPath;
                     slotShader = std::make_shared<ShaderSource>();
-                    slotShader->setResolution(480, 270);
-                    if (!slotShader->loadFromFile(sh.fullPath)) slotShader.reset();
+                    // Full output resolution, not a small preview res — this
+                    // shader IS the real PROGRAM/output signal now (B/A feed
+                    // forward into it), and rendering it at 480x270 then
+                    // stretching 4x into a 1920x1080 output was exactly what
+                    // made the output look pixelated.
+                    slotShader->setResolution(1920, 1080);
+                    if (!slotShader->loadFromFile(sh.fullPath)) {
+                        slotShader.reset();
+                    } else {
+                        // No default audio-reactive recipe on load, per user request —
+                        // deck shaders start with no audio bindings (params stay where
+                        // they are until the user assigns reactivity themselves).
+
+                        // Knobs no longer auto-map on load, per user request
+                        // (it kept clobbering hand-set assignments) — clear
+                        // any stale bindings left from the PREVIOUS shader
+                        // and leave the knobs unbound until the PARAMETERS
+                        // panel's Auto-Map switch is flipped on for this slot.
+                        std::string* boundParams = isLeft ? m_deckKnobBoundParamB : m_deckKnobBoundParamA;
+                        for (int ki = 0; ki < kDeckKnobCount; ki++) boundParams[ki].clear();
+                        (isLeft ? m_deckAutoMapOnB : m_deckAutoMapOnA) = false;
+                    }
                     s_railClickPath[side].clear();
                     s_railClickTime[side] = -1.0;
                 } else {
@@ -11474,19 +12803,96 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
             }
 
             ImDrawList* gd = ImGui::GetWindowDrawList();
-            ImU32 bg = hov ? IM_COL32(255, 255, 255, 34) : IM_COL32(255, 255, 255, 18);
-            ImVec2 cellMax(cellPos.x + cell - 2.0f, cellPos.y + cell - 2.0f);
-            gd->AddRectFilled(cellPos, cellMax, bg, 3.0f);
+            ImU32 bg = hov ? kHoverFill : kCardSoft;
+            gd->AddRectFilled(cellPos, cellMax, bg, 8.0f);
             if (thumbTex) {
                 gd->AddImageRounded((ImTextureID)(intptr_t)thumbTex, cellPos, cellMax,
-                                    ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 3.0f);
+                                    ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 8.0f);
             }
-            if (hov) {
+            // Corner cog, per user request ("all thumbnails") — skipped
+            // while browsing a playlist, where that same corner is already
+            // the hover "x" remove affordance, and hidden until the cell is
+            // hovered so the grid reads clean (matches the reference
+            // mockup's icon-only cards) while the feature stays one hover
+            // away. Click opens a menu to set a custom thumbnail —
+            // screenshot the live rail preview, or load an image from disk —
+            // since the auto-generated one is just whatever the background
+            // renderer's first few frames looked like, which for an
+            // animated shader can be blank/uninteresting.
+            if (!onPlaylist && hov) {
+                if (drawCornerCog(("##thumbCog" + std::to_string(i)).c_str(), cellMax.x, cellPos.y))
+                    ImGui::OpenPopup("ThumbCogMenu");
+                if (ImGui::BeginPopup("ThumbCogMenu")) {
+                    bool hasPreview = previewShader && previewShader->textureId() != 0;
+                    if (!hasPreview) ImGui::BeginDisabled();
+                    bool doScreenshot = ImGui::MenuItem("Screenshot Preview");
+                    if (!hasPreview) ImGui::EndDisabled();
+                    if (!hasPreview && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Click a thumbnail above to load it into the preview first");
+                    if (doScreenshot) {
+                        captureThumbnailFromTexture(sh.fullPath, previewShader->textureId(),
+                                                     previewShader->width(), previewShader->height());
+                    }
+                    if (ImGui::MenuItem("Upload Image...")) {
+                        std::string img = openFileDialog(
+                            "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files\0*.*\0");
+                        if (!img.empty()) captureThumbnailFromFile(sh.fullPath, img);
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+            // Shader name — plain text BELOW the card (matches the reference
+            // mockup's icon+caption look), not an overlay scrim on top of
+            // the image.
+            const float nameFont = 13.0f, nameH = 18.0f;
+            {
+                std::string name = sh.title.empty() ? sh.file : sh.title;
+                ImFont* nfont = ImGui::GetFont();
+                float maxTextW = cellMax.x - cellPos.x - 2.0f;
+                // Force a single line: a wrap_width here (as this used to pass)
+                // lets a long title wrap onto extra lines that spill into the
+                // next row. Truncate instead.
+                if (nfont->CalcTextSizeA(nameFont, FLT_MAX, 0.0f, name.c_str()).x > maxTextW) {
+                    while (!name.empty() &&
+                           nfont->CalcTextSizeA(nameFont, FLT_MAX, 0.0f, (name + "...").c_str()).x > maxTextW)
+                        name.pop_back();
+                    name += "...";
+                }
+                ImVec2 nameMin(cellPos.x, cellMax.y + 4.0f);
+                ImVec2 nameMax(cellMax.x, cellMax.y + 4.0f + nameH);
+                gd->PushClipRect(nameMin, nameMax, true);
+                gd->AddText(nfont, nameFont, nameMin, kText, name.c_str(), nullptr, 0.0f);
+                gd->PopClipRect();
+            }
+            if (hov && !xHov && !cogHov) {
                 ImGui::SetTooltip("%s\nclick: preview  \xc2\xb7  dbl-click: send to %s",
                                   sh.title.empty() ? sh.file.c_str() : sh.title.c_str(),
-                                  isLeft ? "B (red)" : "A (green)");
+                                  isLeft ? "A (orange)" : "B (green)");
+            }
+            // Remove-from-playlist affordance — small "x" chip, top-right,
+            // only while browsing a playlist (not "All Shaders") and only
+            // on hover, so the base grid stays uncluttered.
+            if (onPlaylist && hov) {
+                gd->AddRectFilled(xMin, xMax, IM_COL32(20, 20, 24, xHov ? 235 : 190), 3.0f);
+                gd->AddLine(ImVec2(xMin.x + 4, xMin.y + 4), ImVec2(xMax.x - 4, xMax.y - 4),
+                           IM_COL32(255, 255, 255, 235), 1.5f);
+                gd->AddLine(ImVec2(xMax.x - 4, xMin.y + 4), ImVec2(xMin.x + 4, xMax.y - 4),
+                           IM_COL32(255, 255, 255, 235), 1.5f);
+                if (xHov) {
+                    ImGui::SetTooltip("Remove from playlist");
+                    if (ImGui::IsMouseClicked(0)) {
+                        auto& pl = m_deckPlaylists[gridSel];
+                        pl.shaderPaths.erase(std::remove(pl.shaderPaths.begin(), pl.shaderPaths.end(),
+                                                         sh.fullPath), pl.shaderPaths.end());
+                        saveDeckPlaylists();
+                    }
+                }
             }
             ImGui::PopID();
+            // Row gap now also reserves room for the caption drawn below
+            // each card (nameH + its own 4px offset), plus the original
+            // breathing room so rows don't read as one merged block.
+            if (cellIdx % cols == cols - 1) ImGui::Dummy(ImVec2(0, nameH + 4.0f + 6.0f));
         }
         ImGui::EndChild();
         ImGui::PopID();
@@ -11494,177 +12900,19 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
     renderRail(0, origin.x);
     renderRail(1, origin.x + width - railW);
 
-    // ---- blue parameter panel — live ISF float inputs of that slot's
-    // shader. Placeholder scope for now (per design note); real routing
-    // TBD.
-    auto renderParamPanel = [&](float x, const char* childId,
-                                const std::shared_ptr<ShaderSource>& shader) {
-        ImGui::SetCursorScreenPos(ImVec2(x, origin.y));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(40, 70, 140, 40));
-        ImGui::BeginChild(childId, ImVec2(blueW, height), false);
-        ImGui::PopStyleColor();
-        ImGui::TextDisabled("PARAMETERS");
-        ImGui::Separator();
-        if (!shader) {
-            ImGui::TextWrapped("(no shader loaded)");
-        } else {
-            for (auto& in : shader->inputs()) {
-                if (in.type != "float") continue;
-                float v = std::get<float>(in.value);
-                const char* lbl = !in.label.empty() ? in.label.c_str() : in.name.c_str();
-                // Name above the slider instead of ImGui's default
-                // to-the-right label.
-                ImGui::TextUnformatted(lbl);
-                ImGui::SetNextItemWidth(-1);
-                std::string sliderId = std::string("##") + lbl;
-                if (ImGui::SliderFloat(sliderId.c_str(), &v, in.minVal, in.maxVal)) in.value = v;
-            }
-        }
-        ImGui::EndChild();
-    };
-    renderParamPanel(origin.x + railW + gap, "##paramsB", m_deckShaderB);
-    renderParamPanel(origin.x + width - railW - gap - blueW, "##paramsA", m_deckShaderA);
-
-    // ---- center column: Main Output mix, B/sliders/A, knobs, buttons ---
-    float centerX = origin.x + railW + gap + blueW + gap;
-    ImGui::SetCursorScreenPos(ImVec2(centerX, origin.y));
-
-    const float btnRowH    = 30.0f;
-    const float rowGap     = 8.0f;
-
-    // Program monitor — fixed 19:9, filling the full center column width
-    // (both dimensions scale off that, so the ratio stays exact).
-    const float kProgramAspect = 19.0f / 9.0f;
-    float mixW = centerW;
-    float mixH = mixW / kProgramAspect;
-    float mixX = centerX + (centerW - mixW) * 0.5f;
-
-    // B/A boxes are locked to a real 16:9 rectangle (taller, less wide than
-    // the old wide-short strip) — sideW derives from sliderRowH at that
-    // ratio, then both shrink together (keeping 16:9) if mixW is too
-    // narrow to fit two of them plus a usable slider strip. B's left edge
-    // and A's right edge are pinned to the PROGRAM monitor's own left/right
-    // edges (mixX / mixX+mixW) rather than the wider center column, so the
-    // whole B/slider/A row reads as "under PROGRAM" instead of overhanging it.
-    const float kMinSliderStripW = 100.0f;
-    float sliderRowH = 180.0f;
-    float sideW = sliderRowH * 16.0f / 9.0f;
-    float maxSideW = (mixW - kMinSliderStripW) * 0.5f;
-    if (sideW > maxSideW) {
-        sideW = std::max(80.0f, maxSideW);
-        sliderRowH = sideW * 9.0f / 16.0f;
-    }
-    float rowLeft  = mixX;
-    float rowRight = mixX + mixW;
-
-    ImGui::SetCursorScreenPos(ImVec2(mixX, origin.y));
-    ImGui::BeginChild("##deckMix", ImVec2(mixW, mixH), false, ImGuiWindowFlags_NoScrollbar);
-    {
-        ImDrawList* md = ImGui::GetWindowDrawList();
-        ImVec2 m0 = ImGui::GetCursorScreenPos();
-        ImVec2 m1 = ImVec2(m0.x + mixW, m0.y + mixH);
-        md->AddRectFilled(m0, m1, IM_COL32(40, 20, 0, 255), 4.0f);
-        // A/B crossfade result takes over PROGRAM whenever either slot is
-        // loaded (m_deckCrossfade: 0 = pure B, 1 = pure A, between = blend
-        // — see mixTex compute block at the top of this function). Falls
-        // back to the real Zone/projector feed (already rendered at this
-        // box's own 19:9) only when neither slot has a shader loaded yet.
-        if (mixTex) {
-            // The deck's own shader slots render at a fixed 16:9 (see
-            // setResolution(480, 270) at commit time), which doesn't match
-            // PROGRAM's 19:9 frame — stretching it full-bleed distorted the
-            // picture. Fit it letterboxed instead, same convention as the
-            // B/A slot boxes below.
-            const float kMixAspect = 16.0f / 9.0f;
-            float iw = mixW, ih = iw / kMixAspect;
-            if (ih > mixH) { ih = mixH; iw = ih * kMixAspect; }
-            ImVec2 i0(m0.x + (mixW - iw) * 0.5f, m0.y + (mixH - ih) * 0.5f);
-            ImVec2 i1(i0.x + iw, i0.y + ih);
-            md->AddImageRounded((ImTextureID)(intptr_t)mixTex, i0, i1,
-                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
-        } else if (programTex) {
-            md->AddImageRounded((ImTextureID)(intptr_t)programTex, m0, m1,
-                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
-        }
-        md->AddText(ImVec2(m0.x + 8.0f, m0.y + 6.0f), IM_COL32(255, 200, 150, 230), "PROGRAM");
-    }
-    ImGui::EndChild();
-    ImGui::Dummy(ImVec2(0, rowGap));
-    // EndChild/Dummy reset the window cursor's X back to the content
-    // indent — re-pin it to the center column's X before capturing rowPos,
-    // since every box/knob/button below is positioned relative to it.
-    ImGui::SetCursorScreenPos(ImVec2(centerX, ImGui::GetCursorScreenPos().y));
-
-    ImVec2 rowPos = ImGui::GetCursorScreenPos();
-
-    // Each slot box IS the live preview of its own shader now (no separate
-    // monitor row above) — colored border keeps the A/B identity legible.
-    auto drawSlot = [&](float x, const char* letter, ImU32 col, const std::shared_ptr<ShaderSource>& shader) {
-        ImDrawList* sd = ImGui::GetWindowDrawList();
-        ImVec2 s0(x, rowPos.y);
-        ImVec2 s1(x + sideW, rowPos.y + sliderRowH);
-        sd->AddRectFilled(s0, s1, col, 4.0f);   // identity color also serves as the letterbox fill
-        GLuint tex = shader ? shader->textureId() : 0;
-        if (tex) {
-            // Fit at a fixed 16:9 aspect inside the box (letterbox/pillarbox
-            // against the identity-color background) instead of stretching
-            // to fill — matches the old Program/Preview monitors' behavior.
-            const float kAspect = 16.0f / 9.0f;
-            float boxW = s1.x - s0.x, boxH = s1.y - s0.y;
-            float iw = boxW, ih = iw / kAspect;
-            if (ih > boxH) { ih = boxH; iw = ih * kAspect; }
-            ImVec2 i0(s0.x + (boxW - iw) * 0.5f, s0.y + (boxH - ih) * 0.5f);
-            ImVec2 i1(i0.x + iw, i0.y + ih);
-            sd->AddImageRounded((ImTextureID)(intptr_t)tex, i0, i1,
-                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
-        }
-        sd->AddRect(s0, s1, col, 4.0f, 0, 2.5f);
-        // Letter badge, top-left — dark chip so it stays legible over any shader.
-        ImVec2 lp(s0.x + 8.0f, s0.y + 6.0f);
-        ImVec2 lsz = ImGui::CalcTextSize(letter);
-        sd->AddRectFilled(ImVec2(lp.x - 5.0f, lp.y - 3.0f),
-                          ImVec2(lp.x + lsz.x + 5.0f, lp.y + lsz.y + 3.0f),
-                          IM_COL32(0, 0, 0, 150), 3.0f);
-        sd->AddText(lp, IM_COL32(255, 255, 255, 255), letter);
-    };
-    drawSlot(rowLeft, "B", IM_COL32(215, 45, 45, 255), m_deckShaderB);
-    drawSlot(rowRight - sideW, "A", IM_COL32(70, 175, 80, 255), m_deckShaderA);
-
-    // Gap geometry shared by the A/B crossfader and the 9-slider bank
-    // below it — both are centered in the B..A gap, not the wider mixW.
-    const float kMaxSliderPitch = 42.0f;
-    float gapW = (rowRight - sideW) - (rowLeft + sideW);
-    float pitch = std::min(gapW / (float)kDeckSliderCount, kMaxSliderPitch);
-    float clusterW = pitch * (float)kDeckSliderCount;
-    float slidersX = rowLeft + sideW + (gapW - clusterW) * 0.5f;
-
-    // A/B crossfader — centered in the gap between Slot B and Slot A,
-    // sitting above the slider bank in the headroom the sliders already
-    // leave above their own vertical center. Left = pure B, right = pure A
-    // (see the mix compute block at the top of this function for how the
-    // blend is actually rendered).
-    {
-        const float comboW = std::min(140.0f, clusterW), comboH = 22.0f, faderH = 20.0f;
-        float cfX = slidersX + (clusterW - comboW) * 0.5f;
-        ImGui::SetCursorScreenPos(ImVec2(cfX, rowPos.y));
-        ImGui::SetNextItemWidth(comboW);
-        if (ImGui::BeginCombo("##deckBlendMode", kShowDeckBlendModes[m_deckBlendMode].label)) {
-            for (int i = 0; i < (int)IM_ARRAYSIZE(kShowDeckBlendModes); i++) {
-                if (ImGui::Selectable(kShowDeckBlendModes[i].label, m_deckBlendMode == i))
-                    m_deckBlendMode = i;
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SetCursorScreenPos(ImVec2(slidersX, rowPos.y + comboH + 4.0f));
-        drawHSliderWidget("deckCrossfade", &m_deckCrossfade, clusterW, faderH);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("A / B crossfader (left = B, right = A)");
-    }
-
-    // Knob grid + button row footprint — twice sideW (the now-narrower 16:9
-    // box), clamped so the two sides never meet in the middle. Still
-    // outer-edge-aligned with the box above it, just reaching further
-    // inward now that there's room.
-    float bottomColW = std::min(sideW * 2.0f, mixW * 0.5f - 4.0f);
+    const float rowGap    = 8.0f;
+    const float kBtnH     = 18.0f * deckScale, kBtnGap = 6.0f * deckScale;
+    // The A/B crossfader doesn't occupy a header band above PROGRAM — it
+    // sits in the gap below PROGRAM instead (see the PROGRAM block below),
+    // so PROGRAM/A/B start flush with the rail preview boxes at the very
+    // top, per user request.
+    const float kComboH = 22.0f, kCrossfadeH = 10.0f;   // fader half-height per user request
+    const float kContentTop = origin.y;
+    // Knob size enlarged 35% in diameter/circumference (was 52), per user request.
+    const float kKnobSz = std::min(52.0f * 1.35f * deckScale, mixW / 8.0f * 0.9f), kKnobLabelH = 40.0f * deckScale;
+    // Row gap reduced 30% (was 36), per user request.
+    const float kKnobRowGap = 36.0f * 0.7f * deckScale;
+    const float kKnobGridH = 3.0f * (kKnobSz + 4.0f + kKnobLabelH + kKnobRowGap);   // 3 rows * (knobSz+4+labelH+rowGap) — see drawKnobGrid below
 
     // Pushes a knob/slider's live value into its bound ISF float input (by
     // name), mapped from the widget's 0..1 range into [minVal,maxVal].
@@ -11680,28 +12928,47 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
             }
         }
     };
-    // Dot + label row under a knob/slider. Click the dot to open a popup
-    // listing `shader`'s float ISF inputs; picking one rebinds boundParam
-    // and the label switches from the default (e.g. "K3"/"F5") to that
-    // parameter's display name. "Not Assigned" clears the binding.
+    // Dot + label row under a knob. Click the dot to open a popup listing
+    // `shader`'s float ISF inputs; picking one rebinds boundParam and the
+    // label switches from the default (e.g. "K3") to that parameter's
+    // display name. "Not Assigned" clears the binding.
     auto drawParamPicker = [&](const std::string& popupId, float x, float y, float w,
+                               float knobX, float knobY, float knobSz,
                                std::string& boundParam,
                                const std::shared_ptr<ShaderSource>& shader,
-                               const char* defaultLabel) {
-        const float dotD = 7.0f, dotGap = 3.0f, labelH = 14.0f;
+                               const char* defaultLabel,
+                               int side, int knobIdx, int effectiveCC, int* ccOverride) {
+        const float dotD = 14.0f, dotMargin = 4.0f, labelH = 40.0f, labelFont = 16.0f;   // +3pt per user request; dotD 2x'd per user request
         ImDrawList* d = ImGui::GetWindowDrawList();
+
+        // "Assigned" light sits at the upper-left corner of the square the
+        // knob is inscribed in — and, since it moved there from the label
+        // row, IT is now what actually opens the parameter picker (was
+        // still wired to the old label-row hitbox only, so clicking the
+        // dot itself did nothing — fixed here per user request). The
+        // label row below the knob stays clickable too, as a convenience.
+        ImVec2 dotC(knobX + dotMargin + dotD * 0.5f, knobY + dotMargin + dotD * 0.5f);
+        const float dotHitR = dotD;   // bigger than the dot itself — easier to hit
+        ImGui::SetCursorScreenPos(ImVec2(dotC.x - dotHitR, dotC.y - dotHitR));
+        // (The AllowOverlap fix for this hit region — which sits inside the
+        // knob's own drag InvisibleButton, submitted earlier — lives on that
+        // EARLIER widget, in drawKnobGrid where drawKnobWidgetLight is
+        // called; see its comment. Flagging THIS item does nothing.)
+        ImGui::InvisibleButton(("##dotClick" + popupId).c_str(), ImVec2(dotHitR * 2.0f, dotHitR * 2.0f));
+        bool dotHov = ImGui::IsItemHovered();
+        if (ImGui::IsItemClicked()) ImGui::OpenPopup(popupId.c_str());
+
         ImGui::SetCursorScreenPos(ImVec2(x, y));
         ImGui::InvisibleButton(("##dot" + popupId).c_str(), ImVec2(w, labelH));
-        bool hov = ImGui::IsItemHovered();
+        bool hov = ImGui::IsItemHovered() || dotHov;
         if (ImGui::IsItemClicked()) ImGui::OpenPopup(popupId.c_str());
 
         bool assigned = !boundParam.empty();
-        ImVec2 dotC(x + dotD * 0.5f, y + labelH * 0.5f);
         d->AddCircleFilled(dotC, dotD * 0.5f,
-                           assigned ? IM_COL32(110, 190, 255, 255)
-                                    : IM_COL32(140, 144, 155, hov ? 255 : 190), 10);
+                           assigned ? IM_COL32(90, 150, 230, 255)
+                                    : (kTextDim & 0x00FFFFFF) | ((ImU32)(hov ? 255 : 210) << 24), 10);
 
-        ImVec2 boxMin(x + dotD + dotGap, y);
+        ImVec2 boxMin(x, y);
         ImVec2 boxMax(x + w, y + labelH);
         std::string disp = defaultLabel;
         if (assigned) {
@@ -11712,111 +12979,1041 @@ void Application::renderShowDeck(float width, float height, GLuint programTex) {
             }
         }
         ImGui::PushClipRect(boxMin, boxMax, true);
-        d->AddText(ImGui::GetFont(), 11.0f, ImVec2(boxMin.x + 2.0f, boxMin.y + 1.0f),
-                  IM_COL32(200, 204, 216, 225), disp.c_str());
+        // Centered under the knob (was left-aligned next to the dot, which
+        // has since moved up onto the knob itself), per user request.
+        // wrap_width lets a long title spill onto a second line (the taller
+        // labelH above leaves room for it) instead of being cut off.
+        float wrapW = boxMax.x - boxMin.x - 4.0f;
+        ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(labelFont, FLT_MAX, wrapW, disp.c_str());
+        d->AddText(ImGui::GetFont(), labelFont,
+                  ImVec2(boxMin.x + std::max(2.0f, (wrapW - ts.x) * 0.5f), boxMin.y + 2.0f),
+                  kText, disp.c_str(), nullptr, wrapW);
         ImGui::PopClipRect();
 
         if (ImGui::BeginPopup(popupId.c_str())) {
-            if (ImGui::Selectable("Not Assigned", !assigned)) boundParam.clear();
-            if (shader) {
-                bool any = false;
-                for (auto& in : shader->inputs()) {
-                    if (in.type != "float") continue;
-                    any = true;
-                    std::string dn = in.label.empty() ? in.name : in.label;
-                    if (ImGui::Selectable(dn.c_str(), boundParam == in.name)) boundParam = in.name;
+            bool learningThis = (m_deckKnobLearnSide == side && m_deckKnobLearnIdx == knobIdx);
+            char learnLbl[48];
+            if (learningThis) snprintf(learnLbl, sizeof(learnLbl), "Move a MIDI control now\xe2\x80\xa6");
+            else              snprintf(learnLbl, sizeof(learnLbl), "Learn MIDI CC (currently CC %d)", effectiveCC);
+            if (learningThis) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 190, 255, 255));
+            if (ImGui::Selectable(learnLbl, false)) {
+                if (learningThis) {
+                    m_midiManager.stopLearn();
+                    m_deckKnobLearnSide = -1;
+                    m_deckKnobLearnIdx  = -1;
+                } else {
+                    m_deckKnobLearnSide = side;
+                    m_deckKnobLearnIdx  = knobIdx;
+                    m_midiManager.startLearn();
                 }
-                if (!any) ImGui::TextDisabled("(no float params)");
-            } else {
-                ImGui::TextDisabled("(no shader loaded)");
+            }
+            if (learningThis) ImGui::PopStyleColor();
+            if (ccOverride[knobIdx] >= 0) {
+                if (ImGui::Selectable("Reset to default CC")) ccOverride[knobIdx] = -1;
+            }
+            ImGui::Separator();
+            // Parameter list now lives behind its own submenu (was a flat
+            // Selectable list right in the popup) — same structure as the
+            // PARAMETERS panel's cog-wheel menu, per user request, instead
+            // of dumping every float param straight into this popup.
+            if (ImGui::BeginMenu("Assign Parameter")) {
+                if (ImGui::MenuItem("Not Assigned", nullptr, !assigned)) boundParam.clear();
+                if (shader) {
+                    bool any = false;
+                    for (auto& in : shader->inputs()) {
+                        if (in.type != "float") continue;
+                        any = true;
+                        std::string dn = in.label.empty() ? in.name : in.label;
+                        if (ImGui::MenuItem(dn.c_str(), nullptr, boundParam == in.name)) boundParam = in.name;
+                    }
+                    if (!any) ImGui::TextDisabled("(no float params)");
+                } else {
+                    ImGui::TextDisabled("(no shader loaded)");
+                }
+                ImGui::EndMenu();
             }
             ImGui::EndPopup();
         }
     };
 
-    // Sliders — free/unbound by default; left half binds into B's shader,
-    // right half into A's (dot+label picker below each, same as knobs).
-    // Pitch is capped well under what the B..A gap could stretch to, so the
-    // bank stays a tight cluster instead of spreading edge to edge.
-    {
-        float sliderW = 14.0f, sliderH = 90.0f;
-        float sliderY = rowPos.y + (sliderRowH - sliderH) * 0.5f;
-        for (int i = 0; i < kDeckSliderCount; i++) {
-            float cellX = slidersX + i * pitch;
-            ImGui::SetCursorScreenPos(ImVec2(cellX + (pitch - sliderW) * 0.5f, sliderY));
-            char idbuf[16]; snprintf(idbuf, sizeof(idbuf), "dslider%d", i);
-            drawVSliderWidget(idbuf, &m_deckSlider[i], false, sliderW, sliderH);
+    // Knob grid — a 3-row x 4-col block spanning colW (its own column's
+    // width, not a shared center span anymore). Every knob still
+    // live-mirrors one physical knob of whatever MIDI controller is
+    // connected — same Launch Control XL factory CC layout (3 rows of 8) as
+    // the Canvas knob bank's kKnobCC — with B taking physical columns 0-3
+    // and A taking columns 4-7.
+    static const int kShowKnobCC_XL[24] = {
+        13, 14, 15, 16, 17, 18, 19, 20,
+        29, 30, 31, 32, 33, 34, 35, 36,
+        49, 50, 51, 52, 53, 54, 55, 56,
+    };
+    static const int kShowKnobCC_XL3[24] = {   // Launch Control XL 3 (contiguous 13-36)
+        13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28,
+        29, 30, 31, 32, 33, 34, 35, 36,
+    };
+    const int* kShowKnobCC = m_midiManager.isLaunchControlXL3() ? kShowKnobCC_XL3 : kShowKnobCC_XL;
+    // extraGapAfterLocalCol: local column index (0-2, -1 = disabled) after
+    // which an extra half-margin gap is inserted — used to widen the gap
+    // between screen columns 5 and 6 (A's local columns 0 and 1) by 50%,
+    // per user request; every column after it shifts right by that amount.
+    auto drawKnobGrid = [&](float x, float y, float colW, float* values, std::string* boundParams,
+                            int* ccOverride, const std::shared_ptr<ShaderSource>& shader,
+                            const char* sidePrefix, int physColBase, int side,
+                            int extraGapAfterLocalCol, ImU32 accent) {
+        const float knobSz = kKnobSz, labelH = kKnobLabelH;
+        const float rowStride = knobSz + 4.0f + labelH + kKnobRowGap;
+        const int knobCols = 4, knobRows = 3;
+        float pitch = colW / (float)knobCols;
+        float extraGap = std::max(0.0f, (pitch - knobSz) * 0.5f);   // 50% wider than the normal margin
+        for (int r = 0; r < knobRows; r++) {
+            for (int c = 0; c < knobCols; c++) {
+                int idx = r * knobCols + c;
+                int defaultCC = kShowKnobCC[r * 8 + physColBase + c];
+                int cc = (ccOverride[idx] >= 0) ? ccOverride[idx] : defaultCC;
+                bool learningThis = (m_deckKnobLearnSide == side && m_deckKnobLearnIdx == idx);
+                float live = m_midiManager.getCCValue(-1, cc);
+                bool midiBound = (live >= 0.0f) && !learningThis;
+                if (midiBound) values[idx] = live;
 
-            bool isB = (i < kDeckSliderCount / 2);
-            const std::shared_ptr<ShaderSource>& sShader = isB ? m_deckShaderB : m_deckShaderA;
-            applyParamBinding(sShader, m_deckSliderBoundParam[i], m_deckSlider[i]);
+                float colX = x + c * pitch + ((extraGapAfterLocalCol >= 0 && c > extraGapAfterLocalCol) ? extraGap : 0.0f);
+                float kx = colX + (pitch - knobSz) * 0.5f;
+                float ky = y + r * rowStride;
+                ImGui::SetCursorScreenPos(ImVec2(kx, ky));
+                char idbuf[24]; snprintf(idbuf, sizeof(idbuf), "dknob_%s_%d", sidePrefix, idx);
+                // AllowOverlap goes on the EARLIER/blocking item (this knob's
+                // own drag InvisibleButton, submitted first) — that's what
+                // actually releases exclusive hover for the rest of this
+                // frame so the assign-dot's InvisibleButton (submitted after,
+                // overlapping this knob's top-left corner) can be hovered/
+                // clicked normally. Putting the flag on the dot itself (the
+                // previous attempt) does nothing: per imgui.cpp's
+                // ItemHoverable, the blocking check runs BEFORE a later
+                // item's own flags are even looked at.
+                ImGui::SetNextItemAllowOverlap();
+                drawKnobWidgetLight(idbuf, &values[idx], midiBound, knobSz, accent, showDark);
+                if (learningThis) {
+                    ImDrawList* ld = ImGui::GetWindowDrawList();
+                    ld->AddCircle(ImVec2(kx + knobSz * 0.5f, ky + knobSz * 0.5f), knobSz * 0.62f,
+                                 IM_COL32(120, 190, 255, 220), 24, 2.0f);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(ccOverride[idx] >= 0 ? "MIDI CC %d (learned)" : "MIDI CC %d", cc);
+                applyParamBinding(shader, boundParams[idx], values[idx]);
 
-            char defLabel[8]; snprintf(defLabel, sizeof(defLabel), "F%d", i + 1);
-            drawParamPicker("##dsliderParam" + std::to_string(i),
-                            cellX + 2.0f, sliderY + sliderH + 4.0f,
-                            pitch - 4.0f, m_deckSliderBoundParam[i], sShader, defLabel);
+                char defLabel[8]; snprintf(defLabel, sizeof(defLabel), "K%d", idx + 1);
+                float labelW = pitch - 4.0f;
+                drawParamPicker(std::string("##dknobParam_") + sidePrefix + std::to_string(idx),
+                                colX + (pitch - labelW) * 0.5f, ky + knobSz + 4.0f, labelW,
+                                kx, ky, knobSz, boundParams[idx], shader, defLabel,
+                                side, idx, cc, ccOverride);
+            }
         }
-    }
-    ImGui::SetCursorScreenPos(ImVec2(rowLeft, rowPos.y + sliderRowH));
-    ImGui::Dummy(ImVec2(0, rowGap));
+    };
 
-    // Knob grids — 3 rows x 4 cols under each slot. Each knob gets a
-    // dot+label picker below it (same convention as the sliders above);
-    // B's grid binds only into m_deckShaderB, A's only into m_deckShaderA.
-    {
-        ImVec2 knobsPos = ImGui::GetCursorScreenPos();
-        const float knobSz = 40.0f, labelH = 14.0f;
-        const float rowStride = knobSz + 4.0f + labelH + 8.0f;
-        const float knobRowH = 3.0f * rowStride;
-        auto drawKnobGrid = [&](float x, float* values, std::string* boundParams,
-                                const std::shared_ptr<ShaderSource>& shader,
-                                const char* sidePrefix) {
-            const int knobCols = 4, knobRows = 3;
-            float pitch = bottomColW / (float)knobCols;
-            for (int r = 0; r < knobRows; r++) {
-                for (int c = 0; c < knobCols; c++) {
-                    int idx = r * knobCols + c;
-                    float kx = x + c * pitch + (pitch - knobSz) * 0.5f;
-                    float ky = knobsPos.y + r * rowStride;
-                    ImGui::SetCursorScreenPos(ImVec2(kx, ky));
-                    char idbuf[24]; snprintf(idbuf, sizeof(idbuf), "dknob_%s_%d", sidePrefix, idx);
-                    drawKnobWidget(idbuf, &values[idx], false, nullptr, knobSz);
-                    applyParamBinding(shader, boundParams[idx], values[idx]);
+    // Each slot's preview IS the live render of its own shader — colored
+    // border keeps the A/B identity legible. Sized to whatever box is
+    // passed in (the side column's own width) rather than a fixed slot
+    // size, now that it lives above the knobs/buttons in that column.
+    auto drawPreviewBox = [&](float x, float y, float w, float h, const char* letter, ImU32 col,
+                              const std::shared_ptr<ShaderSource>& shader) {
+        ImDrawList* sd = ImGui::GetWindowDrawList();
+        ImVec2 s0(x, y);
+        ImVec2 s1(x + w, y + h);
+        sd->AddRectFilled(s0, s1, kCardSoft, 6.0f);   // light card fill (letterbox when no shader)
+        GLuint tex = shader ? shader->textureId() : 0;
+        if (tex) {
+            // Fit at a fixed 16:9 aspect inside the box (letterbox/pillarbox
+            // against the identity-color background) instead of stretching.
+            const float kAspect = 16.0f / 9.0f;
+            float iw = w, ih = iw / kAspect;
+            if (ih > h) { ih = h; iw = ih * kAspect; }
+            ImVec2 i0(s0.x + (w - iw) * 0.5f, s0.y + (h - ih) * 0.5f);
+            ImVec2 i1(i0.x + iw, i0.y + ih);
+            sd->AddImageRounded((ImTextureID)(intptr_t)tex, i0, i1,
+                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 6.0f);
+        }
+        sd->AddRect(s0, s1, col, 6.0f, 0, 2.0f);
+        // Letter badge, top-left — dark chip so it stays legible over any shader.
+        ImVec2 lp(s0.x + 8.0f, s0.y + 6.0f);
+        ImVec2 lsz = ImGui::CalcTextSize(letter);
+        sd->AddRectFilled(ImVec2(lp.x - 5.0f, lp.y - 3.0f),
+                          ImVec2(lp.x + lsz.x + 5.0f, lp.y + lsz.y + 3.0f),
+                          IM_COL32(0, 0, 0, 150), 3.0f);
+        sd->AddText(lp, IM_COL32(255, 255, 255, 255), letter);
+        drawCornerCog((std::string("##slotCog") + letter).c_str(), s1.x, s0.y);
+    };
 
-                    char defLabel[8]; snprintf(defLabel, sizeof(defLabel), "K%d", idx + 1);
-                    float labelW = pitch - 4.0f;
-                    drawParamPicker(std::string("##dknobParam_") + sidePrefix + std::to_string(idx),
-                                    x + c * pitch + (pitch - labelW) * 0.5f, ky + knobSz + 4.0f,
-                                    labelW, boundParams[idx], shader, defLabel);
+    // Memory bank buttons — each one is a save/recall slot for a named
+    // snapshot of the 12 knob positions, per user request. Click the body:
+    // recall if the slot holds a memory, or save the CURRENT knobs as a new
+    // one (prompting for a name) if it's blank ("+"). Click the small cog:
+    // pick a different previously-saved memory to assign to this slot.
+    auto drawMemoryBankRow = [&](float x, float y, float colW, int* slots,
+                                 float* knobValues, const char* sidePrefix, ImU32 accent) {
+        float btnW = (colW - 3.0f * kBtnGap) / 4.0f;
+        ImDrawList* bd = ImGui::GetWindowDrawList();
+        const float cogSz = 9.0f, cogPad = 3.0f;
+        ImFont* font = ImGui::GetFont();
+        for (int i = 0; i < kDeckButtonCount; i++) {
+            ImGui::PushID((std::string("dmem_") + sidePrefix + std::to_string(i)).c_str());
+            ImVec2 bpos(x + i * (btnW + kBtnGap), y);
+            int memIdx = slots[i];
+            bool filled = (memIdx >= 0 && memIdx < (int)m_deckKnobMemories.size());
+
+            ImGui::SetCursorScreenPos(bpos);
+            bool clicked = ImGui::InvisibleButton("##body", ImVec2(btnW, kBtnH));
+            bool hov = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+            ImU32 bg = active ? accent
+                     : hov    ? kHoverFill
+                     : filled ? ((accent & 0x00FFFFFF) | (170u << 24))
+                              : kCardSoft;
+            bd->AddRectFilled(bpos, ImVec2(bpos.x + btnW, bpos.y + kBtnH), bg, 3.0f);
+
+            if (clicked) {
+                if (filled) {
+                    for (int k = 0; k < kDeckKnobCount; k++)
+                        knobValues[k] = m_deckKnobMemories[memIdx].knobs[k];
+                } else {
+                    for (int k = 0; k < kDeckKnobCount; k++)
+                        m_deckMemPendingKnobs[k] = knobValues[k];
+                    m_deckMemPendingSlots = slots;
+                    m_deckMemPendingIdx   = i;
+                    m_deckMemNameBuf[0]   = '\0';
+                    ImGui::OpenPopup("##deckMemNamePopup");
                 }
             }
-        };
-        drawKnobGrid(rowLeft, m_deckKnobB, m_deckKnobBoundParamB, m_deckShaderB, "B");
-        drawKnobGrid(rowRight - bottomColW, m_deckKnobA, m_deckKnobBoundParamA, m_deckShaderA, "A");
-        ImGui::SetCursorScreenPos(ImVec2(rowLeft, knobsPos.y + knobRowH));
+            if (hov) {
+                ImGui::SetTooltip(filled ? m_deckKnobMemories[memIdx].name.c_str()
+                                         : "Save the current knobs as a new memory");
+            }
+
+            // Cog — right edge — opens the "pick an old memory" list.
+            float ccx = bpos.x + btnW - cogPad - cogSz * 0.5f;
+            float ccy = bpos.y + kBtnH * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(ccx - cogSz * 0.5f, ccy - cogSz * 0.5f));
+            ImGui::InvisibleButton("##cog", ImVec2(cogSz, cogSz));
+            bool cogHov = ImGui::IsItemHovered();
+            lucide::settings(bd, ccx, ccy, cogSz,
+                             filled ? IM_COL32(255, 255, 255, cogHov ? 255 : 210)
+                                    : (cogHov ? kText : kTextDim));
+            if (ImGui::IsItemClicked()) {
+                m_deckMemPickSlots = slots;
+                m_deckMemPickIdx   = i;
+                ImGui::OpenPopup("##deckMemPickPopup");
+            }
+            if (cogHov) ImGui::SetTooltip("Choose a saved memory for this slot");
+
+            // Label: "+" when blank, else the memory's name (truncated to fit
+            // beside the cog).
+            float maxLabelW = btnW - cogSz - cogPad * 2.0f - 6.0f;
+            if (!filled) {
+                float px = bpos.x + 6.0f + maxLabelW * 0.5f;
+                float py = bpos.y + kBtnH * 0.5f;
+                const float plusSz = 6.5f;
+                bd->AddLine(ImVec2(px - plusSz * 0.5f, py), ImVec2(px + plusSz * 0.5f, py), kTextDim, 1.6f);
+                bd->AddLine(ImVec2(px, py - plusSz * 0.5f), ImVec2(px, py + plusSz * 0.5f), kTextDim, 1.6f);
+            } else {
+                std::string label = m_deckKnobMemories[memIdx].name;
+                while (!label.empty() &&
+                       font->CalcTextSizeA(11.0f, FLT_MAX, 0.0f, label.c_str()).x > maxLabelW) {
+                    label.pop_back();
+                }
+                ImVec2 lts = font->CalcTextSizeA(11.0f, FLT_MAX, 0.0f, label.c_str());
+                bd->AddText(font, 11.0f, ImVec2(bpos.x + 5.0f, bpos.y + (kBtnH - lts.y) * 0.5f),
+                           IM_COL32(255, 255, 255, 240), label.c_str());
+            }
+            ImGui::PopID();
+        }
+    };
+
+    // Blue parameter panel — live ISF float inputs of that slot's shader.
+    // Placeholder scope for now (per design note); real routing TBD.
+    auto renderParamPanel = [&](float x, float y, float w, float h, const char* childId,
+                                const std::shared_ptr<ShaderSource>& shader,
+                                std::string* boundParams, bool& autoMapOn, ImU32 accent) {
+        ImGui::SetCursorScreenPos(ImVec2(x, y));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+        ImGui::BeginChild(childId, ImVec2(w, h), false);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        ImGui::TextDisabled("PARAMETERS");
+        // Auto-Map switch, flush-left directly under the header, per user
+        // request — replaces the old "auto-map on every load" behavior with
+        // an explicit trigger. Flipping OFF->ON re-derives all 12 knob
+        // bindings from scratch (see autoMapKnobs above).
+        {
+            bool wasOn = autoMapOn;
+            drawToggleSwitch("##autoMap", autoMapOn);
+            if (!wasOn && autoMapOn) autoMapKnobs(boundParams, shader);
+            ImGui::SameLine(0, 6.0f);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("Auto-Map Knobs");
+        }
+        ImGui::Separator();
+        if (!shader) {
+            ImGui::TextWrapped("(no shader loaded)");
+        } else {
+            for (auto& in : shader->inputs()) {
+                if (in.type != "float") continue;
+                float v = std::get<float>(in.value);
+                const char* lbl = !in.label.empty() ? in.label.c_str() : in.name.c_str();
+                ImGui::PushID(in.name.c_str());
+                // Cog to the left of the name (per user request) opens a
+                // menu of per-parameter options — currently just Reactivity,
+                // room for more later — rather than the name alone. Same
+                // assigned/unassigned blue tint as the knob grid's dot
+                // (drawParamPicker) when this param has a live signal bound.
+                bool reactAssigned = shader->audioBindings().count(in.name) != 0;
+                const float cogSz = ImGui::GetFontSize() * 0.8f;
+                ImVec2 cogP = ImGui::GetCursorScreenPos();
+                // Hit area is the full text-row height and the cog is drawn at
+                // its vertical middle, so it lines up with the label's midline.
+                const float paramRowH = ImGui::GetFrameHeight();
+                ImGui::InvisibleButton("##paramCog", ImVec2(cogSz, paramRowH));
+                bool cogHovP = ImGui::IsItemHovered();
+                ImDrawList* rowDl = ImGui::GetWindowDrawList();
+                lucide::settings(rowDl, cogP.x + cogSz * 0.5f, cogP.y + paramRowH * 0.5f, cogSz,
+                                 reactAssigned ? IM_COL32(110, 190, 255, 255)
+                                               : (cogHovP ? IM_COL32(255, 255, 255, 235)
+                                                          : IM_COL32(200, 204, 216, 170)));
+                if (ImGui::IsItemClicked()) ImGui::OpenPopup("ParamOptions");
+                ImGui::SameLine(0, 5.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(lbl);
+                if (ImGui::BeginPopup("ParamOptions")) {
+                    if (ImGui::BeginMenu("Reactivity")) {
+                        auto& bindings = shader->audioBindings();
+                        auto bit = bindings.find(in.name);
+                        AudioSignal cur = (bit != bindings.end()) ? bit->second.signal : AudioSignal::None;
+                        static const std::pair<const char*, AudioSignal> kSignals[] = {
+                            { "None",  AudioSignal::None  }, { "Level", AudioSignal::Level },
+                            { "Low (Bass)",  AudioSignal::Bass  }, { "Mid",   AudioSignal::Mid   },
+                            { "High (Treble)",  AudioSignal::High  }, { "Beat",  AudioSignal::Beat  },
+                        };
+                        for (auto& [sigName, sig] : kSignals) {
+                            if (ImGui::MenuItem(sigName, nullptr, cur == sig)) {
+                                if (sig == AudioSignal::None) {
+                                    bindings.erase(in.name);
+                                } else {
+                                    auto& b = bindings[in.name];
+                                    b.signal = sig;
+                                    b.rangeMin = in.minVal;
+                                    b.rangeMax = in.maxVal;
+                                }
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::EndPopup();
+                }
+                // Fader half the stock ImGui slider height, per user
+                // request — a plain SliderFloat can't go this short (its
+                // frame height is floored by the font line), so this is a
+                // small custom-drawn track+fill instead. Value number sits
+                // right of the track (matches the reference mockup) instead
+                // of being hidden entirely.
+                const float valueW = 52.0f, valueGap = 8.0f;
+                const float arrowW = 14.0f;   // curve-editor toggle; also the bar row's hit height
+                float faderW = std::max(20.0f, w - valueW - valueGap - arrowW - 4.0f);
+                float faderH = ImGui::GetFrameHeight() * 0.25f;   // half the previous bar height
+                // Half the gap between the label row and its bar.
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y * 0.5f);
+
+                // Little drop-down arrow left of the bar: toggles the response
+                // curve editor for this parameter (open state kept per param).
+                ImGuiStorage* stg = ImGui::GetStateStorage();
+                const ImGuiID curveOpenId = ImGui::GetID("##curveOpen");
+                bool curveOpen = stg->GetBool(curveOpenId, false);
+                ImVec2 ap0 = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##curveTgl", ImVec2(arrowW, arrowW));
+                bool arrowHov = ImGui::IsItemHovered();
+                if (ImGui::IsItemClicked()) { curveOpen = !curveOpen; stg->SetBool(curveOpenId, curveOpen); }
+                if (arrowHov) ImGui::SetTooltip("Response curve");
+                {
+                    ImDrawList* ad = ImGui::GetWindowDrawList();
+                    ImU32 ac = (reactAssigned || curveOpen) ? IM_COL32(110, 190, 255, 255)
+                             : (arrowHov ? IM_COL32(255, 255, 255, 235) : IM_COL32(200, 204, 216, 170));
+                    float cx = ap0.x + arrowW * 0.5f, cy = ap0.y + arrowW * 0.5f, r = 3.5f;
+                    if (curveOpen) ad->AddTriangleFilled(ImVec2(cx - r, cy + r * 0.6f), ImVec2(cx + r, cy + r * 0.6f), ImVec2(cx, cy - r * 0.8f), ac);
+                    else           ad->AddTriangleFilled(ImVec2(cx - r, cy - r * 0.6f), ImVec2(cx + r, cy - r * 0.6f), ImVec2(cx, cy + r * 0.8f), ac);
+                }
+                ImGui::SameLine(0, 4.0f);
+
+                ImVec2 fp0 = ImGui::GetCursorScreenPos();   // hit area top-left (arrowW tall)
+                float trackY = fp0.y + (arrowW - faderH) * 0.5f;
+                ImVec2 tp0(fp0.x, trackY), tp1(fp0.x + faderW, trackY + faderH);
+                ImGui::InvisibleButton("##paramFader", ImVec2(faderW, arrowW));
+                bool faderActive = ImGui::IsItemActive();
+                bool faderHov = ImGui::IsItemHovered();
+                if (faderActive) {
+                    float t = (ImGui::GetIO().MousePos.x - fp0.x) / faderW;
+                    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+                    v = in.minVal + t * (in.maxVal - in.minVal);
+                    in.value = v;
+                }
+                // Right-click resets to the range midpoint, per user request.
+                if (faderHov && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    v = (in.minVal + in.maxVal) * 0.5f;
+                    in.value = v;
+                }
+                float t = (in.maxVal > in.minVal) ? (v - in.minVal) / (in.maxVal - in.minVal) : 0.0f;
+                ImDrawList* fd = ImGui::GetWindowDrawList();
+                fd->AddRectFilled(tp0, tp1, faderHov ? IM_COL32(214, 211, 205, 255) : kTrack, faderH * 0.5f);
+                fd->AddRectFilled(tp0, ImVec2(tp0.x + faderW * t, tp1.y),
+                                  (accent & 0x00FFFFFF) | ((ImU32)(faderActive ? 255 : 220) << 24), faderH * 0.5f);
+                char valBuf[32];
+                snprintf(valBuf, sizeof(valBuf), "%.3f", v);
+                ImVec2 valTs = ImGui::CalcTextSize(valBuf);
+                fd->AddText(ImVec2(fp0.x + faderW + valueGap + (valueW - valTs.x),
+                                   fp0.y + arrowW * 0.5f - valTs.y * 0.5f),
+                           kTextDim, valBuf);
+
+                // ---- response-curve editor (XY bezier) ----------------------
+                // X = how hard the selected audio signal is hitting, Y = how
+                // much of the parameter's range that produces (what the bar
+                // above shows). Drag the two handles to bend the curve; right-
+                // click the box to reset to a straight line.
+                if (curveOpen) {
+                    auto& bindings = shader->audioBindings();
+                    auto bit = bindings.find(in.name);
+                    const bool hasAudio = (bit != bindings.end()) && bit->second.signal != AudioSignal::None
+                                          && bit->second.signal != AudioSignal::MidiCC;
+                    if (!hasAudio) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+                        ImGui::TextWrapped("Pick Low / Mid / High / Level / Beat in this parameter's cog "
+                                           "(Reactivity) to shape how audio drives it.");
+                        ImGui::PopStyleColor();
+                    } else {
+                        AudioBinding& ab = bit->second;
+                        const float labW = 14.0f;
+                        float boxW = std::max(60.0f, w - labW - valueW * 0.3f);
+                        float boxH = std::min(boxW * 0.6f, 120.0f);
+                        ImVec2 cursor0 = ImGui::GetCursorScreenPos();
+                        ImVec2 b0(cursor0.x + labW, cursor0.y + 4.0f);
+                        ImVec2 b1(b0.x + boxW, b0.y + boxH);
+                        ImGui::InvisibleButton("##curveBox", ImVec2(w, boxH + 8.0f + 14.0f));
+                        bool boxHov = ImGui::IsItemHovered();
+                        ImDrawList* cd = ImGui::GetWindowDrawList();
+                        cd->AddRectFilled(b0, b1, IM_COL32(0, 0, 0, 38), 4.0f);
+                        for (int g = 1; g < 4; g++) {
+                            float fx = b0.x + boxW * g * 0.25f, fy = b0.y + boxH * g * 0.25f;
+                            cd->AddLine(ImVec2(fx, b0.y), ImVec2(fx, b1.y), IM_COL32(255, 255, 255, 18));
+                            cd->AddLine(ImVec2(b0.x, fy), ImVec2(b1.x, fy), IM_COL32(255, 255, 255, 18));
+                        }
+                        cd->AddRect(b0, b1, IM_COL32(255, 255, 255, 40), 4.0f);
+                        auto toScr = [&](float cx, float cy) { return ImVec2(b0.x + cx * boxW, b1.y - cy * boxH); };
+                        // handle drag: pick nearest handle on press, track it while held
+                        ImVec2 h1 = toScr(ab.curveP1x, ab.curveP1y), h2 = toScr(ab.curveP2x, ab.curveP2y);
+                        const ImGuiID dragId = ImGui::GetID("##curveDrag");
+                        int dragH = stg->GetInt(dragId, 0);   // 0 none, 1 = P1, 2 = P2
+                        ImVec2 mp = ImGui::GetIO().MousePos;
+                        auto d2 = [](ImVec2 a, ImVec2 b) { float dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy; };
+                        if (boxHov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                            dragH = (d2(mp, h1) <= d2(mp, h2)) ? 1 : 2;
+                        }
+                        if (dragH != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                            float nx = std::clamp((mp.x - b0.x) / boxW, 0.0f, 1.0f);
+                            float ny = std::clamp((b1.y - mp.y) / boxH, 0.0f, 1.0f);
+                            if (dragH == 1) { ab.curveP1x = nx; ab.curveP1y = ny; }
+                            else            { ab.curveP2x = nx; ab.curveP2y = ny; }
+                            ab.curveOn = true;
+                        } else {
+                            dragH = 0;
+                        }
+                        stg->SetInt(dragId, dragH);
+                        if (boxHov && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) ab.resetCurve();
+                        h1 = toScr(ab.curveP1x, ab.curveP1y); h2 = toScr(ab.curveP2x, ab.curveP2y);
+                        // curve
+                        ImU32 curveCol = (accent & 0x00FFFFFF) | (255u << 24);
+                        ImVec2 prev = toScr(0.0f, 0.0f);
+                        for (int sgi = 1; sgi <= 40; sgi++) {
+                            float x = sgi / 40.0f;
+                            ImVec2 cur = toScr(x, ab.shape(x));
+                            cd->AddLine(prev, cur, curveCol, 2.0f);
+                            prev = cur;
+                        }
+                        // handles + tangents
+                        cd->AddLine(toScr(0.0f, 0.0f), h1, IM_COL32(255, 255, 255, 70), 1.0f);
+                        cd->AddLine(toScr(1.0f, 1.0f), h2, IM_COL32(255, 255, 255, 70), 1.0f);
+                        cd->AddCircleFilled(h1, 5.0f, IM_COL32(245, 245, 248, 255));
+                        cd->AddCircleFilled(h2, 5.0f, IM_COL32(245, 245, 248, 255));
+                        cd->AddCircle(h1, 5.0f, curveCol, 0, 1.5f);
+                        cd->AddCircle(h2, 5.0f, curveCol, 0, 1.5f);
+                        // live marker: where the current audio level sits on the curve
+                        float lx = std::clamp(ab.smoothedValue, 0.0f, 1.0f);
+                        ImVec2 lp = toScr(lx, ab.curveOn ? ab.shape(lx) : lx);
+                        cd->AddLine(ImVec2(lp.x, b0.y), ImVec2(lp.x, b1.y), IM_COL32(110, 190, 255, 90), 1.0f);
+                        cd->AddCircleFilled(lp, 3.5f, IM_COL32(110, 190, 255, 255));
+                        // axis labels
+                        ImFont* lf = ImGui::GetFont();
+                        cd->AddText(lf, 11.0f, ImVec2(b0.x, b1.y + 3.0f), kTextDim, "AUDIO IMPACT >");
+                        const char* yl = "EFFECT";
+                        cd->AddText(lf, 10.0f, ImVec2(b1.x - lf->CalcTextSizeA(10.0f, FLT_MAX, 0.0f, yl).x - 4.0f, b0.y + 3.0f), kTextDim, yl);
+
+                        // ---- live input level for the selected signal ----
+                        // Solid fill = what the parameter actually follows (after
+                        // gain + fall); white tick = the instantaneous gained level.
+                        {
+                            const float sigH = 8.0f;
+                            ImVec2 sp0 = ImGui::GetCursorScreenPos();
+                            ImGui::Dummy(ImVec2(w, sigH + 6.0f));
+                            ImVec2 s0(sp0.x + labW, sp0.y + 2.0f), s1(s0.x + boxW, s0.y + sigH);
+                            cd->AddRectFilled(s0, s1, IM_COL32(0, 0, 0, 38), sigH * 0.5f);
+                            float lvSm = std::clamp(ab.smoothedValue, 0.0f, 1.0f);
+                            float lvRaw = std::clamp(ab.lastRaw, 0.0f, 1.0f);
+                            if (lvSm > 0.0f)
+                                cd->AddRectFilled(s0, ImVec2(s0.x + boxW * lvSm, s1.y), curveCol, sigH * 0.5f);
+                            float tx = s0.x + boxW * lvRaw;
+                            cd->AddLine(ImVec2(tx, s0.y - 1.0f), ImVec2(tx, s1.y + 1.0f), IM_COL32(255, 255, 255, 220), 1.5f);
+                        }
+                        // ---- gain + fall knobs (log scale, 1x at 12 o'clock) ----
+                        {
+                            const float kSz = 26.0f;
+                            auto logKnob = [&](const char* id, const char* label, float* val) {
+                                float g = std::clamp(*val, 0.25f, 4.0f);
+                                float kv = std::clamp(0.5f + log2f(g) / 4.0f, 0.0f, 1.0f);
+                                ImGui::PushID(id);
+                                if (drawKnobWidgetLight(id, &kv, false, kSz, accent, UIManager::sShowDarkMode, 0.5f))
+                                    *val = powf(2.0f, (kv - 0.5f) * 4.0f);
+                                bool kh = ImGui::IsItemHovered();
+                                ImGui::SameLine(0, 5.0f);
+                                ImGui::BeginGroup();
+                                ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+                                ImGui::TextUnformatted(label);
+                                ImGui::PopStyleColor();
+                                ImGui::Text("%.2fx", *val);
+                                ImGui::EndGroup();
+                                if (kh || ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("%s: %.2fx  (drag; right-click = 1x)", label, *val);
+                                ImGui::PopID();
+                            };
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + labW);
+                            logKnob("##gainKnob", "GAIN", &ab.gain);
+                            ImGui::SameLine(0, 22.0f);
+                            logKnob("##fallKnob", "FALL", &ab.fall);
+                        }
+                    }
+                }
+                ImGui::PopID();
+            }
+
+            // Image-type inputs (e.g. Stush's "Image") — skipped by the
+            // float loop above. A deck shader isn't a Layer Stack Layer
+            // (see the double-click load above: it's a bare ShaderSource),
+            // so it can't see Canvas layers the way PropertyPanel's TEXTURE
+            // dropdown does. Scoped down to the one source Show can offer
+            // on its own: m_deckWebcam, opened lazily on first pick.
+            for (auto& in : shader->inputs()) {
+                if (in.type != "image") continue;
+                ImGui::PushID(in.name.c_str());
+                const char* lbl = !in.label.empty() ? in.label.c_str() : in.name.c_str();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(lbl);
+#ifdef HAS_OPENCV
+                bool boundToWebcam = m_deckWebcam && m_deckWebcam->isOpen() &&
+                    shader->imageBindings().count(in.name) &&
+                    shader->imageBindings()[in.name].textureId == m_deckWebcam->textureId();
+#if defined(__APPLE__) || defined(_WIN32)
+                // Named devices (AVFoundation on Mac, Media Foundation on
+                // Windows — see CameraEnumerator_win.cpp) rather than blind
+                // indices, so a system with a virtual capture device (NDI
+                // Tools, OBS, etc.) registered ahead of the real camera
+                // shows "USB2.0 HD UVC WebCam" etc. instead of "Webcam 0/1/2"
+                // and forcing a guess.
+                refreshCameraDevices();
+                std::string curLabel = "None";
+                if (boundToWebcam) {
+                    curLabel = (m_deckWebcamIndex >= 0 && m_deckWebcamIndex < (int)m_cameraDevices.size())
+                        ? m_cameraDevices[m_deckWebcamIndex].name
+                        : ("Camera " + std::to_string(m_deckWebcamIndex));
+                }
+                if (ImGui::BeginCombo("##imgsrc", curLabel.c_str())) {
+                    if (ImGui::Selectable("None", !boundToWebcam)) {
+                        shader->unbindImageInput(in.name);
+                    }
+                    if (m_cameraDevices.empty()) {
+                        ImGui::TextDisabled("No cameras detected");
+                    }
+                    for (int ci = 0; ci < (int)m_cameraDevices.size(); ci++) {
+                        ImGui::PushID(ci);
+                        bool isCur = boundToWebcam && m_deckWebcamIndex == ci;
+                        if (ImGui::Selectable(m_cameraDevices[ci].name.c_str(), isCur)) {
+                            if (!m_deckWebcam) m_deckWebcam = std::make_shared<WebcamSource>();
+                            if (m_deckWebcamIndex != ci || !m_deckWebcam->isOpen()) {
+                                m_deckWebcam->open(ci);
+                                m_deckWebcamIndex = ci;
+                            }
+                            if (m_deckWebcam->isOpen()) {
+                                shader->bindImageInput(in.name, m_deckWebcam->textureId(),
+                                                       m_deckWebcam->width(), m_deckWebcam->height(),
+                                                       0xFFFFFFFEu, false);
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+#else
+                // No device-name enumerator for this platform — fall back
+                // to raw indices.
+                char curLabel[32] = "None";
+                if (boundToWebcam)
+                    snprintf(curLabel, sizeof(curLabel), "Webcam %d", m_deckWebcamIndex);
+                if (ImGui::BeginCombo("##imgsrc", curLabel)) {
+                    if (ImGui::Selectable("None", !boundToWebcam)) {
+                        shader->unbindImageInput(in.name);
+                    }
+                    for (int camIdx = 0; camIdx < 4; camIdx++) {
+                        bool isCur = boundToWebcam && m_deckWebcamIndex == camIdx;
+                        char item[16];
+                        snprintf(item, sizeof(item), "Webcam %d", camIdx);
+                        if (ImGui::Selectable(item, isCur)) {
+                            if (!m_deckWebcam) m_deckWebcam = std::make_shared<WebcamSource>();
+                            if (m_deckWebcamIndex != camIdx || !m_deckWebcam->isOpen()) {
+                                m_deckWebcam->open(camIdx);
+                                m_deckWebcamIndex = camIdx;
+                            }
+                            if (m_deckWebcam->isOpen()) {
+                                shader->bindImageInput(in.name, m_deckWebcam->textureId(),
+                                                       m_deckWebcam->width(), m_deckWebcam->height(),
+                                                       0xFFFFFFFEu, false);
+                            }
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+#endif
+#else
+                ImGui::TextDisabled("(webcam not available in this build)");
+#endif
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    };
+
+    // Side column (one per slot): just the preview box, then PARAMETERS
+    // filling the rest of the column. Knobs, faders, and buttons all now
+    // live together in the center column (see below), laid out like a
+    // Launch Control XL: 3 rows of 8 knobs, then 8 faders, then a row of
+    // 8 buttons.
+    auto renderSideColumn = [&](float x, const char* letter, ImU32 col,
+                                const std::shared_ptr<ShaderSource>& shader, const char* sidePrefix) {
+        float y = kContentTop;
+        float previewH = blueW * 9.0f / 16.0f;
+        drawPreviewBox(x, y, blueW, previewH, letter, col, shader);
+        y += previewH + rowGap;
+
+        bool isSlotB = (sidePrefix[0] == 'B');
+        std::string* boundParams = isSlotB ? m_deckKnobBoundParamB : m_deckKnobBoundParamA;
+        bool& autoMapOn = isSlotB ? m_deckAutoMapOnB : m_deckAutoMapOnA;
+
+        float paramH = panelBottom - y;
+        renderParamPanel(x, y, blueW, paramH, (std::string("##params") + sidePrefix).c_str(),
+                         shader, boundParams, autoMapOn, col);
+    };
+    // Display letters swapped per user request (left is now labeled "A",
+    // right "B") — internal variable/binding names (m_deckShaderB etc.)
+    // and widget IDs (sidePrefix) are untouched, this only flips the
+    // on-screen badge/label text.
+    renderSideColumn(origin.x + railW + gap, "A", kAccentA, m_deckShaderB, "B");
+    renderSideColumn(origin.x + width - railW - gap - blueW, "B", kAccentB, m_deckShaderA, "A");
+
+    // ---- center column: PROGRAM monitor (with the A/B crossfader floating
+    // as a translucent overlay flush over its own bottom edge — see below),
+    // the combined knob grid (3x8), fader bank (8), button row (8), and
+    // MIDI device picker — laid out like a Launch Control XL, spanning
+    // mixX..mixX+mixW.
+    const float kCenterInset = 4.0f;   // trimmed (was 10) to reclaim a bit more width for the knob/fader grid, per user request
+    float centerLeft  = mixX + kCenterInset;
+    float centerRight = mixX + mixW - kCenterInset;
+    float gapW = centerRight - centerLeft;
+
+    // PROGRAM monitor — same top edge as the side columns' preview boxes
+    // (kContentTop), per user request.
+    float programY = kContentTop;
+    ImGui::SetCursorScreenPos(ImVec2(mixX, programY));
+    ImGui::BeginChild("##deckMix", ImVec2(mixW, mixH), false, ImGuiWindowFlags_NoScrollbar);
+    {
+        ImDrawList* md = ImGui::GetWindowDrawList();
+        ImVec2 m0 = ImGui::GetCursorScreenPos();
+        ImVec2 m1 = ImVec2(m0.x + mixW, m0.y + mixH);
+        // Neutral dark fill (matches the app's other panel backgrounds).
+        // With PROGRAM now locked to 16:9 and the live content also fit at
+        // 16:9 below, this fill shouldn't normally show through at all.
+        md->AddRectFilled(m0, m1, IM_COL32(12, 14, 20, 255), 6.0f);
+        // A/B crossfade result takes over PROGRAM whenever either slot is
+        // loaded (m_deckCrossfade: 0 = pure B, 1 = pure A, between = blend
+        // — see mixTex compute block at the top of this function) — B/A
+        // feed forward into PROGRAM, which is the actual output signal.
+        // Falls back to the real Zone/projector feed (already rendered at
+        // this box's own 16:9) only when neither slot has a shader loaded.
+        if (mixTex) {
+            // The deck's own shader slots render at a fixed 16:9 (see
+            // setResolution(480, 270) at commit time), matching PROGRAM's
+            // own 16:9 frame exactly now, so this just fills edge-to-edge.
+            const float kMixAspect = 16.0f / 9.0f;
+            float iw = mixW, ih = iw / kMixAspect;
+            if (ih > mixH) { ih = mixH; iw = ih * kMixAspect; }
+            ImVec2 i0(m0.x + (mixW - iw) * 0.5f, m0.y + (mixH - ih) * 0.5f);
+            ImVec2 i1(i0.x + iw, i0.y + ih);
+            md->AddImageRounded((ImTextureID)(intptr_t)programDisplayTex, i0, i1,
+                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
+        } else if (programTex) {
+            md->AddImageRounded((ImTextureID)(intptr_t)programDisplayTex, m0, m1,
+                                ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 4.0f);
+        }
+        md->AddText(ImVec2(m0.x + 8.0f, m0.y + 6.0f), IM_COL32(255, 200, 150, 230), "PROGRAM");
+        drawCornerCog("##programCog", m1.x, m0.y);
+    }
+    ImGui::EndChild();
+
+    // A/B crossfader — sits in the gap below PROGRAM now, not as an overlay
+    // on top of its video (per user request: it was covering the picture).
+    // Drawn as ordinary widgets on the panel background here, since nothing
+    // else draws over this strip — the child-always-on-top gotcha that
+    // forced the old overlay to live *inside* PROGRAM's own draw list
+    // doesn't apply once this is fully outside PROGRAM's rect.
+    {
+        const float comboW = std::min(140.0f, gapW);
+        const float durW = 56.0f;
+        float cfX = centerLeft + (gapW - comboW) * 0.5f;
+        float cfY = programY + mixH + 10.0f;
+        ImGui::SetCursorScreenPos(ImVec2(cfX, cfY));
+        ImGui::SetNextItemWidth(comboW);
+        if (ImGui::BeginCombo("##deckBlendMode", kShowDeckBlendModes[m_deckBlendMode].label)) {
+            for (int i = 0; i < (int)IM_ARRAYSIZE(kShowDeckBlendModes); i++) {
+                if (ImGui::Selectable(kShowDeckBlendModes[i].label, m_deckBlendMode == i))
+                    m_deckBlendMode = i;
+            }
+            ImGui::EndCombo();
+        }
+        // Auto-fade duration, per the reference mockup's "Fade  2.0 s" —
+        // also the duration the double-click auto-fade below animates
+        // over.
+        ImGui::SetCursorScreenPos(ImVec2(cfX + comboW + 8.0f, cfY));
+        ImGui::SetNextItemWidth(durW);
+        ImGui::DragFloat("##deckCrossfadeDuration", &m_deckCrossfadeDuration, 0.1f, 0.1f, 30.0f, "%.1f s");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Auto-fade duration \xe2\x80\x94 double-click the crossfader below to trigger");
+        float sliderY = cfY + kComboH + 6.0f;
+        ImGui::SetCursorScreenPos(ImVec2(centerLeft, sliderY));
+        drawHSliderWidget("deckCrossfade", &m_deckCrossfade, deckFaderMidiBound[0], gapW, kCrossfadeH);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("A / B crossfader (left = A, right = B) \xe2\x80\x94 MIDI fader 1\ndouble-click: auto-fade to the other side");
+            if (!deckFaderMidiBound[0] && ImGui::IsMouseDoubleClicked(0)) {
+                m_deckCrossfadeAnimFrom = m_deckCrossfade;
+                m_deckCrossfadeAnimTo   = (m_deckCrossfade < 0.5f) ? 1.0f : 0.0f;
+                m_deckCrossfadeAnimT    = 0.0f;
+                m_deckCrossfadeAnimating = true;
+            }
+        }
+        ImGui::SetCursorScreenPos(ImVec2(mixX, sliderY + kCrossfadeH));
+    }
+    // ~half an inch (96dpi) of breathing room between the crossfader and
+    // the top of the knob grid, per user request (was the tighter shared
+    // rowGap).
+    const float kKnobTopGap = 48.0f * deckScale;
+    ImGui::Dummy(ImVec2(0, kKnobTopGap));
+    // EndChild/Dummy reset the window cursor's X back to the content
+    // indent — re-pin it to PROGRAM's left edge before capturing rowPos,
+    // since every knob/fader/button below is positioned relative to it.
+    ImGui::SetCursorScreenPos(ImVec2(mixX, ImGui::GetCursorScreenPos().y));
+
+    ImVec2 rowPos = ImGui::GetCursorScreenPos();
+
+    // Knobs, faders, and buttons below PROGRAM are laid out like a physical
+    // Launch Control XL: 3 rows of 8 knobs, then a row of 8 faders, then a
+    // row of 8 buttons, all sharing the same 8-column pitch/positions
+    // (physColBase 0-3 = B, 4-7 = A throughout, so the on-screen columns
+    // line up with the hardware's own 8-wide rows). Pitch widened and the
+    // vertical faders shortened further (now 45% of the original travel)
+    // per user request, so knobs get more room to spread out.
+    const int kFaderCols = 8;
+    // No pitch cap — knobs/faders now spread all the way to PROGRAM's
+    // edges (centerLeft..centerRight) per user request, instead of
+    // clustering at a fixed max pitch.
+    float faderPitch = gapW / (float)kFaderCols;
+    float faderX     = centerLeft;
+    const float kFaderTravel = 101.0f * deckScale;   // 135 * 0.75 (was already 75% of the original 180)
+
+    float knobGridY = rowPos.y;
+    // Accent colors follow the ON-SCREEN letter, not the internal slot name
+    // — the left half of this grid is internal slot B but sits under the
+    // on-screen "A" (orange) column; the right half is internal slot A
+    // under on-screen "B" (green). Matches the divider line's convention
+    // just below.
+    drawKnobGrid(faderX, knobGridY, faderPitch * 4.0f, m_deckKnobB, m_deckKnobBoundParamB, m_deckKnobCCOverrideB,
+                 m_deckShaderB, "B", 0, 0, -1, kAccentA);
+    // extraGapAfterLocalCol = 0: widens the gap between screen columns 5
+    // and 6 (A's own first and second knob) by 50%, per user request.
+    drawKnobGrid(faderX + faderPitch * 4.0f, knobGridY, faderPitch * 4.0f, m_deckKnobA, m_deckKnobBoundParamA,
+                 m_deckKnobCCOverrideA, m_deckShaderA, "A", 4, 1, 0, kAccentB);
+
+    ImVec2 faderRowPos(centerLeft, knobGridY + kKnobGridH + rowGap);
+
+    // Thin orange/green divider straddling the B|A boundary (physical
+    // columns 0-3 = B = on-screen "A", 4-7 = A = on-screen "B"), running
+    // from the top of the knob rows down to the bottom of the fader travel.
+    // Orange sits just left of center, green just right, per user request.
+    // Gap between them widened 4x (was 6px apart, now 24px), also per user
+    // request.
+    {
+        float splitX = faderX + faderPitch * 4.0f;
+        float lineTop = knobGridY;
+        float lineBot = faderRowPos.y + kFaderTravel;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddLine(ImVec2(splitX - 12.0f, lineTop), ImVec2(splitX - 12.0f, lineBot), kAccentA, 1.5f);
+        dl->AddLine(ImVec2(splitX + 12.0f, lineTop), ImVec2(splitX + 12.0f, lineBot), kAccentB, 1.5f);
+    }
+    {
+        // A/B crossfader now sits in screen column 0 (Brightness's old
+        // spot), with the 7 effect faders shifted one column to the right
+        // (1-7) per user request — this also happens to line up on-screen
+        // fader position 1:1 with the physical Launch Control XL fader
+        // number (fader 1 = crossfader = CC77, faders 2-8 = the 7 effects),
+        // which the vertical fader positions weren't before. Column 0's
+        // caption is fixed ("A / B", never reassignable); columns 1-7 name
+        // whatever global effect that slot is currently assigned to
+        // (identity by default — see m_deckFaderEffect), reassignable via
+        // the small cog beside each caption.
+        const char* kFaderLabels[8];
+        kFaderLabels[0] = "A / B";
+        for (int i = 1; i < 8; i++)
+            kFaderLabels[i] = kGlobalEffectNames[std::clamp(m_deckFaderEffect[i - 1], 0, 6)];
+
+        float sliderW = 14.0f;
+        float sliderH = kFaderTravel;
+        ImFont* font = ImGui::GetFont();
+        ImDrawList* ld = ImGui::GetWindowDrawList();
+        const float dotD = 9.0f, dotGapX = 5.0f;   // blue reassign dot, replaces the old cog icon
+        float widest = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            float w = font->CalcTextSizeA(10.5f, FLT_MAX, 0.0f, kFaderLabels[i]).x;
+            widest = std::max(widest, w);
+        }
+        // Caption font scales with the actual per-fader pitch so labels
+        // never collide into their neighbors, whatever the window width.
+        float labelFont = widest > 0.0f ? std::clamp(13.5f * (faderPitch - 6.0f) / widest, 11.0f, 24.0f) : 24.0f;   // +3pt per user request
+
+        ImVec2 faderPos = faderRowPos;
+
+        for (int i = 0; i < 8; i++) {
+            float cellX = faderX + i * faderPitch;
+            float sliderX = cellX + (faderPitch - sliderW) * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(sliderX, faderPos.y));
+            if (i == 0) {
+                drawVSliderWidgetLight("deckCrossfadeV", &m_deckCrossfade, deckFaderMidiBound[0], sliderW, sliderH,
+                                       IM_COL32(90, 150, 230, 255), showDark, 0.0f);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A / B crossfader (bottom = B, top = A) \xe2\x80\x94 MIDI fader 1");
+            } else {
+                int si = i - 1;
+                char idbuf[16]; snprintf(idbuf, sizeof(idbuf), "dslider%d", si);
+                float effNeutral = kGlobalEffectNeutral[std::clamp(m_deckFaderEffect[si], 0, 6)];
+                drawVSliderWidgetLight(idbuf, &m_deckSlider[si], deckFaderMidiBound[i], sliderW, sliderH,
+                                       (i <= 3) ? kAccentA : kAccentB, showDark, effNeutral);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s \xe2\x80\x94 MIDI fader %d", kFaderLabels[i], i + 1);
+            }
+
+            // Reassign-effect control — a small blue circle (matches the
+            // knob "assigned" dot styling) directly left of the fader, top-
+            // aligned with the top of its travel, per user request (was a
+            // grey cog icon beside the caption below).
+            bool hasDot = (i != 0);
+            if (hasDot) {
+                int si = i - 1;
+                float dcx = sliderX - dotGapX - dotD * 0.5f;
+                float dcy = faderPos.y + dotD * 0.5f;
+                ImGui::SetCursorScreenPos(ImVec2(dcx - dotD * 0.5f, dcy - dotD * 0.5f));
+                ImGui::InvisibleButton(("##faderCog" + std::to_string(si)).c_str(), ImVec2(dotD, dotD));
+                bool dotHov = ImGui::IsItemHovered();
+                ld->AddCircleFilled(ImVec2(dcx, dcy), dotD * 0.5f,
+                                    dotHov ? IM_COL32(150, 210, 255, 255) : IM_COL32(110, 190, 255, 220), 12);
+                const std::string popupId = "FaderEffectPicker" + std::to_string(si);
+                if (ImGui::IsItemClicked()) ImGui::OpenPopup(popupId.c_str());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reassign this fader's effect");
+                if (ImGui::BeginPopup(popupId.c_str())) {
+                    ImGui::TextDisabled("GLOBAL EFFECTS");
+                    ImGui::Separator();
+                    for (int e = 0; e < 7; e++) {
+                        if (ImGui::Selectable(kGlobalEffectNames[e], m_deckFaderEffect[si] == e))
+                            m_deckFaderEffect[si] = e;
+                    }
+                    // Trails — only relevant once this slot is actually
+                    // driving Kaleidoscope; on by default, per user request.
+                    if (m_deckFaderEffect[si] == 6) {
+                        ImGui::Separator();
+                        ImGui::Checkbox("Trails", &m_deckKaleidoTrails);
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+
+            ImVec2 lts = font->CalcTextSizeA(labelFont, FLT_MAX, 0.0f, kFaderLabels[i]);
+            float rowX = cellX + (faderPitch - lts.x) * 0.5f;
+            float rowY = faderPos.y + sliderH + 4.0f;
+            // Clip each label to its own cell — belt-and-suspenders against
+            // any residual overflow bleeding into a neighboring caption.
+            ImVec2 clipMin(cellX + 1.0f, rowY - 2.0f);
+            ImVec2 clipMax(cellX + faderPitch - 1.0f, rowY + labelFont + 6.0f);
+            ld->PushClipRect(clipMin, clipMax, true);
+            ld->AddText(font, labelFont, ImVec2(rowX, rowY),
+                       i == 0 ? IM_COL32(90, 150, 230, 255) : kText, kFaderLabels[i]);
+            ld->PopClipRect();
+
+            // +/- nudge steppers, per the reference mockup — one pair per
+            // fader column, stacked under its caption. Nudges the same
+            // value the vertical fader above it drags; disabled while a
+            // physical MIDI fader currently owns this column (its value
+            // would just get overwritten next frame anyway).
+            {
+                float* target = (i == 0) ? &m_deckCrossfade : &m_deckSlider[i - 1];
+                bool midiOwned = deckFaderMidiBound[i];
+                ImU32 stepAccent = (i <= 3) ? kAccentA : kAccentB;
+                float stepW = faderPitch - 6.0f, stepH = 16.0f, stepGap = 3.0f;
+                float stepX = cellX + 3.0f;
+                float stepY = rowY + labelFont + 6.0f;
+                const char* stepLbl[2] = { "+", "\xe2\x88\x92" };  // U+2212 minus
+                for (int s = 0; s < 2; s++) {
+                    ImVec2 bMin(stepX, stepY + s * (stepH + stepGap));
+                    ImVec2 bMax(bMin.x + stepW, bMin.y + stepH);
+                    ImGui::SetCursorScreenPos(bMin);
+                    ImGui::PushID(s);
+                    bool clicked = !midiOwned &&
+                        ImGui::InvisibleButton(("##faderStep" + std::to_string(i)).c_str(), ImVec2(stepW, stepH));
+                    bool bhov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    ImU32 fillCol = midiOwned
+                        ? kBorder
+                        : ((stepAccent & 0x00FFFFFF) | ((ImU32)(bhov ? 235 : 190) << 24));
+                    ld->AddRectFilled(bMin, bMax, fillCol, 3.0f);
+                    ImVec2 lsz = font->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, stepLbl[s]);
+                    ld->AddText(font, 12.0f,
+                               ImVec2((bMin.x + bMax.x - lsz.x) * 0.5f, (bMin.y + bMax.y - lsz.y) * 0.5f),
+                               IM_COL32(255, 255, 255, 255), stepLbl[s]);
+                    if (clicked) *target = std::clamp(*target + (s == 0 ? 0.05f : -0.05f), 0.0f, 1.0f);
+                }
+            }
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(centerLeft, faderPos.y + sliderH + labelFont + 6.0f + 16.0f * 2.0f + 3.0f + 10.0f));
+    }
+    // Grow this gap to consume whatever vertical room is left over instead
+    // of a fixed rowGap — pins the button rows + meter near the panel's
+    // true bottom edge so nothing is left as dead grey space below them,
+    // per user request.
+    {
+        ImVec2 afterFaders = ImGui::GetCursorScreenPos();
+        float twoBtnRowsH = kBtnH * 2.0f + kBtnGap;   // 2 button rows now, per user request
+        float meterBlockH = 10.0f + rowGap * 2.0f;    // audio level meter + gaps around it
+        float desiredBtnY = panelBottom - 8.0f - meterBlockH - rowGap - twoBtnRowsH;
+        float fillGap = std::max(rowGap, desiredBtnY - afterFaders.y);
+        ImGui::Dummy(ImVec2(0, fillGap));
+    }
+
+    // Memory bank button rows — B's 4 + A's 4 per row, directly under the
+    // faders, same 8-column alignment as the knobs above them.
+    {
+        ImVec2 btnPos = ImGui::GetCursorScreenPos();
+        drawMemoryBankRow(faderX, btnPos.y, faderPitch * 4.0f, m_deckMemSlotB2, m_deckKnobB, "B2", kAccentA);
+        drawMemoryBankRow(faderX + faderPitch * 4.0f, btnPos.y, faderPitch * 4.0f, m_deckMemSlotA2, m_deckKnobA, "A2", kAccentB);
+        float row2Y = btnPos.y + kBtnH + kBtnGap;
+        drawMemoryBankRow(faderX, row2Y, faderPitch * 4.0f, m_deckMemSlotB, m_deckKnobB, "B", kAccentA);
+        drawMemoryBankRow(faderX + faderPitch * 4.0f, row2Y, faderPitch * 4.0f, m_deckMemSlotA, m_deckKnobA, "A", kAccentB);
+        ImGui::SetCursorScreenPos(ImVec2(centerLeft, row2Y + kBtnH));
+
+        // Shared popups for all 16 memory slots — only one can be open at a
+        // time, driven by the pending/pick state the clicks above set.
+        if (ImGui::BeginPopup("##deckMemNamePopup")) {
+            ImGui::TextDisabled("SAVE MEMORY");
+            ImGui::Separator();
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(180.0f);
+            bool enterPressed = ImGui::InputTextWithHint(
+                "##memName", "Name this memory", m_deckMemNameBuf, sizeof(m_deckMemNameBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            bool canSave = m_deckMemNameBuf[0] != '\0';
+            if (!canSave) ImGui::BeginDisabled();
+            bool doSave = ImGui::Button("Save");
+            if (!canSave) ImGui::EndDisabled();
+            if (canSave && (enterPressed || doSave)) {
+                DeckKnobMemory mem;
+                mem.name = m_deckMemNameBuf;
+                for (int k = 0; k < kDeckKnobCount; k++) mem.knobs[k] = m_deckMemPendingKnobs[k];
+                m_deckKnobMemories.push_back(mem);
+                if (m_deckMemPendingSlots && m_deckMemPendingIdx >= 0)
+                    m_deckMemPendingSlots[m_deckMemPendingIdx] = (int)m_deckKnobMemories.size() - 1;
+                m_deckMemPendingSlots = nullptr;
+                m_deckMemPendingIdx   = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopup("##deckMemPickPopup")) {
+            ImGui::TextDisabled("SAVED MEMORIES");
+            ImGui::Separator();
+            if (m_deckKnobMemories.empty()) {
+                ImGui::TextDisabled("(none saved yet)");
+            } else {
+                for (int m = 0; m < (int)m_deckKnobMemories.size(); m++) {
+                    bool sel = (m_deckMemPickSlots && m_deckMemPickIdx >= 0 &&
+                               m_deckMemPickSlots[m_deckMemPickIdx] == m);
+                    if (ImGui::Selectable(m_deckKnobMemories[m].name.c_str(), sel)) {
+                        if (m_deckMemPickSlots && m_deckMemPickIdx >= 0)
+                            m_deckMemPickSlots[m_deckMemPickIdx] = m;
+                    }
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::Selectable("Clear this slot")) {
+                if (m_deckMemPickSlots && m_deckMemPickIdx >= 0)
+                    m_deckMemPickSlots[m_deckMemPickIdx] = -1;
+            }
+            ImGui::EndPopup();
+        }
     }
     ImGui::Dummy(ImVec2(0, rowGap));
 
-    // Buttons — 4 per side, plain toggles for now (programmable later).
+    // Horizontal mic/audio input level meter — sits between the buttons and
+    // the MIDI picker (which moved further down, below it, per user
+    // request). Reuses the same AGC'd RMS the OSC bus already emits
+    // elsewhere as "/easel/audio/audioLevel", so whatever input is
+    // currently selected (System Audio / a picked device / the Mixer)
+    // drives it.
     {
-        ImVec2 btnPos = ImGui::GetCursorScreenPos();
-        auto drawButtonRow = [&](float x, bool* values, const char* sidePrefix) {
-            float btnW = (bottomColW - 3.0f * 4.0f) / 4.0f;
-            for (int i = 0; i < kDeckButtonCount; i++) {
-                ImGui::SetCursorScreenPos(ImVec2(x + i * (btnW + 4.0f), btnPos.y));
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      values[i] ? IM_COL32(190, 120, 50, 255) : IM_COL32(120, 80, 40, 255));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(200, 140, 70, 255));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(210, 150, 80, 255));
-                char idbuf[24]; snprintf(idbuf, sizeof(idbuf), "dbtn_%s_%d", sidePrefix, i);
-                if (ImGui::Button(idbuf, ImVec2(btnW, btnRowH))) values[i] = !values[i];
-                ImGui::PopStyleColor(3);
-            }
-        };
-        drawButtonRow(rowLeft, m_deckButtonB, "B");
-        drawButtonRow(rowRight - bottomColW, m_deckButtonA, "A");
+        ImVec2 meterPos = ImGui::GetCursorScreenPos();
+        float meterH = 10.0f;
+        ImDrawList* mdl = ImGui::GetWindowDrawList();
+        mdl->AddRectFilled(ImVec2(centerLeft, meterPos.y), ImVec2(centerLeft + gapW, meterPos.y + meterH),
+                           kTrack, 3.0f);
+        float lvl = std::clamp(m_audioAnalyzer.smoothedRMS(), 0.0f, 1.0f);
+        if (lvl > 0.001f) {
+            mdl->AddRectFilled(ImVec2(centerLeft, meterPos.y), ImVec2(centerLeft + gapW * lvl, meterPos.y + meterH),
+                               IM_COL32(90, 150, 230, 255), 3.0f);
+        }
+        mdl->AddRect(ImVec2(centerLeft, meterPos.y), ImVec2(centerLeft + gapW, meterPos.y + meterH),
+                    kBorder, 3.0f, 0, 1.0f);
+        ImGui::SetCursorScreenPos(ImVec2(centerLeft, meterPos.y + meterH));
+        // A bare SetCursorScreenPos with no item submitted after it can't
+        // grow the parent ("Play") window's known content bounds — Dear
+        // ImGui 1.92 flags that as a recoverable error (the on-screen red
+        // box + border the user was seeing). Dummy({0,0}) is the documented
+        // fix: it submits a zero-size item right at this position so the
+        // parent's bounds actually extend to include it.
+        ImGui::Dummy(ImVec2(0, 0));
     }
 
+    // MIDI device picker + status used to live here — moved to Show mode's
+    // own flush-bottom bar (renderShowMidiBar(), called from renderUI())
+    // per user request, so it's not squeezed into this panel's own tight
+    // bottom-reserve budget and actually fills that bar's blank space.
+
+    ImGui::PopStyleColor(kShowThemeColorCount);
     ImGui::PopID();
 }
 
@@ -14714,6 +16911,53 @@ void Application::renderMenuBar() {
 // workspace nav row in ViewportPanel::renderNavBar. NO BeginMainMenuBar —
 // this writes into whatever window is current (the viewport's docked
 // window) so the chrome reads as a single row.
+void Application::renderAudioSettingsMenu() {
+    if (!ImGui::BeginMenu("Audio Settings")) return;
+#ifdef HAS_FFMPEG
+    if (ImGui::BeginMenu("Mic Input")) {
+        if (m_audioDevices.empty())
+            m_audioDevices = VideoRecorder::enumerateAudioDevices();
+        if (ImGui::MenuItem("System Audio (loopback)", nullptr, m_selectedAudioDevice == -1))
+            m_selectedAudioDevice = -1;
+        ImGui::Separator();
+        bool anyMic = false;
+        for (int i = 0; i < (int)m_audioDevices.size(); i++) {
+            const auto& d = m_audioDevices[i];
+            if (!d.isCapture) continue;   // mics only; loopback = "System Audio" above
+            anyMic = true;
+            ImGui::PushID(i);
+            if (ImGui::MenuItem(d.name.c_str(), nullptr, m_selectedAudioDevice == i))
+                m_selectedAudioDevice = i;
+            ImGui::PopID();
+        }
+        if (!anyMic) ImGui::TextDisabled("No microphones found");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Refresh Devices"))
+            m_audioDevices = VideoRecorder::enumerateAudioDevices();
+        ImGui::EndMenu();
+    }
+#else
+    if (ImGui::BeginMenu("Mic Input")) {
+        if (m_micDevices.empty()) m_micDevices = enumerateAudioInputDevices();
+        if (ImGui::MenuItem("System Audio (loopback)", nullptr, m_selectedMicId.empty()))
+            m_selectedMicId.clear();
+        ImGui::Separator();
+        for (int i = 0; i < (int)m_micDevices.size(); i++) {
+            ImGui::PushID(i);
+            if (ImGui::MenuItem(m_micDevices[i].name.c_str(), nullptr, m_selectedMicId == m_micDevices[i].id))
+                m_selectedMicId = m_micDevices[i].id;
+            ImGui::PopID();
+        }
+        if (m_micDevices.empty()) ImGui::TextDisabled("No microphones found");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Refresh Devices"))
+            m_micDevices = enumerateAudioInputDevices();
+        ImGui::EndMenu();
+    }
+#endif
+    ImGui::EndMenu();
+}
+
 void Application::renderNavBarPrefix() {
     // Hamburger / brand mark draws on the viewport FOREGROUND list so it
     // shares the same z-priority as the rest of the nav-row chrome
@@ -14721,7 +16965,13 @@ void Application::renderNavBarPrefix() {
     // ViewportPanel::renderNavBar). Without this the band on fg would
     // paint over a hamburger drawn into the Canvas window draw list.
     ImDrawList* dl = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
-    const ImU32 kMark = IM_COL32(232, 238, 250, 235);
+    // SHOW workspace only (and only while its own dark-mode switch is off):
+    // the nav row goes light-theme there (see ViewportPanel::renderNavBar)
+    // — this hamburger glyph needs a dark variant to stay legible against
+    // it. Show's dark-mode switch falls back to the original light-on-dark
+    // glyph below, same as every other mode.
+    const bool navShowLight = (UIManager::sMode == UIManager::WorkspaceMode::Show) && !UIManager::sShowDarkMode;
+    const ImU32 kMark = navShowLight ? IM_COL32(45, 45, 48, 255) : IM_COL32(232, 238, 250, 235);
 
     const float kBtn   = 28.0f;   // matches the inner pill height in the row
     const float kGap   = 8.0f;
@@ -14756,9 +17006,9 @@ void Application::renderNavBarPrefix() {
         float cx = cur.x + sz.x * 0.5f, cy = cur.y + sz.y * 0.5f;
         if (hov) {
             dl->AddCircleFilled(ImVec2(cx, cy), sz.x * 0.5f,
-                                IM_COL32(255, 255, 255, 18), 24);
+                                navShowLight ? IM_COL32(0, 0, 0, 16) : IM_COL32(255, 255, 255, 18), 24);
         }
-        ImU32 menuCol = hov ? kMark : IM_COL32(170, 178, 195, 220);
+        ImU32 menuCol = hov ? kMark : (navShowLight ? IM_COL32(140, 138, 133, 255) : IM_COL32(170, 178, 195, 220));
         // Hamburger menu — three short horizontal lines stacked. Reads
         // unambiguously as "open menu" without the cog overtones the gear
         // had (which suggested settings/preferences only).
@@ -14775,6 +17025,7 @@ void Application::renderNavBarPrefix() {
         if (clicked) ImGui::OpenPopup("##nav_more_popup");
     }
     if (ImGui::BeginPopup("##nav_more_popup")) {
+        renderAudioSettingsMenu();
         if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
                 m_undoStack.undo(m_layerStack, m_selectedLayer);
@@ -15027,6 +17278,7 @@ void Application::renderMenuBar_legacy() {
         // U+22EF MIDLINE HORIZONTAL ELLIPSIS — the typographic "more" glyph;
         // single codepoint, cleaner kerning than three U+2022 bullets.
         if (ImGui::BeginMenu("\xe2\x8b\xaf")) {
+        renderAudioSettingsMenu();
         if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, m_undoStack.canUndo())) {
                 m_undoStack.undo(m_layerStack, m_selectedLayer);
@@ -15572,7 +17824,7 @@ void Application::addWebcam(int cameraIndex, const std::string& deviceName) {
 }
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || (defined(_WIN32) && defined(HAS_OPENCV))
 void Application::refreshCameraDevices(bool force) {
     const double now = ImGui::GetTime();
     if (!force && m_cameraDevicesLastScan >= 0.0 &&
@@ -15689,6 +17941,23 @@ void Application::loadShader(const std::string& path) {
         if (hasMsg) {
             m_dataBus.bind(layer->id, "msg", "cue.latest");
         }
+    }
+
+    // Give every shader layer some baseline motion by default — a random
+    // audio-reactive recipe (same engine as the PropertyPanel's Reactivity
+    // row), so a freshly added shader is never just sitting static until
+    // someone remembers to turn reactivity on. Skipped when a restored
+    // preset already brought its own bindings back (don't clobber a saved
+    // reactive setup with a fresh random one).
+    if (source && source->audioBindings().empty()) {
+        std::vector<AudioPresetEngine::Param> pp;
+        for (const auto& in : source->inputs()) {
+            if (in.type != "float") continue;
+            if (in.name.find("audio") != std::string::npos ||
+                in.name.find("Audio") != std::string::npos) continue;
+            pp.push_back({ in.name, std::get<float>(in.value), in.minVal, in.maxVal });
+        }
+        AudioPresetEngine::on(source->audioBindings(), pp, layer->id);
     }
 }
 

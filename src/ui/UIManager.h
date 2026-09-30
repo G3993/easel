@@ -84,6 +84,13 @@ public:
     // Fullscreen shader GALLERY overlay -- toggled by the top-nav GALLERY
     // tab (next to ZONES) and rendered by Application::renderShaderGallery.
     static bool sGalleryOpen;
+    // SHOW workspace's light/dark theme toggle — a switch in the bottom
+    // footer (Application::renderShowMidiBar) flips this; renderShowDeck,
+    // renderShowMidiBar, and ViewportPanel::renderNavBar all read it to
+    // pick between the light and "super dark gray" Show-mode palettes.
+    // Static (not an Application member) so ViewportPanel.cpp — which has
+    // no Application reference — can read it too, same as sMode.
+    static bool sShowDarkMode;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
     // with an ease-out cubic. Set via setMode() — never write sMode directly

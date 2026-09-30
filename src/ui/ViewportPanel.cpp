@@ -1897,6 +1897,22 @@ void ViewportPanel::renderNavBar(bool stageActive,
                                  std::function<void()> prefixContent) {
     if (!zones || !activeZone) return;
 
+    // SHOW workspace only: light-theme nav row, matching the reference
+    // mockup — dark-on-light instead of this row's usual light-on-dark,
+    // scoped so Canvas/Mapping/Zones/Stage/Gallery keep the original
+    // scheme untouched. showLight is false (falling back to the original
+    // dark-on-dark colors below, which already read fine as a "dark mode")
+    // whenever Show's own dark-mode switch (bottom-left of its footer) is
+    // on — so that switch doubles as this row's dark/light toggle too,
+    // with no separate palette needed. Reused at every color decision here.
+    const bool showLight = (UIManager::sMode == UIManager::WorkspaceMode::Show) && !UIManager::sShowDarkMode;
+    const ImU32 kSLBg        = IM_COL32(234, 231, 226, 255);
+    const ImU32 kSLHairline  = IM_COL32(214, 211, 205, 255);
+    const ImU32 kSLText      = IM_COL32(45, 45, 48, 255);
+    const ImU32 kSLTextDim   = IM_COL32(140, 138, 133, 255);
+    const ImU32 kSLTextHov   = IM_COL32(20, 20, 22, 255);
+    const ImU32 kSLAccent    = IM_COL32(90, 150, 230, 255);
+
     // Nav row height = 28 so its 28-tall items (gear, System Audio pill,
     // workspace pill, etc.) center exactly on y=14 — the same vertical line
     // the macOS traffic-light buttons live on (titlebar = 28, lights centered
@@ -1927,11 +1943,11 @@ void ViewportPanel::renderNavBar(bool stageActive,
         navFG->AddRectFilled(
             ImVec2(vpFG->Pos.x, navRowScreenY),
             ImVec2(vpFG->Pos.x + vpFG->Size.x, navRowScreenY + kNavRowH),
-            UITokens::kNavSurface);
+            showLight ? kSLBg : UITokens::kNavSurface);
         navFG->AddLine(
             ImVec2(vpFG->Pos.x,                  navRowScreenY + kNavRowH),
             ImVec2(vpFG->Pos.x + vpFG->Size.x,   navRowScreenY + kNavRowH),
-            IM_COL32(255, 255, 255, 28), 1.0f);
+            showLight ? kSLHairline : IM_COL32(255, 255, 255, 28), 1.0f);
     }
 
     // Traffic-light clearance is owned by Application::renderNavBarPrefix
@@ -2031,10 +2047,12 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
             ImVec2 ts = ImGui::CalcTextSize(labels[i]);
             bool isActive = (i == 3) ? UIManager::sGalleryOpen : (i == activeIdx);
-            ImU32 fg = isActive
-                ? IM_COL32(255, 255, 255, 255)
-                : (hov ? IM_COL32(200, 208, 220, 230)
-                       : IM_COL32(135, 142, 158, 200));
+            ImU32 fg = showLight
+                ? (isActive ? kSLAccent : (hov ? kSLTextHov : kSLTextDim))
+                : (isActive
+                    ? IM_COL32(255, 255, 255, 255)
+                    : (hov ? IM_COL32(200, 208, 220, 230)
+                           : IM_COL32(135, 142, 158, 200)));
 
             // ── Label (vertically centered on yCenter) ─────────────
             float lblX = x;
@@ -2201,10 +2219,12 @@ void ViewportPanel::renderNavBar(bool stageActive,
             bool clicked = ImGui::InvisibleButton("##zoneTab", ImVec2(hitW, fsBtnSize));
             bool hov     = ImGui::IsItemHovered();
 
-            ImU32 fg = isActive
-                ? IM_COL32(245, 247, 252, 255)
-                : (hov ? IM_COL32(220, 225, 235, 230)
-                       : IM_COL32(150, 158, 175, 200));
+            ImU32 fg = showLight
+                ? (isActive ? kSLText : (hov ? kSLTextHov : kSLTextDim))
+                : (isActive
+                    ? IM_COL32(245, 247, 252, 255)
+                    : (hov ? IM_COL32(220, 225, 235, 230)
+                           : IM_COL32(150, 158, 175, 200)));
             float yMid = cur.y + fsBtnSize * 0.5f;
             tabDraw->AddText(ImVec2(cur.x + 6.0f, yMid - lblSz.y * 0.5f),
                              fg, zNameShown.c_str());
@@ -2267,8 +2287,9 @@ void ViewportPanel::renderNavBar(bool stageActive,
             ImDrawList* dAdd = navFG;
             float cx = cur.x + kAddW * 0.5f;
             float cy = cur.y + fsBtnSize * 0.5f;
-            ImU32 col = hov ? IM_COL32(235, 240, 250, 240)
-                            : IM_COL32(150, 158, 175, 220);
+            ImU32 col = showLight
+                ? (hov ? kSLTextHov : kSLTextDim)
+                : (hov ? IM_COL32(235, 240, 250, 240) : IM_COL32(150, 158, 175, 220));
             float a = 5.0f;        // half-length of each plus arm
             float th = 1.4f;       // stroke thickness, matches the chevrons
             dAdd->AddLine(ImVec2(cx - a, cy), ImVec2(cx + a, cy), col, th);
@@ -2340,9 +2361,10 @@ void ViewportPanel::renderNavBar(bool stageActive,
                 ImDrawList* dOut = navFG;
 
                 ImU32 textCol;
-                if (live)      textCol = IM_COL32(85, 210, 130, 245);
-                else if (hov)  textCol = IM_COL32(235, 240, 250, 240);
-                else           textCol = IM_COL32(170, 175, 185, 230);
+                if (live)          textCol = IM_COL32(40, 165, 100, 255);
+                else if (showLight) textCol = hov ? kSLTextHov : kSLTextDim;
+                else if (hov)      textCol = IM_COL32(235, 240, 250, 240);
+                else               textCol = IM_COL32(170, 175, 185, 230);
 
                 float yMid = cur.y + chipH * 0.5f;
                 dOut->AddText(ImVec2(cur.x, yMid - lblSz.y * 0.5f),
@@ -2477,8 +2499,9 @@ void ViewportPanel::renderNavBar(bool stageActive,
                 bool hov = ImGui::IsItemHovered();
                 ImDrawList* dl = navFG;
 
-                ImU32 textCol = hov ? IM_COL32(235, 240, 250, 240)
-                                    : IM_COL32(170, 175, 185, 230);
+                ImU32 textCol = showLight
+                    ? (hov ? kSLTextHov : kSLTextDim)
+                    : (hov ? IM_COL32(235, 240, 250, 240) : IM_COL32(170, 175, 185, 230));
                 ImVec2 lblPos(cur.x,
                               cur.y + (fsBtnSize - lblSz.y) * 0.5f);
                 dl->AddText(lblPos, textCol, compLabel);
@@ -2522,13 +2545,14 @@ void ViewportPanel::renderNavBar(bool stageActive,
                 if (hov) {
                     dlfs->AddRectFilled(cur,
                                         ImVec2(cur.x + fsBtnSize, cur.y + fsBtnSize),
-                                        IM_COL32(255, 255, 255, 24), 6.0f);
+                                        showLight ? IM_COL32(0, 0, 0, 16) : IM_COL32(255, 255, 255, 24), 6.0f);
                 }
                 float r  = 7.0f;
                 float a  = 4.0f;
                 float th = 1.6f;
-                ImU32 c  = hov ? IM_COL32(235, 240, 250, 240)
-                               : IM_COL32(190, 195, 205, 230);
+                ImU32 c  = showLight
+                    ? (hov ? kSLTextHov : kSLTextDim)
+                    : (hov ? IM_COL32(235, 240, 250, 240) : IM_COL32(190, 195, 205, 230));
                 if (m_editorFullscreenHint) {
                     // Inward-pointing brackets — "exit fullscreen" glyph.
                     dlfs->AddLine(ImVec2(cx - r,     cy - r + a), ImVec2(cx - r + a, cy - r + a), c, th);
