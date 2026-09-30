@@ -33,7 +33,7 @@ static void modeButton(const char* label, int thisMode, int& currentMode, float 
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
     } else {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.125f, 0.165f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.596f, 0.596f, 0.596f, 1.0f));
     }
     if (ImGui::Button(label, ImVec2(width, 0))) currentMode = thisMode;
     ImGui::PopStyleColor(2);
@@ -63,8 +63,8 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     // Index order MUST match Application::m_mapPatterns.
     if (UIManager::sMode == UIManager::WorkspaceMode::Mapping) {
         static const char* kPatternNames[] = {
-            "Grid", "Checkerboard", "Crosshair", "Concentric Circles",
-            "Dots", "Solid White"
+            "Grid", "Checkerboard", "Crosshair", "Color Bars",
+            "Rainbow", "Solid White"
         };
         PropertyPanel::PanelLabel("TEST PATTERN");
         ImGui::Combo("##mapTestPattern", &m_testPattern,
@@ -73,7 +73,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
 
     // --- Mapping profile header ---
     if (allMappings && !allMappings->empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
         ImGui::Text("Profile");
         ImGui::PopStyleColor();
         ImGui::SameLine();
@@ -111,11 +111,12 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     int modeInt = (int)mapping.warpMode;
     static const char* kModeNames[] = { "Corner Pin", "Mesh Warp", "OBJ Mesh" };
 
-    ImGui::SetNextItemWidth(-1);
-    ImGui::Combo("##WarpMode", &modeInt, kModeNames, IM_ARRAYSIZE(kModeNames));
-
-    mapping.warpMode = (ViewportPanel::WarpMode)modeInt;
-
+    // Mode is switched from the floating Corner Pin · Mesh Warp · OBJ Mesh
+    // bar over the canvas (Application), so the panel just shows it.
+    (void)modeInt;
+    ImGui::TextDisabled("MODE");
+    ImGui::SameLine(0, 12);
+    ImGui::TextUnformatted(kModeNames[(int)mapping.warpMode]);
     ImGui::Dummy(ImVec2(0, 10));
 
     if (mapping.warpMode == ViewportPanel::WarpMode::CornerPin) {
@@ -150,7 +151,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             }};
         }
     } else if (mapping.warpMode == ViewportPanel::WarpMode::MeshWarp) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
         ImGui::Text("%d x %d", meshWarp.cols(), meshWarp.rows());
         ImGui::PopStyleColor();
 
@@ -172,7 +173,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
         // go straight). Right-click a point in the viewport to toggle one;
         // these set them all at once. Smooth = circle, straight = square.
         ImGui::Dummy(ImVec2(0, 4));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
         ImGui::TextWrapped("Right-click a point to toggle curve / straight");
         ImGui::PopStyleColor();
         float hw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -187,7 +188,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             ImGui::Text("%s", filename.c_str());
             ImGui::PopStyleColor();
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 0.7f));
             ImGui::Text("No mesh loaded");
             ImGui::PopStyleColor();
         }
@@ -200,7 +201,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             sectionSep();
 
             // Camera controls
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
             ImGui::Text("Camera");
             ImGui::PopStyleColor();
 
@@ -219,7 +220,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
 
             sectionSep();
 
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
             ImGui::Text("Model");
             ImGui::PopStyleColor();
 
@@ -239,7 +240,7 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
             if (!mats.empty()) {
                 sectionSep();
 
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
                 ImGui::Text("Materials");
                 ImGui::PopStyleColor();
 

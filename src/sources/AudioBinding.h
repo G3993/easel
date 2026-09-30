@@ -37,11 +37,11 @@ struct AudioBinding {
     // bindings calm by default (was 0.7, then 0.55 — both still felt too
     // fast/strobey the moment audio is enabled). Users wanting punch drag it
     // down; the common case is "make it smooth," so start there.
-    float smoothing = 0.85f;
+    float smoothing = 0.80f;   // Lu: new bindings always start smooth
     // EaselAudio character: -1 = extra smooth … +1 = spiky/chopped.
     // 0 = NEUTRAL = the exact legacy feel (existing projects load with 0, so
     // nothing changes until the user touches the new Character control).
-    float character = 0.0f;
+    float character = -1.0f;   // Lu: new bindings start on the smooth end
     float smoothedValue = 0.0f; // internal follower state (0-1, pre-range-map)
     bool  hasSmoothed  = false; // false until first sample (avoids 0 ramp-in)
     // Gentle-enable ramp: modulation DEPTH eases in over rampTime seconds

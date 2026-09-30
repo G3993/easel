@@ -113,6 +113,14 @@ public:
 
     // Set to true when a property widget is first activated (signals Application to push undo state)
     bool undoNeeded = false;
+
+    // Layer header card "Delete layer" signal. PropertyPanel renders AFTER
+    // Application has already consumed LayerPanel::removedLayerIds for the
+    // frame (and LayerPanel clears that list at the top of its own render),
+    // so pushing into it from here would be lost. Instead this flag is raised
+    // for one frame and reset at the top of the next render(); Application
+    // consumes it to remove the currently selected layer.
+    bool wantsDeleteSelected = false;
 private:
     StageView* m_stageView = nullptr;
     const std::vector<unsigned int>* m_zoneTexs = nullptr;

@@ -253,6 +253,9 @@ private:
     // peer floating window listing the menu items.
     bool m_envMenuOpen     = false;
     bool m_surfaceMenuOpen = false;
+    // UI-only: which toolbar item (Select=0 / Move=1) carries the
+    // highlight while the translate gizmo (m_gizmoOp == 0) is active.
+    int  m_toolbarSelectVariant = 0;
 public:
     int& gizmoOp() { return m_gizmoOp; }
 };

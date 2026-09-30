@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include "ui/ImGuizmo.h"
 #include "ui/ParamRow.h"
+#include "ui/UIManager.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
@@ -425,8 +426,8 @@ void StageView::renderFrustum(const VirtualProjector& proj, const glm::mat4& sta
         return ImVec2(sx, sy);
     };
 
-    ImU32 col = selected ? IM_COL32(255, 200, 50, 200) : IM_COL32(255, 255, 255, 120);
-    ImU32 colDim = selected ? IM_COL32(255, 200, 50, 60) : IM_COL32(255, 255, 255, 40);
+    ImU32 col = selected ? IM_COL32(199, 199, 199, 200) : IM_COL32(255, 255, 255, 120);
+    ImU32 colDim = selected ? IM_COL32(199, 199, 199, 60) : IM_COL32(255, 255, 255, 40);
 
     // Near plane
     for (int i = 0; i < 4; i++) {
@@ -656,30 +657,36 @@ void StageView::renderToolbar() {
 }
 
 void StageView::renderFloatingToolbar() {
-    // Vertical pill at the left edge of the viewport, where the Layers
-    // panel sits in Canvas mode. Four circular icon buttons stacked
-    // top-to-bottom: Room (env preset dropdown), Add Display,
-    // Add Surface (shape picker), Import. Bigger buttons + more inner
-    // padding so each glyph reads cleanly with breathing room.
-    const float kBtnSize = 44.0f;
-    const float kBtnGap  = 8.0f;
-    const float kPillPad = 10.0f;
-    const float kPillW   = kBtnSize + kPillPad * 2.0f;
-    // 4 add/import + 3 gizmo tools (select / rotate / scale) so users can
-    // switch transform mode without leaving the canvas.
-    const int   kBtnCount = 7;
-    const float kPillH   = kPillPad * 2.0f
-                         + kBtnSize * kBtnCount
-                         + kBtnGap  * (kBtnCount - 1);
+    // Rounded card at the left edge of the viewport (right of the
+    // workspace rail), where the Layers panel sits in Canvas mode.
+    // Eight LABELLED items stacked top-to-bottom, each = glyph on top
+    // + 11px caption underneath:
+    //   Select · Move · Rotate · Scale  ── hairline ──  Screen · Surface · Import · Scene
+    // Monochrome only: fills are white-at-alpha, text is the grey ramp.
+    const float kCardW     = 88.0f;
+    const float kCardPad   = 6.0f;
+    const float kItemW     = kCardW - kCardPad * 2.0f;
+    const float kItemH     = 48.0f;
+    const float kItemGap   = 2.0f;
+    const float kDividerH  = 9.0f;
+    const float kGlyphR    = 10.0f;     // glyph half-extent
+    const float kGlyphCy   = 18.0f;     // glyph centre, from item top
+    const float kLabelY    = 31.0f;     // label top, from item top
+    const float kLabelPx   = 11.0f;
+    const int   kItemCount = 8;
+    const float kCardH     = kCardPad * 2.0f
+                           + kItemH   * kItemCount
+                           + kItemGap * (kItemCount - 1)
+                           + kDividerH;
 
     // Position: left edge, vertically CENTRED in the available canvas
-    // height (so the rounded ends never get clipped against the
+    // height (so the rounded corners never get clipped against the
     // secondary nav above or the timeline below).
     ImGuiViewport* vp = ImGui::GetMainViewport();
     float headerReserve = ImGui::GetFrameHeight() + 22.0f;
     float bandTop    = vp->WorkPos.y + headerReserve + 18.0f;
     float bandHeight = vp->WorkSize.y - headerReserve - 18.0f - 80.0f; // -timeline strip
-    float topY       = bandTop + std::max(0.0f, (bandHeight - kPillH) * 0.5f);
+    float topY       = bandTop + std::max(0.0f, (bandHeight - kCardH) * 0.5f);
 
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar |
@@ -691,13 +698,14 @@ void StageView::renderFloatingToolbar() {
         ImGuiWindowFlags_NoBackground |
         ImGuiWindowFlags_NoScrollbar;
 
-    // Pad the host window so the pill's rounded ends fit inside its
+    // Pad the host window so the card's rounded corners fit inside its
     // content rect without being clipped by the window's own rounding.
     const float kHostExtra = 8.0f;
-    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + 12.0f, topY - kHostExtra),
+    // Sits right of the workspace rail (8 + 72 + 8 = 88px band).
+    ImGui::SetNextWindowPos (ImVec2(vp->WorkPos.x + 88.0f + 8.0f, topY - kHostExtra),
                              ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(kPillW + kHostExtra * 2.0f,
-                                    kPillH + kHostExtra * 2.0f),
+    ImGui::SetNextWindowSize(ImVec2(kCardW + kHostExtra * 2.0f,
+                                    kCardH + kHostExtra * 2.0f),
                              ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -710,35 +718,38 @@ void StageView::renderFloatingToolbar() {
     ImGui::PopStyleVar(3);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    // Inset the pill from the host window so its rounded ends sit
+    // Inset the card from the host window so its rounded corners sit
     // inside the host's content rect without being clipped.
-    ImVec2 pillPos(ImGui::GetWindowPos().x + kHostExtra,
+    ImVec2 cardPos(ImGui::GetWindowPos().x + kHostExtra,
                    ImGui::GetWindowPos().y + kHostExtra);
     dl->AddRectFilled(
-        pillPos,
-        ImVec2(pillPos.x + kPillW, pillPos.y + kPillH),
-        IM_COL32(28, 30, 34, 235),
-        kPillW * 0.5f);
+        cardPos,
+        ImVec2(cardPos.x + kCardW, cardPos.y + kCardH),
+        UITokens::kNavSurface,
+        UITokens::kRadiusPanel);
     dl->AddRect(
-        pillPos,
-        ImVec2(pillPos.x + kPillW, pillPos.y + kPillH),
-        IM_COL32(255, 255, 255, 24),
-        kPillW * 0.5f, 0, 1.0f);
+        cardPos,
+        ImVec2(cardPos.x + kCardW, cardPos.y + kCardH),
+        UITokens::kHairline,
+        UITokens::kRadiusPanel, 0, 1.0f);
 
+    // Small font (UIManager adds it second, right after the main font).
+    ImGuiIO& io = ImGui::GetIO();
+    ImFont* lblFont = (io.Fonts->Fonts.Size > 1 && io.Fonts->Fonts[1])
+                    ? io.Fonts->Fonts[1] : ImGui::GetFont();
+
+    // Glyph kinds (match the original procedural set):
+    //   0 Scene/Environment cube · 1 Display · 2 Surface · 3 Import
+    //   4 Select cursor · 5 Rotate arc · 6 Scale diagonal · 7 Move cross
     auto drawGlyph = [&](ImVec2 c, int kind, ImU32 col) {
-        const float r = kBtnSize * 0.32f;
+        const float r = kGlyphR;
         switch (kind) {
-        case 0: { // Room — filled isometric cube (top + left + right faces)
-            // Top face (rhombus, lighter)
-            ImU32 colTop  = (col & 0x00FFFFFF) | (((col >> 24) & 0xFF) << 24);
-            // Use alpha modulation for a flat-but-readable cube: top brightest,
-            // left/right dimmer. Simulate by mixing col with two tones.
-            // Compose two extra tones from `col` alpha.
+        case 0: { // Scene — filled isometric cube (top + left + right faces)
+            // Flat-but-readable cube: top brightest, left/right dimmer.
+            // Compose two extra tones from `col` alpha (stays greyscale).
             int  a   = (col >> 24) & 0xFF;
             ImU32 colMid = (col & 0x00FFFFFF) | ((unsigned)((a * 70) / 100) << 24);
             ImU32 colDim = (col & 0x00FFFFFF) | ((unsigned)((a * 45) / 100) << 24);
-            (void)colTop;
-            // Top rhombus
             ImVec2 top[4] = {
                 ImVec2(c.x,             c.y - r),
                 ImVec2(c.x + r,         c.y - r * 0.5f),
@@ -746,7 +757,6 @@ void StageView::renderFloatingToolbar() {
                 ImVec2(c.x - r,         c.y - r * 0.5f),
             };
             dl->AddConvexPolyFilled(top, 4, col);
-            // Left face
             ImVec2 left[4] = {
                 ImVec2(c.x - r,         c.y - r * 0.5f),
                 ImVec2(c.x,             c.y),
@@ -754,7 +764,6 @@ void StageView::renderFloatingToolbar() {
                 ImVec2(c.x - r,         c.y + r * 0.5f),
             };
             dl->AddConvexPolyFilled(left, 4, colMid);
-            // Right face
             ImVec2 right[4] = {
                 ImVec2(c.x,             c.y),
                 ImVec2(c.x + r,         c.y - r * 0.5f),
@@ -763,7 +772,7 @@ void StageView::renderFloatingToolbar() {
             };
             dl->AddConvexPolyFilled(right, 4, colDim);
             break; }
-        case 1: { // Display — filled rect with stand triangle below
+        case 1: { // Screen — filled rect with stand triangle below
             dl->AddRectFilled(ImVec2(c.x - r,        c.y - r * 0.75f),
                               ImVec2(c.x + r,        c.y + r * 0.30f), col, 2.0f);
             ImVec2 stand[3] = {
@@ -794,7 +803,7 @@ void StageView::renderFloatingToolbar() {
             dl->AddRectFilled(ImVec2(c.x - r,        c.y + r * 0.65f),
                               ImVec2(c.x + r,        c.y + r * 0.90f), col, 1.5f);
             break; }
-        case 4: { // Select / move — filled cursor arrow
+        case 4: { // Select — filled cursor arrow
             ImVec2 ptr[7] = {
                 ImVec2(c.x - r * 0.55f, c.y - r * 0.75f),
                 ImVec2(c.x + r * 0.20f, c.y),
@@ -807,7 +816,7 @@ void StageView::renderFloatingToolbar() {
             dl->AddConvexPolyFilled(ptr, 7, col);
             break; }
         case 5: { // Rotate — filled arc with arrowhead
-            // Arc is non-convex; build it from triangle fan strips between
+            // Arc is non-convex; build it from quad strips between
             // outer/inner radii.
             const int seg = 22;
             const float aStart = -1.4f;
@@ -825,7 +834,6 @@ void StageView::renderFloatingToolbar() {
                 };
                 dl->AddConvexPolyFilled(q, 4, col);
             }
-            // Arrowhead at the end
             float ae = aStart + aSpan;
             ImVec2 tip(c.x + cosf(ae) * (rOut + r * 0.30f),
                        c.y + sinf(ae) * (rOut + r * 0.30f));
@@ -839,7 +847,6 @@ void StageView::renderFloatingToolbar() {
             dl->AddConvexPolyFilled(head, 3, col);
             break; }
         case 6: { // Scale — filled diagonal arrow with corner triangles
-            // Diagonal shaft as rotated rectangle (BL → TR)
             float t = r * 0.10f; // half-thickness
             ImVec2 shaft[4] = {
                 ImVec2(c.x - r * 0.55f - t, c.y + r * 0.55f - t),
@@ -848,14 +855,12 @@ void StageView::renderFloatingToolbar() {
                 ImVec2(c.x + r * 0.55f - t, c.y - r * 0.55f - t),
             };
             dl->AddConvexPolyFilled(shaft, 4, col);
-            // Bottom-left corner triangle
             ImVec2 blt[3] = {
                 ImVec2(c.x - r * 0.85f, c.y + r * 0.85f),
                 ImVec2(c.x - r * 0.10f, c.y + r * 0.85f),
                 ImVec2(c.x - r * 0.85f, c.y + r * 0.10f),
             };
             dl->AddConvexPolyFilled(blt, 3, col);
-            // Top-right corner triangle
             ImVec2 trt[3] = {
                 ImVec2(c.x + r * 0.85f, c.y - r * 0.85f),
                 ImVec2(c.x + r * 0.10f, c.y - r * 0.85f),
@@ -863,52 +868,101 @@ void StageView::renderFloatingToolbar() {
             };
             dl->AddConvexPolyFilled(trt, 3, col);
             break; }
+        case 7: { // Move — four-way cross with arrowheads
+            float t = r * 0.11f; // half-thickness of the bars
+            float l = r * 0.55f; // bar half-length (heads extend beyond)
+            dl->AddRectFilled(ImVec2(c.x - t, c.y - l), ImVec2(c.x + t, c.y + l), col);
+            dl->AddRectFilled(ImVec2(c.x - l, c.y - t), ImVec2(c.x + l, c.y + t), col);
+            float hw = r * 0.32f; // head half-width
+            float hl = r * 0.40f; // head length
+            ImVec2 up[3]    = { ImVec2(c.x, c.y - r),  ImVec2(c.x - hw, c.y - r + hl), ImVec2(c.x + hw, c.y - r + hl) };
+            ImVec2 down[3]  = { ImVec2(c.x, c.y + r),  ImVec2(c.x + hw, c.y + r - hl), ImVec2(c.x - hw, c.y + r - hl) };
+            ImVec2 left[3]  = { ImVec2(c.x - r, c.y),  ImVec2(c.x - r + hl, c.y + hw), ImVec2(c.x - r + hl, c.y - hw) };
+            ImVec2 right[3] = { ImVec2(c.x + r, c.y),  ImVec2(c.x + r - hl, c.y - hw), ImVec2(c.x + r - hl, c.y + hw) };
+            dl->AddConvexPolyFilled(up, 3, col);
+            dl->AddConvexPolyFilled(down, 3, col);
+            dl->AddConvexPolyFilled(left, 3, col);
+            dl->AddConvexPolyFilled(right, 3, col);
+            break; }
         }
     };
 
-    const char* tips[]     = {"Environment", "Add display", "Add surface", "Import...",
-                              "Select / Move (V)", "Rotate (R)", "Scale (S)"};
-    const bool  isToggle[] = {false,         false,         false,         false,
-                              true,                  true,         true};
+    // Item table. `action` is the legacy click id so the dispatch below
+    // stays identical to the old pill: 0 env · 1 display · 2 surface ·
+    // 3 import · 4 translate · 5 rotate · 6 scale. Select and Move both
+    // map to the translate gizmo (there is no separate select-only op);
+    // m_toolbarSelectVariant only decides which of the two carries the
+    // highlight while gizmoOp == 0.
+    struct Item { const char* label; const char* tip; int glyph; int action; };
+    const Item items[kItemCount] = {
+        {"Select",  "Select (V)",   4, 4},
+        {"Move",    "Move (V)",     7, 4},
+        {"Rotate",  "Rotate (R)",   5, 5},
+        {"Scale",   "Scale (S)",    6, 6},
+        {"Screen",  "Add display",  1, 1},
+        {"Surface", "Add surface",  2, 2},
+        {"Import",  "Import...",    3, 3},
+        {"Scene",   "Environment",  0, 0},
+    };
+    const int kDividerAfter = 3; // hairline sits below item index 3 (Scale)
 
-    float bx = pillPos.x + kPillPad;
-    float by = pillPos.y + kPillPad;
-    int clickedIdx = -1;
-    for (int i = 0; i < kBtnCount; i++) {
+    float itemY[kItemCount];
+    float bx = cardPos.x + kCardPad;
+    float by = cardPos.y + kCardPad;
+    int clickedItem = -1;
+    for (int i = 0; i < kItemCount; i++) {
+        itemY[i] = by;
         ImGui::SetCursorScreenPos(ImVec2(bx, by));
         ImGui::PushID(i + 100);
-        bool clicked = ImGui::InvisibleButton("##fb", ImVec2(kBtnSize, kBtnSize));
+        bool clicked = ImGui::InvisibleButton("##fb", ImVec2(kItemW, kItemH));
         bool hov     = ImGui::IsItemHovered();
         ImGui::PopID();
-        // Active state: tools 4-6 highlight when current gizmo op matches
-        // (i-4 maps to translate=0 / rotate=1 / scale=2). Tool 0 (env)
-        // would highlight when m_envVisible — but it's not currently
-        // wired as a toggle, so the existing behaviour (no-active env
-        // button) is preserved by leaving it false.
+
+        // Active state: transform tools highlight when the current gizmo
+        // op matches. Scene/Screen/Surface/Import are one-shot actions
+        // (env is not wired as a toggle) so they never show active.
         bool active = false;
-        if (isToggle[i] && i >= 4 && i <= 6) {
-            active = (m_gizmoOp == (i - 4));
+        if (items[i].action == 4)      active = (m_gizmoOp == 0) && (m_toolbarSelectVariant == i);
+        else if (items[i].action == 5) active = (m_gizmoOp == 1);
+        else if (items[i].action == 6) active = (m_gizmoOp == 2);
+
+        if (active) {
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + kItemW, by + kItemH),
+                              IM_COL32(255, 255, 255, 30), UITokens::kRadiusControl);
+        } else if (hov) {
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + kItemW, by + kItemH),
+                              IM_COL32(255, 255, 255, 12), UITokens::kRadiusControl);
         }
 
-        ImVec2 center(bx + kBtnSize * 0.5f, by + kBtnSize * 0.5f);
-        ImU32 fill = active
-            ? IM_COL32(247, 248, 248, 255)
-            : (hov ? IM_COL32(255, 255, 255, 28) : IM_COL32(255, 255, 255, 12));
-        dl->AddCircleFilled(center, kBtnSize * 0.5f - 1.0f, fill, 64);
+        ImU32 fg = active ? UITokens::kTextPrimary
+                 : (hov   ? UITokens::kTextSecondary
+                          : UITokens::kTextTertiary);
 
-        ImU32 fg = active ? IM_COL32(13, 18, 26, 255)
-                          : IM_COL32(220, 226, 235, 230);
-        drawGlyph(center, i, fg);
+        ImVec2 center(bx + kItemW * 0.5f, by + kGlyphCy);
+        drawGlyph(center, items[i].glyph, fg);
 
-        if (hov) ParamRow::Tooltip(tips[i]);
-        if (clicked) clickedIdx = i;
+        ImVec2 ts = lblFont->CalcTextSizeA(kLabelPx, FLT_MAX, 0.0f, items[i].label);
+        dl->AddText(lblFont, kLabelPx,
+                    ImVec2(bx + (kItemW - ts.x) * 0.5f, by + kLabelY),
+                    fg, items[i].label);
 
-        by += kBtnSize + kBtnGap;
+        if (hov) ParamRow::Tooltip(items[i].tip);
+        if (clicked) clickedItem = i;
+
+        by += kItemH + kItemGap;
+        if (i == kDividerAfter) {
+            float ly = by - kItemGap + kDividerH * 0.5f;
+            dl->AddLine(ImVec2(cardPos.x + 10.0f, ly),
+                        ImVec2(cardPos.x + kCardW - 10.0f, ly),
+                        UITokens::kHairline, 1.0f);
+            by += kDividerH;
+        }
     }
 
     // Toggle sub-menus on click. Mutually exclusive — opening one
     // closes the other so we never stack two pickers on top of each
     // other next to the toolbar.
+    int clickedIdx = (clickedItem >= 0) ? items[clickedItem].action : -1;
     if (clickedIdx == 0) {
         m_envMenuOpen     = !m_envMenuOpen;
         m_surfaceMenuOpen = false;
@@ -926,26 +980,26 @@ void StageView::renderFloatingToolbar() {
     } else if (clickedIdx >= 4 && clickedIdx <= 6) {
         // Gizmo tool selection: 4=translate, 5=rotate, 6=scale.
         m_gizmoOp = clickedIdx - 4;
+        if (clickedIdx == 4) m_toolbarSelectVariant = clickedItem;
         m_envMenuOpen = m_surfaceMenuOpen = false;
     }
 
     ImGui::End();
 
     // ── Sub-menus rendered as separate peer floating windows ──
-    // Anchored to the right of the toolbar's button row at the
-    // appropriate Y for the button that opened them. Plain Begin
-    // windows (not ImGui popups) so they don't fight with the host
-    // window's borderless flags.
-    auto subMenu = [&](const char* id, int btnIndex,
+    // Anchored to the right of the card at the Y of the item that
+    // opened them. Plain Begin windows (not ImGui popups) so they don't
+    // fight with the host window's borderless flags.
+    auto subMenu = [&](const char* id, float anchorY,
                        const char* title,
-                       const std::initializer_list<const char*>& items,
+                       const std::initializer_list<const char*>& menuItems,
                        bool& openFlag,
                        std::function<void(int idx)> onPick)
     {
         if (!openFlag) return;
         const float kMenuW = 200.0f;
-        float menuY = pillPos.y + kPillPad + btnIndex * (kBtnSize + kBtnGap);
-        float menuX = pillPos.x + kPillW + 8.0f;
+        float menuY = anchorY;
+        float menuX = cardPos.x + kCardW + 8.0f;
         ImGui::SetNextWindowPos (ImVec2(menuX, menuY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(kMenuW, 0),    ImGuiCond_Always);
         ImGuiWindowFlags mf = ImGuiWindowFlags_NoTitleBar
@@ -956,12 +1010,12 @@ void StageView::renderFloatingToolbar() {
                             | ImGuiWindowFlags_NoSavedSettings
                             | ImGuiWindowFlags_AlwaysAutoResize;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(8, 8));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, UITokens::kRadiusPanel);
         if (ImGui::Begin(id, &openFlag, mf)) {
             ImGui::TextDisabled("%s", title);
             ImGui::Separator();
             int i = 0;
-            for (const char* it : items) {
+            for (const char* it : menuItems) {
                 if (ImGui::Selectable(it)) {
                     onPick(i);
                     openFlag = false;
@@ -973,7 +1027,7 @@ void StageView::renderFloatingToolbar() {
         ImGui::PopStyleVar(2);
     };
 
-    subMenu("##StageEnvMenu", 0, "Environment",
+    subMenu("##StageEnvMenu", itemY[7], "Environment",
             {"Floor", "Wall", "3D Room", "Seamless backdrop", "Frame"},
             m_envMenuOpen,
             [this](int idx) {
@@ -984,7 +1038,7 @@ void StageView::renderFloatingToolbar() {
                 m_envVisible = !m_envVisible;
             });
 
-    subMenu("##StageSurfaceMenu", 2, "Add surface",
+    subMenu("##StageSurfaceMenu", itemY[5], "Add surface",
             {"Rectangle", "Circle", "Triangle", "Octagon"},
             m_surfaceMenuOpen,
             [this](int idx) {
@@ -1489,7 +1543,7 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
             ImGui::DragFloat3("Target", &p.target.x, 0.1f);
             ImGui::DragFloat("FOV", &p.fovDeg, 0.5f, 10.0f, 170.0f);
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.831f, 0.839f, 0.855f, 0.7f));
             if (ImGui::SmallButton("Del")) projRemove = i;
             ImGui::PopStyleColor();
         }
@@ -1498,7 +1552,7 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
     if (projRemove >= 0) removeProjector(projRemove);
 
     // --- Surface list ---
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
     ImGui::Text("Surfaces");
     ImGui::PopStyleColor();
 
@@ -1539,7 +1593,7 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.831f, 0.839f, 0.855f, 0.7f));
             if (ImGui::SmallButton("Del")) surfRemove = i;
             ImGui::PopStyleColor();
         }
@@ -1550,7 +1604,7 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
     ImGui::Dummy(ImVec2(0, 6));
 
     // --- Screen Clusters ---
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
     ImGui::Text("Screen Clusters");
     ImGui::PopStyleColor();
 
@@ -1587,7 +1641,7 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
             ImGui::DragFloat("Scale##cl", &cl.scale, 0.01f, 0.01f, 10.0f, "%.2f");
 
             ImGui::Dummy(ImVec2(0, 3));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.55f, 0.65f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
             ImGui::Text("Grid");
             ImGui::PopStyleColor();
 
@@ -1629,12 +1683,12 @@ void StageView::renderSceneInspector(const std::vector<GLuint>& zoneTextures) {
             // Count surfaces in this cluster
             int surfCount = 0;
             for (auto& s : m_surfaces) if (s.clusterIndex == ci) surfCount++;
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.50f, 0.58f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 0.7f));
             ImGui::Text("%d screens", surfCount);
             ImGui::PopStyleColor();
 
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.831f, 0.839f, 0.855f, 0.7f));
             if (ImGui::SmallButton("Del##cl")) clRemove = ci;
             ImGui::PopStyleColor();
         }

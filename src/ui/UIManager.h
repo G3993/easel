@@ -11,22 +11,31 @@ struct ImFont;
 // or active-state styling should reference these so the whole UI stays
 // in lockstep.
 namespace UITokens {
-    static constexpr ImU32 kChromeSurface = IM_COL32(11, 13, 17, 255);
-    // The top nav band's fill — ALSO the right float parameter panel's bg
-    // (2026-07-18 directive: "floating right parameters same color as the
-    // top nav"). Change here and both surfaces move together.
-    static constexpr ImU32 kNavSurface    = IM_COL32(0x20, 0x24, 0x28, 255);
-    static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 30);
-    static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 22);
+    // ── Monochrome design tokens (2026-09-27 redesign) ────────────────
+    // Black / white / greys only. Surfaces are a luminance ramp; every
+    // "accent" is white at some alpha. Live / active / selected = the
+    // brightest thing on screen, never a hue.
+    static constexpr ImU32 kChromeSurface = IM_COL32(10, 11, 13, 255);    // canvas void
+    // Panels, nav band, rail, transport — ONE surface for all chrome.
+    static constexpr ImU32 kNavSurface    = IM_COL32(18, 19, 22, 255);    // #121316
+    static constexpr ImU32 kPageBg        = IM_COL32(10, 11, 13, 255);    // Gallery / Show page background
+    static constexpr ImU32 kSurfaceRaised = IM_COL32(26, 27, 31, 255);    // cards inside panels
+    static constexpr ImU32 kSurfaceHover  = IM_COL32(36, 38, 43, 255);
+    static constexpr ImU32 kHairline      = IM_COL32(255, 255, 255, 26);  // 10% white
+    static constexpr ImU32 kHairlineSoft  = IM_COL32(255, 255, 255, 16);  // 6% white
     static constexpr ImU32 kButtonHover   = IM_COL32(255, 255, 255, 22);
     static constexpr ImU32 kButtonActive  = IM_COL32(255, 255, 255, 36);
-    // Single chromatic anchor — reference's cyan/blue accent. Used only
-    // for active states (selection handles, ring on the play button,
-    // active rail icon, active properties tab). Never as a plain fill
-    // color outside of the play-button glow.
-    static constexpr ImU32 kAccent        = IM_COL32(74, 140, 255, 255);
-    static constexpr ImU32 kAccentSoft    = IM_COL32(74, 140, 255, 100);
-    static constexpr ImU32 kAccentGlow    = IM_COL32(74, 140, 255, 60);
+    static constexpr ImU32 kTextPrimary   = IM_COL32(242, 243, 245, 255);
+    static constexpr ImU32 kTextSecondary = IM_COL32(166, 171, 181, 255);
+    static constexpr ImU32 kTextTertiary  = IM_COL32(107, 112, 121, 255);
+    // Accent = white. Used only for active states (selection handles,
+    // play ring, active rail item, active inspector tab, live dot).
+    static constexpr ImU32 kAccent        = IM_COL32(245, 246, 248, 255);
+    static constexpr ImU32 kAccentSoft    = IM_COL32(255, 255, 255, 70);
+    static constexpr ImU32 kAccentGlow    = IM_COL32(255, 255, 255, 34);
+    // Geometry
+    static constexpr float kRadiusPanel   = 12.0f;   // rail, inspector, drawer, cards
+    static constexpr float kRadiusControl = 6.0f;    // buttons, fields, chips
 }
 // Mirrors ImGui's `typedef unsigned int ImGuiID;` so we can store dock node
 // ids here without forcing imgui.h into every translation unit that includes
@@ -80,6 +89,10 @@ public:
     // NOTE: order matters — the nav switcher lists them left→right as
     // Canvas / Mapping / Stage / Play, so Mapping sits between Canvas and Stage.
     enum class WorkspaceMode { Canvas, Mapping, Stage, Show, Zones };
+    // Stage (3D pre-viz) is parked for now: it stays in the enum so the
+    // existing StageView / dock code compiles untouched, but the rail and
+    // the OSC workspace switch both skip it while this is false.
+    static constexpr bool kStageEnabled = false;
     static WorkspaceMode sMode;
     // Fullscreen shader GALLERY overlay -- toggled by the top-nav GALLERY
     // tab (next to ZONES) and rendered by Application::renderShaderGallery.
@@ -89,6 +102,12 @@ public:
     // frame). Fullscreen pages (gallery / show) start below it so the
     // workspace tabs stay clickable while a page is open.
     static float sNavBandBottom;
+    // Live status published by Application every frame for the nav status
+    // pill (fps) and the project label; the Settings sheet's open flag is
+    // toggled from the rail gear + hamburger and consumed by Application.
+    static float sFpsDisplay;
+    static char  sProjectLabel[128];
+    static bool  sSettingsOpen;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
     // with an ease-out cubic. Set via setMode() — never write sMode directly
@@ -230,7 +249,7 @@ public:
     // Mapping). Render at the TOP of each right-dock panel's ImGui::Begin
     // block — `active` controls which pill highlights. With this bar
     // present in every panel we hide the outer ImGui tab bar.
-    enum class QuickNavTab { None = 0, Properties, Shader, Mic, Music, Cam, Win, Mapping };
+    enum class QuickNavTab { None = 0, Properties, Shader, Mic, Music, Cam, Win, Mapping, MIDI };
     void renderRightDockNavBar(QuickNavTab active);
 
     // Singleton accessor — set during init() so panels without a UIManager
@@ -249,7 +268,20 @@ public:
     void setActiveLeftPanel(LeftPanel p) { m_activeLeftPanel = p; }
     // Rail width — used by the float-host code to shift the flyout
     // position rightward by this much. Constant for now.
-    static constexpr float kLeftRailW = 64.0f;
+    static constexpr float kLeftRailW = 72.0f;
+    // Rail card inset from the window edge; railSpan() is the total
+    // horizontal band the rail owns (inset + width + inset) — pages and
+    // the canvas fit region start to the right of it.
+    static constexpr float kLeftRailInset = 8.0f;
+    static constexpr float railSpan() { return kLeftRailInset * 2.0f + kLeftRailW; }
+    // ONE inset for every card on screen: window edge → card, rail card →
+    // page column, column → column, nav band → card top. Pages, the
+    // canvas floats and the rail all read this.
+    static constexpr float kPageInset = 8.0f;
+    // Screen X of the left Layers panel's right edge (0 = hidden). The
+    // canvas fit region starts right of this so the image centres between
+    // the Layers panel and the inspector.
+    float getLeftPanelRight() const { return m_leftFloatRight; }
     // Renders the rail itself; called once per frame from Application.
     // The optional `drawExtra` runs inside the rail window after the nav
     // buttons, with `kLeftRailW - 12` of horizontal space available. Use it
@@ -278,7 +310,8 @@ private:
     // rail icon to open the panel; click again to collapse. Avoids the
     // duplication where both the rail thumb AND a wide layers card show
     // the same layer.
-    LeftPanel m_activeLeftPanel = LeftPanel::None;
+    LeftPanel m_activeLeftPanel = LeftPanel::Layers;
+    float m_leftFloatRight = 0.0f;
     unsigned int m_tabIconTex[4] = {0, 0, 0, 0};
     int          m_tabIconW[4]   = {0, 0, 0, 0};
     int          m_tabIconH[4]   = {0, 0, 0, 0};

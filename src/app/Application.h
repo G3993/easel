@@ -515,6 +515,8 @@ private:
     // The XL's bottom button rows (and the drawn buttons) pick which shader
     // layer the surface drives; a fresh target auto-maps on arrival.
     void renderShowPanel();
+    void renderSettingsWindow();
+    std::string m_recError;
     std::vector<Layer*> showShaderSlots();
     // A SHOW-bindable source: shaders, 2D fluid, 3D fluid, particles.
     struct ShowParam { std::string name, label; float cur, lo, hi; };
@@ -528,7 +530,11 @@ private:
     // ── SHOW decks: two managed shader layers (A/B) under a crossfader ──
     float       m_deckBlend = 0.0f;         // 0 = A on screen, 1 = B
     int         m_deckTarget = 0;           // which deck the XL knobs drive
-    BlendMode   m_deckBlendMode = BlendMode::Normal;   // the top deck's mode
+    BlendMode   m_deckBlendModes[2] = {BlendMode::Normal, BlendMode::Normal};   // per deck: how it sits over the other when on top
+    int         m_showLibraryDeck = -1;
+    bool        m_deckGLLive = false;      // a gl-transition is live on the decks this frame (GO or the hand fader)
+    int         m_deckGLIn = 1;            // the deck riding IN through it
+    float       m_deckGLProgress = 0.0f;     // SHOW page: library open in the centre card, cueing into this deck (-1 = closed)
     std::string m_deckTransition = "fade";  // "cut" | "fade" | gl-transition name
     float       m_deckTransSecs = 1.5f;
     bool  m_deckAnim = false, m_deckAnimGL = false;
@@ -537,7 +543,9 @@ private:
     Layer* deckLayer(int deck);
     int    deckLayerIndex(int deck);
     void   deckLoad(int deck, const std::string& path, const std::string& title);
+    void   deckEnsureRouted(int deck);     // a deck must reach the active zone's output
     void   deckGo();
+    void   takeOverFromShowGlobal();
     void   deckTick(float dt);
     void   deckTakeSurface(int deck, bool pin);
     bool   m_deckTargetPinned = false;   // false = knobs follow whatever is on air

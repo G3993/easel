@@ -132,7 +132,7 @@ void TimecodePanel::render(double glfwTime, ProDJLink* djlink) {
             char buf[32];
             snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d", t.h, t.m, t.s, t.ms);
             ImU32 col = timecodePaused ? IM_COL32(180,185,195,255)
-                                       : IM_COL32(120,200,255,255);
+                                       : IM_COL32(245, 246, 248,255);
             dl->AddText(ImGui::GetFont(), fs, pos, col, buf);
             ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, fs + 2.0f));
         }
@@ -184,7 +184,7 @@ void TimecodePanel::render(double glfwTime, ProDJLink* djlink) {
             m_editMs = std::max(0, std::min(999, m_editMs));
 
             ImGui::Dummy(ImVec2(0, 2));
-            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(74,140,255,180));
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(245, 246, 248,180));
             if (ImGui::Button("Set", ImVec2(60, 0))) {
                 timecodeSeconds = m_editH*3600.0 + m_editM*60.0 + m_editS + m_editMs/1000.0;
                 m_editing = false;
@@ -224,12 +224,12 @@ void TimecodePanel::renderDJLinkSection(ProDJLink* djlink) {
             if (running) {
                 int n = djlink->deviceCount();
                 ImGui::PushStyleColor(ImGuiCol_Text,
-                    n > 0 ? IM_COL32(80,220,120,255) : IM_COL32(200,200,80,255));
+                    n > 0 ? IM_COL32(225, 227, 230,255) : IM_COL32(225, 227, 230,255));
                 ImGui::Text(n > 0 ? "(%d device%s)" : "(scanning...)", n, n==1?"":"s");
                 ImGui::PopStyleColor();
                 ImGui::SameLine(ImGui::GetContentRegionAvail().x - 70);
-                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200,60,60,120));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(220,80,80,180));
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(212, 214, 218,120));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(212, 214, 218,180));
                 if (ImGui::Button("Disconnect", ImVec2(-1, 0))) djlink->stop();
                 ImGui::PopStyleColor(2);
             } else {
@@ -237,8 +237,8 @@ void TimecodePanel::renderDJLinkSection(ProDJLink* djlink) {
                 ImGui::Text("(not connected)");
                 ImGui::PopStyleColor();
                 ImGui::SameLine(ImGui::GetContentRegionAvail().x - 65);
-                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(74,140,255,160));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(100,160,255,220));
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(245, 246, 248,160));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(245, 246, 248,220));
                 if (ImGui::Button("Connect", ImVec2(-1, 0))) djlink->start();
                 ImGui::PopStyleColor(2);
             }
@@ -304,10 +304,10 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
 
     // Accent stripe on left for player color
     static constexpr ImU32 kPlayerColors[4] = {
-        IM_COL32(255, 100,  60, 255),  // P1 orange-red
-        IM_COL32( 60, 160, 255, 255),  // P2 blue
-        IM_COL32(120, 220,  80, 255),  // P3 green
-        IM_COL32(220, 100, 255, 255),  // P4 purple
+        IM_COL32(212, 214, 218, 255),  // P1 orange-red
+        IM_COL32(245, 246, 248, 255),  // P2 blue
+        IM_COL32(225, 227, 230, 255),  // P3 green
+        IM_COL32(245, 246, 248, 255),  // P4 purple
     };
     ImU32 pCol = kPlayerColors[(slot - 1) % 4];
     dl->AddRectFilled(cardP,
@@ -329,7 +329,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
         ImVec2 bp = ImVec2(cardP.x + 38, cardP.y + 7);
         ImVec2 bsz = ImGui::CalcTextSize("ON AIR");
         dl->AddRectFilled(bp, ImVec2(bp.x + bsz.x + 8, bp.y + bsz.y + 4),
-                          IM_COL32(220, 50, 50, 220), 3.0f);
+                          IM_COL32(212, 214, 218, 220), 3.0f);
         dl->AddText(ImVec2(bp.x + 4, bp.y + 2), IM_COL32(255,255,255,255), "ON AIR");
     }
 
@@ -341,7 +341,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
         badgeX -= bsz.x + 10;
         dl->AddRectFilled(ImVec2(badgeX, cardP.y + 7),
                           ImVec2(badgeX + bsz.x + 8, cardP.y + 7 + bsz.y + 4),
-                          IM_COL32(74,140,255,180), 3.0f);
+                          IM_COL32(245, 246, 248,180), 3.0f);
         dl->AddText(ImVec2(badgeX + 4, cardP.y + 9), IM_COL32(255,255,255,255), lbl);
         badgeX -= 4;
     }
@@ -351,7 +351,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
         badgeX -= bsz.x + 10;
         dl->AddRectFilled(ImVec2(badgeX, cardP.y + 7),
                           ImVec2(badgeX + bsz.x + 8, cardP.y + 7 + bsz.y + 4),
-                          IM_COL32(100,200,100,140), 3.0f);
+                          IM_COL32(225, 227, 230,140), 3.0f);
         dl->AddText(ImVec2(badgeX + 4, cardP.y + 9), IM_COL32(255,255,255,255), lbl);
     }
 
@@ -359,7 +359,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
     {
         float titleY = cardP.y + 26;
         ImU32 titleCol = IM_COL32(230, 235, 245, 255);
-        ImU32 artistCol = IM_COL32(130, 140, 160, 255);
+        ImU32 artistCol = IM_COL32(150, 150, 150, 255);
         const char* title  = ps.trackTitle.empty()  ? (ps.trackNumber ? "Track Loading..." : "No Track") : ps.trackTitle.c_str();
         const char* artist = ps.artistName.empty()  ? ""                                                  : ps.artistName.c_str();
 
@@ -420,7 +420,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
                 float x = wfX + (float)i / cols * wfW;
                 float h = (float)ps.waveformHeight[i] / 31.0f * wfH;
                 ImU32 c = ps.waveformColor.size() > (size_t)i ? ps.waveformColor[i]
-                                                               : IM_COL32(74, 140, 255, 200);
+                                                               : IM_COL32(245, 246, 248, 200);
                 dl->AddRectFilled(ImVec2(x, wfY + wfH - h),
                                   ImVec2(x + std::max(1.0f, wfW / cols), wfY + wfH), c);
             }
@@ -431,7 +431,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
                 float h = wfH * (0.3f + 0.25f * sinf(phase * 30.0f));
                 dl->AddRectFilled(ImVec2(wfX + i, wfY + wfH - h),
                                   ImVec2(wfX + i + 2, wfY + wfH),
-                                  IM_COL32(50, 60, 80, 200));
+                                  IM_COL32(150, 150, 150, 200));
             }
         }
 
@@ -446,7 +446,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
         if (ps.playheadPct > 0.0f) {
             float phX = wfX + ps.playheadPct * wfW;
             dl->AddRectFilled(ImVec2(wfX, wfY), ImVec2(phX, wfY + wfH),
-                              IM_COL32(74,140,255,25), 2.0f);
+                              IM_COL32(245, 246, 248,25), 2.0f);
         }
     }
 
@@ -460,7 +460,7 @@ void TimecodePanel::renderPlayerCard(int slot, const ProDJLink::PlayerStatus& ps
                 ImVec2(icoX, icoY),
                 ImVec2(icoX, icoY + 14),
                 ImVec2(icoX + 10, icoY + 7),
-                IM_COL32(80,220,120,255));
+                IM_COL32(225, 227, 230,255));
         } else {
             // Pause bars
             dl->AddRectFilled(ImVec2(icoX,     icoY), ImVec2(icoX + 3,  icoY + 14), IM_COL32(150,155,165,255));

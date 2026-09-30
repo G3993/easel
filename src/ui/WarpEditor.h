@@ -18,6 +18,7 @@ public:
     // generated in Application (Grid / Checkerboard / Crosshair / Circles /
     // Dots / Solid White). Application reads this to pick the warp source.
     int  testPatternIndex() const { return m_testPattern; }
+    void setTestPatternIndex(int i) { m_testPattern = i; }   // OSC / test harness
 
 private:
     bool m_wantsLoadOBJ = false;
