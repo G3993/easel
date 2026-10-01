@@ -24,6 +24,8 @@ float UIManager::sNavBandBottom = 44.0f;
 float UIManager::sFpsDisplay = 0.0f;
 char  UIManager::sProjectLabel[128] = "Untitled";
 bool  UIManager::sSettingsOpen = false;
+// Show-mode light/dark palette switch (Dane's ShowDeck + nav row read it).
+bool  UIManager::sShowDarkMode = true;
 UIManager::WorkspaceMode UIManager::sPrevMode = UIManager::WorkspaceMode::Canvas;
 double UIManager::sModeTransitionStart = -1.0;
 
@@ -1459,6 +1461,9 @@ void UIManager::setupDockspace(float bottomBarHeight) {
         m_rightFloatLeft = (rightHasContent && !dockCollapsed)
             ? viewport->WorkPos.x + dockSize.x - rightW - kRightInset
             : 0.0f;
+        // Always-valid edge/centre for Application::renderRightPanelCollapseTab (Show mode).
+        m_rightFloatLeftRaw = viewport->WorkPos.x + dockSize.x - rightW - kRightInset;
+        m_rightFloatCenterY = floatY + floatH * 0.5f;
         // Folded: isPanelVisible() hides every right-dock panel, so
         // rightHasContent reads false — but the strip host must still render
         // or there'd be nothing left to click to reopen the dock.

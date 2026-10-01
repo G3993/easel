@@ -108,6 +108,13 @@ public:
     static float sFpsDisplay;
     static char  sProjectLabel[128];
     static bool  sSettingsOpen;
+    // SHOW workspace's light/dark theme toggle — a switch in the bottom
+    // footer (Application::renderShowMidiBar) flips this; renderShowDeck,
+    // renderShowMidiBar, and ViewportPanel::renderNavBar all read it to
+    // pick between the light and "super dark gray" Show-mode palettes.
+    // Static (not an Application member) so ViewportPanel.cpp — which has
+    // no Application reference — can read it too, same as sMode.
+    static bool sShowDarkMode;
     static WorkspaceMode sPrevMode;
     // Glassy 2D→3D handoff: incoming mode fades in over kModeTransitionSec
     // with an ease-out cubic. Set via setMode() — never write sMode directly
@@ -188,10 +195,11 @@ private:
     float m_leftFloatW = 0.0f;
     float m_rightFloatW = 0.0f;
     float m_rightFloatLeft = 0.0f; // left X of the right sidebar (for timeline width clamping)
-    // Right dock collapsed to just the icon strip — toggled by clicking the
-    // already-active pill in renderRightDockNavBar (same idiom as the left
-    // rail's click-again-to-close). The canvas reclaims the width.
-    bool m_rightDockCollapsed = false;
+    // Right dock collapsed to just a sliver — toggled via the floating edge
+    // tab (Application::renderRightPanelCollapseTab) or the in-bar pill in
+    // renderRightDockNavBar. Starts collapsed by default so a fresh launch
+    // opens with the canvas/ShowDeck reclaiming the full width.
+    bool m_rightDockCollapsed = true;
     // Frame-latched copy, snapped in setupDockspace BEFORE the pill bar can
     // flip m_rightDockCollapsed mid-frame. isPanelVisible() reads THIS one:
     // if panels re-Begin in the same frame whose DockSpace was already
@@ -207,11 +215,30 @@ private:
     // Pixels to reserve at the top of the right sidebar for a preview panel.
     // Set by Application each frame when a shader preview is active.
     float m_rightPanelTopOffset = 0.0f;
+    // Unlike m_rightFloatLeft (zeroed when the dock is collapsed — a "no
+    // panel" signal for canvas-fit consumers), these track the panel's
+    // actual left edge / vertical center in EVERY state, so an external
+    // always-visible collapse-tab widget can position itself correctly
+    // whether the dock is open or folded.
+    float m_rightFloatLeftRaw = 0.0f;
+    float m_rightFloatCenterY = 0.0f;
 
 public:
     // Left X of the right sidebar panel in screen coords (0 if hidden).
     // Read by Application to clamp timeline + transport pill width.
     float getRightPanelLeft() const { return m_rightFloatLeft; }
+    // Valid even while the dock is collapsed — see field comment above.
+    float rightPanelLeftRaw() const { return m_rightFloatLeftRaw; }
+    float rightPanelCenterY() const { return m_rightFloatCenterY; }
+    bool  rightDockCollapsed() const { return m_rightDockCollapsed; }
+    // Same fold/unfold semantics as the click-active-pill idiom in
+    // renderRightDockNavBar (force a dock rebuild on unfold — the
+    // unsubmitted node can be pruned while folded).
+    void setRightDockCollapsed(bool v) {
+        if (v == m_rightDockCollapsed) return;
+        if (!v) m_forceDockRebuild = true;
+        m_rightDockCollapsed = v;
+    }
     // Call each frame with the desired preview height (0 = no preview offset).
     void setRightPanelTopOffset(float h) { m_rightPanelTopOffset = h; }
     float getRightPanelTopOffset() const { return m_rightPanelTopOffset; }

@@ -12,7 +12,16 @@ bool WebcamSource::open(int cameraIndex) {
     close();
     m_cameraIndex = cameraIndex;
 
+    // Windows: request MSMF explicitly (not CAP_ANY) so this index order
+    // matches CameraEnumerator_win.cpp's Media Foundation device list 1:1 —
+    // CAP_ANY's backend choice isn't guaranteed to agree with MF's own
+    // enumeration order, especially with virtual capture devices (NDI, OBS)
+    // installed alongside a real camera.
+#ifdef _WIN32
+    if (!m_capture.open(cameraIndex, cv::CAP_MSMF)) {
+#else
     if (!m_capture.open(cameraIndex, cv::CAP_ANY)) {
+#endif
         std::cerr << "WebcamSource: failed to open camera " << cameraIndex << std::endl;
         return false;
     }

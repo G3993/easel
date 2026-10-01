@@ -287,6 +287,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         dwmapi d3d11 dxgi comdlg32 ws2_32 runtimeobject iphlpapi
+        ole32 mf mfplat mfuuid
     )
 elseif(APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE

@@ -56,19 +56,23 @@ bool Framebuffer::create(int width, int height, bool withDepth) {
     return true;
 }
 
-bool Framebuffer::createHalfFloat(int width, int height) {
+bool Framebuffer::createHalfFloat(int width, int height, bool fullFloat) {
     destroy();
     m_width = width;
     m_height = height;
     m_hasDepth = false;
     m_halfFloat = true;
+    m_fullFloat = fullFloat;
 
     glGenFramebuffers(1, &m_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
 
     glGenTextures(1, &m_texture);
     glBindTexture(GL_TEXTURE_2D, m_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+    if (fullFloat)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -86,6 +90,7 @@ bool Framebuffer::createHalfFloat(int width, int height) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         destroy();
         m_halfFloat = false;
+        m_fullFloat = false;
         return create(width, height, false);
     }
 
@@ -96,7 +101,7 @@ bool Framebuffer::createHalfFloat(int width, int height) {
 void Framebuffer::resize(int width, int height) {
     if (width == m_width && height == m_height) return;
     if (m_halfFloat)
-        createHalfFloat(width, height);
+        createHalfFloat(width, height, m_fullFloat);
     else
         create(width, height, m_hasDepth);
 }

@@ -117,7 +117,7 @@ public:
     // target shader parameter is a float). Vision keys map 1:1 to the
     // landmarks pushed by VisionSource (Apple Vision pose/face/hands).
     static std::vector<DataKey> availableNumericKeys() {
-        return {
+        std::vector<DataKey> keys = {
             {"",                          "Manual"},
             {"vision.pose.confidence",    "Pose Confidence"},
             {"vision.pose.head.x",        "Head X"},
@@ -131,6 +131,13 @@ public:
             {"vision.hand.right.y",       "Right Hand Y"},
             {"vision.hand.pinch",         "Pinch"},
         };
+        // MIDI knob/fader bank (Canvas mode, under the viewport) — 3 rows of
+        // 8 knobs + 8 faders, mapped to a Launch Control XL by default.
+        for (int i = 1; i <= 24; i++)
+            keys.push_back({"midi.knob" + std::to_string(i), "MIDI Knob " + std::to_string(i)});
+        for (int i = 1; i <= 8; i++)
+            keys.push_back({"midi.fader" + std::to_string(i), "MIDI Fader " + std::to_string(i)});
+        return keys;
     }
 
 private:

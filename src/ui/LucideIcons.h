@@ -242,6 +242,28 @@ inline void chevronDown(ImDrawList* dl, float cx, float cy, float size, ImU32 co
                 ImVec2(cx + w, cy - h), col, stroke);
 }
 
+// Lucide `chevron-left`.
+inline void chevronLeft(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                        float stroke = 1.8f) {
+    float w = size * 0.18f;
+    float h = size * 0.36f;
+    dl->AddLine(ImVec2(cx + w, cy - h),
+                ImVec2(cx - w, cy),     col, stroke);
+    dl->AddLine(ImVec2(cx - w, cy),
+                ImVec2(cx + w, cy + h), col, stroke);
+}
+
+// Lucide `chevron-right`.
+inline void chevronRight(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                         float stroke = 1.8f) {
+    float w = size * 0.18f;
+    float h = size * 0.36f;
+    dl->AddLine(ImVec2(cx - w, cy - h),
+                ImVec2(cx + w, cy),     col, stroke);
+    dl->AddLine(ImVec2(cx + w, cy),
+                ImVec2(cx - w, cy + h), col, stroke);
+}
+
 // Lucide `more-horizontal` — three filled dots in a row. Used for the
 // "more / overflow menu" affordance. Filled (not stroked) because dots
 // at this size read more clearly as solid pixels.
@@ -791,6 +813,36 @@ inline void settings(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
     dl->PathStroke(col, ImDrawFlags_Closed, stroke);
     // Center hub circle.
     dl->AddCircle(ImVec2(cx, cy), rHub, col, 16, stroke);
+}
+
+// Lucide `pencil` (simplified) — diagonal shaft, pointed tip, small
+// perpendicular cap at the other end. Used for "edit" affordances (e.g.
+// the Show Deck playlist editor button).
+inline void pencil(ImDrawList* dl, float cx, float cy, float size, ImU32 col,
+                   float stroke = 1.6f) {
+    float half = size * 0.38f;
+    ImVec2 tip(cx - half, cy + half);   // writing end
+    ImVec2 tail(cx + half, cy - half);  // eraser end
+    dl->AddLine(tip, tail, col, stroke * 1.8f);
+
+    float dx = tail.x - tip.x, dy = tail.y - tip.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.001f) return;
+    float ux = dx / len, uy = dy / len;
+    float nx = -uy, ny = ux;
+
+    // Tip point — small triangle extending beyond the shaft's writing end.
+    float tipLen = size * 0.16f, tipHalf = size * 0.09f;
+    ImVec2 tipEnd(tip.x - ux * tipLen, tip.y - uy * tipLen);
+    ImVec2 tipL(tip.x + nx * tipHalf, tip.y + ny * tipHalf);
+    ImVec2 tipR(tip.x - nx * tipHalf, tip.y - ny * tipHalf);
+    dl->AddTriangleFilled(tipEnd, tipL, tipR, col);
+
+    // Eraser cap — short perpendicular tick at the tail end.
+    float capHalf = size * 0.12f;
+    ImVec2 capA(tail.x + nx * capHalf, tail.y + ny * capHalf);
+    ImVec2 capB(tail.x - nx * capHalf, tail.y - ny * capHalf);
+    dl->AddLine(capA, capB, col, stroke * 1.4f);
 }
 
 } // namespace lucide

@@ -9,6 +9,7 @@
 #include <regex>
 #include <cmath>
 #include <algorithm>
+#include <functional>
 #include <GLFW/glfw3.h>
 
 using json = nlohmann::json;
@@ -516,6 +517,127 @@ bool ShaderSource::loadFromFile(const std::string& path) {
     return loadFromCode(m_rawFragment);
 }
 
+// Tiny recursive-descent evaluator for ISF pass WIDTH/HEIGHT expressions:
+// numbers, $WIDTH, $HEIGHT, $<float/long input>, + - * / ( ), and
+// floor/ceil/round/min/max/abs/sqrt. Anything unparseable -> fallback.
+float ShaderSource::evalSizeExpr(const std::string& expr, float fallback) const {
+    if (expr.empty()) return fallback;
+    size_t pos = 0;
+    bool ok = true;
+    auto skip = [&]() { while (pos < expr.size() && isspace((unsigned char)expr[pos])) pos++; };
+    std::function<float()> parseSum;
+    std::function<float()> parseAtom = [&]() -> float {
+        skip();
+        if (pos >= expr.size()) { ok = false; return 0.0f; }
+        char c = expr[pos];
+        if (c == '(') { pos++; float v = parseSum(); skip(); if (pos < expr.size() && expr[pos] == ')') pos++; else ok = false; return v; }
+        if (c == '-') { pos++; return -parseAtom(); }
+        if (c == '+') { pos++; return parseAtom(); }
+        if (isdigit((unsigned char)c) || c == '.') {
+            size_t used = 0;
+            float v = 0.0f;
+            try { v = std::stof(expr.substr(pos), &used); } catch (...) { ok = false; return 0.0f; }
+            pos += used;
+            return v;
+        }
+        bool isVar = (c == '$');
+        if (isVar) pos++;
+        size_t s = pos;
+        while (pos < expr.size() && (isalnum((unsigned char)expr[pos]) || expr[pos] == '_')) pos++;
+        std::string name = expr.substr(s, pos - s);
+        if (name.empty()) { ok = false; return 0.0f; }
+        if (isVar) {
+            if (name == "WIDTH")  return (float)m_width;
+            if (name == "HEIGHT") return (float)m_height;
+            for (const auto& in : m_inputs) {
+                if (in.name != name) continue;
+                if (auto f = std::get_if<float>(&in.value)) return *f;
+                if (auto b = std::get_if<bool>(&in.value)) return *b ? 1.0f : 0.0f;
+            }
+            ok = false;
+            return 0.0f;
+        }
+        // function call
+        skip();
+        if (pos >= expr.size() || expr[pos] != '(') { ok = false; return 0.0f; }
+        pos++;
+        float a = parseSum(), b = 0.0f;
+        skip();
+        bool two = pos < expr.size() && expr[pos] == ',';
+        if (two) { pos++; b = parseSum(); skip(); }
+        if (pos < expr.size() && expr[pos] == ')') pos++; else ok = false;
+        if (name == "floor") return std::floor(a);
+        if (name == "ceil")  return std::ceil(a);
+        if (name == "round") return std::round(a);
+        if (name == "abs")   return std::fabs(a);
+        if (name == "sqrt")  return std::sqrt(std::max(a, 0.0f));
+        if (name == "min" && two) return std::min(a, b);
+        if (name == "max" && two) return std::max(a, b);
+        ok = false;
+        return 0.0f;
+    };
+    auto parseProduct = [&]() -> float {
+        float v = parseAtom();
+        for (;;) {
+            skip();
+            if (pos < expr.size() && expr[pos] == '*') { pos++; v *= parseAtom(); }
+            else if (pos < expr.size() && expr[pos] == '/') { pos++; float d = parseAtom(); v = (d != 0.0f) ? v / d : 0.0f; }
+            else return v;
+        }
+    };
+    parseSum = [&]() -> float {
+        float v = parseProduct();
+        for (;;) {
+            skip();
+            if (pos < expr.size() && expr[pos] == '+') { pos++; v += parseProduct(); }
+            else if (pos < expr.size() && expr[pos] == '-') { pos++; v -= parseProduct(); }
+            else return v;
+        }
+    };
+    float v = parseSum();
+    skip();
+    if (!ok || pos != expr.size() || !std::isfinite(v)) return fallback;
+    return v;
+}
+
+void ShaderSource::passSize(const ISFPass& pass, int& pw, int& ph) const {
+    if (pass.widthExpr.empty() && pass.heightExpr.empty()) {
+        // Auto-downscale simulation passes on large canvases
+        // (fluid sim is low-frequency, half-res looks identical)
+        pw = m_width;
+        ph = m_height;
+        if (m_width > 4096) {
+            pw = std::max(1, m_width / 2);
+            ph = std::max(1, m_height / 2);
+        }
+        return;
+    }
+    // Explicit sizes are clamped to the canvas so a runaway expression
+    // can't allocate a giant half-float pair.
+    pw = (int)std::lround(evalSizeExpr(pass.widthExpr, (float)m_width));
+    ph = (int)std::lround(evalSizeExpr(pass.heightExpr, (float)m_height));
+    pw = std::clamp(pw, 1, std::max(1, std::max(m_width, 4096)));
+    ph = std::clamp(ph, 1, std::max(1, std::max(m_height, 4096)));
+}
+
+// Called each frame: a WIDTH/HEIGHT expression that references an input
+// (e.g. a resolution slider) re-allocates its buffers when the value moves.
+void ShaderSource::refreshPassSizes() {
+    bool changed = false;
+    for (auto& pass : m_passes) {
+        if (!pass.ppFBO || (pass.widthExpr.empty() && pass.heightExpr.empty())) continue;
+        int pw, ph;
+        passSize(pass, pw, ph);
+        if (pw == pass.simWidth && ph == pass.simHeight) continue;
+        pass.simWidth = pw;
+        pass.simHeight = ph;
+        pass.ppFBO->a.resize(pw, ph);
+        pass.ppFBO->b.resize(pw, ph);
+        changed = true;
+    }
+    if (changed) m_frameIndex = 0; // re-seed persistent state at the new size
+}
+
 void ShaderSource::createPassFBOs() {
     m_passes.clear();
     m_frameIndex = 0; // reset frame counter so shader seeds correctly
@@ -543,20 +665,25 @@ void ShaderSource::createPassFBOs() {
                             pass.target = p["TARGET"].get<std::string>();
                         if (p.contains("PERSISTENT") && p["PERSISTENT"].is_boolean())
                             pass.persistent = p["PERSISTENT"].get<bool>();
+                        auto sizeExpr = [&](const char* key) -> std::string {
+                            if (!p.contains(key)) return "";
+                            if (p[key].is_string()) return p[key].get<std::string>();
+                            if (p[key].is_number()) return std::to_string(p[key].get<double>());
+                            return "";
+                        };
+                        if (p.contains("FLOAT") && p["FLOAT"].is_boolean())
+                            pass.floatTarget = p["FLOAT"].get<bool>();
+                        pass.widthExpr = sizeExpr("WIDTH");
+                        pass.heightExpr = sizeExpr("HEIGHT");
 
                         if (!pass.target.empty()) {
-                            // Auto-downscale simulation passes on large canvases
-                            // (fluid sim is low-frequency, half-res looks identical)
-                            int pw = m_width, ph = m_height;
-                            if (m_width > 4096) {
-                                pw = std::max(1, m_width / 2);
-                                ph = std::max(1, m_height / 2);
-                            }
+                            int pw, ph;
+                            passSize(pass, pw, ph);
                             pass.simWidth = pw;
                             pass.simHeight = ph;
                             pass.ppFBO = std::make_unique<PingPongFBO>();
-                            pass.ppFBO->a.createHalfFloat(pw, ph);
-                            pass.ppFBO->b.createHalfFloat(pw, ph);
+                            pass.ppFBO->a.createHalfFloat(pw, ph, pass.floatTarget);
+                            pass.ppFBO->b.createHalfFloat(pw, ph, pass.floatTarget);
                         }
                         m_passes.push_back(std::move(pass));
                     }
@@ -729,6 +856,8 @@ void ShaderSource::update() {
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
     } else {
+        refreshPassSizes();
+
         // Multi-pass rendering with ping-pong persistent buffers
         // Reserve texture units for pass buffers (start after audio=2, font=3)
         int targetBaseUnit = 4;
@@ -1323,11 +1452,8 @@ void ShaderSource::setResolution(int w, int h) {
         // Resize pass FBOs (simulation passes at half-res for large canvases)
         for (auto& pass : m_passes) {
             if (pass.ppFBO) {
-                int pw = w, ph = h;
-                if (w > 4096) {
-                    pw = std::max(1, w / 2);
-                    ph = std::max(1, h / 2);
-                }
+                int pw, ph;
+                passSize(pass, pw, ph);
                 pass.simWidth = pw;
                 pass.simHeight = ph;
                 pass.ppFBO->a.resize(pw, ph);
