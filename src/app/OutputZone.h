@@ -58,7 +58,8 @@ struct OutputZone {
 
     // Output routing
     OutputDest outputDest = OutputDest::None;
-    int outputMonitor = -1;         // for Fullscreen: which monitor index
+    int outputMonitor = -1;         // for Fullscreen: which monitor index (re-resolved from outputMonitorName on hot-plug; -1 = waiting)
+    std::string outputMonitorName;  // the monitor's identity: "<name>#<ordinal> <w>x<h>"
     std::string ndiStreamName;      // for NDI: stream name (defaults to zone name)
     // When true, the NDI sender broadcasts ndiStreamName verbatim (no "Easel - "
     // prefix) so agent-driven composite feeds get a caller-chosen name.

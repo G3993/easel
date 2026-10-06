@@ -1,0 +1,296 @@
+[
+ [
+  {
+   "file": "color_frames.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:106: 'i' : Index expression can only contain const or loop symbols\nERROR: 0:106: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:106: 'i' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "crystalline_flow.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:112: 'texelFetch' : no matching overloaded function found\nERROR: 0:112: '=' : dimension mismatch\nERROR: 0:112: '=' : cannot convert from 'const mediump float' to 'mediump 4-component vector of float'\nERROR: 0:157: 'texelFetch' : no matching overloaded function found\nERROR: 0:157: '=' : dimension mismatch\nERROR: 0:157: '=' : cannot convert from 'const mediump float' to 'mediump 4-component vector of float'\n\u0000"
+  },
+  {
+   "file": "reverse_flow_field.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:134: 'ia' : Index expression can only contain const or loop symbols\nERROR: 0:135: 'ia' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "carbon_fiber.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:136: 'abs' : no matching overloaded function found\nERROR: 0:136: 'abs' : no matching overloaded function found\nERROR: 0:136: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'const mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:137: 'abs' : no matching overloaded function found\nERROR: 0:137: 'abs' : no matching overloaded function found\nERROR: 0:137: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'const mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "lightning_storm.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:145: 'pivotCount' : Index expression can only contain const or loop symbols\nERROR: 0:146: 'pivotCount' : Index expression can only contain const or loop symbols\nERROR: 0:196: 'subCount' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "minimalism_stella.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:155: 'idx' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "terminal_ticker.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:212: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\n\u0000"
+  },
+  {
+   "file": "pen_ink.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:228: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:252: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:262: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:264: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of ty"
+  }
+ ],
+ [
+  {
+   "file": "metamorphosis.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:232: 'transpose' : no matching overloaded function found\nERROR: 0:233: 'transpose' : no matching overloaded function found\nWARNING: 0:233: 'normalize' : operation result is undefined for the values passed in\nWARNING: 0:233: 'normalize' : operation result is undefined for the values passed in\nWARNING: 0:233: 'normalize' : operation result is undefined for the values passed in\n\u0000"
+  },
+  {
+   "file": "pixel_players.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:249: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:251: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:257: '!=' : wrong operand types - no operation '!=' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "audio_particles_3d.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:251: 'bestJ' : Index expression can only contain const or loop symbols\nERROR: 0:263: 'bestJ' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "gradient_example.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:254: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:259: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:264: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "mirror_fractal.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:273: 'ni' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "holographic_foil.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:276: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:281: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:286: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "geo.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:278: '=' : cannot convert from 'uniform mediump float' to 'mediump int'\n\u0000"
+  },
+  {
+   "file": "text_stream.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:285: '*' : wrong operand types - no operation '*' exists that takes a left-hand operand of type 'mediump int' and a right operand of type 'const float' (or there is no acceptable conversion)\nERROR: 0:285: '+' : wrong operand types - no operation '+' exists that takes a left-hand operand of type 'mediump int' and a right operand of type 'mediump float' (or there is no acceptable conversion)\nERROR: 0:285: 'hash11' : no matching overloaded function found\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "fisheye_sphere.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:286: 'uint' : syntax error\n\u0000"
+  },
+  {
+   "file": "digital_wave_grid_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:296: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:302: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "robot_arm.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:318: 'clamp' : no matching overloaded function found\nERROR: 0:318: 'assign' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  },
+  {
+   "file": "morphing_organic_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:322: 'clamp' : no matching overloaded function found\nERROR: 0:322: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:344: 'max' : no matching overloaded function found\nERROR: 0:343: 'morphField' : no matching overloaded function found\nERROR: 0:343: '=' : dimension mismatch\nERROR: 0:343: '=' : cannot convert from 'const mediump float' to 'mediump 3-component vector of float'\nERROR: 0:361: 'clamp' : no matching overloaded function found\nERROR: 0:361: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:408: 'max' : no matching overloaded function found\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "grid_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:341: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:346: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\nERROR: 0:381: '==' : wrong operand types - no operation '==' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "popart_lichtenstein.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:342: '<' : wrong operand types - no operation '<' exists that takes a left-hand operand of type 'uniform mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "expressionism_kirchner.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:344: 'clamp' : no matching overloaded function found\nERROR: 0:344: '=' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  },
+  {
+   "file": "meaning_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:356: 'idx' : Index expression can only contain const or loop symbols\nERROR: 0:548: 'b' : Loop index cannot be initialized with non-constant expression\nERROR: 0:548: 'b' : Expected loop index\nERROR: 0:548: 'b' : Expected loop index\nERROR: 0:549: 'b' : Index expression can only contain const or loop symbols\nERROR: 0:549: 'b' : Index expression can only contain const or loop symbols\nERROR: 0:549: 'idxOrder' : Index expression can only contain const or loop symbols\nERROR: 0:550: 'b' : Index expression can only contain const or loop symbols\nERROR: 0:550: 'b' : Index expression can only contain const or loop symbols\nERROR: 0:558: 'i' : Index expression can only contain const or loop symbols\nERROR: 0:563: 'i' : Index expression can only contain const or loop symbols\nERROR: "
+  }
+ ],
+ [
+  {
+   "file": "images_grid_lines_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:360: 'clamp' : no matching overloaded function found\nERROR: 0:360: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:361: 'clamp' : no matching overloaded function found\nERROR: 0:361: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:362: 'clamp' : no matching overloaded function found\nERROR: 0:362: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:507: 'clamp' : no matching overloaded function found\nERROR: 0:507: '?:' : mismatching ternary operator operand types 'const mediump float and 'mediump int'\n\u0000"
+  },
+  {
+   "file": "imagedrag_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:365: 'max' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "highlighted_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:394: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:395: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:396: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:397: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:398: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:409: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:410: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:411: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:412: 'wordCount' : Index expression can only contain const or loop symbols\nERROR: 0:413: 'wordCount' : In"
+  },
+  {
+   "file": "shape_grid_circular_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:418: 'clamp' : no matching overloaded function found\nERROR: 0:418: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:419: 'clamp' : no matching overloaded function found\nERROR: 0:419: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:420: 'clamp' : no matching overloaded function found\nERROR: 0:420: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:599: 'clamp' : no matching overloaded function found\nERROR: 0:599: '=' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "time_glitch_rgbfs.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:43: 'round' : no matching overloaded function found\nERROR: 0:52: 'round' : no matching overloaded function found\nERROR: 0:61: 'round' : no matching overloaded function found\nERROR: 0:62: 'round' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "gradient_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:444: 'max' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "connectnumbers_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:445: 'k1' : Index expression can only contain const or loop symbols\nERROR: 0:449: 'k2' : Index expression can only contain const or loop symbols\nERROR: 0:539: 'min' : no matching overloaded function found\nERROR: 0:539: '=' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  },
+  {
+   "file": "data_minimal_lines_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:448: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\nERROR: 0:479: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "form_plus_lines_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:471: 'max' : no matching overloaded function found\nERROR: 0:486: 'max' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "shape_grid_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:480: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\nERROR: 0:482: 'band' : Index expression can only contain const or loop symbols\nERROR: 0:545: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\nERROR: 0:603: 'band' : Index expression can only contain const or loop symbols\nERROR: 0:621: 'min' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "images_maximalist_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:482: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\nERROR: 0:489: '%' : integer modulus operator supported in GLSL ES 3.00 and above only\n\u0000"
+  },
+  {
+   "file": "type_shapes_blobs_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:484: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "world_cup_3d.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:48: 'LOGO' : syntax error\n\u0000"
+  },
+  {
+   "file": "moving_circular_grid_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:494: 'clamp' : no matching overloaded function found\nERROR: 0:494: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:506: 'clamp' : no matching overloaded function found\nERROR: 0:506: '=' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  },
+  {
+   "file": "image_grid_colorbg_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:508: 'clamp' : no matching overloaded function found\nERROR: 0:508: 'assign' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:509: 'stripe' : Index expression can only contain const or loop symbols\nERROR: 0:557: 'clamp' : no matching overloaded function found\nERROR: 0:557: 'assign' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:558: 'stripe' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "doubleperson_convo_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:522: 'max' : no matching overloaded function found\nERROR: 0:522: '=' : cannot convert from 'const mediump float' to 'mediump int'\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "menger_descent.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:53: 'mid' : undeclared identifier\n\u0000"
+  },
+  {
+   "file": "liquid_3d.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:55: 'transpose' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "linear.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:57: 'texelFetch' : no matching overloaded function found\nERROR: 0:57: '=' : dimension mismatch\nERROR: 0:57: '=' : cannot convert from 'const mediump float' to 'mediump 4-component vector of float'\nERROR: 0:65: 'texelFetch' : no matching overloaded function found\nERROR: 0:65: '=' : dimension mismatch\nERROR: 0:65: '=' : cannot convert from 'const mediump float' to 'mediump 4-component vector of float'\nERROR: 0:101: 'texelFetch' : no matching overloaded function found\nERROR: 0:101: 'xy' :  field selection requires structure or vector on left hand side\nERROR: 0:101: '=' : dimension mismatch\nERROR: 0:101: '=' : cannot convert from 'const mediump float' to 'mediump 2-component vector of float'\n\u0000"
+  },
+  {
+   "file": "png3d_rows_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:582: 'clamp' : no matching overloaded function found\nERROR: 0:582: '?:' : mismatching ternary operator operand types 'const mediump float and 'mediump int'\nERROR: 0:665: '*' : wrong operand types - no operation '*' exists that takes a left-hand operand of type 'mediump int' and a right operand of type 'mediump float' (or there is no acceptable conversion)\nERROR: 0:665: '+' : wrong operand types - no operation '+' exists that takes a left-hand operand of type 'mediump float' and a right operand of type 'mediump int' (or there is no acceptable conversion)\nERROR: 0:706: 'max' : no matching overloaded function found\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "forms_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:663: 'max' : no matching overloaded function found\nERROR: 0:663: '/' : wrong operand types - no operation '/' exists that takes a left-hand operand of type 'mediump int' and a right operand of type 'const mediump float' (or there is no acceptable conversion)\nERROR: 0:663: 'max' : no matching overloaded function found\nERROR: 0:663: '*' : wrong operand types - no operation '*' exists that takes a left-hand operand of type 'mediump int' and a right operand of type 'const mediump float' (or there is no acceptable conversion)\n\u0000"
+  },
+  {
+   "file": "pbr_reference_3d.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:67: '?:' : ternary operator is not allowed for structures in ESSL 1.0 and webgl\n\u0000"
+  },
+  {
+   "file": "poster_type_text.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:695: 'max' : no matching overloaded function found\n\u0000"
+  },
+  {
+   "file": "emoji_swarm.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:72: 'return' : function return is not matching type:\nERROR: 0:72: 'return' : function return is not matching type:\nERROR: 0:72: 'return' : function return is not matching type:\nERROR: 0:73: 'return' : function return is not matching type:\nERROR: 0:73: 'return' : function return is not matching type:\nERROR: 0:73: 'return' : function return is not matching type:\nERROR: 0:74: 'return' : function return is not matching type:\nERROR: 0:74: 'return' : function return is not matching type:\nERROR: 0:74: 'return' : function return is not matching type:\nERROR: 0:75: 'return' : function return is not matching type:\nERROR: 0:75: 'return' : function return is not matching type:\nERROR: 0:75: 'return' : function return is not matching type:\nERROR: 0:76: 'return' : function return is"
+  }
+ ],
+ [
+  {
+   "file": "pixy.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:79: 'k' : Index expression can only contain const or loop symbols\nERROR: 0:80: 'k' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "dancing_cubes.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:81: 'i' : Loop index cannot be initialized with non-constant expression\nERROR: 0:81: 'i' : Expected loop index\nERROR: 0:81: 'i' : Expected loop index\nERROR: 0:82: 'j' : Loop index cannot be initialized with non-constant expression\nERROR: 0:82: 'j' : Expected loop index\nERROR: 0:82: 'j' : Expected loop index\n\u0000"
+  },
+  {
+   "file": "glitch_datamosh.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:82: 'bi' : Index expression can only contain const or loop symbols\n\u0000"
+  },
+  {
+   "file": "interactive_particles.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:90: 'clamp' : no matching overloaded function found\nERROR: 0:90: '=' : cannot convert from 'const mediump float' to 'mediump int'\nERROR: 0:92: 'clamp' : no matching overloaded function found\nERROR: 0:92: '-' : wrong operand types - no operation '-' exists that takes a left-hand operand of type 'const mediump float' and a right operand of type 'const int' (or there is no acceptable conversion)\n\u0000"
+  }
+ ],
+ [
+  {
+   "file": "vaporwave_floral_shoppe.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:93: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:94: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:95: '>>' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:95: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:96: '>>' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:96: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:97: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:98: '>>' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:98: '&' : bit-wise operator supported in GLSL ES 3.00 and above only\nERROR: 0:99: '>>' : bit-wise operator supported in GLSL ES 3.00 and above only\nER"
+  },
+  {
+   "file": "cloud.fs",
+   "errors": "FRAG COMPILE: ERROR: 0:98: 'uint' : syntax error\n\u0000"
+  },
+  {
+   "file": "text_james.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "text_typewriter.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  }
+ ],
+ [
+  {
+   "file": "text_ascii.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "text_la_bloom.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "text_chat.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "text_clusters.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  }
+ ],
+ [
+  {
+   "file": "coil_text.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "james.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "layers_text.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  },
+  {
+   "file": "shine_text.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  }
+ ],
+ [
+  {
+   "file": "wave_text.fs",
+   "errors": "RENDERS BLACK (blackFrac=1.0000)"
+  }
+ ]
+]

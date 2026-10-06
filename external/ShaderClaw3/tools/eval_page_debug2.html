@@ -1,0 +1,443 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ShaderClaw Eval Harness</title>
+<canvas id="c" width="256" height="256"></canvas>
+<script src="/js/isf.js"></script>
+<script>
+// ============================================================
+// ShaderClaw offline eval page — compiles every shader through
+// the app's own buildFragmentShader(), runs it (incl. multipass
+// ping-pong + persistent-buffer warmup) and scores the frames.
+// Driven by tools/eval_harness.cjs via page.evaluate().
+// ============================================================
+
+const W = 256, H = 256;
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false })
+        || canvas.getContext('experimental-webgl');
+const extHF = gl.getExtension('OES_texture_half_float');
+gl.getExtension('OES_texture_half_float_linear');
+gl.getExtension('OES_texture_float');
+gl.getExtension('OES_standard_derivatives');
+
+// Fullscreen quad
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+// --- Shared dummy textures -------------------------------------------------
+function makeTex(w, h, fill) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  const data = new Uint8Array(w * h * 4);
+  fill(data, w, h);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+// Colorful gradient-checker: representative "user video/image" content
+const testImageTex = makeTex(128, 128, (d, w, h) => {
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    const chk = ((x >> 4) + (y >> 4)) & 1;
+    d[i]   = (x / w) * 255;
+    d[i+1] = (y / h) * 255;
+    d[i+2] = chk ? 220 : 60;
+    d[i+3] = 255;
+  }
+});
+
+// Font atlas — replicates updateFontAtlas() in js/media.js exactly:
+// 37 cells (A-Z, space, 0-9), one row, white glyphs, vertically flipped.
+const fontAtlasTexture = (() => {
+  const cellW = 96, cellH = 90; // quarter-scale of app atlas; same layout
+  const c = document.createElement('canvas');
+  c.width = 37 * cellW; c.height = cellH;
+  const ctx = c.getContext('2d');
+  ctx.translate(0, c.height); ctx.scale(1, -1);
+  ctx.font = '400 ' + Math.round(cellH * 0.85) + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < 26; i++) ctx.fillText(String.fromCharCode(65 + i), (i + 0.5) * cellW, cellH / 2);
+  for (let i = 0; i < 10; i++) ctx.fillText(String(i), (27 + i + 0.5) * cellW, cellH / 2);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+})();
+
+// varFontTex — message text rendered to a canvas (like app.js updateVarFontTexture)
+const varFontTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.translate(0, c.height); ctx.scale(1, -1);
+  ctx.font = '700 90px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('ETHEREA', c.width / 2, c.height / 2);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+})();
+
+// audioFFT texture — rebuilt per audio level
+const fftTex = gl.createTexture();
+function setFFT(level) {
+  const w = 256;
+  const data = new Uint8Array(w * 4);
+  for (let x = 0; x < w; x++) {
+    const f = x / w;
+    // plausible falling spectrum with some peaks, scaled by level
+    const v = level * Math.max(0, (1.0 - f * 0.85)) *
+              (0.6 + 0.4 * Math.sin(f * 47.0) * Math.sin(f * 13.0 + 1.7));
+    data[x * 4] = data[x * 4 + 1] = data[x * 4 + 2] = Math.max(0, Math.min(255, v * 255));
+    data[x * 4 + 3] = 255;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, fftTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+setFFT(0);
+
+function compileStage(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    gl.deleteShader(s);
+    return { ok: false, log };
+  }
+  return { ok: true, shader: s };
+}
+
+function makeFBO(w, h, half) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  const type = half && extHF ? extHF.HALF_FLOAT_OES : gl.UNSIGNED_BYTE;
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, tex, complete };
+}
+
+// --- Metrics ---------------------------------------------------------------
+function framePixels(fbo) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  const px = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return px;
+}
+
+function frameStats(px) {
+  let sum = 0, sum2 = 0, black = 0, edges = 0;
+  const buckets = new Map();
+  const n = W * H;
+  for (let i = 0; i < n; i++) {
+    const r = px[i*4], g = px[i*4+1], b = px[i*4+2];
+    const l = (0.299*r + 0.587*g + 0.114*b) / 255;
+    sum += l; sum2 += l * l;
+    if (r + g + b < 18) black++;
+    const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+  // horizontal gradient magnitude (subsampled)
+  for (let y = 0; y < H; y += 2) for (let x = 1; x < W; x += 2) {
+    const i = (y * W + x) * 4, j = i - 4;
+    edges += Math.abs(px[i] - px[j]) + Math.abs(px[i+1] - px[j+1]) + Math.abs(px[i+2] - px[j+2]);
+  }
+  let entropy = 0;
+  for (const c of buckets.values()) { const p = c / n; entropy -= p * Math.log2(p); }
+  const mean = sum / n;
+  return {
+    meanLuma: mean,
+    variance: sum2 / n - mean * mean,
+    blackFrac: black / n,
+    entropy,
+    edges: edges / (W * H / 4) / 765,
+  };
+}
+
+function frameDiff(a, b) {
+  let d = 0;
+  const n = W * H * 4;
+  for (let i = 0; i < n; i += 16) d += Math.abs(a[i] - b[i]) + Math.abs(a[i+1] - b[i+1]) + Math.abs(a[i+2] - b[i+2]);
+  return d / (n / 16) / 765;
+}
+
+// --- Main entry ------------------------------------------------------------
+window.evalShader = async function(file, opts) {
+  opts = opts || {};
+  const out = { file, compileOk: false, linkOk: false, errors: [], warnings: [] };
+  const owned = { programs: [], textures: [], fbos: [] };
+  try {
+    const resp = await fetch('/shaders/' + file + '?t=' + Date.now());
+    if (!resp.ok) { out.errors.push('fetch failed: ' + resp.status); return out; }
+    const source = await resp.text();
+
+    let built;
+    try { built = buildFragmentShader(source); }
+    catch (e) { out.errors.push('buildFragmentShader threw: ' + e.message); return out; }
+    const parsed = built.parsed;
+    out.headerLineCount = built.headerLineCount;
+
+    // Compile
+    const vs = compileStage(gl.VERTEX_SHADER, VERT_SHADER);
+    if (!vs.ok) { out.errors.push('VERT: ' + vs.log); return out; }
+    const fsRes = compileStage(gl.FRAGMENT_SHADER, built.frag);
+    if (!fsRes.ok) {
+      out.errors.push('FRAG COMPILE: ' + fsRes.log);
+      gl.deleteShader(vs.shader);
+      return out;
+    }
+    out.compileOk = true;
+    const prog = gl.createProgram();
+    owned.programs.push(prog);
+    gl.attachShader(prog, vs.shader);
+    gl.attachShader(prog, fsRes.shader);
+    gl.linkProgram(prog);
+    gl.deleteShader(vs.shader); gl.deleteShader(fsRes.shader);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      out.errors.push('LINK: ' + gl.getProgramInfoLog(prog));
+      return out;
+    }
+    out.linkOk = true;
+    gl.useProgram(prog);
+
+    // Active uniform census
+    const nu = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+    const uniforms = {};
+    for (let i = 0; i < nu; i++) {
+      const info = gl.getActiveUniform(prog, i);
+      const name = info.name.replace(/\[0\]$/, '');
+      uniforms[name] = { type: info.type, loc: gl.getUniformLocation(prog, info.name), size: info.size };
+    }
+    out.activeUniforms = Object.keys(uniforms);
+
+    // Pass setup: single-file multipass via PASSES + PASSINDEX
+    const passes = (parsed.meta && Array.isArray(parsed.meta.PASSES) && parsed.meta.PASSES.length)
+      ? parsed.meta.PASSES : [{}];
+    // ping-pong buffers per TARGET; final output FBO for readback
+    const targets = {};
+    for (const p of passes) {
+      if (p.TARGET && !targets[p.TARGET]) {
+        const a = makeFBO(W, H, !!p.FLOAT || !!p.PERSISTENT);
+        const b = makeFBO(W, H, !!p.FLOAT || !!p.PERSISTENT);
+        if (!a.complete || !b.complete) out.warnings.push('FBO incomplete for TARGET ' + p.TARGET);
+        targets[p.TARGET] = { front: a, back: b };
+        owned.fbos.push(a, b);
+      }
+    }
+    const outFBO = makeFBO(W, H, false);
+    owned.fbos.push(outFBO);
+
+    // Input defaults from ISF metadata
+    const inputDefaults = {};
+    const textUniformVals = {};
+    for (const inp of parsed.inputs || []) {
+      inputDefaults[inp.NAME] = inp;
+      if (inp.TYPE === 'text') {
+        // App convention (js/app.js): chars are ATLAS INDICES, not char codes:
+        // A-Z -> 0-25, space -> 26, 0-9 -> 27-36
+        const msg = ((typeof inp.DEFAULT === 'string' && inp.DEFAULT.trim()) || 'ETHEREA').toUpperCase();
+        const c2c = (ch) => {
+          if (!ch || ch === ' ') return 26;
+          const code = ch.charCodeAt(0);
+          if (code >= 65 && code <= 90) return code - 65;
+          if (code >= 48 && code <= 57) return code - 48 + 27;
+          return 26;
+        };
+        const maxLen = inp.MAX_LENGTH || 12;
+        for (let i = 0; i < maxLen; i++) textUniformVals[inp.NAME + '_' + i] = c2c(msg[i]);
+        textUniformVals[inp.NAME + '_len'] = Math.min(msg.replace(/\s+$/, '').length, maxLen);
+      }
+    }
+
+    const posLoc = gl.getAttribLocation(prog, 'position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    let frameIndex = 0;
+    function drawFrame(time, dt, audio) {
+      setFFT(audio);
+      for (let pi = 0; pi < passes.length; pi++) {
+        const pass = passes[pi];
+        const isFinal = pi === passes.length - 1;
+        // texture unit assignment fresh each pass
+        let unit = 0;
+        for (const [name, u] of Object.entries(uniforms)) {
+          const loc = u.loc;
+          if (!loc) continue;
+          if (u.type === gl.SAMPLER_2D) {
+            gl.activeTexture(gl.TEXTURE0 + unit);
+            if (targets[name]) gl.bindTexture(gl.TEXTURE_2D, targets[name].front.tex);
+            else if (name === 'audioFFT') gl.bindTexture(gl.TEXTURE_2D, fftTex);
+            else if (name === 'fontAtlasTex') gl.bindTexture(gl.TEXTURE_2D, fontAtlasTexture);
+            else if (name === 'varFontTex') gl.bindTexture(gl.TEXTURE_2D, varFontTexture);
+            else gl.bindTexture(gl.TEXTURE_2D, testImageTex);
+            gl.uniform1i(loc, unit);
+            unit++;
+            continue;
+          }
+          switch (name) {
+            case 'TIME': gl.uniform1f(loc, time); break;
+            case 'TIMEDELTA': gl.uniform1f(loc, dt); break;
+            case 'RENDERSIZE': gl.uniform2f(loc, W, H); break;
+            case 'PASSINDEX': gl.uniform1i(loc, pi); break;
+            case 'FRAMEINDEX': gl.uniform1i(loc, frameIndex); break;
+            case 'mousePos': gl.uniform2f(loc, 0.5, 0.5); break;
+            case 'mouseDelta': gl.uniform2f(loc, 0, 0); break;
+            case 'mouseDown': case 'pinchHold': case 'pinchHold2': case 'inputActivity':
+              gl.uniform1f(loc, 0); break;
+            case 'audioLevel': gl.uniform1f(loc, audio); break;
+            case 'audioBass': gl.uniform1f(loc, audio); break;
+            case 'audioMid': gl.uniform1f(loc, audio * 0.8); break;
+            case 'audioHigh': gl.uniform1f(loc, audio * 0.6); break;
+            // Audio Feature Bus — plausible values so bus-driven shaders light up
+            case 'audioEnergy': gl.uniform1f(loc, audio); break;
+            case 'audioBeatPulse': gl.uniform1f(loc, audio * Math.max(0, Math.sin(time * 11.0))); break;
+            case 'audioBeat': gl.uniform1f(loc, audio > 0.5 && Math.sin(time * 11.0) > 0.95 ? 1 : 0); break;
+            case 'audioPunch': gl.uniform1f(loc, audio * 0.7); break;
+            case 'audioOnset': gl.uniform1f(loc, audio * 0.6); break;
+            case 'audioBrightness': gl.uniform1f(loc, 0.3 + audio * 0.4); break;
+            case 'audioArousal': gl.uniform1f(loc, audio); break;
+            case 'audioValence': gl.uniform1f(loc, 0.5); break;
+            case 'audioBarPhase': gl.uniform1f(loc, (time * 0.4) % 1); break;
+            case 'audioBeatPhase': gl.uniform1f(loc, (time * 1.6) % 1); break;
+            case 'audioBassTime': gl.uniform1f(loc, time * audio); break;
+            case 'audioMidTime': gl.uniform1f(loc, time * audio * 0.8); break;
+            case 'audioHighTime': gl.uniform1f(loc, time * audio * 0.6); break;
+            case 'audioBuildup': gl.uniform1f(loc, audio * 0.3); break;
+            case 'audioSub': gl.uniform1f(loc, audio * 0.9); break;
+            case 'audioTreble': gl.uniform1f(loc, audio * 0.6); break;
+            case 'audioPalShadow': gl.uniform3f(loc, 0.03, 0.02, 0.08); break;
+            case 'audioPalMid': gl.uniform3f(loc, 0.35, 0.25, 0.60); break;
+            case 'audioPalHigh': gl.uniform3f(loc, 0.85, 0.80, 0.95); break;
+            case 'audioPalAccent': gl.uniform3f(loc, 1.00, 0.35, 0.50); break;
+            case '_transparentBg': gl.uniform1f(loc, 0); break;
+            case 'msgAge': gl.uniform1f(loc, -1.0); break;
+            case 'useFontAtlas': gl.uniform1f(loc, 1.0); break;
+            case 'scVideoMix': gl.uniform1f(loc, opts.videoMix != null ? opts.videoMix : 0.0); break;
+            default: {
+              if (name.startsWith('IMG_SIZE_')) { gl.uniform2f(loc, 128, 128); break; }
+              if (name in textUniformVals) { gl.uniform1f(loc, textUniformVals[name]); break; }
+              const inp = inputDefaults[name];
+              if (inp) {
+                const d = inp.DEFAULT;
+                if (inp.TYPE === 'float') gl.uniform1f(loc, typeof d === 'number' ? d : 0.5);
+                else if (inp.TYPE === 'bool') gl.uniform1f(loc, d ? 1 : 0);
+                else if (inp.TYPE === 'long') gl.uniform1i(loc, typeof d === 'number' ? d : 0);
+                else if (inp.TYPE === 'color') { const c = Array.isArray(d) ? d : [1,1,1,1]; gl.uniform4f(loc, c[0], c[1], c[2], c[3] != null ? c[3] : 1); }
+                else if (inp.TYPE === 'point2D') { const p = Array.isArray(d) ? d : [0.5,0.5]; gl.uniform2f(loc, p[0], p[1]); }
+              } else if (u.type === gl.FLOAT) gl.uniform1f(loc, 0.0);
+              else if (u.type === gl.FLOAT_VEC2) gl.uniform2f(loc, 0, 0);
+              else if (u.type === gl.FLOAT_VEC3) gl.uniform3f(loc, 0, 0, 0);
+              else if (u.type === gl.FLOAT_VEC4) gl.uniform4f(loc, 0, 0, 0, 0);
+              else if (u.type === gl.INT) gl.uniform1i(loc, 0);
+            }
+          }
+        }
+        // render target
+        if (pass.TARGET) gl.bindFramebuffer(gl.FRAMEBUFFER, targets[pass.TARGET].back.fbo);
+        else gl.bindFramebuffer(gl.FRAMEBUFFER, isFinal ? outFBO.fbo : outFBO.fbo);
+        gl.viewport(0, 0, W, H);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        if (pass.TARGET) {
+          const t = targets[pass.TARGET];
+          const tmp = t.front; t.front = t.back; t.back = tmp;
+        }
+      }
+      frameIndex++;
+      // If the LAST pass wrote to a TARGET (no final screen pass), read that target
+      const last = passes[passes.length - 1];
+      return last.TARGET ? targets[last.TARGET].front : outFBO;
+    }
+
+    // Warmup for persistent-buffer sims
+    const warmFrames = opts.warmup != null ? opts.warmup : 30;
+    let t = 0;
+    const dt = 1 / 30;
+    const baseAudio = opts.audio != null ? opts.audio : 0.0;
+    for (let i = 0; i < warmFrames; i++) { t += dt; drawFrame(t, dt, baseAudio); }
+
+    // Sample frames
+    const sampleTimes = opts.times || [0.5, 2.0, 5.0, 9.0];
+    const frames = [];
+    for (const st of sampleTimes) {
+      while (t < st) { t += dt; drawFrame(t, dt, baseAudio); }
+      const fb = drawFrame(t, dt, baseAudio);
+      frames.push(framePixels(fb.fbo));
+    }
+    const stats = frames.map(frameStats);
+    out.meanLuma = stats.reduce((s, x) => s + x.meanLuma, 0) / stats.length;
+    out.variance = stats.reduce((s, x) => s + x.variance, 0) / stats.length;
+    out.blackFrac = stats.reduce((s, x) => s + x.blackFrac, 0) / stats.length;
+    out.entropy = stats.reduce((s, x) => s + x.entropy, 0) / stats.length;
+    out.edges = stats.reduce((s, x) => s + x.edges, 0) / stats.length;
+    let mv = 0;
+    for (let i = 1; i < frames.length; i++) mv += frameDiff(frames[i - 1], frames[i]);
+    out.movement = mv / (frames.length - 1);
+
+    // Audio response: continue sim with audio driven high, diff vs quiet frame
+    const quiet = frames[frames.length - 1];
+    for (let i = 0; i < 12; i++) { t += dt; drawFrame(t, dt, 0.85 + 0.15 * Math.sin(i * 2.1)); }
+    const loudFB = drawFrame(t + dt, dt, 0.9);
+    const loud = framePixels(loudFB.fbo);
+    // control: same extra frames with no audio would also move; approximate control
+    // via movement metric — audioResponse = diff minus expected motion drift
+    out.audioResponseRaw = frameDiff(quiet, loud);
+    out.audioResponse = Math.max(0, out.audioResponseRaw - out.movement);
+
+    const glErr = gl.getError();
+    if (glErr !== gl.NO_ERROR) out.warnings.push('glError 0x' + glErr.toString(16));
+
+    // Scores 0..10 (same axes as AUTONOMOUS_LOOP.md)
+    const clamp10 = (x) => Math.max(0, Math.min(10, x));
+    out.scores = {
+      density: clamp10(out.variance * 120 + (1 - Math.abs(out.meanLuma - 0.4) * 2) * 3),
+      movement: clamp10(Math.sqrt(out.movement) * 40),
+      palette: clamp10(out.entropy * 1.4),
+      edges: clamp10(out.edges * 90),
+      audio: clamp10(Math.sqrt(out.audioResponse) * 40),
+    };
+    out.scores.overall = (out.scores.density + out.scores.movement + out.scores.palette + out.scores.edges) / 4;
+    // "black" = essentially zero lit pixels across all sampled frames.
+    // (Text shaders legitimately render 99%+ black at 256px.)
+    out.ok = out.compileOk && out.linkOk && out.blackFrac < 0.9999;
+    if (out.blackFrac >= 0.9999) out.errors.push('RENDERS BLACK (blackFrac=' + out.blackFrac.toFixed(4) + ')');
+  } catch (e) {
+    out.errors.push('EXCEPTION: ' + (e && e.message || String(e)));
+  } finally {
+    for (const p of owned.programs) gl.deleteProgram(p);
+    for (const f of owned.fbos) { gl.deleteFramebuffer(f.fbo); gl.deleteTexture(f.tex); }
+  }
+  return out;
+};
+window.__harnessReady = true;
+</script>

@@ -115,3 +115,45 @@ extern "C" void EaselMac_UnifyTitleBar(GLFWwindow* window) {
         b.frame = frame;
     }
 }
+
+
+// ── Displays: how many are online, and "extend, laptop as main" ─────────
+// macOS sometimes brings a freshly plugged projector up MIRRORED with the
+// projector as the main display: the editor and every new window land on
+// the projector, GLFW sees one monitor and no output can open. Easel calls
+// this when it notices (see the hot-plug block in Application::run).
+#include <CoreGraphics/CoreGraphics.h>
+extern "C" int EaselMac_OnlineDisplayCount(void) {
+    uint32_t n = 0; CGDirectDisplayID ids[16];
+    CGGetOnlineDisplayList(16, ids, &n);
+    return (int)n;
+}
+// Only the LAPTOP screen being in a mirror set is a problem (the editor
+// ends up on the projector). Two projectors mirroring each other while the
+// laptop is extended is a legitimate show setup and is left alone.
+extern "C" int EaselMac_DisplaysMirrored(void) {
+    uint32_t n = 0; CGDirectDisplayID ids[16];
+    CGGetOnlineDisplayList(16, ids, &n);
+    CGDirectDisplayID builtin = kCGNullDirectDisplay;
+    for (uint32_t i = 0; i < n; i++) if (CGDisplayIsBuiltin(ids[i])) builtin = ids[i];
+    if (builtin == kCGNullDirectDisplay) return 0;
+    if (CGDisplayMirrorsDisplay(builtin) != kCGNullDirectDisplay) return 1;          // laptop mirrors a projector
+    for (uint32_t i = 0; i < n; i++) if (CGDisplayMirrorsDisplay(ids[i]) == builtin) return 1;   // a projector mirrors the laptop
+    return 0;
+}
+extern "C" int EaselMac_ExtendDisplays(void) {
+    uint32_t n = 0; CGDirectDisplayID ids[16];
+    CGGetOnlineDisplayList(16, ids, &n);
+    CGDirectDisplayID builtin = kCGNullDirectDisplay;
+    for (uint32_t i = 0; i < n; i++) if (CGDisplayIsBuiltin(ids[i])) builtin = ids[i];
+    if (builtin == kCGNullDirectDisplay || n < 2) return 0;
+    CGDisplayConfigRef cfg = NULL;
+    if (CGBeginDisplayConfiguration(&cfg) != kCGErrorSuccess) return 0;
+    // take only the laptop out of its mirror set; projector↔projector mirrors stay
+    CGConfigureDisplayMirrorOfDisplay(cfg, builtin, kCGNullDirectDisplay);
+    for (uint32_t i = 0; i < n; i++) if (CGDisplayMirrorsDisplay(ids[i]) == builtin) CGConfigureDisplayMirrorOfDisplay(cfg, ids[i], kCGNullDirectDisplay);
+    CGConfigureDisplayOrigin(cfg, builtin, 0, 0);               // laptop = main
+    int32_t x = (int32_t)CGDisplayPixelsWide(builtin);
+    for (uint32_t i = 0; i < n; i++) if (ids[i] != builtin && CGDisplayMirrorsDisplay(ids[i]) == kCGNullDirectDisplay) { CGConfigureDisplayOrigin(cfg, ids[i], x, 0); x += (int32_t)CGDisplayPixelsWide(ids[i]); }
+    return CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently) == kCGErrorSuccess ? 1 : 0;
+}

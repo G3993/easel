@@ -20,6 +20,7 @@
 UIManager::WorkspaceMode UIManager::sMode = UIManager::WorkspaceMode::Canvas;
 bool UIManager::sGalleryOpen = false;
 bool UIManager::sShowOpen = false;
+bool UIManager::sGalleryFromShow = false;
 float UIManager::sNavBandBottom = 44.0f;
 float UIManager::sFpsDisplay = 0.0f;
 char  UIManager::sProjectLabel[128] = "Untitled";
@@ -1825,7 +1826,7 @@ void UIManager::renderLeftRail(const std::function<void(float innerW)>& /*drawEx
                                   ? LeftPanel::None : LeftPanel::Layers;
             } else if (clicked && !active) {
                 switch (items[i].kind) {
-                    case 4: sGalleryOpen = true;  sShowOpen = false; break;
+                    case 4: sGalleryFromShow = sShowOpen; sGalleryOpen = true; sShowOpen = false; break;
                     case 5: sShowOpen    = true;  sGalleryOpen = false; break;
                     default: {
                         sGalleryOpen = false; sShowOpen = false;

@@ -18,6 +18,16 @@ float characterKnobToConditioner(float k) {
 
 static bool isBrightnessParam(const std::string& name); // defined below
 
+// Spin / rotation / hue params are excluded from auto-generated recipes:
+// an angle integrator or a hue wheel driven by the music whirls the whole
+// picture or cycles its colours (per Lu: spin and hue shift go too crazy).
+static bool isSpinParam(const std::string& name) {
+    std::string s; s.reserve(name.size());
+    for (char c : name) s += (char)std::tolower((unsigned char)c);
+    return s.find("spin") != std::string::npos || s.find("rotat") != std::string::npos
+        || s.find("hue") != std::string::npos;
+}
+
 // Motion-integrator params (speeds, spins, zooms…) compound over time, so
 // even a modest modulation reads violently — a shader whose motionSpeed
 // swings ±20% looks twice as "intense" as one whose color does. These get
@@ -102,6 +112,9 @@ bool shuffle(std::map<std::string, AudioBinding>& bindings,
     int want = std::min(5, (int)idx.size());
     bool brightUsed = false;
     for (int j = 0; j < (int)idx.size() && (int)r.e.size() < want; j++) {
+        // Never auto-pick a spin / rotation / hue param (see isSpinParam).
+        // Still bindable by hand from the bolt popover.
+        if (isSpinParam(params[idx[j]].name)) continue;
         bool bright = isBrightnessParam(params[idx[j]].name);
         if (bright && brightUsed) continue;       // at most ONE brightness param
         RecipeEntry e;

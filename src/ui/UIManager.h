@@ -98,6 +98,7 @@ public:
     // tab (next to ZONES) and rendered by Application::renderShaderGallery.
     static bool sGalleryOpen;
     static bool sShowOpen;
+    static bool sGalleryFromShow;   // the gallery was opened from the SHOW page: tiles load the knob-target deck by default
     // Screen-space Y where the top nav band ends (set by ViewportPanel each
     // frame). Fullscreen pages (gallery / show) start below it so the
     // workspace tabs stay clickable while a page is open.

@@ -1,6 +1,7 @@
 #include "ui/LayerPanel.h"
 #include "ui/UIManager.h"
 #include "ui/LucideIcons.h"
+#include "sources/FluidSource3D.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -795,6 +796,15 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
                 dupe->cropLeft = orig->cropLeft;
                 dupe->cropRight = orig->cropRight;
                 dupe->source = orig->source;
+                // A 3D Fluid gets its OWN simulation (same settings) so the
+                // copy can be colored, blended and driven independently —
+                // sharing the source would just draw the same sim twice.
+                if (orig->source && orig->source->typeName() == "Fluid3D") {
+                    auto* of = static_cast<FluidSource3D*>(orig->source.get());
+                    auto nf = std::make_shared<FluidSource3D>();
+                    nf->copyConfigFrom(*of);
+                    if (nf->init(of->zoneWidth(), of->zoneHeight())) dupe->source = nf;
+                }
                 stack.insertLayer(ci + 1, dupe);
                 selectedLayer = ci + 1;
             }

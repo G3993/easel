@@ -1,0 +1,193 @@
+/* ============================================================
+   ShaderClaw 3 — Design Tokens
+   Apple-grade dark instrument. The shader is the product;
+   chrome is one quiet glass layer that retreats behind it.
+   Red is spent on exactly one thing: live signal + interaction.
+   ============================================================ */
+:root {
+  /* Background — true black stage for the shader */
+  --sc-bg:              #000000;
+  --sc-surface:         rgba(22, 22, 24, 0.78);
+  --sc-surface-solid:   #161618;
+  --sc-surface-alt:     rgba(44, 44, 46, 0.88);
+  --sc-surface-raised:  #2c2c2e;
+
+  /* Quiet fills — iOS grouped-inset hierarchy */
+  --sc-fill:            rgba(255, 255, 255, 0.045);
+  --sc-fill-2:          rgba(255, 255, 255, 0.08);
+  --sc-fill-3:          rgba(255, 255, 255, 0.12);
+  --sc-fill-input:      rgba(0, 0, 0, 0.28);
+
+  /* Glass — Apple frosted material */
+  --sc-glass:           rgba(20, 20, 22, 0.62);
+  --sc-glass-blur:      36px;
+  --sc-glass-border:    rgba(255, 255, 255, 0.09);
+  --sc-glass-shadow:    0 16px 48px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.06) inset;
+
+  /* Borders */
+  --sc-border:          rgba(255, 255, 255, 0.07);
+  --sc-border-hover:    rgba(255, 255, 255, 0.14);
+  --sc-border-focus:    rgba(232, 64, 87, 0.45);
+  --sc-border-active:   rgba(232, 64, 87, 0.6);
+  --sc-separator:       rgba(255, 255, 255, 0.055);
+
+  /* Text — SF hierarchy */
+  --sc-text:            rgba(255, 255, 255, 0.92);
+  --sc-text-dim:        rgba(255, 255, 255, 0.5);
+  --sc-text-bright:     #ffffff;
+  --sc-text-muted:      rgba(255, 255, 255, 0.28);
+
+  /* Accent — ShaderClaw red. Live signal + interaction only. */
+  --sc-accent:          #E84057;
+  --sc-accent-dim:      rgba(232, 64, 87, 0.12);
+  --sc-accent-glow:     rgba(232, 64, 87, 0.35);
+  --sc-accent-hover:    #f04868;
+  --sc-accent-surface:  rgba(232, 64, 87, 0.08);
+  --sc-accent-purple:   #E84057;
+  --sc-accent-gradient: #E84057; /* flattened: solid, no gradients */
+
+  /* Status */
+  --sc-cyan:            #64d2ff;
+  --sc-green:           #30d158;
+  --sc-yellow:          #ffd60a;
+  --sc-purple:          #bf5af2;
+  --sc-red:             #ff453a;
+
+  /* Typography — SF Pro, negative tracking at every size */
+  --sc-font:            -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Inter', system-ui, sans-serif;
+  --sc-font-mono:       'SF Mono', ui-monospace, 'JetBrains Mono', 'Cascadia Code', monospace;
+  --sc-font-size-xs:    10px;
+  --sc-font-size-sm:    11px;
+  --sc-font-size-base:  12px;
+  --sc-font-size-md:    13px;
+  --sc-font-size-lg:    14px;
+  --sc-font-size-xl:    15px;
+  --sc-tracking:        -0.12px;
+  --sc-tracking-tight:  -0.2px;
+
+  /* Spacing */
+  --sc-space-1:  4px;
+  --sc-space-2:  8px;
+  --sc-space-3:  12px;
+  --sc-space-4:  16px;
+  --sc-space-5:  20px;
+  --sc-space-6:  24px;
+  --sc-space-8:  32px;
+
+  /* Radii */
+  --sc-radius-sm: 6px;
+  --sc-radius:    8px;
+  --sc-radius-lg: 12px;
+  --sc-radius-xl: 18px;
+  --sc-radius-pill: 980px;
+
+  /* Motion — exponential ease-out, no bounce */
+  --sc-ease:      cubic-bezier(0.25, 0.1, 0.25, 1);
+  --sc-ease-out:  cubic-bezier(0.16, 1, 0.3, 1);
+  --sc-ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --sc-duration:  180ms;
+  --sc-duration-slow: 320ms;
+
+  /* Floating panel dimensions */
+  --sc-topbar-h:      48px;
+  --sc-toolbar-w:     54px;
+  --sc-detail-w:      340px;
+  --sc-sources-w:     260px;
+  --sc-panel-gap:     14px;
+  --sc-panel-radius:  18px;
+
+  /* Control sizing */
+  --sc-label-w:    88px;
+  --sc-val-w:      38px;
+  --sc-slider-h:   4px;
+  --sc-thumb:      16px;
+  --sc-control-gap: 10px;
+
+  /* Slider colors */
+  --sc-slider-track: rgba(255, 255, 255, 0.12);
+  --sc-slider-fill:  rgba(255, 255, 255, 0.85);
+
+  /* Legacy compat aliases */
+  --bg:           var(--sc-bg);
+  --panel:        var(--sc-surface);
+  --panel-solid:  var(--sc-surface-solid);
+  --panel-alt:    var(--sc-surface-alt);
+  --surface-alt:  var(--sc-surface-raised);
+  --border:       var(--sc-border);
+  --border-hover: var(--sc-border-hover);
+  --border-focus: var(--sc-border-focus);
+  --text:         var(--sc-text);
+  --text-dim:     var(--sc-text-dim);
+  --text-bright:  var(--sc-text-bright);
+  --accent:       var(--sc-accent);
+  --accent-dim:   var(--sc-accent-dim);
+  --accent-glow:  var(--sc-accent-glow);
+  --cyan:         var(--sc-cyan);
+  --status-ok:    var(--sc-green);
+  --font:         var(--sc-font);
+  --font-mono:    var(--sc-font-mono);
+  --radius:       var(--sc-radius);
+  --radius-lg:    var(--sc-radius-lg);
+  --label-w:      var(--sc-label-w);
+  --val-w:        var(--sc-val-w);
+  --control-gap:  var(--sc-control-gap);
+  --slider-h:     var(--sc-slider-h);
+}
+
+/* Mobile: larger type, thicker tracks, bigger touch targets */
+@media (max-width: 900px) {
+  :root {
+    --sc-font-size-xs: 11px;
+    --sc-font-size-sm: 12px;
+    --sc-font-size-base: 13px;
+    --sc-font-size-md: 14px;
+    --sc-font-size-lg: 15px;
+    --sc-font-size-xl: 17px;
+    --sc-slider-h: 6px;
+    --sc-thumb: 24px;
+    --sc-label-w: 110px;
+    --sc-panel-radius: 20px;
+  }
+}
+
+/* Large screens (4K, ultrawide, TV): wider panels, distance-readable type */
+@media (min-width: 2560px) {
+  :root {
+    --sc-detail-w: 420px;
+    --sc-sources-w: 320px;
+    --sc-toolbar-w: 64px;
+    --sc-font-size-xs: 12px;
+    --sc-font-size-sm: 13px;
+    --sc-font-size-base: 14px;
+    --sc-font-size-md: 15px;
+    --sc-font-size-lg: 17px;
+    --sc-font-size-xl: 20px;
+    --sc-slider-h: 5px;
+    --sc-thumb: 18px;
+  }
+}
+@media (min-width: 3840px) {
+  :root {
+    --sc-detail-w: 500px;
+    --sc-sources-w: 380px;
+    --sc-toolbar-w: 72px;
+    --sc-font-size-xs: 14px;
+    --sc-font-size-sm: 15px;
+    --sc-font-size-base: 16px;
+    --sc-font-size-md: 18px;
+    --sc-font-size-lg: 20px;
+    --sc-font-size-xl: 24px;
+    --sc-slider-h: 7px;
+    --sc-thumb: 22px;
+    --sc-topbar-h: 56px;
+    --sc-panel-gap: 18px;
+  }
+}
+
+:root {
+  /* Compat for old grid layout references */
+  --sc-toolbar-h:     var(--sc-topbar-h);
+  --sc-assets-w:      var(--sc-toolbar-w);
+  --sc-properties-w:  var(--sc-detail-w);
+  --sc-timeline-h:    0px;
+}

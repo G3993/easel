@@ -1,0 +1,471 @@
+/* ============================================================
+   ShaderClaw 3 — Layout: Canvas-First Floating Panels
+   The canvas IS the app. One glass panel floats above it.
+   ============================================================ */
+
+/* ===== APP CONTAINER — full viewport ===== */
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh; /* fix mobile Safari address bar overlap */
+  overflow: hidden;
+  background: #000;
+  font-family: var(--sc-font);
+  letter-spacing: var(--sc-tracking);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== FLOATING PANEL BASE ===== */
+.sc3-panel,
+.sc3-detail-panel,
+.sc3-sources-panel,
+.sc3-code-panel {
+  position: absolute;
+  background: var(--sc-glass);
+  backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.5);
+  border: 1px solid var(--sc-glass-border);
+  border-radius: var(--sc-panel-radius);
+  box-shadow: var(--sc-glass-shadow);
+  overflow: hidden;
+  z-index: 50;
+  transition: opacity var(--sc-duration-slow) var(--sc-ease),
+              transform var(--sc-duration-slow) var(--sc-ease-out);
+}
+
+/* ===== SOURCES PANEL (legacy, replaced by tabs) ===== */
+.sc3-sources {
+  position: absolute;
+  left: calc(var(--sc-toolbar-w) + var(--sc-panel-gap) + var(--sc-panel-gap));
+  top: calc(var(--sc-topbar-h) + var(--sc-panel-gap));
+  bottom: var(--sc-panel-gap);
+  width: var(--sc-sources-w);
+  z-index: 60;
+  overflow: hidden;
+  display: none;
+}
+.sc3-sources.visible {
+  display: flex;
+  flex-direction: column;
+  animation: sc3-panel-in 0.3s var(--sc-ease-out);
+}
+
+/* ===== PROPERTIES / DETAIL PANEL (right) ===== */
+.sc3-properties {
+  position: absolute;
+  right: var(--sc-panel-gap);
+  top: var(--sc-panel-gap);
+  bottom: var(--sc-panel-gap);
+  width: var(--sc-detail-w);
+  background: var(--sc-glass);
+  backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.6);
+  -webkit-backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.6);
+  border: 1px solid var(--sc-glass-border);
+  border-top-color: rgba(255, 255, 255, 0.13);
+  border-radius: var(--sc-panel-radius);
+  box-shadow: var(--sc-glass-shadow);
+  z-index: 50;
+  display: none;
+  overflow: hidden; /* tabs handle their own scroll */
+}
+.sc3-properties.visible {
+  display: flex;
+  flex-direction: column;
+  animation: sc3-panel-in 0.24s var(--sc-ease-out);
+}
+
+/* ===== PROPERTIES PANEL RESIZE HANDLE (left edge) ===== */
+.sc3-properties-resize {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+.sc3-properties-resize:hover,
+.sc3-properties-resize.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ===== TAB BAR — iOS segmented control ===== */
+.sc3-tab-bar {
+  display: flex;
+  gap: 2px;
+  margin: 10px 12px 8px;
+  padding: 2px;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 9px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.sc3-tab {
+  flex: 1;
+  padding: 6px 0 7px;
+  font-size: var(--sc-font-size-base);
+  font-weight: 500;
+  letter-spacing: var(--sc-tracking);
+  color: var(--sc-text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: color var(--sc-duration) var(--sc-ease), background var(--sc-duration) var(--sc-ease);
+  font-family: var(--sc-font);
+}
+.sc3-tab:hover { color: var(--sc-text); }
+.sc3-tab.active {
+  color: var(--sc-text-bright);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Tab content panels */
+.sc3-tab-content {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  padding-bottom: 14px;
+}
+.sc3-tab-content.active { display: block; }
+
+/* Controls tab — flex column so sections can be ordered by importance:
+   the shader you are playing comes first, output size last. */
+.sc3-tab-content.active[data-tab-content="canvas"] {
+  display: flex;
+  flex-direction: column;
+}
+.sc3-tab-content[data-tab-content="canvas"] > * { order: 10; flex-shrink: 0; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-section:has([data-section="shader-layer"])   { order: 1; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-section:has([data-section="text-layer"])     { order: 2; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-section:has([data-section="input-triggers"]) { order: 3; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-section:has([data-section="movement"])       { order: 4; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-section:has([data-section="scene-layer"])    { order: 5; }
+.sc3-tab-content[data-tab-content="canvas"] > .sc3-canvas-size-row                              { order: 6; margin-top: 2px; }
+.sc3-tab-content::-webkit-scrollbar { width: 3px; }
+.sc3-tab-content::-webkit-scrollbar-track { background: transparent; }
+.sc3-tab-content::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+
+/* Hide the old left toolbar strip */
+.sc3-toolbar-strip { display: none !important; }
+
+/* Sources panel no longer needed as standalone */
+.sc3-sources { display: none !important; }
+
+/* ===== CONTENT TILE GRID (Assets tab) ===== */
+.sc3-content-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 4px 12px 10px;
+}
+.sc3-content-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 14px 4px 12px;
+  background: var(--sc-fill);
+  border: none;
+  border-radius: var(--sc-radius-lg);
+  color: var(--sc-text-dim);
+  cursor: pointer;
+  transition: background var(--sc-duration) var(--sc-ease), color var(--sc-duration) var(--sc-ease), transform var(--sc-duration) var(--sc-ease-out);
+  font-family: var(--sc-font);
+}
+.sc3-content-tile:hover {
+  background: var(--sc-fill-2);
+  color: var(--sc-text);
+}
+.sc3-content-tile:active {
+  background: var(--sc-fill-3);
+  transform: scale(0.97);
+}
+.sc3-content-tile svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.5;
+}
+.sc3-content-tile span {
+  font-size: var(--sc-font-size-sm);
+  font-weight: 500;
+  letter-spacing: var(--sc-tracking);
+}
+
+/* ===== SECTIONS — inset grouped, iOS style ===== */
+.sc3-tab-content[data-tab-content="canvas"] .sc3-section {
+  margin: 0 12px 10px;
+  background: var(--sc-fill);
+  border-radius: var(--sc-radius-lg);
+  overflow: hidden;
+}
+.sc3-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: var(--sc-font-size-md);
+  font-weight: 600;
+  letter-spacing: var(--sc-tracking-tight);
+  color: var(--sc-text);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--sc-duration);
+  border-bottom: none;
+}
+.sc3-section-header:hover { background: rgba(255,255,255,0.03); }
+.sc3-section-chevron {
+  font-size: 8px;
+  color: var(--sc-text-muted);
+  transition: transform 0.22s var(--sc-ease-out);
+  display: inline-block;
+}
+.sc3-section-body { padding-bottom: 6px; }
+.sc3-section.collapsed .sc3-section-body { display: none; }
+.sc3-section.collapsed .sc3-section-chevron { transform: rotate(-90deg); }
+
+/* Layer section headers — eye + title + add */
+.sc3-layer-header {
+  display: flex; align-items: center; gap: 8px;
+  border-bottom: none;
+}
+.sc3-layer-header .layer-vis {
+  background: none; border: none; color: var(--sc-text-dim);
+  cursor: pointer; padding: 0; display: flex; flex-shrink: 0;
+}
+.sc3-layer-header .layer-vis:hover { color: var(--sc-text); }
+.sc3-section-title { flex: 1; }
+.sc3-section-swatch {
+  width: 14px; height: 14px; border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.12);
+  flex-shrink: 0; background: #000;
+}
+
+/* Hide old Layers section header (replaced by individual layer sections) */
+.sc3-section-header[data-section="layers"] { display: none; }
+
+/* Hide old assets header (tab bar replaces it) */
+.assets-header { display: none; }
+
+.section-body { display: block; }
+.section-header {
+  font-size: var(--sc-font-size-sm); font-weight: 600;
+  letter-spacing: var(--sc-tracking);
+  color: var(--sc-text-dim);
+  padding: 8px 14px 4px;
+  display: flex; align-items: center; gap: var(--sc-space-2);
+}
+
+/* ===== ANIMATIONS ===== */
+@keyframes sc3-panel-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes sc3-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ===== MOBILE DOCK — hidden on desktop ===== */
+#mobile-dock { display: none; }
+
+/* ===== FULLSCREEN EXIT CHIP — hidden unless pseudo-fullscreen ===== */
+#fs-exit { display: none; }
+
+/* ===== MOBILE — centered stage + bottom dock + per-effect sheet ===== */
+@media (max-width: 900px) {
+  /* Hide toolbar strip, header, and 3D layer on mobile */
+  .sc3-toolbar-strip { display: none !important; }
+  .sc3-header { display: none !important; }
+  .layer-toggle-section[data-type="scene"] { display: none !important; }
+  [data-section="scene-layer"] { display: none !important; }
+  .sc3-properties-resize { display: none; }
+
+  /* Stage rules live in viewport.css (loads after this file) */
+
+  /* Bottom dock — horizontal scroll of effects */
+  #mobile-dock {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: calc(76px + env(safe-area-inset-bottom, 0px));
+    padding: 8px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    background: rgba(10, 10, 12, 0.85);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    z-index: 90;
+  }
+  #mobile-dock::-webkit-scrollbar { display: none; }
+  .dock-item {
+    flex: 1 0 auto;
+    min-width: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    background: none;
+    border: none;
+    border-radius: 12px;
+    color: rgba(255,255,255,0.65);
+    font-family: var(--sc-font);
+    cursor: pointer;
+    padding: 6px 8px;
+    transition: color 0.15s, background 0.15s, transform 0.15s var(--sc-ease-out);
+  }
+  .dock-item:active { transform: scale(0.94); }
+  .dock-item.active { color: #fff; background: rgba(255,255,255,0.1); }
+  .dock-item svg { width: 22px; height: 22px; flex-shrink: 0; }
+  .dock-item span {
+    font-size: 11px; font-weight: 500;
+    letter-spacing: var(--sc-tracking);
+    white-space: nowrap;
+  }
+
+  /* Control sheet — sits above the dock, hidden until a dock item opens it.
+     The dock stays visible so switching effects is one tap. */
+  .sc3-sources, .sc3-properties {
+    left: 0 !important;
+    right: 0 !important;
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px)) !important;
+    top: auto !important;
+    width: auto !important;
+    height: 44dvh;
+    max-height: none;
+    border-radius: var(--sc-panel-radius) var(--sc-panel-radius) 0 0;
+    border-bottom: none;
+    padding-bottom: 4px;
+    transition: height 0.3s var(--sc-ease-out), transform 0.3s var(--sc-ease-out);
+    background: rgba(14, 14, 16, 0.88);
+    z-index: 85;
+  }
+  .sc3-properties.sheet-hidden {
+    transform: translateY(115%);
+    pointer-events: none;
+  }
+  .sc3-properties.sheet-full {
+    height: calc(100dvh - 132px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  }
+  /* Live drag — no transition while the finger is down */
+  .sc3-properties.dragging { transition: none; }
+  .sc3-panel-pill { touch-action: none; }
+
+  /* Solo mode — dock choice shows only that section's controls */
+  .sc3-tab-content[data-tab-content="canvas"].solo > .sc3-section,
+  .sc3-tab-content[data-tab-content="canvas"].solo > .sc3-canvas-size-row { display: none; }
+  .sc3-tab-content[data-tab-content="canvas"].solo > .sc3-section.solo-target { display: block; }
+  /* Solo hides the tab bar too — the dock is the navigation */
+  .sc3-properties.sheet-solo .sc3-tab-bar { display: none; }
+
+  /* Drag pill at top of the sheet — large touch target */
+  .sc3-panel-pill {
+    display: flex !important;
+    justify-content: center;
+    align-items: center;
+    padding: 10px 0 4px;
+    cursor: grab;
+    min-height: 26px;
+  }
+  .sc3-panel-pill .drag-pill {
+    width: 40px; height: 5px; border-radius: 3px;
+    background: rgba(255,255,255,0.3);
+  }
+  .sc3-tab-bar { margin-top: 2px; }
+
+  /* Old floating toggle + input buttons — replaced by the dock */
+  .sc3-mobile-toggle { display: none !important; }
+  .sc3-mobile-inputs { display: none !important; }
+
+  .canvas-btn { width: 44px; height: 44px; font-size: 18px; }
+  .input-circle-btn { min-width: 44px; min-height: 44px; }
+  .layer-params { max-height: none !important; overflow-y: visible !important; }
+  #shader-browser { width: calc(100vw - 20px) !important; left: 10px !important; right: 10px !important; }
+  #shader-browser .browser-body { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* Cheaper blur on mobile GPUs */
+  .sc3-panel, .sc3-sources, .sc3-properties {
+    backdrop-filter: blur(20px) saturate(1.4) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(1.4) !important;
+  }
+
+  /* ===== PSEUDO-FULLSCREEN — hide chrome, pure shader ===== */
+  body.sc3-fs #mobile-dock,
+  body.sc3-fs .sc3-properties,
+  body.sc3-fs .canvas-controls,
+  body.sc3-fs #interact-hint { display: none !important; }
+}
+
+/* Mobile drag handle (legacy) */
+#mobile-drag-handle { display: none; }
+.drag-pill {
+  width: 36px; height: 4px; border-radius: 2px;
+  background: rgba(255,255,255,0.25);
+}
+
+/* Panel pill — hidden on desktop */
+.sc3-panel-pill { display: none; }
+
+/* Mobile floating input buttons — hidden on desktop */
+.sc3-mobile-inputs { display: none; }
+.sc3-mobile-input-btn {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.7);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
+}
+.sc3-mobile-input-btn:active { transform: scale(0.9); }
+.sc3-mobile-input-btn.active {
+  background: rgba(232, 64, 87, 0.25);
+  border-color: rgba(232, 64, 87, 0.5);
+  color: #E84057;
+}
+
+/* Mobile toggle button — hidden on desktop */
+.sc3-mobile-toggle {
+  display: none;
+  position: fixed;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px)); left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: var(--sc-radius-pill);
+  color: rgba(255,255,255,0.75);
+  padding: 9px 22px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s var(--sc-ease-out), background 0.2s;
+}
+.sc3-mobile-toggle:active { transform: translateX(-50%) scale(0.95); }
+.sc3-mobile-toggle.hidden { display: none !important; }
+
+/* Sidebar compat (hide old tab system) */
+#sidebar-resize { display: none; }
+.sidebar-tabs { display: none; }
+.sidebar-tab { display: none; }
+.sidebar-tab-content { display: block; }
+.sidebar-tab-content.active { display: block; }
+#sidebar-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; }

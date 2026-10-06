@@ -1,0 +1,213 @@
+/* ============================================================
+   ShaderClaw 3 — Top Bar + Vertical Element Toolbar
+   Minimal floating chrome over the canvas
+   ============================================================ */
+
+/* ===== TOP BAR (floating gradient) ===== */
+.sc3-header {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: var(--sc-topbar-h);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--sc-space-4);
+  background: linear-gradient(180deg, rgba(0,0,0,0.5) 0%, transparent 100%);
+  z-index: 100;
+  pointer-events: none;
+  gap: var(--sc-space-3);
+}
+.sc3-header > * { pointer-events: auto; }
+
+.sc3-logo {
+  font-family: var(--sc-font);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: var(--sc-tracking-tight);
+  color: rgba(255,255,255,0.85);
+  user-select: none;
+  display: flex; align-items: center; gap: 9px;
+}
+.sc3-logo-img {
+  width: 26px; height: 26px;
+  object-fit: contain;
+  overflow: visible;
+}
+.sc3-version {
+  color: var(--sc-accent);
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 1px;
+  vertical-align: super;
+}
+
+.sc3-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.sc3-header-actions button {
+  background: rgba(255,255,255,0.07);
+  border: none;
+  color: rgba(255,255,255,0.6);
+  padding: 6px 16px;
+  border-radius: var(--sc-radius-pill);
+  font-size: var(--sc-font-size-base);
+  font-family: var(--sc-font);
+  font-weight: 500;
+  letter-spacing: var(--sc-tracking);
+  cursor: pointer;
+  transition: all var(--sc-duration);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.sc3-header-actions button:hover {
+  background: rgba(255,255,255,0.12);
+  color: var(--sc-text);
+}
+.sc3-header-actions button.active {
+  background: var(--sc-accent);
+  color: #fff;
+}
+
+/* ===== VERTICAL ELEMENT TOOLBAR ===== */
+.sc3-toolbar-strip {
+  position: absolute;
+  left: var(--sc-panel-gap);
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--sc-toolbar-w);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  background: var(--sc-glass);
+  backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.6);
+  -webkit-backdrop-filter: blur(var(--sc-glass-blur)) saturate(1.6);
+  border: 1px solid var(--sc-glass-border);
+  border-radius: var(--sc-panel-radius);
+  box-shadow: var(--sc-glass-shadow);
+  z-index: 80;
+}
+
+.sc3-tool {
+  width: 42px;
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  background: none;
+  border: none;
+  border-radius: 10px;
+  color: var(--sc-text-dim);
+  cursor: pointer;
+  transition: all var(--sc-duration);
+  position: relative;
+  padding: 0;
+}
+.sc3-tool:hover {
+  color: var(--sc-text);
+  background: var(--sc-fill-2);
+}
+.sc3-tool.active {
+  color: #fff;
+  background: var(--sc-accent);
+}
+.sc3-tool svg { width: 18px; height: 18px; flex-shrink: 0; }
+.sc3-tool-label {
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.sc3-tool-sep {
+  width: 24px; height: 1px;
+  background: var(--sc-separator);
+  margin: 3px 0;
+}
+
+/* Tooltip */
+.sc3-tool[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(10,10,12,0.92);
+  color: var(--sc-text);
+  font-size: 11px; font-weight: 500;
+  letter-spacing: var(--sc-tracking);
+  padding: 5px 11px; border-radius: 7px;
+  white-space: nowrap; pointer-events: none;
+  opacity: 0; transition: opacity 0.15s;
+  z-index: 200;
+}
+.sc3-tool[data-tooltip]:hover::after { opacity: 1; }
+
+/* Active indicator dot */
+.sc3-tool-dot {
+  position: absolute; top: 3px; right: 3px;
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--sc-accent);
+  box-shadow: 0 0 6px var(--sc-accent-glow);
+  display: none;
+}
+.sc3-tool.has-content .sc3-tool-dot { display: block; }
+
+/* ===== EXPORT HUB DROPDOWN ===== */
+#export-hub {
+  display: none;
+  position: fixed;
+  bottom: 64px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  background: var(--sc-glass);
+  backdrop-filter: blur(28px) saturate(1.5); -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid var(--sc-glass-border);
+  border-radius: var(--sc-panel-radius);
+  box-shadow: var(--sc-glass-shadow);
+  padding: var(--sc-space-3);
+  width: 292px;
+}
+#export-hub.show { display: block; animation: sc3-panel-in 0.18s var(--sc-ease-out); }
+
+.export-hub-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+}
+.export-tile {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 7px;
+  padding: var(--sc-space-3) var(--sc-space-1); aspect-ratio: 1;
+  background: var(--sc-fill);
+  border: none; border-radius: var(--sc-radius-lg);
+  color: var(--sc-text-dim); font-size: var(--sc-font-size-xs); font-family: var(--sc-font);
+  font-weight: 500; letter-spacing: var(--sc-tracking);
+  cursor: pointer; transition: all var(--sc-duration);
+}
+.export-tile:hover {
+  background: var(--sc-fill-2); color: var(--sc-text);
+}
+.export-tile:active { transform: scale(0.96); }
+.export-tile svg { opacity: 0.7; flex-shrink: 0; }
+.export-tile:hover svg { opacity: 1; }
+
+@media (max-width: 900px) {
+  #export-hub {
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    width: calc(100vw - 32px);
+    max-width: 320px;
+  }
+  .export-tile {
+    padding: var(--sc-space-3); font-size: var(--sc-font-size-sm);
+    min-height: 56px;
+  }
+}
+
+/* Legacy */
+#export-tab-content { display: none; }
+.export-tab-grid { display: none; }
+.export-tab-tile { display: none; }

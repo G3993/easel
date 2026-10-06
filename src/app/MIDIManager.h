@@ -71,6 +71,18 @@ public:
     // connected inputs. Its factory CC layout differs from the original XL's
     // (knobs 13-36, faders 5-12), so ShowDeck/Canvas pick their default CC
     // tables from this. Main thread only (reads the hot-plug device list).
+    // True when a hands-on control surface is connected. Virtual ports (AVA
+    // OS Octagon, IAC) and bare "USB MIDI Device" entries are always present
+    // on this Mac, so "MIDI is open" never means a controller is plugged in —
+    // the Show page's automatic knob takeover keys off THIS instead.
+    bool hasControlSurface() const {
+        for (const auto& n : m_lastDeviceNames)
+            if (n.find("Launch Control") != std::string::npos || n.find("LCXL") != std::string::npos ||
+                n.find("Launchpad") != std::string::npos || n.find("nanoKONTROL") != std::string::npos ||
+                n.find("APC") != std::string::npos)
+                return true;
+        return false;
+    }
     bool isLaunchControlXL3() const {
         for (const auto& n : m_lastDeviceNames)
             if (n.find("LCXL3") != std::string::npos || n.find("Launch Control XL 3") != std::string::npos)

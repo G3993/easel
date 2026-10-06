@@ -1,0 +1,22 @@
+/* ============================================================
+   ShaderClaw — Reset + Base Styles
+   ============================================================ */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--sc-font);
+  background: var(--sc-bg);
+  color: var(--sc-text);
+  height: 100vh;
+  height: 100dvh; /* fix mobile Safari address bar overlap */
+  overflow: hidden;
+  font-size: var(--sc-font-size-base);
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ===== SCROLLBAR GLOBAL ===== */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }

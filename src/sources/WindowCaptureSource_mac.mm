@@ -432,8 +432,18 @@ void WindowCaptureSource::update() {
             IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, nullptr);
             if (!m_loggedFirstFrame) {
                 m_loggedFirstFrame = true;
+                // Probe: average brightness of a 4x4 sample of the surface, so a
+                // "started but black" report can be split into black FRAMES
+                // (permission / system) vs a broken upload (GL).
+                const unsigned char* px = (const unsigned char*)base;
+                double sum = 0.0; int n = 0;
+                for (int yy = 0; yy < 4; yy++) for (int xx = 0; xx < 4; xx++) {
+                    int sx = (sw * (2 * xx + 1)) / 8, sy = (sh * (2 * yy + 1)) / 8;
+                    const unsigned char* q = px + (size_t)sy * rowBytes + (size_t)sx * 4;
+                    sum += (q[0] + q[1] + q[2]) / 3.0; n++;
+                }
                 std::cout << "[WindowCapture] first frame on screen: "
-                          << sw << "x" << sh << std::endl;
+                          << sw << "x" << sh << "  avg=" << (n ? sum / n : 0.0) << "/255" << std::endl;
             }
         }
     }

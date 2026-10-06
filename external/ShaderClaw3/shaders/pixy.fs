@@ -1,0 +1,221 @@
+/*{
+  "DESCRIPTION": "Pixy — a warping pixel-grid kaleidoscope. The bound image is sliced into a grid of cells whose borders breathe on a procedural wave field; each cell samples the image (and a feedback-smeared copy of it) through swirling UV displacement, inverting and cross-fading between the fresh frame and the trailed one. Ported from a multi-buffer Shadertoy: iChannel0/1 -> input image + Buffer A feedback, iChannel2/3 displacement maps -> procedural value noise, Buffer A -> a persistent gaussian-smear feedback of the input.",
+  "CREDIT": "Shadertoy 'pixy' — ISF multi-buffer port for Easel",
+  "CATEGORIES": [
+    "Effect",
+    "Feedback"
+  ],
+  "INPUTS": [
+    {
+      "NAME": "inputImage",
+      "LABEL": "Texture",
+      "TYPE": "image"
+    },
+    {
+      "NAME": "gridScale",
+      "LABEL": "Grid Scale",
+      "TYPE": "float",
+      "MIN": 4,
+      "MAX": 60,
+      "DEFAULT": 20,
+      "GROUP": "Shape / Geometry"
+    },
+    {
+      "NAME": "speed",
+      "LABEL": "Speed",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 3,
+      "DEFAULT": 1,
+      "GROUP": "Motion / Animation"
+    },
+    {
+      "NAME": "warpAmt",
+      "LABEL": "Warp",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 1,
+      "DEFAULT": 0.3,
+      "GROUP": "Motion / Animation"
+    },
+    {
+      "NAME": "trail",
+      "LABEL": "Trail",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 0.98,
+      "DEFAULT": 0.9,
+      "GROUP": "Motion / Animation"
+    },
+    {
+      "NAME": "hueShift",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 1,
+      "DEFAULT": 0,
+      "LABEL": "Hue Shift",
+      "GROUP": "Color"
+    },
+    {
+      "NAME": "colorBoost",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 2,
+      "DEFAULT": 1,
+      "LABEL": "Color Boost",
+      "GROUP": "Color"
+    },
+    {
+      "NAME": "bgColor",
+      "TYPE": "color",
+      "DEFAULT": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "LABEL": "Background",
+      "GROUP": "Background"
+    },
+    {
+      "NAME": "audioReact",
+      "LABEL": "Audio React",
+      "TYPE": "float",
+      "MIN": 0,
+      "MAX": 2,
+      "DEFAULT": 0.35,
+      "GROUP": "Audio Reactivity"
+    }
+  ],
+  "PASSES": [
+    {
+      "TARGET": "bufA",
+      "PERSISTENT": true
+    },
+    {}
+  ]
+}*/
+
+// ════════════════════════════════════════════════════════════════════════
+//  PIXY — Easel ISF port of a multi-buffer Shadertoy.
+//
+//  Shadertoy -> Easel mapping:
+//    iChannel0 -> inputImage      (the bound image / video)
+//    iChannel1 -> bufA            (feedback-smeared copy of the input)
+//    iChannel2/iChannel3 (htx/htx2 displacement, .g only) -> value noise
+//    Buffer A  -> bufA            (gaussian "boy + blur" feedback smear)
+//    iTime -> TIME, iResolution -> RENDERSIZE, iFrame -> FRAMEINDEX
+//  Pass order: bufA (PASSINDEX 0), image (PASSINDEX 1).
+// ════════════════════════════════════════════════════════════════════════
+
+#define PI 3.14159
+
+// Procedural fallback so it never renders flat when no image is bound.
+vec3 starterTex(vec2 uv) {
+    float a = 0.5 + 0.5 * sin(uv.x * 12.0 + TIME);
+    float b = 0.5 + 0.5 * sin(uv.y * 12.0 - TIME * 0.7);
+    float c = 0.5 + 0.5 * sin((uv.x + uv.y) * 8.0 + TIME * 1.3);
+    return vec3(a, b, c);
+}
+vec3 srcTex(vec2 uv) {
+    if (IMG_SIZE_inputImage.x > 0.0) return texture(inputImage, fract(uv)).rgb;
+    return starterTex(uv);
+}
+
+// Cheap value noise — stands in for the Shadertoy displacement textures.
+float h21(vec2 p) { p = fract(p * vec2(123.34, 345.45)); p += dot(p, p + 34.345); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = h21(i), b = h21(i + vec2(1, 0)), c = h21(i + vec2(0, 1)), d = h21(i + vec2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    vec2 uv0 = gl_FragCoord.xy / RENDERSIZE.xy;
+
+    // ── Buffer A: feedback smear (the "boy" + gaussian-blur blend) ─────────
+    if (PASSINDEX == 0) {
+        vec3 boy = srcTex(uv0 * vec2(1.2, 1.0) - vec2(0.1, 0.0));
+        // 3x3 gaussian blur of the PREVIOUS Buffer A → a soft trailing copy.
+        // Kernel 1 2 1 / 2 4 2 / 1 2 1 is separable: w = (2-|i|)*(2-|j|).
+        vec3 agg = vec3(0.0); float tw = 0.0;
+        for (int i = -1; i <= 1; i++)
+        for (int j = -1; j <= 1; j++) {
+            vec2 off = vec2(float(i), float(j)) * 0.01;
+            float w = (2.0 - abs(float(i))) * (2.0 - abs(float(j)));
+            agg += texture(bufA, uv0 + off).rgb * w;
+            tw  += w;
+        }
+        vec3 blurred = agg / tw;
+        if (FRAMEINDEX < 4) { gl_FragColor = vec4(boy, 1.0); return; }  // seed
+        gl_FragColor = vec4(mix(boy, blurred, clamp(trail, 0.0, 0.98)), 1.0);
+        return;
+    }
+
+    // ── Image: the pixy grid kaleidoscope ─────────────────────────────────
+    vec2 uv = (gl_FragCoord.xy - 0.5 * RENDERSIZE.xy) / RENDERSIZE.y;
+
+    // Non-gating audio: alive at audio=0; audioReact only adds on top.
+    float knee0 = smoothstep(0.05, 0.85, audioBass);
+    float bassP = pow(knee0, 1.6);                      // structural weight → warp
+    float highKnee = smoothstep(0.10, 0.90, audioHigh);
+    float highP = pow(highKnee, 1.2);                    // sparkle on grid lines
+    float beatP = audioBeatPulse * audioBeatPulse;        // decaying flash on the beat
+    float lvlP  = smoothstep(0.05, 0.90, audioLevel);     // overall energy → gentle glow lift
+
+    float sc = gridScale;
+    float t  = TIME * PI * 0.25 * 0.1 * speed;
+    vec2 p   = fract(uv * sc) - 0.5;
+    vec2 id  = floor(uv * sc) * 0.5;
+    float gridTheta = id.x * 0.2 - id.y * 0.1 + PI * 0.02 + t * 2.0;
+
+    // Displacement phase fields (Shadertoy htx.g / htx2.g) → value noise.
+    float g  = vnoise(uv0 * 8.0 + TIME * 0.20);
+    float g2 = vnoise(uv0 * 8.0 + 17.3 - TIME * 0.15);
+
+    vec2 txwav1 = vec2(sin(gridTheta * 0.5 + t + length(id) * 0.3 + g  * PI),
+                       cos(gridTheta * 0.5 + t + length(id) * 0.3));
+    vec2 txwav2 = vec2(cos(gridTheta * 0.5 + t + length(id) * 0.5),
+                       sin(gridTheta * 0.5 + t + length(id) * 0.5 + g2 * PI));
+
+    float gridWav = sin(gridTheta - txwav1.x * PI * 0.2) * 0.5 + 0.5;
+    // Bass also breathes the grid line thickness — the dominant structure.
+    float lineW   = mix(0.2, 0.7, gridWav) - audioReact * 0.08 * bassP;
+    float grid    = 1.0 - step(clamp(lineW, 0.04, 0.9), max(abs(p.y), abs(p.x)));
+
+    // Bass breathes the warp amount (structure, not position).
+    float warpEff = warpAmt * (1.0 + audioReact * 0.5 * bassP);
+    vec3 tx  = srcTex(uv0 + txwav1 * warpEff);                 // fresh, inverted
+    vec3 tx2 = texture(bufA, fract(uv0 + txwav2 * warpEff * 0.33)).rgb; // trailed
+    vec3 col = clamp(mix(1.0 - tx, tx2, grid), 0.0, 1.0);
+
+    // Overall energy → the frame leans toward its own inverse on louder passages
+    // (reads as a pulse/flash without ever clipping to white, since the image
+    // here runs bright — a straight brightness multiply would just clip). Clamp
+    // col first so this never runs away when stacked with the terms below.
+    float invFrac = clamp(audioReact * 0.65 * lvlP, 0.0, 0.5);
+    col = mix(col, 1.0 - col, invFrac);
+
+    // Highs: sparse sparkle riding the grid borders only (1.0 - grid = border mask).
+    float sparkleMask = (1.0 - grid) * step(0.7 - 0.15 * highP, h21(id));
+    col += vec3(sparkleMask * highP * audioReact * 0.3);
+
+    // Beat: a brief, soft flash on the grid lines that decays with the pulse.
+    col += vec3((1.0 - grid) * beatP * audioReact * 0.2);
+
+    // ---- universal color block (defaults = no-op) ----
+    float ucL = dot(col, vec3(0.299, 0.587, 0.114));
+    vec3 uc = mix(vec3(ucL), col, colorBoost);
+    if (hueShift > 0.0005) {
+        float hueA = hueShift * 6.2831853;
+        float hueC = cos(hueA), hueS = sin(hueA);
+        mat3 hueM = mat3(0.299,0.587,0.114, 0.299,0.587,0.114, 0.299,0.587,0.114)
+                  + hueC * mat3(0.701,-0.587,-0.114, -0.299,0.413,-0.114, -0.300,-0.588,0.886)
+                  + hueS * mat3(0.168,0.330,-0.497, -0.328,0.035,0.292, 1.250,-1.050,-0.203);
+        uc = clamp(hueM * uc, 0.0, 1.0);
+    }
+    uc = mix(uc, bgColor.rgb, bgColor.a * (1.0 - smoothstep(0.0, 0.35, ucL)));
+
+    gl_FragColor = vec4(uc, 1.0);
+}

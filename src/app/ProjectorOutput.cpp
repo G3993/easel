@@ -36,7 +36,8 @@ std::vector<MonitorInfo> ProjectorOutput::enumerateMonitors() {
         const char* nm = glfwGetMonitorName(monitors[i]);
         MonitorInfo info;
         info.monitor = monitors[i];
-        info.name = nm ? nm : "Display";
+        // a projector with no EDID name used to list as a blank label — give it one
+        info.name = (nm && *nm) ? nm : ("Display " + std::to_string(i + 1));
         info.x = 0; info.y = 0;
         glfwGetMonitorPos(monitors[i], &info.x, &info.y);
         info.width  = mode ? mode->width  : 1920;
@@ -45,6 +46,27 @@ std::vector<MonitorInfo> ProjectorOutput::enumerateMonitors() {
     }
 
     return result;
+}
+
+std::string ProjectorOutput::monitorKey(const std::vector<MonitorInfo>& mons, int idx) {
+    if (idx < 0 || idx >= (int)mons.size()) return "";
+    int ord = 0;
+    for (int i = 0; i < idx; i++) if (mons[i].name == mons[idx].name) ord++;
+    return mons[idx].name + "#" + std::to_string(ord) + " " + std::to_string(mons[idx].width) + "x" + std::to_string(mons[idx].height);
+}
+int ProjectorOutput::findMonitorByKey(const std::vector<MonitorInfo>& mons, const std::string& key) {
+    if (key.empty()) return -1;
+    for (int i = 0; i < (int)mons.size(); i++) if (monitorKey(mons, i) == key) return i;
+    // same name + ordinal but a different mode (the projector changed resolution): still it
+    std::string stem = key.substr(0, key.find(' '));
+    for (int i = 0; i < (int)mons.size(); i++) { std::string k = monitorKey(mons, i); if (k.substr(0, k.find(' ')) == stem) return i; }
+    // an unnamed projector ("Display N" / "" stem): match on size alone
+    std::string sz = key.substr(key.rfind(' ') + 1);
+    bool anon = stem.empty() || stem.rfind("Display", 0) == 0 || key[0] == '#';
+    if (anon) for (int i = 0; i < (int)mons.size(); i++) { if (mons[i].name.rfind("Display", 0) == 0 && std::to_string(mons[i].width) + "x" + std::to_string(mons[i].height) == sz) return i; }
+    // ...and if its resolution changed (720p → 1080p), the only unnamed external is still it
+    if (anon) { int found = -1, cnt = 0; for (int i = 0; i < (int)mons.size(); i++) if (mons[i].name.rfind("Display", 0) == 0) { found = i; cnt++; } if (cnt == 1) return found; }
+    return -1;
 }
 
 int ProjectorOutput::findSecondaryMonitor(GLFWwindow* mainWindow) {
@@ -113,6 +135,7 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
     m_mainWindow = mainWindow;
     m_width = tw;
     m_height = th;
+    m_targetX = tx; m_targetY = ty;
 
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
@@ -140,11 +163,19 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
 #endif
 
     // Escape key closes the projector window
+    {   // where did AppKit actually put it? (a rect off every screen gets
+        // constrained onto the main display — the "projector over the editor" glitch)
+        int ax = 0, ay = 0; glfwGetWindowPos(m_window, &ax, &ay);
+        int aw = 0, ah = 0; glfwGetWindowSize(m_window, &aw, &ah);
+        std::cout << "[Projector] window placed at " << ax << "," << ay << " " << aw << "x" << ah
+                  << " (wanted " << tx << "," << ty << " " << tw << "x" << th << ")" << std::endl;
+    }
+    ensurePlacement();   // AppKit sometimes constrains the first placement onto the main display
     glfwSetWindowUserPointer(m_window, this);
     glfwSetKeyCallback(m_window, [](GLFWwindow* win, int key, int, int action, int) {
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
             auto* self = (ProjectorOutput*)glfwGetWindowUserPointer(win);
-            if (self) self->requestClose();
+            if (self) self->bringEditorBack();
         }
     });
 
@@ -166,6 +197,31 @@ bool ProjectorOutput::create(GLFWwindow* mainWindow, int monitorIndex) {
               << " (" << tw << "x" << th << " at " << tx << "," << ty << ")" << std::endl;
 
     return true;
+}
+
+// The window must sit exactly on its monitor. AppKit constrains a window
+// whose frame it does not consider on-screen (first placement at startup,
+// display rearrangements) onto the main display — that is the "projector
+// over the editor" glitch. Put it back whenever it has drifted.
+void ProjectorOutput::ensurePlacement() {
+    if (!m_window) return;
+    int ax = 0, ay = 0;
+    glfwGetWindowPos(m_window, &ax, &ay);
+    if (ax != m_targetX || ay != m_targetY) {
+        glfwSetWindowPos(m_window, m_targetX, m_targetY);
+        glfwSetWindowSize(m_window, m_width, m_height);
+        int bx = 0, by = 0; glfwGetWindowPos(m_window, &bx, &by);
+        std::cout << "[Projector] re-placed from " << ax << "," << ay << " to " << bx << "," << by
+                  << " (target " << m_targetX << "," << m_targetY << ")" << std::endl;
+    }
+}
+
+void ProjectorOutput::bringEditorBack() {
+    ensurePlacement();
+    if (m_mainWindow) {
+        glfwFocusWindow(m_mainWindow);
+        std::cout << "[Projector] Esc: editor brought back (output stays live)" << std::endl;
+    }
 }
 
 void ProjectorOutput::destroy() {
@@ -193,6 +249,7 @@ void ProjectorOutput::present(GLuint texture) {
 void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
                                   float uScaleX, float uScaleY) {
     if (!m_window || !texture) return;
+    if ((m_placeCheck++ % 30) == 0) ensurePlacement();   // twice a second
 
     // Check if close was requested (e.g. Escape pressed on projector window)
     if (m_closeRequested) {

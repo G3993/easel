@@ -122,6 +122,23 @@ def build_preamble(isf_inputs: list, pass_buffers: list, body: str) -> str:
     lines.append("uniform float audioBass;")
     lines.append("uniform float audioMid;")
     lines.append("uniform float audioHigh;")
+    # The full Easel host audio surface (ShaderSource.cpp preamble), so
+    # shaders that read the extended uniforms compile here too. Unset
+    # uniforms read as 0 (the Time clocks are driven below).
+    lines.append("uniform float audioSub, audioLowMid, audioHighMid, audioTreble, audioPunch;")
+    lines.append("uniform float audioBeat, audioBeatPhase, audioBeatPulse, audioBarPhase, audioBPM, audioTempo01;")
+    lines.append("uniform float audioBrightness, audioSpread, audioRolloff, audioFlatness, audioTexture;")
+    lines.append("uniform float audioFlux, audioOnset, audioOnsetRate, audioTilt, audioZCR;")
+    lines.append("uniform float audioValence, audioArousal, audioTension, audioWarmth, audioSoftness, audioRoughness, audioCharm;")
+    lines.append("uniform float audioEnergy, audioEnergyVel, audioEnergyAcc, audioBuildup, audioBuildupRate, audioDrop;")
+    lines.append("uniform float audioNovelty, audioSectionPhase, audioSectionAge, audioLayers, audioDensity;")
+    lines.append("uniform float audioPalTemp, audioPalSat;")
+    lines.append("uniform float audioDominantPitch, audioMajorMinor, audioHCDF;")
+    lines.append("uniform float audioBassHit, audioMidHit, audioHighHit;")
+    lines.append("uniform float audioBassPresence, audioMidPresence, audioHighPresence, audioLevelPresence;")
+    lines.append("uniform float audioBassTime, audioMidTime, audioHighTime, audioTime;")
+    lines.append("uniform float audioBPMConfidence, audioPhase2, audioPhase4, audioPhase8, audioPhase16;")
+    lines.append("uniform float audioOnBeat, audioToggleOnBeat;")
     if "_voiceGlitch" in body:
         lines.append("uniform float _voiceGlitch;")
     lines.append("uniform float _voiceLevel;")
@@ -387,6 +404,11 @@ def render_frame(ctx, prog, fbo, time_value: float, frame_index: int,
     safe_set(prog, "audioBass", 0.5 + 0.35 * math.sin(time_value * 0.9))
     safe_set(prog, "audioMid", 0.35 + 0.3 * math.sin(time_value * 2.0 + 1.0))
     safe_set(prog, "audioHigh", 0.25 + 0.25 * math.sin(time_value * 3.3 + 2.0))
+    safe_set(prog, "audioBeatPulse", max(0.0, math.sin(time_value * 4.0)) ** 6)
+    safe_set(prog, "audioBeatPhase", (time_value * 2.0) % 1.0)
+    safe_set(prog, "audioEnergy", 0.5 + 0.3 * math.sin(time_value * 0.5))
+    for k in ("audioBassTime", "audioMidTime", "audioHighTime", "audioTime"):
+        safe_set(prog, k, time_value)
     safe_set(prog, "_voiceLevel", 0.3)
     safe_set(prog, "_voiceGlitch", 0.0)
     # Bind textures

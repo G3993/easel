@@ -348,6 +348,30 @@ if(HAS_OPENCV)
     endif()
 endif()
 
+# macOS: sign every build with a STABLE identity. Ad-hoc signatures change
+# cdhash on every rebuild, so macOS treated each build as a new app and
+# dropped its Screen Recording / audio-capture grants (the "screen capture
+# not allowed" loop). "Easel Dev" is a self-signed code-signing cert in the
+# login keychain (2026-10-06); when it is missing we fall back to ad-hoc so
+# a fresh checkout still builds. Override with -DEASEL_SIGN_IDENTITY=...
+if(APPLE)
+    set(EASEL_SIGN_IDENTITY "Easel Dev" CACHE STRING "codesign identity for Easel.app (empty = ad-hoc)")
+    set(_easel_sign "-")
+    if(NOT EASEL_SIGN_IDENTITY STREQUAL "")
+        execute_process(COMMAND security find-identity -v -p codesigning
+                        OUTPUT_VARIABLE _ids ERROR_QUIET)
+        if(_ids MATCHES "\"${EASEL_SIGN_IDENTITY}\"")
+            set(_easel_sign "${EASEL_SIGN_IDENTITY}")
+        else()
+            message(STATUS "codesign identity '${EASEL_SIGN_IDENTITY}' not found - ad-hoc signing")
+        endif()
+    endif()
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND codesign --force --deep --sign "${_easel_sign}" "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>"
+        COMMENT "codesign Easel.app (${_easel_sign})"
+        VERBATIM)
+endif()
+
 if(HAS_WHISPER)
     target_link_libraries(${PROJECT_NAME} PRIVATE whisper)
     target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_SOURCE_DIR}/external" "${whisper_SOURCE_DIR}/include")

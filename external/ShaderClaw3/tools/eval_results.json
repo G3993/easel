@@ -1,0 +1,123 @@
+{
+ "generated": "2026-08-27T23:40:23.802Z",
+ "count": 1,
+ "results": [
+  {
+   "file": "orchid.fs",
+   "compileOk": true,
+   "linkOk": true,
+   "errors": [],
+   "warnings": [],
+   "headerLineCount": 40,
+   "activeUniforms": [
+    "TIME",
+    "PASSINDEX",
+    "audioLevel",
+    "audioBass",
+    "audioMid",
+    "audioHigh",
+    "audioBeatPulse",
+    "_transparentBg",
+    "bloomSize",
+    "bloomOpen",
+    "swayAmt",
+    "orbitSpeed",
+    "cloudAmt",
+    "skyShift",
+    "brightness",
+    "motionSpeed",
+    "audioReact",
+    "trailAmt",
+    "bloomAmt",
+    "aberration",
+    "RENDERSIZE",
+    "mousePos",
+    "petalColor",
+    "throatColor",
+    "abTrail"
+   ],
+   "meanLuma": 0.9286709455602358,
+   "variance": 0.013547963265275437,
+   "blackFrac": 0,
+   "entropy": 2.636464651862501,
+   "edges": 0.007757209329044118,
+   "movement": 0.019204745157611655,
+   "audioResponseRaw": 0.049055670445261434,
+   "audioResponse": 0.02985092528764978,
+   "styles": {
+    "edm": {
+     "corr": 0.9644954667012354,
+     "nullCorr": 0.8241797650941399,
+     "corrAdj": 0.1403157016070955,
+     "responseMag": 0,
+     "silenceStep": 0.0035215290543300654,
+     "medianStep": 0.003335391773897059,
+     "p95Step": 0.018898478987949347,
+     "choppiness": 5.666044731491448
+    },
+    "hiphop": {
+     "corr": 0.9364692942215804,
+     "nullCorr": 0.643590449756754,
+     "corrAdj": 0.2928788444648265,
+     "responseMag": 0,
+     "silenceStep": 0.0034550685508578432,
+     "medianStep": 0.002637835733251634,
+     "p95Step": 0.0046051623774509805,
+     "choppiness": 1.745810900731958
+    },
+    "rock": {
+     "corr": 0.9686088486507765,
+     "nullCorr": 0.5638031029382111,
+     "corrAdj": 0.40480574571256533,
+     "responseMag": 0,
+     "silenceStep": 0.0030336467269199345,
+     "medianStep": 0.0023940940308415032,
+     "p95Step": 0.00466204873876634,
+     "choppiness": 1.9473122937981138
+    },
+    "ambient": {
+     "corr": 0,
+     "nullCorr": 0.7124908852605851,
+     "corrAdj": 0,
+     "responseMag": 0,
+     "silenceStep": 0.0034537919985702615,
+     "medianStep": 0.002849184921364379,
+     "p95Step": 0.0033101798662173204,
+     "choppiness": 1.161798885497466
+    },
+    "jazz": {
+     "corr": 0.964027554245991,
+     "nullCorr": 0.557816244433276,
+     "corrAdj": 0.4062113098127149,
+     "responseMag": 0,
+     "silenceStep": 0.003609850515727124,
+     "medianStep": 0.0029708563112745097,
+     "p95Step": 0.004208393969566993,
+     "choppiness": 1.4165592437426147
+    }
+   },
+   "styleDifferentiation": 0.01937217697301553,
+   "scores": {
+    "density": 1.453729918471638,
+    "movement": 5.5432474464142985,
+    "palette": 3.691050512607501,
+    "edges": 0.6981488396139706,
+    "audio": 6.910968127566473,
+    "audioStyles": {
+     "edm": 2.1047355241064327,
+     "hiphop": 4.393182666972397,
+     "rock": 6.07208618568848,
+     "ambient": 0,
+     "jazz": 6.093169647190724
+    },
+    "audioMin": 0,
+    "styleDiff": 5.567358723562265,
+    "overall": 2.8465441792768518
+   },
+   "choppy": false,
+   "maxChoppiness": 5.666044731491448,
+   "maxP95Step": 0.018898478987949347,
+   "ok": true
+  }
+ ]
+}

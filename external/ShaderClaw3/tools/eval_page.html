@@ -1,0 +1,836 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ShaderClaw Eval Harness</title>
+<canvas id="c" width="256" height="256"></canvas>
+<script src="/js/isf.js"></script>
+<script>
+// ============================================================
+// ShaderClaw offline eval page — compiles every shader through
+// the app's own buildFragmentShader(), runs it (incl. multipass
+// ping-pong + persistent-buffer warmup) and scores the frames.
+// Driven by tools/eval_harness.cjs via page.evaluate().
+// ============================================================
+
+// Render size: 256 for scoring (unchanged default); ?size=N enables high-res
+// still capture (tools/snap_shader.cjs). Scoring runs never pass ?size.
+const W = (function(){ try { return Math.max(64, Math.min(2048, parseInt(new URL(location.href).searchParams.get('size'), 10) || 256)); } catch (e) { return 256; } })();
+const H = W;
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, antialias: false })
+        || canvas.getContext('experimental-webgl');
+const extHF = gl.getExtension('OES_texture_half_float');
+gl.getExtension('OES_texture_half_float_linear');
+gl.getExtension('OES_texture_float');
+gl.getExtension('OES_standard_derivatives');
+
+// Fullscreen quad
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+// --- Shared dummy textures -------------------------------------------------
+function makeTex(w, h, fill) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  const data = new Uint8Array(w * h * 4);
+  fill(data, w, h);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+// Colorful gradient-checker: representative "user video/image" content
+const testImageTex = makeTex(128, 128, (d, w, h) => {
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    const chk = ((x >> 4) + (y >> 4)) & 1;
+    d[i]   = (x / w) * 255;
+    d[i+1] = (y / h) * 255;
+    d[i+2] = chk ? 220 : 60;
+    d[i+3] = 255;
+  }
+});
+
+// Font atlas — replicates updateFontAtlas() in js/media.js exactly:
+// 37 cells (A-Z, space, 0-9), one row, white glyphs, vertically flipped.
+const fontAtlasTexture = (() => {
+  const cellW = 96, cellH = 90; // quarter-scale of app atlas; same layout
+  const c = document.createElement('canvas');
+  c.width = 37 * cellW; c.height = cellH;
+  const ctx = c.getContext('2d');
+  ctx.translate(0, c.height); ctx.scale(1, -1);
+  ctx.font = '400 ' + Math.round(cellH * 0.85) + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < 26; i++) ctx.fillText(String.fromCharCode(65 + i), (i + 0.5) * cellW, cellH / 2);
+  for (let i = 0; i < 10; i++) ctx.fillText(String(i), (27 + i + 0.5) * cellW, cellH / 2);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+})();
+
+// varFontTex — message text rendered to a canvas (like app.js updateVarFontTexture)
+const varFontTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.translate(0, c.height); ctx.scale(1, -1);
+  ctx.font = '700 90px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('ETHEREA', c.width / 2, c.height / 2);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+})();
+
+// audioFFT texture — rebuilt per frame from the band object (or legacy scalar)
+const fftTex = gl.createTexture();
+function setFFT(b) {
+  if (typeof b === 'number') b = { sub: b * 0.9, bass: b, mid: b * 0.8, high: b * 0.6, treble: b * 0.6 };
+  const w = 256;
+  const data = new Uint8Array(w * 4);
+  // piecewise-linear band envelope across the spectrum: sub→bass→mid→high→treble
+  const anchors = [[0.00, b.sub || 0], [0.08, b.bass || 0], [0.30, b.mid || 0], [0.60, b.high || 0], [1.00, b.treble || 0]];
+  for (let x = 0; x < w; x++) {
+    const f = x / w;
+    let env = anchors[anchors.length - 1][1];
+    for (let k = 1; k < anchors.length; k++) {
+      if (f <= anchors[k][0]) {
+        const [f0, v0] = anchors[k - 1], [f1, v1] = anchors[k];
+        env = v0 + (v1 - v0) * (f - f0) / (f1 - f0);
+        break;
+      }
+    }
+    const v = env * Math.max(0, 1.0 - f * 0.35) *
+              (0.6 + 0.4 * Math.sin(f * 47.0) * Math.sin(f * 13.0 + 1.7));
+    data[x * 4] = data[x * 4 + 1] = data[x * 4 + 2] = Math.max(0, Math.min(255, v * 255));
+    data[x * 4 + 3] = 255;
+  }
+  gl.bindTexture(gl.TEXTURE_2D, fftTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+setFFT(0);
+
+// --- Music-style generators --------------------------------------------------
+// Each style produces a full band object per frame with DISTINCT per-band
+// envelopes, so we can score whether a shader adapts to different music —
+// not just whether it follows overall volume. Raw values pass through the
+// same fast-attack / slow-release smoothing the real audio bus applies
+// (house default release 0.85), so shaders receive bus-realistic signals.
+function legacyBands(a, time) {
+  return {
+    level: a, bass: a, mid: a * 0.8, high: a * 0.6, sub: a * 0.9, treble: a * 0.6,
+    energy: a, punch: a * 0.7, onset: a * 0.6, arousal: a, valence: 0.5,
+    brightness: 0.3 + a * 0.4, buildup: a * 0.3,
+    beatPulse: a * Math.max(0, Math.sin(time * 11.0)),
+    beat: a > 0.5 && Math.sin(time * 11.0) > 0.95 ? 1 : 0,
+    barPhase: (time * 0.4) % 1, beatPhase: (time * 1.6) % 1,
+    bassTime: time * a, midTime: time * a * 0.8, highTime: time * a * 0.6,
+    // EaselAudio schema extensions — derived from the same scalar (additive
+    // keys only; every pre-existing key above is untouched)
+    levelTime: time * a * 0.9,
+    bpm: 0, bpmConfidence: 0,
+    phase2: (time * 0.8) % 1, phase4: (time * 0.4) % 1,
+    phase8: (time * 0.2) % 1, phase16: (time * 0.1) % 1,
+    onBeat: a * Math.max(0, Math.sin(time * 11.0)),
+    toggleOnBeat: Math.floor(time * 1.6) % 2,
+    bassHit: a * 0.7, midHit: a * 0.6, highHit: a * 0.5,
+    bassPresence: a * 0.9, midPresence: a * 0.75, highPresence: a * 0.6,
+    stemBass: a * 0.9, stemDrums: a * 0.75, stemMelody: a * 0.8, stemAir: a * 0.6, stemVocal: a * 0.5,
+    stemBassHit: a * 0.7, stemDrumsHit: a * 0.7, stemMelodyHit: a * 0.5, stemAirHit: a * 0.45, stemVocalHit: a * 0.4,
+    stemBassPresence: a * 0.9, stemDrumsPresence: a * 0.75, stemMelodyPresence: a * 0.8, stemAirPresence: a * 0.6, stemVocalPresence: a * 0.5,
+  };
+}
+
+function hash1(n) { const s = Math.sin(n * 127.1) * 43758.5453; return s - Math.floor(s); }
+
+const STYLE_DEFS = {
+  // 128 BPM four-on-floor: sub+bass kicks every beat, offbeat hats, 8s build/drop cycle
+  edm:     { bpm: 128, kick: [1, 1, 1, 1], snare: [0, 0.6, 0, 0.6], hatOffbeat: 0.55, midBase: 0.45, energy: 0.85, swing: 0 },
+  // 88 BPM sub-heavy, sparse swung kicks, crisp hats, quiet mids
+  hiphop:  { bpm: 88,  kick: [1, 0, 0.85, 0.3], snare: [0, 0.9, 0, 0.9], hatOffbeat: 0.45, midBase: 0.3, energy: 0.6, swing: 0.12 },
+  // 120 BPM broadband: guitars dominate mids, kick/snare backbeat, cymbal wash
+  rock:    { bpm: 120, kick: [1, 0, 0.9, 0.2], snare: [0, 0.95, 0, 0.95], hatOffbeat: 0.5, midBase: 0.75, energy: 0.75, swing: 0 },
+  // beatless slow swells — the hard case: shader must still visibly breathe
+  ambient: { bpm: 0,   kick: [0, 0, 0, 0], snare: [0, 0, 0, 0], hatOffbeat: 0, midBase: 0.3, energy: 0.32, swing: 0 },
+  // 140 BPM swing, irregular accents, walking bass, brushed highs
+  jazz:    { bpm: 140, kick: [0.5, 0, 0.4, 0], snare: [0, 0.5, 0, 0.6], hatOffbeat: 0.5, midBase: 0.5, energy: 0.55, swing: 0.2 },
+};
+
+function StyleGen(name) {
+  const d = STYLE_DEFS[name];
+  const sm = {};   // smoothed band state (fast attack, slow release — bus behavior)
+  let bassTime = 0, midTime = 0, highTime = 0, levelTime = 0;
+  const smooth = (key, v, attack, release) => {
+    const prev = sm[key] != null ? sm[key] : v;
+    const k = v > prev ? (attack != null ? attack : 0.35) : (release != null ? release : 0.85);
+    return (sm[key] = prev * k + v * (1 - k));
+  };
+  this.tick = function(t, dt) {
+    let sub = 0.15, bass = 0.2, mid = d.midBase, high = 0.15, punch = 0, onset = 0, beat = 0, beatPulse = 0;
+    let beatPhase = 0, barPhase = 0, buildup = 0;
+    let midHitRaw = 0, highHitRaw = 0; // per-band transient envelopes (EaselAudio Hits)
+    if (d.bpm > 0) {
+      const bps = d.bpm / 60;
+      let bt = t * bps;
+      const bi = Math.floor(bt);
+      // swing: delay every other beat
+      if (d.swing && bi % 2 === 1) bt -= d.swing;
+      const phase = bt - Math.floor(bt);
+      beatPhase = phase;
+      barPhase = (bt / 4) % 1;
+      const slot = bi % 4;
+      const accent = 0.8 + 0.4 * hash1(bi);        // humanize accents (jazz especially)
+      const kickAmp = d.kick[slot] * accent;
+      const snareAmp = d.snare[slot] * accent;
+      const env = Math.pow(Math.max(0, 1 - phase), 3);   // decaying beat envelope
+      sub = 0.15 + 0.85 * kickAmp * env;
+      bass = 0.2 + 0.75 * kickAmp * env;
+      mid = d.midBase + 0.25 * snareAmp * env + 0.1 * Math.sin(t * 0.9);
+      const hat = phase > 0.5 ? d.hatOffbeat * Math.pow(1 - (phase - 0.5) * 2, 2) : 0;
+      high = 0.15 + 0.5 * snareAmp * env + hat;
+      punch = kickAmp * env;
+      onset = Math.max(kickAmp, snareAmp) * env;
+      midHitRaw = snareAmp * env;
+      highHitRaw = Math.max(hat, snareAmp * env * 0.7);
+      beat = (phase < 0.12 && kickAmp > 0.3) ? 1 : 0;
+      beatPulse = kickAmp > 0.3 ? kickAmp * Math.pow(Math.max(0, 1 - phase), 2) : 0;
+      // EDM-style 8s buildup ramp, resets on the "drop"
+      buildup = name === 'edm' ? Math.pow((t % 8) / 8, 2) * 0.8 : 0;
+    } else {
+      // ambient: beatless phase-offset swells. Periods 2-3.7s so a full swell
+      // fits the analysis window — slower LFOs are undetectable in 3.2s and
+      // scored every shader 0 on ambient regardless of real responsiveness
+      sub = 0.4 + 0.3 * Math.sin(t * 1.7 + 0.8);
+      bass = 0.45 + 0.35 * Math.sin(t * 2.2);
+      mid = 0.35 + 0.25 * Math.sin(t * 2.6 + 1.3);
+      high = 0.3 + 0.2 * Math.sin(t * 3.1 + 2.1);
+      onset = 0;
+    }
+    const energy = d.energy * (0.85 + 0.15 * Math.sin(t * 0.23));
+    const level = Math.min(1, 0.45 * bass + 0.35 * mid + 0.2 * high);
+    // smooth like the bus: events (beat/beatPulse/punch) stay raw — they're
+    // already decaying envelopes; continuous bands get attack/release
+    const b = {
+      level: smooth('level', level), bass: smooth('bass', bass), mid: smooth('mid', mid),
+      high: smooth('high', high), sub: smooth('sub', sub), treble: smooth('treble', high * 0.9),
+      energy: smooth('energy', energy), brightness: smooth('bright', 0.25 + 0.5 * (mid * 0.4 + high * 0.6)),
+      punch, onset, beat, beatPulse, buildup,
+      arousal: energy, valence: name === 'ambient' ? 0.6 : 0.5,
+      beatPhase, barPhase,
+      bassTime: (bassTime += dt * sm.bass || 0), midTime: (midTime += dt * sm.mid || 0), highTime: (highTime += dt * sm.high || 0),
+    };
+    // --- EaselAudio schema v1.0 extensions — derived from the SAME envelopes.
+    // Additive keys only: every field/state key used above stays untouched, so
+    // the pre-existing uniforms receive bit-identical sequences.
+    const btU = d.bpm > 0 ? t * (d.bpm / 60) : 0; // unswung beat clock for phase ramps
+    b.bpm = d.bpm;
+    b.bpmConfidence = d.bpm > 0 ? 0.9 : 0;
+    b.phase2 = d.bpm > 0 ? (btU / 2) % 1 : 0;
+    b.phase4 = barPhase;
+    b.phase8 = d.bpm > 0 ? (btU / 8) % 1 : 0;
+    b.phase16 = d.bpm > 0 ? (btU / 16) % 1 : 0;
+    b.onBeat = d.bpm > 0 ? Math.pow(Math.max(0, 1 - beatPhase / 0.15), 2) : 0;
+    b.toggleOnBeat = d.bpm > 0 ? Math.floor(btU) % 2 : 0;
+    // Hits: kick envelope drives bass, snare/hat envelopes drive mid/high
+    b.bassHit = punch;
+    b.midHit = midHitRaw;
+    b.highHit = highHitRaw;
+    // Presence: slow EMA of the (already bus-smoothed) bands — attack ~1.5s /
+    // release ~4s at the harness's fixed dt = 1/30
+    b.bassPresence = smooth('presBass', b.bass, 0.95, 0.981);
+    b.midPresence = smooth('presMid', b.mid, 0.95, 0.981);
+    b.highPresence = smooth('presHigh', b.high, 0.95, 0.981);
+    // Mix Time clock: accumulated dt * level
+    b.levelTime = (levelTime += dt * (sm.level || 0));
+    // Tier-1 pseudo-stems mapped from the sub/bass/percussive/tonal envelopes
+    b.stemBass = b.sub;
+    b.stemDrums = Math.max(punch, onset);
+    b.stemMelody = b.mid;
+    b.stemAir = b.treble;
+    b.stemVocal = Math.min(1, b.mid * 0.5 + b.high * 0.4);
+    b.stemBassHit = punch;
+    b.stemDrumsHit = onset;
+    b.stemMelodyHit = midHitRaw;
+    b.stemAirHit = highHitRaw;
+    b.stemVocalHit = midHitRaw * 0.6;
+    b.stemBassPresence = smooth('presStemBass', b.stemBass, 0.95, 0.981);
+    b.stemDrumsPresence = smooth('presStemDrums', b.stemDrums, 0.95, 0.981);
+    b.stemMelodyPresence = b.midPresence;
+    b.stemAirPresence = smooth('presStemAir', b.stemAir, 0.95, 0.981);
+    b.stemVocalPresence = smooth('presStemVocal', b.stemVocal, 0.95, 0.981);
+    return b;
+  };
+}
+
+function compileStage(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    gl.deleteShader(s);
+    return { ok: false, log };
+  }
+  return { ok: true, shader: s };
+}
+
+function makeFBO(w, h, half) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  const type = half && extHF ? extHF.HALF_FLOAT_OES : gl.UNSIGNED_BYTE;
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, tex, complete };
+}
+
+// --- Metrics ---------------------------------------------------------------
+function framePixels(fbo) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  const px = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return px;
+}
+
+function frameStats(px) {
+  let sum = 0, sum2 = 0, black = 0, edges = 0;
+  const buckets = new Map();
+  const n = W * H;
+  for (let i = 0; i < n; i++) {
+    const r = px[i*4], g = px[i*4+1], b = px[i*4+2];
+    const l = (0.299*r + 0.587*g + 0.114*b) / 255;
+    sum += l; sum2 += l * l;
+    if (r + g + b < 18) black++;
+    const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+  // horizontal gradient magnitude (subsampled)
+  for (let y = 0; y < H; y += 2) for (let x = 1; x < W; x += 2) {
+    const i = (y * W + x) * 4, j = i - 4;
+    edges += Math.abs(px[i] - px[j]) + Math.abs(px[i+1] - px[j+1]) + Math.abs(px[i+2] - px[j+2]);
+  }
+  let entropy = 0;
+  for (const c of buckets.values()) { const p = c / n; entropy -= p * Math.log2(p); }
+  const mean = sum / n;
+  return {
+    meanLuma: mean,
+    variance: sum2 / n - mean * mean,
+    blackFrac: black / n,
+    entropy,
+    edges: edges / (W * H / 4) / 765,
+  };
+}
+
+function frameDiff(a, b) {
+  let d = 0;
+  const n = W * H * 4;
+  for (let i = 0; i < n; i += 16) d += Math.abs(a[i] - b[i]) + Math.abs(a[i+1] - b[i+1]) + Math.abs(a[i+2] - b[i+2]);
+  return d / (n / 16) / 765;
+}
+
+// --- Main entry ------------------------------------------------------------
+window.evalShader = async function(file, opts) {
+  opts = opts || {};
+  const out = { file, compileOk: false, linkOk: false, errors: [], warnings: [] };
+  const owned = { programs: [], textures: [], fbos: [] };
+  try {
+    const resp = await fetch('/shaders/' + file + '?t=' + Date.now());
+    if (!resp.ok) { out.errors.push('fetch failed: ' + resp.status); return out; }
+    const source = await resp.text();
+
+    let built;
+    try { built = buildFragmentShader(source); }
+    catch (e) { out.errors.push('buildFragmentShader threw: ' + e.message); return out; }
+    const parsed = built.parsed;
+    out.headerLineCount = built.headerLineCount;
+
+    // Compile
+    const vs = compileStage(gl.VERTEX_SHADER, VERT_SHADER);
+    if (!vs.ok) { out.errors.push('VERT: ' + vs.log); return out; }
+    const fsRes = compileStage(gl.FRAGMENT_SHADER, built.frag);
+    if (!fsRes.ok) {
+      out.errors.push('FRAG COMPILE: ' + fsRes.log);
+      gl.deleteShader(vs.shader);
+      return out;
+    }
+    out.compileOk = true;
+    const prog = gl.createProgram();
+    owned.programs.push(prog);
+    gl.attachShader(prog, vs.shader);
+    gl.attachShader(prog, fsRes.shader);
+    gl.linkProgram(prog);
+    gl.deleteShader(vs.shader); gl.deleteShader(fsRes.shader);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      out.errors.push('LINK: ' + gl.getProgramInfoLog(prog));
+      return out;
+    }
+    out.linkOk = true;
+    gl.useProgram(prog);
+
+    // Active uniform census
+    const nu = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+    const uniforms = {};
+    for (let i = 0; i < nu; i++) {
+      const info = gl.getActiveUniform(prog, i);
+      const name = info.name.replace(/\[0\]$/, '');
+      uniforms[name] = { type: info.type, loc: gl.getUniformLocation(prog, info.name), size: info.size };
+    }
+    out.activeUniforms = Object.keys(uniforms);
+
+    // Pass setup: single-file multipass via PASSES + PASSINDEX
+    const passes = (parsed.meta && Array.isArray(parsed.meta.PASSES) && parsed.meta.PASSES.length)
+      ? parsed.meta.PASSES : [{}];
+    // ping-pong buffers per TARGET; final output FBO for readback
+    const targets = {};
+    for (const p of passes) {
+      if (p.TARGET && !targets[p.TARGET]) {
+        const a = makeFBO(W, H, !!p.FLOAT || !!p.PERSISTENT);
+        const b = makeFBO(W, H, !!p.FLOAT || !!p.PERSISTENT);
+        if (!a.complete || !b.complete) out.warnings.push('FBO incomplete for TARGET ' + p.TARGET);
+        targets[p.TARGET] = { front: a, back: b };
+        owned.fbos.push(a, b);
+      }
+    }
+    const outFBO = makeFBO(W, H, false);
+    owned.fbos.push(outFBO);
+
+    // Input defaults from ISF metadata
+    const inputDefaults = {};
+    const textUniformVals = {};
+    for (const inp of parsed.inputs || []) {
+      inputDefaults[inp.NAME] = inp;
+      if (inp.TYPE === 'text') {
+        // App convention (js/app.js): chars are ATLAS INDICES, not char codes:
+        // A-Z -> 0-25, space -> 26, 0-9 -> 27-36
+        const msg = ((typeof inp.DEFAULT === 'string' && inp.DEFAULT.trim()) || 'ETHEREA').toUpperCase();
+        const c2c = (ch) => {
+          if (!ch || ch === ' ') return 26;
+          const code = ch.charCodeAt(0);
+          if (code >= 65 && code <= 90) return code - 65;
+          if (code >= 48 && code <= 57) return code - 48 + 27;
+          return 26;
+        };
+        const maxLen = inp.MAX_LENGTH || 12;
+        for (let i = 0; i < maxLen; i++) textUniformVals[inp.NAME + '_' + i] = c2c(msg[i]);
+        textUniformVals[inp.NAME + '_len'] = Math.min(msg.replace(/\s+$/, '').length, maxLen);
+      }
+    }
+
+    const posLoc = gl.getAttribLocation(prog, 'position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    let frameIndex = 0;
+    function drawFrame(time, dt, audio) {
+      const A = (typeof audio === 'number') ? legacyBands(audio, time) : audio;
+      setFFT(A);
+      for (let pi = 0; pi < passes.length; pi++) {
+        const pass = passes[pi];
+        const isFinal = pi === passes.length - 1;
+        // texture unit assignment fresh each pass
+        let unit = 0;
+        for (const [name, u] of Object.entries(uniforms)) {
+          const loc = u.loc;
+          if (!loc) continue;
+          if (u.type === gl.SAMPLER_2D) {
+            gl.activeTexture(gl.TEXTURE0 + unit);
+            if (targets[name]) gl.bindTexture(gl.TEXTURE_2D, targets[name].front.tex);
+            else if (name === 'audioFFT') gl.bindTexture(gl.TEXTURE_2D, fftTex);
+            else if (name === 'fontAtlasTex') gl.bindTexture(gl.TEXTURE_2D, fontAtlasTexture);
+            else if (name === 'varFontTex') gl.bindTexture(gl.TEXTURE_2D, varFontTexture);
+            else gl.bindTexture(gl.TEXTURE_2D, testImageTex);
+            gl.uniform1i(loc, unit);
+            unit++;
+            continue;
+          }
+          switch (name) {
+            case 'TIME': gl.uniform1f(loc, time); break;
+            case 'TIMEDELTA': gl.uniform1f(loc, dt); break;
+            case 'RENDERSIZE': gl.uniform2f(loc, W, H); break;
+            case 'PASSINDEX': gl.uniform1i(loc, pi); break;
+            case 'FRAMEINDEX': gl.uniform1i(loc, frameIndex); break;
+            case 'mousePos': gl.uniform2f(loc, 0.5, 0.5); break;
+            case 'mouseDelta': gl.uniform2f(loc, 0, 0); break;
+            case 'mouseDown': case 'pinchHold': case 'pinchHold2': case 'inputActivity':
+              gl.uniform1f(loc, 0); break;
+            case 'audioLevel': gl.uniform1f(loc, A.level); break;
+            case 'audioBass': gl.uniform1f(loc, A.bass); break;
+            case 'audioMid': gl.uniform1f(loc, A.mid); break;
+            case 'audioHigh': gl.uniform1f(loc, A.high); break;
+            // Audio Feature Bus — full band object (style generator or legacy scalar)
+            case 'audioEnergy': gl.uniform1f(loc, A.energy); break;
+            case 'audioBeatPulse': gl.uniform1f(loc, A.beatPulse); break;
+            case 'audioBeat': gl.uniform1f(loc, A.beat); break;
+            case 'audioPunch': gl.uniform1f(loc, A.punch); break;
+            case 'audioOnset': gl.uniform1f(loc, A.onset); break;
+            case 'audioBrightness': gl.uniform1f(loc, A.brightness); break;
+            case 'audioArousal': gl.uniform1f(loc, A.arousal); break;
+            case 'audioValence': gl.uniform1f(loc, A.valence); break;
+            case 'audioBarPhase': gl.uniform1f(loc, A.barPhase); break;
+            case 'audioBeatPhase': gl.uniform1f(loc, A.beatPhase); break;
+            case 'audioBassTime': gl.uniform1f(loc, A.bassTime); break;
+            case 'audioMidTime': gl.uniform1f(loc, A.midTime); break;
+            case 'audioHighTime': gl.uniform1f(loc, A.highTime); break;
+            case 'audioBuildup': gl.uniform1f(loc, A.buildup); break;
+            case 'audioSub': gl.uniform1f(loc, A.sub); break;
+            case 'audioTreble': gl.uniform1f(loc, A.treble); break;
+            // EaselAudio schema v1.0 — NEW uniforms, driven from the same
+            // style envelopes. (No pre-existing case above was modified, and
+            // no manifest shader referenced these names before, so existing
+            // scoring is unaffected.)
+            case 'audioTime': gl.uniform1f(loc, A.levelTime || 0); break;
+            case 'audioBPM': gl.uniform1f(loc, A.bpm || 0); break;
+            case 'audioBPMConfidence': gl.uniform1f(loc, A.bpmConfidence || 0); break;
+            case 'audioPhase2': gl.uniform1f(loc, A.phase2 || 0); break;
+            case 'audioPhase4': gl.uniform1f(loc, (A.phase4 != null ? A.phase4 : A.barPhase) || 0); break;
+            case 'audioPhase8': gl.uniform1f(loc, A.phase8 || 0); break;
+            case 'audioPhase16': gl.uniform1f(loc, A.phase16 || 0); break;
+            case 'audioOnBeat': gl.uniform1f(loc, A.onBeat || 0); break;
+            case 'audioToggleOnBeat': gl.uniform1f(loc, A.toggleOnBeat || 0); break;
+            case 'audioBassHit': gl.uniform1f(loc, A.bassHit || 0); break;
+            case 'audioMidHit': gl.uniform1f(loc, A.midHit || 0); break;
+            case 'audioHighHit': gl.uniform1f(loc, A.highHit || 0); break;
+            case 'audioBassPresence': gl.uniform1f(loc, A.bassPresence || 0); break;
+            case 'audioMidPresence': gl.uniform1f(loc, A.midPresence || 0); break;
+            case 'audioHighPresence': gl.uniform1f(loc, A.highPresence || 0); break;
+            case 'stemBass': gl.uniform1f(loc, A.stemBass || 0); break;
+            case 'stemDrums': gl.uniform1f(loc, A.stemDrums || 0); break;
+            case 'stemMelody': gl.uniform1f(loc, A.stemMelody || 0); break;
+            case 'stemAir': gl.uniform1f(loc, A.stemAir || 0); break;
+            case 'stemVocal': gl.uniform1f(loc, A.stemVocal || 0); break;
+            case 'stemBassHit': gl.uniform1f(loc, A.stemBassHit || 0); break;
+            case 'stemDrumsHit': gl.uniform1f(loc, A.stemDrumsHit || 0); break;
+            case 'stemMelodyHit': gl.uniform1f(loc, A.stemMelodyHit || 0); break;
+            case 'stemAirHit': gl.uniform1f(loc, A.stemAirHit || 0); break;
+            case 'stemVocalHit': gl.uniform1f(loc, A.stemVocalHit || 0); break;
+            case 'stemBassPresence': gl.uniform1f(loc, A.stemBassPresence || 0); break;
+            case 'stemDrumsPresence': gl.uniform1f(loc, A.stemDrumsPresence || 0); break;
+            case 'stemMelodyPresence': gl.uniform1f(loc, A.stemMelodyPresence || 0); break;
+            case 'stemAirPresence': gl.uniform1f(loc, A.stemAirPresence || 0); break;
+            case 'stemVocalPresence': gl.uniform1f(loc, A.stemVocalPresence || 0); break;
+            case 'audioPalShadow': gl.uniform3f(loc, 0.03, 0.02, 0.08); break;
+            case 'audioPalMid': gl.uniform3f(loc, 0.35, 0.25, 0.60); break;
+            case 'audioPalHigh': gl.uniform3f(loc, 0.85, 0.80, 0.95); break;
+            case 'audioPalAccent': gl.uniform3f(loc, 1.00, 0.35, 0.50); break;
+            case '_transparentBg': gl.uniform1f(loc, 0); break;
+            case 'msgAge': gl.uniform1f(loc, -1.0); break;
+            case 'useFontAtlas': gl.uniform1f(loc, 1.0); break;
+            case 'scVideoMix': gl.uniform1f(loc, opts.videoMix != null ? opts.videoMix : 0.0); break;
+            default: {
+              if (name.startsWith('IMG_SIZE_')) { gl.uniform2f(loc, 128, 128); break; }
+              if (name in textUniformVals) { gl.uniform1f(loc, textUniformVals[name]); break; }
+              const inp = inputDefaults[name];
+              if (inp) {
+                const d = inp.DEFAULT;
+                if (inp.TYPE === 'float') gl.uniform1f(loc, typeof d === 'number' ? d : 0.5);
+                else if (inp.TYPE === 'bool') gl.uniform1f(loc, d ? 1 : 0);
+                else if (inp.TYPE === 'long') gl.uniform1i(loc, typeof d === 'number' ? d : 0);
+                else if (inp.TYPE === 'color') { const c = Array.isArray(d) ? d : [1,1,1,1]; gl.uniform4f(loc, c[0], c[1], c[2], c[3] != null ? c[3] : 1); }
+                else if (inp.TYPE === 'point2D') { const p = Array.isArray(d) ? d : [0.5,0.5]; gl.uniform2f(loc, p[0], p[1]); }
+              } else if (u.type === gl.FLOAT) gl.uniform1f(loc, 0.0);
+              else if (u.type === gl.FLOAT_VEC2) gl.uniform2f(loc, 0, 0);
+              else if (u.type === gl.FLOAT_VEC3) gl.uniform3f(loc, 0, 0, 0);
+              else if (u.type === gl.FLOAT_VEC4) gl.uniform4f(loc, 0, 0, 0, 0);
+              else if (u.type === gl.INT) gl.uniform1i(loc, 0);
+            }
+          }
+        }
+        // render target
+        if (pass.TARGET) gl.bindFramebuffer(gl.FRAMEBUFFER, targets[pass.TARGET].back.fbo);
+        else gl.bindFramebuffer(gl.FRAMEBUFFER, isFinal ? outFBO.fbo : outFBO.fbo);
+        gl.viewport(0, 0, W, H);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        if (pass.TARGET) {
+          const t = targets[pass.TARGET];
+          const tmp = t.front; t.front = t.back; t.back = tmp;
+        }
+      }
+      frameIndex++;
+      // If the LAST pass wrote to a TARGET (no final screen pass), read that target
+      const last = passes[passes.length - 1];
+      return last.TARGET ? targets[last.TARGET].front : outFBO;
+    }
+
+    // Warmup for persistent-buffer sims
+    const warmFrames = opts.warmup != null ? opts.warmup : 30;
+    let t = 0;
+    const dt = 1 / 30;
+    const baseAudio = opts.audio != null ? opts.audio : 0.0;
+    for (let i = 0; i < warmFrames; i++) { t += dt; drawFrame(t, dt, baseAudio); }
+
+    // Sample frames
+    const sampleTimes = opts.times || [0.5, 2.0, 5.0, 9.0];
+    const frames = [];
+    for (const st of sampleTimes) {
+      while (t < st) { t += dt; drawFrame(t, dt, baseAudio); }
+      const fb = drawFrame(t, dt, baseAudio);
+      frames.push(framePixels(fb.fbo));
+    }
+    const stats = frames.map(frameStats);
+    // Opt-in still frame capture for thumbnail generation (make_thumbnails.cjs)
+    // — reuses the same compiled/driven render this function already proved
+    // out on all 176 shaders, so it never fights a second, less-complete
+    // renderer's uniform set. Additive only; scoring below is unaffected.
+    // Picks the LEAST-BLACK sampled frame (not a fixed instant): text shaders
+    // and slow builds can be legitimately dark at any one moment, and a fixed
+    // t=2 frame shipped a batch of all-black thumbnails.
+    if (opts.captureFrame) {
+      let best = 0;
+      for (let i = 1; i < stats.length; i++) {
+        if (stats[i].blackFrac < stats[best].blackFrac - 1e-6 ||
+            (Math.abs(stats[i].blackFrac - stats[best].blackFrac) <= 1e-6 && stats[i].meanLuma > stats[best].meanLuma)) {
+          best = i;
+        }
+      }
+      out.thumbnailFrame = { index: best, time: sampleTimes[best], blackFrac: stats[best].blackFrac, meanLuma: stats[best].meanLuma };
+      const px = frames[best];
+      const raw = document.createElement('canvas');
+      raw.width = W; raw.height = H;
+      // readPixels rows are bottom-to-top; ImageData wants top-to-bottom.
+      const flipped = new Uint8ClampedArray(px.length);
+      for (let y = 0; y < H; y++) {
+        const srcStart = (H - 1 - y) * W * 4;
+        flipped.set(px.subarray(srcStart, srcStart + W * 4), y * W * 4);
+      }
+      raw.getContext('2d').putImageData(new ImageData(flipped, W, H), 0, 0);
+      // Flatten onto black: text shaders are Easel OVERLAYS with transparent
+      // backgrounds by design — putImageData preserves that alpha, which made
+      // their PNGs read as blank. drawImage alpha-composites over the fill.
+      const tmp = document.createElement('canvas');
+      tmp.width = W; tmp.height = H;
+      const ctx2d = tmp.getContext('2d');
+      ctx2d.fillStyle = '#000';
+      ctx2d.fillRect(0, 0, W, H);
+      ctx2d.drawImage(raw, 0, 0);
+      out.thumbnail = tmp.toDataURL('image/png');
+    }
+    // Opt-in ANIMATED capture (gif_previews.cjs): keep rendering past the
+    // sampled window and grab `captureFrames` consecutive frames `frameStep`
+    // seconds apart, each flattened onto black exactly like the still
+    // thumbnail (text shaders are transparent overlays by design). Returned
+    // as PNG data URLs; the node side assembles the gif.
+    if (opts.captureFrames) {
+      const flattenToPng = (px) => {
+        const raw = document.createElement('canvas');
+        raw.width = W; raw.height = H;
+        const flipped = new Uint8ClampedArray(px.length);
+        for (let y = 0; y < H; y++) {
+          const srcStart = (H - 1 - y) * W * 4;
+          flipped.set(px.subarray(srcStart, srcStart + W * 4), y * W * 4);
+        }
+        raw.getContext('2d').putImageData(new ImageData(flipped, W, H), 0, 0);
+        const tmp = document.createElement('canvas');
+        tmp.width = W; tmp.height = H;
+        const c = tmp.getContext('2d');
+        c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+        c.drawImage(raw, 0, 0);
+        return tmp.toDataURL('image/png');
+      };
+      const n = Math.max(2, Math.min(32, opts.captureFrames | 0));
+      const step = opts.frameStep || 0.125;
+      const seq = [];
+      for (let i = 0; i < n; i++) {
+        let target = t + step;
+        let fb;
+        while (t < target) { t += dt; fb = drawFrame(t, dt, baseAudio); }
+        seq.push(flattenToPng(framePixels(fb.fbo)));
+      }
+      out.previewFrames = seq;
+    }
+    out.meanLuma = stats.reduce((s, x) => s + x.meanLuma, 0) / stats.length;
+    out.variance = stats.reduce((s, x) => s + x.variance, 0) / stats.length;
+    out.blackFrac = stats.reduce((s, x) => s + x.blackFrac, 0) / stats.length;
+    out.entropy = stats.reduce((s, x) => s + x.entropy, 0) / stats.length;
+    out.edges = stats.reduce((s, x) => s + x.edges, 0) / stats.length;
+    let mv = 0;
+    for (let i = 1; i < frames.length; i++) mv += frameDiff(frames[i - 1], frames[i]);
+    out.movement = mv / (frames.length - 1);
+
+    // Audio response: continue sim with audio driven high, diff vs quiet frame
+    const quiet = frames[frames.length - 1];
+    for (let i = 0; i < 12; i++) { t += dt; drawFrame(t, dt, 0.85 + 0.15 * Math.sin(i * 2.1)); }
+    const loudFB = drawFrame(t + dt, dt, 0.9);
+    const loud = framePixels(loudFB.fbo);
+    // control: same extra frames with no audio would also move; approximate control
+    // via movement metric — audioResponse = diff minus expected motion drift
+    out.audioResponseRaw = frameDiff(quiet, loud);
+    out.audioResponse = Math.max(0, out.audioResponseRaw - out.movement);
+
+    // Multi-style adaptation test: run each music style, measure
+    //  (a) response — does the shader visibly react to this style at all,
+    //  (b) smoothness — successive-frame diffs; a strobing/choppy chain shows
+    //      huge p95-vs-median spikes,
+    //  (c) differentiation — do different styles produce different images.
+    const styleNames = opts.styles === false ? [] : ['edm', 'hiphop', 'rock', 'ambient', 'jazz'];
+    if (styleNames.length) {
+      out.styles = {};
+      // Detector: correlate per-frame visual change with the style's audio
+      // envelope (lag-tolerant). Block A/B comparison fails on shaders with
+      // memory (fluid sims keep moving through a silence control); correlation
+      // survives persistence because energy INJECTION still lines up with hits.
+      const pearson = (a, b) => {
+        const n = Math.min(a.length, b.length);
+        if (n < 8) return 0;
+        let ma = 0, mb = 0;
+        for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+        ma /= n; mb /= n;
+        let cov = 0, va = 0, vb = 0;
+        for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; cov += x * y; va += x * x; vb += y * y; }
+        return va > 1e-12 && vb > 1e-12 ? cov / Math.sqrt(va * vb) : 0;
+      };
+      for (const sn of styleNames) {
+        // silence control: typical frame-step with no audio (flush + baseline)
+        const silSteps = [];
+        let prev = null;
+        for (let i = 0; i < 24; i++) {
+          t += dt;
+          const fb = drawFrame(t, dt, 0.0);
+          if (i >= 8) {
+            const px = framePixels(fb.fbo);
+            if (prev) silSteps.push(frameDiff(prev, px));
+            prev = px;
+          }
+        }
+        silSteps.sort((x, y) => x - y);
+        const silMed = silSteps[Math.floor(silSteps.length / 2)] || 0;
+        // style segment: per-frame steps + envelope the shader actually receives
+        const gen = new StyleGen(sn);
+        const steps = [], env = [];
+        prev = null;
+        for (let i = 0; i < 96; i++) {
+          t += dt;
+          const bands = gen.tick(t, dt);
+          const fb = drawFrame(t, dt, bands);
+          const px = framePixels(fb.fbo);
+          if (prev) {
+            steps.push(frameDiff(prev, px));
+            env.push(0.4 * bands.bass + 0.25 * bands.mid + 0.15 * bands.high + 0.6 * bands.punch + 0.3 * bands.energy);
+          }
+          prev = px;
+        }
+        // lag-tolerant correlation: smoothed shaders respond a few frames late
+        const maxLagCorr = (e, s) => {
+          let best = 0;
+          for (let lag = 0; lag <= 10; lag++) {
+            const c = pearson(e.slice(0, e.length - lag), s.slice(lag));
+            if (c > best) best = c;
+          }
+          return best;
+        };
+        // smooth level-followers change the image in proportion to the
+        // envelope's DERIVATIVE (brightness tracks level → per-frame delta
+        // tracks d(level)/dt), so test both the envelope and |Δenvelope|
+        const envD = env.map((v, i) => i ? Math.abs(v - env[i - 1]) : 0);
+        // null via circular shifts: shifting the reference by large offsets keeps
+        // its autocorrelation (crucial for slow ambient swells) but destroys the
+        // true alignment — the best shifted score is what "no relationship"
+        // looks like for THIS shader + THIS envelope
+        const shiftNullAdj = (ref) => {
+          const c0 = maxLagCorr(ref, steps);
+          let nullC = 0;
+          for (const shift of [16, 28, 40, 52, 64, 76]) {
+            const shifted = ref.slice(shift).concat(ref.slice(0, shift));
+            const c = maxLagCorr(shifted, steps);
+            if (c > nullC) nullC = c;
+          }
+          return { corr: c0, nullCorr: nullC, adj: Math.max(0, c0 - Math.max(nullC, 0.12)) };
+        };
+        const rv = shiftNullAdj(env), rd = shiftNullAdj(envD);
+        const best = rd.adj > rv.adj ? rd : rv;
+        const corr = best.corr, nullCorr = best.nullCorr, corrAdj = best.adj;
+        const sorted = steps.slice().sort((x, y) => x - y);
+        const med = sorted[Math.floor(sorted.length / 2)] || 0;
+        const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] || 0;
+        out.styles[sn] = {
+          corr,
+          nullCorr,
+          corrAdj,
+          responseMag: Math.max(0, med - silMed),
+          silenceStep: silMed,
+          medianStep: med,
+          p95Step: p95,
+          choppiness: med > 1e-5 ? p95 / med : 0,
+        };
+      }
+      // adaptation = does the shader react DIFFERENTLY across styles (band-aware),
+      // measured as spread of response magnitude + correlation across styles
+      const resps = styleNames.map((sn) => out.styles[sn].responseMag);
+      const corrs = styleNames.map((sn) => out.styles[sn].corr);
+      out.styleDifferentiation = (Math.max(...resps) - Math.min(...resps)) +
+                                 0.02 * (Math.max(...corrs) - Math.min(...corrs));
+    }
+
+    const glErr = gl.getError();
+    if (glErr !== gl.NO_ERROR) out.warnings.push('glError 0x' + glErr.toString(16));
+
+    // Scores 0..10 (same axes as AUTONOMOUS_LOOP.md)
+    const clamp10 = (x) => Math.max(0, Math.min(10, x));
+    out.scores = {
+      density: clamp10(out.variance * 120 + (1 - Math.abs(out.meanLuma - 0.4) * 2) * 3),
+      movement: clamp10(Math.sqrt(out.movement) * 40),
+      palette: clamp10(out.entropy * 1.4),
+      edges: clamp10(out.edges * 90),
+      audio: clamp10(Math.sqrt(out.audioResponse) * 40),
+    };
+    if (out.styles) {
+      out.scores.audioStyles = {};
+      let minScore = 10, maxChop = 0, maxP95 = 0;
+      for (const [sn, s] of Object.entries(out.styles)) {
+        // null-corrected correlation is the detector (r 0.4 over noise ≈ 6/10);
+        // magnitude adds up to +3 so strong movers aren't undersold
+        const sc = clamp10(s.corrAdj * 15 + Math.min(3, Math.sqrt(s.responseMag) * 30));
+        out.scores.audioStyles[sn] = sc;
+        if (sc < minScore) minScore = sc;
+        if (s.choppiness > maxChop) { maxChop = s.choppiness; }
+        if (s.p95Step > maxP95) maxP95 = s.p95Step;
+      }
+      out.scores.audioMin = minScore;
+      out.scores.styleDiff = clamp10(Math.sqrt(out.styleDifferentiation) * 40);
+      // choppy = big spikes relative to typical motion AND big in absolute terms
+      out.choppy = maxP95 > 0.10 && maxChop > 6;
+      out.maxChoppiness = maxChop;
+      out.maxP95Step = maxP95;
+    }
+    out.scores.overall = (out.scores.density + out.scores.movement + out.scores.palette + out.scores.edges) / 4;
+    // "black" = essentially zero lit pixels across all sampled frames.
+    // (Text shaders legitimately render 99%+ black at 256px.)
+    out.ok = out.compileOk && out.linkOk && out.blackFrac < 0.9999;
+    if (out.blackFrac >= 0.9999) out.errors.push('RENDERS BLACK (blackFrac=' + out.blackFrac.toFixed(4) + ')');
+  } catch (e) {
+    out.errors.push('EXCEPTION: ' + (e && e.message || String(e)));
+  } finally {
+    for (const p of owned.programs) gl.deleteProgram(p);
+    for (const f of owned.fbos) { gl.deleteFramebuffer(f.fbo); gl.deleteTexture(f.tex); }
+  }
+  return out;
+};
+window.__harnessReady = true;
+</script>

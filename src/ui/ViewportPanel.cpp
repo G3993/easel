@@ -2194,6 +2194,11 @@ void ViewportPanel::renderNavBar(bool stageActive,
                     snprintf(destBuf, sizeof(destBuf), "FULLSCREEN: %s",
                              (*monitors)[mi].name.c_str());
                     destLabel = destBuf;
+                } else if (!az.outputMonitorName.empty()) {
+                    std::string stem = az.outputMonitorName.substr(0, az.outputMonitorName.find('#'));
+                    if (stem.empty()) stem = "PROJECTOR";
+                    snprintf(destBuf, sizeof(destBuf), "WAITING FOR %s", stem.c_str());
+                    destLabel = destBuf;
                 }
             } else if (az.outputDest == OutputDest::NDI) {
                 snprintf(destBuf, sizeof(destBuf), "NDI: \"%s\"",
@@ -2689,6 +2694,11 @@ void ViewportPanel::renderZoneOutputDock(
                 if (mi >= 0 && mi < (int)monitors->size()) {
                     snprintf(destBuf, sizeof(destBuf), "FULLSCREEN: %s",
                              (*monitors)[mi].name.c_str());
+                    destLabel = destBuf;
+                } else if (!az.outputMonitorName.empty()) {
+                    std::string stem = az.outputMonitorName.substr(0, az.outputMonitorName.find('#'));
+                    if (stem.empty()) stem = "PROJECTOR";
+                    snprintf(destBuf, sizeof(destBuf), "WAITING FOR %s", stem.c_str());
                     destLabel = destBuf;
                 }
             } else if (az.outputDest == OutputDest::NDI) {

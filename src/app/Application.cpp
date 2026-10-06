@@ -135,6 +135,9 @@ extern std::string openFileDialog_mac(const char* filter);
 // doesn't interfere with the link from this C++ TU.
 extern "C" void EaselMac_UnifyTitleBar(GLFWwindow*);
 extern "C" int  EaselMac_IsNativeFullScreen(GLFWwindow*);
+extern "C" int  EaselMac_OnlineDisplayCount(void);
+extern "C" int  EaselMac_DisplaysMirrored(void);
+extern "C" int  EaselMac_ExtendDisplays(void);
 extern "C" void EaselMac_ExitNativeFullScreen(GLFWwindow*);
 extern "C" int  EaselMac_ConsumeZoomFullscreenRequest();
 extern "C" void macFullscreenDockPeek(bool peek);
@@ -1110,17 +1113,23 @@ void Application::run() {
                     m_pendingExitFullscreen = true;
                     continue;
                 }
-                bool hadOutput = !m_projectors.empty();
-                for (auto& [idx, proj] : m_projectors) proj->destroy();
-                m_projectors.clear();
-                for (auto& zone : m_zones) {
-                    if (zone->outputDest == OutputDest::Fullscreen) {
-                        zone->outputDest = OutputDest::None;
-                        zone->outputMonitor = -1;
-                        hadOutput = true;
+                // Esc = "give me the app back": raise the editor window, and
+                // close only a projector window that is sitting ON the
+                // editor's own display (a mirrored / relocated one) — its zone
+                // keeps its target and waits for its monitor. Outputs on
+                // their own projectors are never touched from here.
+                glfwFocusWindow(m_window);
+                {
+                    int ex = 0, ey = 0; glfwGetWindowPos(m_window, &ex, &ey);
+                    for (auto it = m_projectors.begin(); it != m_projectors.end(); ) {
+                        if (it->second->coversPoint(ex + 60, ey + 60)) {
+                            std::cerr << "[Output] Esc: projector window on the editor's display -> closed, zone waits" << std::endl;
+                            for (auto& zp : m_zones) if (zp->outputDest == OutputDest::Fullscreen && zp->outputMonitor == it->first) zp->outputMonitor = -1;
+                            it->second->destroy();
+                            it = m_projectors.erase(it);
+                        } else ++it;
                     }
                 }
-                if (hadOutput) continue;
             }
         }
 
@@ -1210,38 +1219,63 @@ void Application::run() {
             m_windowHeight = h;
         }
 
-        // Auto-detect monitor hotplug — set active zone to fullscreen on secondary.
-        // Debounced: GLFW transiently reports different monitor counts while new
-        // windows (projectors) are being created. React only after the count has
-        // stayed the same for ~1s to avoid nuking zone outputs on spurious blips.
-        if (m_projectorAutoConnect && !getenv("EASEL_PROJECTOR_RECT")) {
-            static int s_pendingCount = -1;
-            static int s_stableFrames = 0;
-            int monitorCount = (int)ProjectorOutput::enumerateMonitors().size();
-            if (s_pendingCount != monitorCount) {
-                s_pendingCount = monitorCount;
-                s_stableFrames = 0;
-            } else if (s_stableFrames < 1000) {
-                s_stableFrames++;
-            }
-            if (s_stableFrames >= 60 && monitorCount != m_lastMonitorCount) {
-                if (monitorCount > 1 && activeZone().outputDest == OutputDest::None) {
+        // ── Display hot-plug ──
+        // Monitors are tracked by IDENTITY (name#ordinal size), never by index:
+        // plugging / unplugging a projector reorders GLFW's list and macOS
+        // moves windows around. When the list settles after a change:
+        //   1. every projector window is dropped and rebuilt on re-resolved
+        //      indices (so none is left sitting on the wrong display);
+        //   2. a zone whose projector is gone keeps its target and WAITS
+        //      (index -1) — it reopens by itself when that projector returns;
+        //   3. on macOS, a mirrored setup (one GLFW monitor, two online
+        //      displays) is switched to extended with the laptop as main;
+        //   4. with nothing routed, auto-connect puts the active zone on the
+        //      first secondary monitor (as before).
+        {
+            static std::string sSig; static int sStable = 0;
+            auto mons = ProjectorOutput::enumerateMonitors();
+            std::string sig;
+            for (int i = 0; i < (int)mons.size(); i++)
+                sig += ProjectorOutput::monitorKey(mons, i) + "@" + std::to_string(mons[i].x) + "," + std::to_string(mons[i].y) + ";";
+            if (sig != sSig) { sSig = sig; sStable = 0; } else if (sStable < 100000) sStable++;
+            if (sStable == 30 && !getenv("EASEL_PROJECTOR_RECT")) {
+                std::cerr << "[Output] display list settled: " << mons.size() << " monitor(s) [" << sig << "]" << std::endl;
+                for (auto& [idx, proj] : m_projectors) proj->destroy();
+                m_projectors.clear();
+                bool anyRouted = false;
+                for (auto& zp : m_zones) {
+                    if (zp->outputDest != OutputDest::Fullscreen) continue;
+                    anyRouted = true;
+                    if (zp->outputMonitorName.empty() && zp->outputMonitor >= 0 && zp->outputMonitor < (int)mons.size())
+                        zp->outputMonitorName = ProjectorOutput::monitorKey(mons, zp->outputMonitor);
+                    int ni = ProjectorOutput::findMonitorByKey(mons, zp->outputMonitorName);
+                    if (ni != zp->outputMonitor)
+                        std::cerr << "[Output] zone '" << zp->name << "' -> '" << zp->outputMonitorName << "' is now monitor " << ni << (ni < 0 ? " (waiting for it)" : "") << std::endl;
+                    zp->outputMonitor = ni;
+                }
+#ifdef __APPLE__
+                // macOS re-mirrors onto a remembered projector on every plug-in:
+                // any mirrored display at all → extended, laptop as main
+                if (EaselMac_DisplaysMirrored()) {
+                    std::cerr << "[Output] displays are MIRRORED — switching to extended, laptop as main" << std::endl;
+                    EaselMac_ExtendDisplays();
+                }
+#endif
+                if (!anyRouted && m_projectorAutoConnect && mons.size() > 1 && activeZone().outputDest == OutputDest::None) {
                     int sec = ProjectorOutput::findSecondaryMonitor(m_window);
                     if (sec >= 0) {
                         activeZone().outputDest = OutputDest::Fullscreen;
                         activeZone().outputMonitor = sec;
-                    }
-                } else if (monitorCount <= 1) {
-                    // Secondary monitor disconnected — clear fullscreen destinations
-                    for (auto& zp : m_zones) {
-                        if (zp->outputDest == OutputDest::Fullscreen) {
-                            zp->outputDest = OutputDest::None;
-                            zp->outputMonitor = -1;
-                        }
+                        activeZone().outputMonitorName = ProjectorOutput::monitorKey(mons, sec);
                     }
                 }
-                m_lastMonitorCount = monitorCount;
+                m_lastMonitorCount = (int)mons.size();
             }
+            // zones routed from the UI / OSC get their identity the moment the list is stable
+            if (sStable > 30)
+                for (auto& zp : m_zones)
+                    if (zp->outputDest == OutputDest::Fullscreen && zp->outputMonitorName.empty() && zp->outputMonitor >= 0 && zp->outputMonitor < (int)mons.size())
+                        zp->outputMonitorName = ProjectorOutput::monitorKey(mons, zp->outputMonitor);
         }
 
         // Assign stable IDs to any layers that don't have one (e.g. duplicated via UI)
@@ -2169,6 +2203,7 @@ void Application::run() {
 }
 
 void Application::shutdown() {
+    m_shaderPresets.flush();   // per-shader memory: never lose the last 2 s of tweaks
     // "Open where I last was" — capture window pos/size/maximized + the
     // active workspace tab before anything is torn down, so the next
     // launch's init() can restore it. GLFW state queries below need
@@ -2357,6 +2392,7 @@ void Application::updateSources() {
     float audioBindDt = (float)(s_nowBindTime - s_lastBindTime);
     s_lastBindTime = s_nowBindTime;
     usageTick(audioBindDt);
+    memoryTick();
     deckTick(audioBindDt);
 
     // ── "Listening" signals (time-aware musical dynamics) ─────────────────
@@ -2394,8 +2430,11 @@ void Application::updateSources() {
         auto& l = m_layerStack[i];
         if (!l->source) continue;
         if (l->source->typeName() == "Fluid3D") {
-            uint32_t sid = static_cast<FluidSource3D*>(l->source.get())->imageSource().sourceLayerId;
+            auto* f3r = static_cast<FluidSource3D*>(l->source.get());
+            uint32_t sid = f3r->imageSource().sourceLayerId;
             if (sid) referencedSources.insert(sid);
+            uint32_t bid = f3r->backdropSource().sourceLayerId;
+            if (bid) referencedSources.insert(bid);
         } else if (l->source->typeName() == "Fluid") {
             uint32_t sid = static_cast<FluidSource*>(l->source.get())->imageSource().sourceLayerId;
             if (sid) referencedSources.insert(sid);
@@ -2676,29 +2715,32 @@ void Application::updateSources() {
                     audioSigEnergy, audioSigBuild, audioSigDrop,
                     audioSigSilence, audioSigMomentum
                 );
-                // Resolve the bound image layer's live texture each frame
-                // (mirrors the 2D Fluid image refresh above).
-                auto& img = f3->imageSource();
-                if (img.sourceLayerId != 0) {
-                    bool found = false;
-                    for (int j = 0; j < m_layerStack.count(); j++) {
-                        auto& srcLayer = m_layerStack[j];
-                        if (srcLayer->id == img.sourceLayerId && srcLayer->source) {
-                            GLuint t = srcLayer->source->textureId();
-                            if (t != 0) {
-                                img.textureId = t;
-                                img.width     = srcLayer->source->width();
-                                img.height    = srcLayer->source->height();
-                                img.flippedV  = srcLayer->source->isFlippedV();
-                                found = true;
+                // Resolve the bound layers' live textures each frame — the
+                // surface image and the backdrop (mirrors the 2D Fluid refresh).
+                auto refreshRef = [&](FluidSource3D::ImageRef& img) {
+                    if (img.sourceLayerId != 0) {
+                        bool found = false;
+                        for (int j = 0; j < m_layerStack.count(); j++) {
+                            auto& srcLayer = m_layerStack[j];
+                            if (srcLayer->id == img.sourceLayerId && srcLayer->source) {
+                                GLuint t = srcLayer->source->textureId();
+                                if (t != 0) {
+                                    img.textureId = t;
+                                    img.width     = srcLayer->source->width();
+                                    img.height    = srcLayer->source->height();
+                                    img.flippedV  = srcLayer->source->isFlippedV();
+                                    found = true;
+                                }
+                                break;
                             }
-                            break;
                         }
+                        if (!found) { img.textureId = 0; img.width = img.height = 0; }
+                    } else if (img.textureId != 0) {
+                        img.textureId = 0; img.width = img.height = 0;
                     }
-                    if (!found) { img.textureId = 0; img.width = img.height = 0; }
-                } else if (img.textureId != 0) {
-                    img.textureId = 0; img.width = img.height = 0;
-                }
+                };
+                refreshRef(f3->imageSource());
+                refreshRef(f3->backdropSource());
             }
 
             // Hologram-model layer — feed audio (drives the glitch) and honor
@@ -2932,14 +2974,22 @@ void Application::compositeAndWarp() {
     //   - zone 0 while the legacy global NDI sender is enabled (pinned feed)
     //   - all zones while a panel that shows every zone's texture is open
     //     (Properties' Stage Setup section, Stage 3D pre-viz)
-    bool uiShowsAllZones = m_ui.isPanelVisible("Properties") ||
+    // Only the Zones workspace (its per-zone cards) and the Stage pre-viz
+    // show every zone's picture. Properties used to count too — and it is
+    // visible on Canvas all the time, so EVERY zone was composited every
+    // frame (a 4K Main + two 1080p zones = the GPU behind, projector swaps
+    // blocking, 30 fps).
+    bool uiShowsAllZones = (UIManager::sMode == UIManager::WorkspaceMode::Zones) ||
         (m_ui.isPanelVisible("Stage") &&
          UIManager::sMode == UIManager::WorkspaceMode::Stage);
     OutputZone* active = m_zones.empty() ? nullptr : &activeZone();
     for (int i = 0; i < (int)m_zones.size(); i++) {
         auto& zone = *m_zones[i];
-        bool needed = uiShowsAllZones || &zone == active ||
-                      zone.outputDest != OutputDest::None;
+        // a Fullscreen zone whose projector is unplugged (waiting, index -1)
+        // has nowhere to send its picture — don't composite it
+        bool hasOutput = zone.outputDest == OutputDest::NDI || zone.outputDest == OutputDest::Spout ||
+                         (zone.outputDest == OutputDest::Fullscreen && zone.outputMonitor >= 0);
+        bool needed = uiShowsAllZones || &zone == active || hasOutput;
 #ifdef HAS_NDI
         if (i == 0 && m_ndiOutputEnabled) needed = true;
 #endif
@@ -3601,6 +3651,9 @@ void Application::presentOutputs() {
                 // cleanup pass below doesn't destroy it either.
                 neededMonitors.insert(zone.outputMonitor);
             } else {
+                // (Esc on a projector window only brings the editor back —
+                // see ProjectorOutput's key callback. It never closes the
+                // output: that is the OUTPUT dropdown's job.)
                 neededMonitors.insert(zone.outputMonitor);
                 ProjectorOutput* proj = ensureProjector(zone.outputMonitor);
                 if (proj) {
@@ -3781,6 +3834,7 @@ void Application::presentOutputs() {
     // Clean up projectors for monitors no longer claimed by any zone
     for (auto it = m_projectors.begin(); it != m_projectors.end(); ) {
         if (neededMonitors.find(it->first) == neededMonitors.end()) {
+            std::cerr << "[Output] closing projector on monitor " << it->first << ": no zone claims it this frame" << std::endl;
             it->second->destroy();
             it = m_projectors.erase(it);
         } else {
@@ -4730,9 +4784,16 @@ void Application::renderUI() {
                 for (auto& c : what) c = (char)tolower((unsigned char)c);
                 for (auto& c : v)    c = (char)tolower((unsigned char)c);
                 if (what == "page") {
+                    if (v == "gallery") UIManager::sGalleryFromShow = UIManager::sShowOpen;
                     UIManager::sGalleryOpen = (v == "gallery");
                     UIManager::sShowOpen    = (v == "show");
+                } else if (what == "f3tab") {
+                    // 3D Fluid inspector sub-tab (test hook): 0..5
+                    PropertyPanel::sFluid3DTab = std::max(0, std::min(5, atoi(v.c_str())));
                 } else if (what == "tab") {
+                    // A remote tab request means "show me that panel": unfold
+                    // the inspector (it starts collapsed on a fresh launch).
+                    m_ui.setRightDockCollapsed(false);
                     if      (v == "properties") m_ui.focusPanel("        ###Properties");
                     else if (v == "audio")      m_ui.focusPanel("        ###Audio");
                     else if (v == "midi")       m_ui.focusPanel("        ###MIDI");
@@ -4749,6 +4810,12 @@ void Application::renderUI() {
                     takeOverFromShowGlobal(); deckGo();
                 } else if (what == "transition") {
                     m_deckTransition = msg.strings[1];   // case preserved: gl names are as listed
+                } else if (what == "xfade") {
+                    // /easel/ui xfade <0..1> — move the hand crossfader (test
+                    // harness / mobile): same path as dragging the on-screen
+                    // slider, so the chosen transition runs at that position.
+                    float xv = std::max(0.0f, std::min(1.0f, (float)atof(v.c_str())));
+                    takeOverFromShowGlobal(); decksToFront(); m_deckBlend = xv; m_deckAnim = false;
                 } else if (what == "secs") {
                     m_deckTransSecs = (float)atof(v.c_str());
                 } else if (what == "library") {
@@ -4771,6 +4838,11 @@ void Application::renderUI() {
                 } else if (what == "showtab") {
                     // /easel/ui showtab knobs|transition|timeline (test harness / mobile)
                     m_showTab = (v == "transition") ? 1 : (v == "timeline") ? 2 : 0;
+                } else if (what == "deck") {
+                    // /easel/ui deck a|b — the knobs (XL + centre) follow that
+                    // deck, exactly like clicking its preview (test harness)
+                    int di = (v == "a" || v == "0") ? 0 : (v == "b" || v == "1") ? 1 : -1;
+                    if (di >= 0 && deckLayer(di)) deckTakeSurface(di, true);
                 } else if (what == "pattern") {
                     // /easel/ui pattern <0-5> — the MAPPING test pattern (test harness)
                     m_warpEditor.setTestPatternIndex(atoi(v.c_str()));
@@ -4835,6 +4907,22 @@ void Application::renderUI() {
 #else
                 std::cerr << "[OSC] /easel/layer/ensure/ndi ignored: "
                              "built without HAS_NDI\n";
+#endif
+            } else if (msg.address == "/easel/layer/add/window" && !msg.strings.empty()) {
+                // Test harness / mobile: add a Window Capture layer whose title
+                // contains the given text (case-insensitive). Mirrors the
+                // Sources > Screen "Add" button.
+#ifdef __APPLE__
+                std::string want = msg.strings[0];
+                for (auto& ch : want) ch = (char)tolower((unsigned char)ch);
+                auto wins = WindowCaptureSource::enumerateWindows();
+                bool done = false;
+                for (const auto& w : wins) {
+                    std::string t = w.title;
+                    for (auto& ch : t) ch = (char)tolower((unsigned char)ch);
+                    if (t.find(want) != std::string::npos) { addWindowCapture(w.windowID, w.title); done = true; break; }
+                }
+                if (!done) std::cerr << "[OSC] layer/add/window: no window matching '" << msg.strings[0] << "'\n";
 #endif
             } else if (msg.address == "/easel/layer/add/ndi"
                        && !msg.strings.empty()) {
@@ -4939,6 +5027,13 @@ void Application::renderUI() {
                           : (msg.strings.size() >= 3 ? atoi(msg.strings[2].c_str()) : -1);
                 std::string arg3 = msg.strings.size() >= 3 ? msg.strings[2] : std::string();
                 setZoneOutput(msg.strings[0], msg.strings[1], mon, arg3);
+            } else if (msg.address == "/easel/zone/size" && msg.strings.size() >= 3) {
+                // /easel/zone/size <zone name> <w> <h> — the zone's canvas size
+                for (auto& zp : m_zones)
+                    if (zp && zp->name == msg.strings[0]) {
+                        int w = atoi(msg.strings[1].c_str()), h = atoi(msg.strings[2].c_str());
+                        if (w >= 64 && h >= 64 && w <= 8192 && h <= 8192) { zp->resize(w, h); std::cerr << "[OSC] zone '" << zp->name << "' -> " << w << "x" << h << std::endl; }
+                    }
             } else if (msg.address == "/easel/zone/activate" && !msg.ints.empty()) {
                 int zi = msg.ints[0];
                 if (zi >= 0 && zi < (int)m_zones.size()) {
@@ -5678,11 +5773,14 @@ void Application::renderUI() {
                     cur = "Fullscreen";
                     if (z.outputMonitor >= 0 && z.outputMonitor < (int)zMonitors.size())
                         cur += ": " + zMonitors[z.outputMonitor].name;
+                    else if (!z.outputMonitorName.empty())
+                        { std::string stem = z.outputMonitorName.substr(0, z.outputMonitorName.find('#')); cur += ": waiting for " + (stem.empty() ? std::string("projector") : stem); }
                 } else if (z.outputDest == OutputDest::NDI) {
                     cur = "NDI: " + (z.ndiStreamName.empty() ? z.name : z.ndiStreamName);
                 } else if (z.outputDest == OutputDest::Spout) cur = "Spout";
                 if (ImGui::BeginCombo("##zoneOut", cur.c_str())) {
                     if (ImGui::Selectable("Preview only", z.outputDest == OutputDest::None)) {
+                        std::cerr << "[Output] UI: zone '" << z.name << "' -> preview only" << std::endl;
                         z.outputDest = OutputDest::None; z.outputMonitor = -1;
                     }
                     for (int mi = 0; mi < (int)zMonitors.size(); mi++) {
@@ -5697,6 +5795,7 @@ void Application::renderUI() {
                                     oz->outputDest = OutputDest::None; oz->outputMonitor = -1;
                                 }
                             z.outputDest = OutputDest::Fullscreen; z.outputMonitor = mi;
+                            z.outputMonitorName = ProjectorOutput::monitorKey(zMonitors, mi);
                         }
                         ImGui::PopID();
                     }
@@ -7738,7 +7837,7 @@ void Application::renderUI() {
                         }
                     }
 
-                    if (ImGui::MenuItem("Save Params", nullptr, false, canSave)) {
+                    if (ImGui::MenuItem("Remember Now", nullptr, false, canSave)) {
                         if (activeShader) {
                             int n = m_shaderPresets.capture(shader.file, *activeShader);
                             std::cout << "[ShaderPresets] Saved " << n
@@ -7746,7 +7845,7 @@ void Application::renderUI() {
                         }
                     }
                     if (m_shaderPresets.has(shader.file)) {
-                        if (ImGui::MenuItem("Clear Saved Params")) {
+                        if (ImGui::MenuItem("Forget Memory")) {
                             m_shaderPresets.clear(shader.file);
                         }
                     }
@@ -18246,6 +18345,10 @@ void Application::addWindowCapture(uint32_t windowID, const std::string& title) 
     layer->name = "Win: " + title;
 
     m_layerStack.addLayer(layer);
+    // Every other add path registers the new layer with the curated zones;
+    // this one didn't, so a window capture never reached a zone that lists
+    // its layers explicitly (black canvas, stream running fine). 2026-10-06.
+    registerLayerWithZones(layer->id);
     m_selectedLayer = m_layerStack.count() - 1;
 }
 #endif
@@ -18328,7 +18431,12 @@ void Application::loadShader(const std::string& path) {
     // someone remembers to turn reactivity on. Skipped when a restored
     // preset already brought its own bindings back (don't clobber a saved
     // reactive setup with a fresh random one).
-    if (source && source->audioBindings().empty()) {
+    bool memoryKnowsReactivity = false;
+    {
+        size_t s = path.find_last_of("/\\");
+        memoryKnowsReactivity = m_shaderPresets.hasBindings((s != std::string::npos) ? path.substr(s + 1) : path);
+    }
+    if (source && source->audioBindings().empty() && !memoryKnowsReactivity) {
         std::vector<AudioPresetEngine::Param> pp;
         for (const auto& in : source->inputs()) {
             if (in.type != "float") continue;
@@ -18630,7 +18738,52 @@ void Application::bindManagedLayerImage(const std::string& key, const std::strin
 void Application::setManagedLayerParam(const std::string& key, const std::string& name, const OSCMessage& msg) {
     if (key.empty() || name.empty()) return;
     for (auto& l : m_layerStack.layers()) {
-        if (!l || l->managedKey != key) continue;
+        // Match by managed key, or by display name (so hand-added layers are
+        // addressable too — same convention as layer/bind-image's sourceRef).
+        if (!l || (l->managedKey != key && l->name != key)) continue;
+        // 3D Fluid: any param-table id (float), any color id (3 floats), the
+        // named modes (int), or "reset". Same ids the panel + project file use.
+        if (l->source && l->source->typeName() == "Fluid3D") {
+            auto* f3 = static_cast<FluidSource3D*>(l->source.get());
+            if (name == "reset") { f3->reseed(); return; }
+            if (msg.floats.size() >= 3) {
+                for (auto& c : f3->colors())
+                    if (name == c.id) { for (int k = 0; k < 3; k++) c.rgb[k] = msg.floats[k]; return; }
+            }
+            float fv = !msg.floats.empty() ? msg.floats[0]
+                     : !msg.ints.empty()   ? (float)msg.ints[0] : 0.0f;
+            bool haveNum = !msg.floats.empty() || !msg.ints.empty();
+            if (!haveNum) { std::cerr << "[OSC] layer/param: " << name << " needs a value\n"; return; }
+            for (auto& d : f3->params())
+                if (name == d.id) { *d.ptr = std::max(d.lo, std::min(d.hi, fv)); return; }
+            int iv = (int)std::lround(fv);
+            struct IntP { const char* id; int* p; } ints[] = {
+                {"bgMode", &f3->m_bgMode}, {"surfaceMode", &f3->m_surfaceMode},
+                {"emitShape", &f3->m_emitShape}, {"vjMode", &f3->m_vjMode},
+                {"journeySignal", &f3->m_journeySignal},
+                {"orb1Motion", &f3->m_orbs[0].motion}, {"orb2Motion", &f3->m_orbs[1].motion},
+                {"orb3Motion", &f3->m_orbs[2].motion}, {"orb4Motion", &f3->m_orbs[3].motion},
+                {"orb1Physics", &f3->m_orbs[0].physics}, {"orb2Physics", &f3->m_orbs[1].physics},
+                {"orb3Physics", &f3->m_orbs[2].physics}, {"orb4Physics", &f3->m_orbs[3].physics},
+                {"simRes", &f3->m_simRes}, {"substeps", &f3->m_substeps} };
+            for (auto& ip : ints) if (name == ip.id) { *ip.p = iv; return; }
+            struct BoolP { const char* id; bool* p; } bools[] = {
+                {"emitOn", &f3->m_emitOn}, {"floorOn", &f3->m_floorOn},
+                {"autoRotate", &f3->m_autoRotate}, {"particleCube", &f3->m_particleCube},
+                {"doubleDensity", &f3->m_doubleDensity}, {"imageEnabled", &f3->m_imageEnabled},
+                {"vjGrab", &f3->m_vjGrab},
+                {"orb1On", &f3->m_orbs[0].enabled}, {"orb2On", &f3->m_orbs[1].enabled},
+                {"orb3On", &f3->m_orbs[2].enabled}, {"orb4On", &f3->m_orbs[3].enabled} };
+            for (auto& bp : bools) if (name == bp.id) { *bp.p = (iv != 0); return; }
+            if (name == "fillAmount") { f3->m_fillAmount = std::max(0.0f, std::min(1.0f, fv)); return; }
+            if (name == "renderScale") { f3->m_renderScale = fv; return; }
+            if (name.size() == 5 && name.rfind("orb", 0) == 0 && (name[4] == 'X' || name[4] == 'Y' || name[4] == 'Z')) {
+                int oi = name[3] - '1';
+                if (oi >= 0 && oi < FluidSource3D::kMaxOrbs) { f3->m_orbs[oi].pos[name[4] - 'X'] = fv; return; }
+            }
+            std::cerr << "[OSC] layer/param: unknown 3D Fluid param " << name << "\n";
+            return;
+        }
         if (!l->source || !l->source->isShader()) {
             std::cerr << "[OSC] layer/param: " << key << " is not a shader layer\n";
             return;
@@ -18772,22 +18925,16 @@ void Application::setManagedLayerAudioPreset(const std::string& key, const std::
         } else if (type == "Fluid3D") {
             auto* f3 = static_cast<FluidSource3D*>(l->source.get());
             bindings = &f3->audioBindings();
-            pp = {
-                { "brightness",     f3->m_brightness,     0.0f,  6.0f },
-                { "rotateSpeed",    f3->m_rotateSpeed,    0.0f,  2.0f },
-                { "tilt",           f3->m_tilt,          -1.57f, 1.57f },
-                { "zoom",           f3->m_zoom,           0.5f,  4.0f },
-                { "gravity",        f3->m_gravity,        0.0f,  4.0f },
-                { "vortex",         f3->m_vortex,         0.0f,  3.0f },
-                { "turbulence",     f3->m_turbulence,     0.0f,  2.0f },
-                { "forceScale",     f3->m_forceScale,     0.1f,  4.0f },
-                { "sphereScale",    f3->m_sphereScale,    0.05f, 1.5f },
-                { "ambient",        f3->m_ambient,        0.0f,  1.0f },
-                { "specular",       f3->m_specular,       0.0f,  3.0f },
-                { "rim",            f3->m_rim,            0.0f,  1.0f },
-                { "saturation",     f3->m_saturation,     0.0f,  2.0f },
-                { "lightIntensity", f3->m_lightIntensity, 0.0f,  3.0f },
-            };
+            // Same curated set the panel's VJ tab shuffles over.
+            static const char* kPreset[] = {
+                "brightness", "tilt", "zoom", "gravity", "vortex",   // never Spin
+                "turbulence", "forceScale", "sphereScale", "ambient", "specular",
+                "rim", "saturation", "lightIntensity", "viscosity", "tension",
+                "attract", "wind", "orbGlow", "velGlow" };
+            auto table = f3->params();
+            for (const char* id : kPreset)
+                for (auto& d : table)
+                    if (!strcmp(d.id, id)) { pp.push_back({ d.id, *d.ptr, d.lo, d.hi }); break; }
         } else {
             std::cerr << "[OSC] layer/audiopreset: " << key
                       << " has no audio-bindable source (" << type << ")\n";
@@ -18876,6 +19023,7 @@ void Application::setZoneOutput(const std::string& zoneName, const std::string& 
         // a bad index is non-fatal.
         z->outputDest = OutputDest::Fullscreen;
         z->outputMonitor = monitor;
+        { auto mons = ProjectorOutput::enumerateMonitors(); z->outputMonitorName = ProjectorOutput::monitorKey(mons, monitor); }   // fresh identity, never a stale one
     } else if (d == "ndi") {
         // Optional explicit feed name, unwrapped the same way as ensureZoneNdi
         // ("MACHINE (sender)" -> "sender"); else keep/derive from the zone name.
@@ -18894,6 +19042,7 @@ void Application::setZoneOutput(const std::string& zoneName, const std::string& 
         }
         z->outputDest = OutputDest::NDI;
     } else { // "none" / "preview" / unknown -> preview-only
+        std::cerr << "[Output] zone '" << z->name << "' -> none (OSC/zone op)" << std::endl;
         z->outputDest = OutputDest::None;
         z->outputMonitor = -1;
     }
@@ -19632,6 +19781,7 @@ void Application::saveProject(const std::string& path) {
 
         zj["outputDest"] = (int)z.outputDest;
         zj["outputMonitor"] = z.outputMonitor;
+        zj["outputMonitorName"] = z.outputMonitorName;
         zj["ndiStreamName"] = z.ndiStreamName;
         zj["rawNdiName"] = z.rawNdiName;
 
@@ -19835,52 +19985,43 @@ void Application::saveProject(const std::string& path) {
                 // key from "fluidConfig" to avoid collision with 2D Fluid.
                 auto* f = static_cast<FluidSource3D*>(layer->source.get());
                 json fc;
-                fc["deepColor"]   = { f->m_deepColor[0], f->m_deepColor[1], f->m_deepColor[2] };
-                fc["glowColor"]   = { f->m_glowColor[0], f->m_glowColor[1], f->m_glowColor[2] };
-                fc["brightness"]  = f->m_brightness;
-                fc["shallowColor"]= { f->m_shallowColor[0], f->m_shallowColor[1], f->m_shallowColor[2] };
+                // Every scalar + color from the param table (ids are the keys).
+                for (const auto& d : f->params()) fc[d.id] = *d.ptr;
+                for (const auto& c : f->colors()) fc[c.id] = { c.rgb[0], c.rgb[1], c.rgb[2] };
                 fc["lightDir"]    = { f->m_lightDir[0], f->m_lightDir[1], f->m_lightDir[2] };
-                fc["lightIntensity"] = f->m_lightIntensity;
-                fc["ambient"]     = f->m_ambient;
-                fc["specular"]    = f->m_specular;
-                fc["rim"]         = f->m_rim;
-                fc["saturation"]  = f->m_saturation;
-                fc["bgTop"]    = { f->m_bgTop[0], f->m_bgTop[1], f->m_bgTop[2] };
-                fc["bgBottom"] = { f->m_bgBottom[0], f->m_bgBottom[1], f->m_bgBottom[2] };
-                fc["bgAlpha"]  = f->m_bgAlpha;
-                fc["sphereScale"] = f->m_sphereScale;
-                fc["zoom"]        = f->m_zoom;
-                fc["audioIntensity"] = f->m_audioIntensity;
-                fc["gravity"]    = f->m_gravity;
-                fc["vortex"]     = f->m_vortex;
-                fc["turbulence"] = f->m_turbulence;
-                fc["forceScale"] = f->m_forceScale;
-                fc["sphereShape"] = f->m_sphereShape;
                 fc["fillAmount"]  = f->m_fillAmount;
                 fc["particleCube"] = f->m_particleCube;
+                fc["surfaceMode"] = f->m_surfaceMode;
+                fc["doubleDensity"] = f->m_doubleDensity;
+                fc["emitOn"]      = f->m_emitOn;
+                fc["emitShape"]   = f->m_emitShape;
+                fc["bgMode"]      = f->m_bgMode;
+                fc["floorOn"]     = f->m_floorOn;
+                {
+                    json orbs = json::array();
+                    for (int i = 0; i < FluidSource3D::kMaxOrbs; i++) {
+                        const auto& o = f->m_orbs[i];
+                        orbs.push_back({ {"enabled", o.enabled}, {"motion", o.motion},
+                                         {"physics", o.physics},
+                                         {"pos", { o.pos[0], o.pos[1], o.pos[2] }} });
+                    }
+                    fc["orbs"] = orbs;
+                }
                 // VJ morph (Low/High look snapshots + drive config).
                 fc["vjMode"]         = f->m_vjMode;
                 fc["vjGrab"]         = f->m_vjGrab;
                 fc["journeySignal"]  = f->m_journeySignal;
                 fc["journeyGain"]    = f->m_journeyGain;
                 fc["journeyPosManual"] = f->m_journeyPosManual;
-                if (f->m_lookSet[0]) {
-                    float a[FluidSource3D::kLookFloats]; f->lookToArray(0, a);
-                    fc["lookLow"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
-                }
-                if (f->m_lookSet[1]) {
-                    float a[FluidSource3D::kLookFloats]; f->lookToArray(1, a);
-                    fc["lookHigh"] = std::vector<float>(a, a + FluidSource3D::kLookFloats);
-                }
+                if (f->m_lookSet[0]) fc["lookLowV2"]  = f->m_look[0].v;
+                if (f->m_lookSet[1]) fc["lookHighV2"] = f->m_look[1].v;
                 fc["autoRotate"]  = f->m_autoRotate;
-                fc["rotateSpeed"] = f->m_rotateSpeed;
-                fc["tilt"]        = f->m_tilt;
                 fc["simRes"]      = f->m_simRes;
                 fc["substeps"]    = f->m_substeps;
                 fc["renderScale"] = f->m_renderScale;
                 fc["imageEnabled"]       = f->m_imageEnabled;
-                fc["imageMix"]           = f->m_imageMix;
                 fc["imageSourceLayerId"] = f->imageSource().sourceLayerId;
+                fc["backdropSourceLayerId"] = f->backdropSource().sourceLayerId;
                 layerJson["fluid3dConfig"] = fc;
 
                 const auto& audioBinds = f->audioBindings();
@@ -20297,6 +20438,7 @@ void Application::loadProjectBody(const json& j) {
 
             z->outputDest = (OutputDest)zj.value("outputDest", 0);
             z->outputMonitor = zj.value("outputMonitor", -1);
+            z->outputMonitorName = zj.value("outputMonitorName", std::string(""));
             z->ndiStreamName = zj.value("ndiStreamName", std::string(""));
             z->rawNdiName = zj.value("rawNdiName", false);
 
@@ -20546,6 +20688,110 @@ void Application::loadProjectBody(const json& j) {
                     src->imageSource().sourceLayerId =
                         fc.value("imageSourceLayerId",
                                  (uint32_t)src->imageSource().sourceLayerId);
+                }
+                int fw = 1280, fh = 720;
+                if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() &&
+                    m_zones[m_activeZone]) {
+                    fw = m_zones[m_activeZone]->width;
+                    fh = m_zones[m_activeZone]->height;
+                }
+                if (src->init(fw, fh)) {
+                    if (layerJson.contains("audioBindings")) {
+                        for (const auto& abj : layerJson["audioBindings"]) {
+                            AudioBinding ab;
+                            ab.signal = (AudioSignal)abj.value("signal", 0);
+                            ab.rangeMin = abj.value("rangeMin", 0.0f);
+                            ab.rangeMax = abj.value("rangeMax", 1.0f);
+                            ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.character = abj.value("character", 0.0f);
+                            ab.midiCC = abj.value("midiCC", -1);
+                            ab.midiChannel = abj.value("midiChannel", -1);
+                            src->audioBindings()[abj.value("param", "")] = ab;
+                        }
+                    }
+                    layer->source = src;
+                }
+            } else if (sourceType == "Fluid3D") {
+                // Rebuild the native 3D SPH fluid. simRes is applied BEFORE
+                // init() since it sizes the volumes.
+                auto src = std::make_shared<FluidSource3D>();
+                if (layerJson.contains("fluid3dConfig")) {
+                    const auto& fc = layerJson["fluid3dConfig"];
+                    for (const auto& d : src->params())
+                        if (fc.contains(d.id) && fc[d.id].is_number()) *d.ptr = fc[d.id].get<float>();
+                    for (const auto& c : src->colors())
+                        if (fc.contains(c.id) && fc[c.id].is_array() && fc[c.id].size() == 3)
+                            for (int i = 0; i < 3; i++) c.rgb[i] = fc[c.id][i].get<float>();
+                    // Legacy (pre-2026-10): light stored as a direction vector.
+                    if (!fc.contains("lightAzimuth") && fc.contains("lightDir") &&
+                        fc["lightDir"].is_array() && fc["lightDir"].size() == 3) {
+                        float x = fc["lightDir"][0].get<float>(), y = fc["lightDir"][1].get<float>(),
+                              z = fc["lightDir"][2].get<float>();
+                        float len = std::sqrt(x*x + y*y + z*z);
+                        if (len > 1e-5f) {
+                            src->m_lightAzimuth = std::atan2(y, x) * 180.0f / 3.14159265f;
+                            if (src->m_lightAzimuth < 0.0f) src->m_lightAzimuth += 360.0f;
+                            src->m_lightElev = std::asin(std::max(-1.0f, std::min(1.0f, z / len))) * 180.0f / 3.14159265f;
+                        }
+                    }
+                    src->m_fillAmount   = fc.value("fillAmount",   src->m_fillAmount);
+                    src->m_particleCube = fc.value("particleCube", src->m_particleCube);
+                    src->m_surfaceMode  = fc.value("surfaceMode",  src->m_surfaceMode);
+                    src->m_doubleDensity = fc.value("doubleDensity", src->m_doubleDensity);
+                    src->m_doublePrev   = src->m_doubleDensity;
+                    src->m_emitOn       = fc.value("emitOn",       src->m_emitOn);
+                    src->m_emitShape    = fc.value("emitShape",    src->m_emitShape);
+                    src->m_bgMode       = fc.value("bgMode",       src->m_bgMode);
+                    src->m_floorOn      = fc.value("floorOn",      src->m_floorOn);
+                    if (fc.contains("orbs") && fc["orbs"].is_array()) {
+                        int n = std::min((int)fc["orbs"].size(), (int)FluidSource3D::kMaxOrbs);
+                        for (int i = 0; i < n; i++) {
+                            const auto& oj = fc["orbs"][i]; auto& o = src->m_orbs[i];
+                            o.enabled = oj.value("enabled", o.enabled);
+                            o.motion  = oj.value("motion",  o.motion);
+                            o.physics = oj.value("physics", o.physics);
+                            if (oj.contains("pos") && oj["pos"].is_array() && oj["pos"].size() == 3)
+                                for (int k = 0; k < 3; k++) o.pos[k] = oj["pos"][k].get<float>();
+                        }
+                    }
+                    src->m_vjMode           = fc.value("vjMode",         src->m_vjMode);
+                    src->m_vjGrab           = fc.value("vjGrab",         src->m_vjGrab);
+                    src->m_journeySignal    = fc.value("journeySignal",  src->m_journeySignal);
+                    src->m_journeyGain      = fc.value("journeyGain",    src->m_journeyGain);
+                    src->m_journeyPosManual = fc.value("journeyPosManual", src->m_journeyPosManual);
+                    auto loadLookV2 = [&](const char* key, int which) {
+                        if (!fc.contains(key) || !fc[key].is_object()) return false;
+                        src->m_look[which].v.clear();
+                        for (auto it = fc[key].begin(); it != fc[key].end(); ++it)
+                            if (it.value().is_number()) src->m_look[which].v[it.key()] = it.value().get<float>();
+                        src->m_lookSet[which] = true;
+                        return true;
+                    };
+                    if (!loadLookV2("lookLowV2", 0) && fc.contains("lookLow") && fc["lookLow"].is_array() &&
+                        fc["lookLow"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookLow"][i].get<float>();
+                        src->lookFromArray(0, a);
+                    }
+                    if (!loadLookV2("lookHighV2", 1) && fc.contains("lookHigh") && fc["lookHigh"].is_array() &&
+                        fc["lookHigh"].size() == FluidSource3D::kLookFloats) {
+                        float a[FluidSource3D::kLookFloats];
+                        for (int i = 0; i < FluidSource3D::kLookFloats; i++) a[i] = fc["lookHigh"][i].get<float>();
+                        src->lookFromArray(1, a);
+                    }
+                    // m_vjModePrev stays -1 so the first frame loads the right
+                    // look for the restored mode.
+                    src->m_autoRotate  = fc.value("autoRotate",  src->m_autoRotate);
+                    src->m_simRes      = fc.value("simRes",      src->m_simRes);
+                    src->m_substeps    = fc.value("substeps",    src->m_substeps);
+                    src->m_renderScale = fc.value("renderScale", src->m_renderScale);
+                    src->m_imageEnabled   = fc.value("imageEnabled", src->m_imageEnabled);
+                    src->imageSource().sourceLayerId =
+                        fc.value("imageSourceLayerId",
+                                 (uint32_t)src->imageSource().sourceLayerId);
+                    src->backdropSource().sourceLayerId =
+                        fc.value("backdropSourceLayerId",
+                                 (uint32_t)src->backdropSource().sourceLayerId);
                 }
                 int fw = 1280, fh = 720;
                 if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() &&
@@ -21342,18 +21588,12 @@ std::vector<Application::ShowParam> Application::showParamsFor(ContentSource* sr
             {"bloomThreshold","bloom threshold",0,1.5f}, {"sunraysWeight","sunrays",0,2},
             {"imageIntensity","image intensity",0,1}, {"reformRate","reform rate",0,2}};
         tab = kFluid; n = (int)(sizeof(kFluid) / sizeof(kFluid[0]));
-    } else if (dynamic_cast<FluidSource3D*>(src)) {
-        static const T kF3[] = {
-            {"rotateSpeed","rotate speed",0,2}, {"brightness","brightness",0,6},
-            {"tilt","tilt",-1.57f,1.57f}, {"sphereScale","sphere scale",0.05f,1.5f},
-            {"zoom","zoom",0.5f,4}, {"gravity","gravity",0,4},
-            {"vortex","vortex",0,3}, {"turbulence","turbulence",0,2},
-            {"forceScale","force scale",0.1f,4}, {"sphereShape","sphere shape",0,1},
-            {"lightIntensity","light",0,3}, {"ambient","ambient",0,1},
-            {"specular","specular",0,3}, {"rim","rim",0,1},
-            {"saturation","saturation",0,2}, {"imageMix","image mix",0,1},
-            {"bgAlpha","bg alpha",0,1}, {"audioIntensity","audio intensity",0,1}};
-        tab = kF3; n = (int)(sizeof(kF3) / sizeof(kF3[0]));
+    } else if (auto* f3 = dynamic_cast<FluidSource3D*>(src)) {
+        // The whole bindable param table, live values included.
+        for (const auto& d : f3->params())
+            if (d.flags & FluidSource3D::kBind)
+                out.push_back({d.id, d.label, *d.ptr, d.lo, d.hi});
+        return out;
     } else if (dynamic_cast<ParticleSource*>(src)) {
         static const T kPart[] = {
             {"spawnRate","spawn rate",0,2000}, {"initialSize","size",0.005f,0.3f},
@@ -21403,6 +21643,17 @@ const int* Application::lcxlBank(int idx) {
 // faders 1-8, then the knob rows top to bottom. Same MidiCC AudioBinding
 // path as the bolt popover, so Properties can retune each one.
 void Application::autoMapShaderToLCXL(ContentSource* src) {
+    // The knob map (which param sits on which XL control) is ALWAYS derived:
+    // the centre surface and the deck knobs read it for their labels, so
+    // clicking a deck or picking a shader renames the knobs with or without
+    // hardware. Label-safe: the binding engine skips a CC it has never
+    // received, so an unplugged map never moves a param. Only the side
+    // effects stay behind an explicit AUTO-MAP / Re-map / More press: the
+    // "leave it listening" audio pick below. (MIDI devices are opened by
+    // the button itself, never here.)
+    // The audio pick needs a real surface too: without one, an AUTO-MAP only
+    // renames the knobs and never binds a param to the music by itself.
+    const bool armed = m_showAutoMapArmed && m_midiManager.hasControlSurface();
     auto* bmapP = showBindingsFor(src);
     if (!bmapP) {
         std::cerr << "[Show] AUTO-MAP refused: source '"
@@ -21413,16 +21664,13 @@ void Application::autoMapShaderToLCXL(ContentSource* src) {
     std::cerr << "[Show] AUTO-MAP on " << src->typeName() << std::endl;
     auto& bmap = *bmapP;
     auto params = showParamsFor(src);
-    if (!m_midiManager.isOpen()) {
-        auto devs = m_midiManager.listDevices();
-        if (!devs.empty()) m_midiManager.openAll();
-    }
-    // AUTO-MAP always leaves the shader listening: if nothing is audio-
-    // reactive yet, pick one param — the most motion/intensity-flavoured
-    // name wins, else the first float — and bind it to Bass with the house
-    // calm defaults (smoothing 0.85, 4s ease-in, upper-half swing from the
-    // param's current value). The knob mapping below routes around it.
-    {
+    // An explicit AUTO-MAP always leaves the shader listening: if nothing is
+    // audio-reactive yet, pick one param — the most motion/intensity-
+    // flavoured name wins, else the first float — and bind it to Bass with
+    // the house calm defaults (smoothing 0.85, 4s ease-in, upper-half swing
+    // from the param's current value). The knob mapping below routes around
+    // it. A plain deck click (not armed) only renames the knobs.
+    if (armed) {
         bool hasAudio = false;
         for (const auto& kv : bmap)
             if (kv.second.signal != AudioSignal::None &&
@@ -21671,6 +21919,31 @@ void Application::usageFlush(bool force) {
     m_usageDirtyT = -1.0;
 }
 
+// Per-shader memory: 4x a second, snapshot every shader layer in the stack
+// (Canvas layers, SHOW decks, timeline clips alike) into ShaderPresets, so
+// whatever Lu last did to a shader — knob values, SOUND/MIDI bindings,
+// motion kit — is what comes back the next time that shader loads
+// anywhere. Thumbnail / preview ShaderSources are not layers, so they
+// never write. A running gallery show is playback, not editing: skipped,
+// or the show's per-entry looks would overwrite the shader's own memory.
+void Application::memoryTick() {
+    const double now = glfwGetTime();
+    if (now < m_memoryNextT) { m_shaderPresets.tick(now); return; }
+    m_memoryNextT = now + 0.25;
+    if (!m_showRunning) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& l = m_layerStack[i];
+            if (!l || !l->source || !l->source->isShader()) continue;
+            auto* ss = dynamic_cast<ShaderSource*>(l->source.get());
+            if (!ss || !ss->isInitialized()) continue;
+            const std::string& p = ss->sourcePath();
+            if (p.empty()) continue;
+            m_shaderPresets.remember(usageKey(p), *ss);
+        }
+    }
+    m_shaderPresets.tick(now);
+}
+
 // ── SHOW decks ──────────────────────────────────────────────────────────
 // Two managed shader layers, A and B, keyed "show:A"/"show:B". The layer
 // stack stays the source of truth: the crossfader only writes opacity /
@@ -21902,8 +22175,16 @@ void Application::deckTick(float dt) {
         else if (newest && maxId > sSeenMaxId) {
             sSeenMaxId = maxId;
             if (!m_midiManager.isOpen()) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
+            // The new layer takes the SHOW knobs either way, so the centre
+            // surface names its params at once. Without a control surface
+            // this is label-only: the knob map never moves a param until a
+            // CC actually arrives, and the audio pick stays behind AUTO-MAP
+            // (Lu: "if there's no midi plugged in, the parameters should
+            // not be auto-set").
             showTakeExtra(newest);
-            std::cerr << "[Show] new layer on the canvas -> knobs + MIDI: " << newest->name << std::endl;
+            std::cerr << "[Show] new layer on the canvas -> knobs"
+                      << (m_midiManager.hasControlSurface() ? " + MIDI: " : " (no control surface, params left alone): ")
+                      << newest->name << std::endl;
         }
     }
     Layer* A = deckLayer(0);
@@ -21972,7 +22253,12 @@ void Application::deckTick(float dt) {
     int ia = deckLayerIndex(0), ib = deckLayerIndex(1);
     Layer* top = ia > ib ? A : B;
     Layer* bot = ia > ib ? B : A;
-    float topAmt = (top == B) ? m_deckBlend : 1.0f - m_deckBlend;
+    // "cut" on the hand fader snaps at the middle (a cut crossfader curve)
+    // instead of mixing like crossfade — otherwise the two are identical
+    // on the slider. The fader itself keeps its position.
+    float mix = m_deckBlend;
+    if (!m_deckAnim && m_deckTransition == "cut") mix = (m_deckBlend >= 0.5f) ? 1.0f : 0.0f;
+    float topAmt = (top == B) ? mix : 1.0f - mix;
 
     if (glLive) {
         // Between-row transition: the compositor blends the stack-so-far
@@ -22530,6 +22816,7 @@ void Application::renderShowPanel() {
                         }
                         deckLoad(di, e.fullPath, t);
                         deckTakeSurface(di, true);   // a fresh pick lands on the knobs + MIDI
+                        m_showLibraryDeck = -1;      // picking closes the library: back to this deck's controls
                     }
                     n++;
                 }
@@ -22589,8 +22876,13 @@ void Application::renderShowPanel() {
             bool clicked = ImGui::InvisibleButton("##preview", ImVec2(pw, ph));
             bool hov = ImGui::IsItemHovered();
             ImGui::PopID();
-            // click the picture = the library for this deck
-            if (clicked) openLibrary(di);
+            // click the picture = the knobs (XL + centre) follow THIS deck;
+            // an empty deck opens the library instead. The library icon /
+            // title open the library for a loaded deck.
+            if (clicked) {
+                if (L) deckTakeSurface(di, true);
+                else   openLibrary(di);
+            }
             GLuint tex = (L && L->source) ? L->source->textureId() : 0;
             d->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255), 6.0f);
             if (tex) {
@@ -22609,7 +22901,9 @@ void Application::renderShowPanel() {
                 d->AddText(ImVec2(p0.x + (pw - ts.x) * 0.5f, p0.y + (ph - ts.y) * 0.5f), hov ? kText : kDim, hint);
             }
             bool onAir = L && di == onAirDeck;
+            bool isT = L && target == L;   // this deck has the knobs
             d->AddRect(p0, p1, onAir ? IM_COL32(255, 255, 255, hov ? 200 : 150) : IM_COL32(255, 255, 255, hov ? 90 : 30), 6.0f, 0, onAir ? 1.5f : 1.0f);
+            if (isT) d->AddRect(ImVec2(p0.x + 3, p0.y + 3), ImVec2(p1.x - 3, p1.y - 3), kBlue, 5.0f, 0, 1.5f);
             // library icon, top-right of the picture: opens the shader library for this deck
             {
                 float r = 15.0f;
@@ -22621,12 +22915,13 @@ void Application::renderShowPanel() {
                 ImGui::PopID();
                 d->AddCircleFilled(c, r, IM_COL32(0, 0, 0, lhov ? 200 : 140));
                 d->AddCircle(c, r, IM_COL32(255, 255, 255, lhov ? 160 : 60), 0, 1.0f);
-                lucide::layers(d, c.x, c.y, 15.0f, IM_COL32(255, 255, 255, lhov ? 255 : 200));
+                // same stars as the rail's Gallery button — one icon for "shaders"
+                lucide::sparkles(d, c.x, c.y, 15.0f, IM_COL32(255, 255, 255, lhov ? 255 : 200), 1.4f);
                 if (lhov) ImGui::SetTooltip("shader library -> deck %s", di == 0 ? "A" : "B");
                 if (lib) openLibrary(di);
                 if (lhov) hov = false;   // the icon owns the hover, not the picture
             }
-            if (hov) ImGui::SetTooltip("open the library for deck %s", di == 0 ? "A" : "B");
+            if (hov) ImGui::SetTooltip(L ? (isT ? "the knobs follow deck %s" : "click: knobs on deck %s") : "click: choose a shader for deck %s", di == 0 ? "A" : "B");
         };
         if (!colLib[0]) deckPreview(0, xA);
         if (!colLib[1]) deckPreview(1, xB);
@@ -22858,7 +23153,11 @@ void Application::renderShowPanel() {
                 const float wTr = 150.0f, wSec = 66.0f, wMidi = 80.0f, wAuto = 92.0f, wReset = 66.0f, g = 8.0f;
                 float total = wAuto + g + wTr + g + wSec + g + wMidi + g + wReset;
                 ImGui::SetCursorScreenPos(ImVec2(xM + std::max(0.0f, (mainW - total) * 0.5f), rowY));
-                if (ImGui::Button("AUTO-MAP", ImVec2(wAuto, 0)) && target) { m_showMapPage = 0; autoMapShaderToLCXL(target->source.get()); }
+                if (ImGui::Button("AUTO-MAP", ImVec2(wAuto, 0)) && target) {
+                    if (!m_midiManager.isOpen()) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
+                    m_showAutoMapArmed = m_midiManager.isOpen();
+                    m_showMapPage = 0; autoMapShaderToLCXL(target->source.get());
+                }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("map every knob + fader to %s again", target ? target->name.c_str() : "the active layer");
                 ImGui::SameLine(0, g);
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
@@ -22954,7 +23253,7 @@ void Application::renderShowPanel() {
                     ImGui::InvisibleButton("##dot", ImVec2(dotW, rowH));
                     bool dh = ImGui::IsItemHovered();
                     ImVec2 cc(base.x + dotW * 0.5f, cyy);
-                    if (audio)      pd->AddCircleFilled(cc, 4.0f, IM_COL32(245, 246, 248, dh ? 255 : 220));
+                    if (audio)      pd->AddCircleFilled(cc, 4.0f, IM_COL32(74, 158, 255, 255));   // live signal = blue
                     else if (midi)  pd->AddCircle(cc, 4.0f, IM_COL32(214, 220, 230, dh ? 230 : 150), 0, 1.5f);
                     else            pd->AddCircleFilled(cc, 2.5f, IM_COL32(120, 128, 142, dh ? 220 : 90));
                     if (dh) ImGui::SetTooltip(audio ? "reacts to %s — click to change" :
@@ -22977,12 +23276,22 @@ void Application::renderShowPanel() {
                     ImVec2 ls = ImGui::CalcTextSize(lbl.c_str());
                     while (ls.x > labelW - 6 && lbl.size() > 3) { lbl = lbl.substr(0, lbl.size() - 2) + "…"; ls = ImGui::CalcTextSize(lbl.c_str()); }
                     pd->AddText(ImVec2(base.x + dotW + 2, cyy - ls.y * 0.5f),
-                                audio ? IM_COL32(245, 246, 248, 255) : IM_COL32(140, 148, 163, 255), lbl.c_str());
+                                audio ? IM_COL32(120, 185, 255, 255) : IM_COL32(140, 148, 163, 255), lbl.c_str());
                     // slider on the same centre line
                     ImGui::SetCursorScreenPos(ImVec2(base.x + sliderX, cyy - ImGui::GetFrameHeight() * 0.5f));
                     ImGui::SetNextItemWidth(w - sliderX - 4.0f);
                     float v = sp.cur;
+                    if (audio) ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.29f, 0.62f, 1.0f, 1.0f));
                     if (ImGui::SliderFloat("##v", &v, sp.lo, sp.hi, "%.2f") && ss) ss->setFloat(sp.name, v);
+                    if (audio) {
+                        ImGui::PopStyleColor();
+                        // the range the signal sweeps, as a blue band under the slider
+                        ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
+                        float span = std::max(sp.hi - sp.lo, 1e-6f);
+                        float fa = std::clamp((it->second.rangeMin - sp.lo) / span, 0.0f, 1.0f), fb = std::clamp((it->second.rangeMax - sp.lo) / span, 0.0f, 1.0f);
+                        if (fb < fa) { float tmp = fa; fa = fb; fb = tmp; }
+                        pd->AddRectFilled(ImVec2(r0.x + (r1.x - r0.x) * fa, r1.y - 3.0f), ImVec2(r0.x + (r1.x - r0.x) * fb, r1.y - 1.0f), IM_COL32(74, 158, 255, 200), 1.0f);
+                    }
                     ImGui::PopID();
                     ry += rowH;
                 }
@@ -23192,10 +23501,10 @@ void Application::renderShowPanel() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, kGhostBtnHov);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.64f, 1));
-                if (ImGui::Button("Re-map", ImVec2(wRemap, 0)) && target) autoMapShaderToLCXL(target->source.get());
+                if (ImGui::Button("Re-map", ImVec2(wRemap, 0)) && target) { m_showAutoMapArmed = m_midiManager.isOpen(); autoMapShaderToLCXL(target->source.get()); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("knob rows top to bottom, then the faders. The crossfader's control is skipped.");
                 ImGui::SameLine(0, gap);
-                if (ImGui::Button("More", ImVec2(wMore, 0)) && target) { m_showMapPage++; autoMapShaderToLCXL(target->source.get()); }
+                if (ImGui::Button("More", ImVec2(wMore, 0)) && target) { m_showAutoMapArmed = m_midiManager.isOpen(); m_showMapPage++; autoMapShaderToLCXL(target->source.get()); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("next page of parameters onto the surface");
                 ImGui::SameLine(0, gap);
                 lcxlBank(0);
@@ -23423,16 +23732,34 @@ void Application::renderShaderGallery() {
                           ImGuiWindowFlags_NoScrollbar;
     if (ImGui::GetIO().MousePos.y < UIManager::sNavBandBottom + 2.0f) fl |= ImGuiWindowFlags_NoInputs;
     bool open = ImGui::Begin("###BabyGallery", nullptr, fl);
-    if (!s_wasOpen) { ImGui::SetWindowFocus(); s_wasOpen = true; }
+    const bool justOpened = !s_wasOpen;
+    if (justOpened) { ImGui::SetWindowFocus(); s_wasOpen = true; }
     if (open) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) UIManager::sGalleryOpen = false;
 
         // ── header row: title · search · filter pills · dest · close ────
         static char s_search[128] = "";
         static int  s_filter = 0;            // 0 ALL / 1 VFX / 2 Text / 3 3D
-        static int  s_destZone = 0;          // the first zone ("Main") — never "whole house"
-        if (s_destZone >= (int)m_zones.size()) s_destZone = m_zones.empty() ? -1 : 0;
+        // Where a clicked tile goes. >= 0: that zone (ONLY that zone; never
+        // "whole house"). -2 / -3: SHOW deck A / B (replace the deck's
+        // shader, the knobs follow it). The default follows what you are
+        // looking at: the active zone — the canvas — when the gallery was
+        // opened from Canvas (a tile used to land in zone 0 while the canvas
+        // showed another zone = "it didn't add"), the knob-target deck when
+        // it was opened from SHOW. A pick in the dropdown sticks until the
+        // active zone changes.
+        static int  s_destZone = 0;
+        static int  s_destFollowZone = -1;
         static bool s_building = false;
+        if (justOpened) {
+            s_building = false;   // a fresh open adds tiles; BUILD SHOW is an explicit mode
+            s_destZone = UIManager::sGalleryFromShow ? (-2 - std::max(0, std::min(1, m_deckTarget))) : m_activeZone;
+            s_destFollowZone = m_activeZone;
+        } else if (m_activeZone != s_destFollowZone) {
+            s_destZone = m_activeZone;
+            s_destFollowZone = m_activeZone;
+        }
+        if (s_destZone >= (int)m_zones.size()) s_destZone = m_zones.empty() ? -1 : 0;
         static std::vector<std::string> s_showSel;
         static float s_showMinutes = 10.0f;
 
@@ -23482,14 +23809,21 @@ void Application::renderShaderGallery() {
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 8);
         const char* destPreview = "Main";   // no zones yet = the main output
-        if (s_destZone >= 0 && s_destZone < (int)m_zones.size() && m_zones[s_destZone])
+        if (s_destZone == -2) destPreview = "Deck A";
+        else if (s_destZone == -3) destPreview = "Deck B";
+        else if (s_destZone >= 0 && s_destZone < (int)m_zones.size() && m_zones[s_destZone])
             destPreview = m_zones[s_destZone]->name.c_str();
         ImGui::SetNextItemWidth(150.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
-        bool zoneArmed = (s_destZone >= 0);
+        bool zoneArmed = (s_destZone != -1);
         ImGui::PushStyleColor(ImGuiCol_FrameBg, zoneArmed ? ImVec4(0.961f, 0.965f, 0.973f, 0.30f)
                                                           : ImVec4(1, 1, 1, 0.06f));
         if (ImGui::BeginCombo("##babyDest", destPreview)) {
+            // SHOW decks first: a tile replaces that deck's shader and the
+            // knobs follow it — the same thing the SHOW library does.
+            if (ImGui::Selectable("Deck A", s_destZone == -2)) s_destZone = -2;
+            if (ImGui::Selectable("Deck B", s_destZone == -3)) s_destZone = -3;
+            ImGui::Separator();
             if (m_zones.empty()) ImGui::Selectable("Main", true);
             for (int zi = 0; zi < (int)m_zones.size(); zi++) {
                 if (!m_zones[zi]) continue;
@@ -23802,6 +24136,16 @@ void Application::renderShaderGallery() {
                 m_zones[zi]->visibleLayerIds.insert(lid);
             };
             auto addShaderRouted = [&](const std::string& fullPath) {
+                if (s_destZone <= -2) {
+                    // a SHOW deck: swap its shader in and hand it the knobs
+                    int di = -2 - s_destZone;
+                    std::string title;
+                    for (const auto& sh : m_shaderClaw.shaders())
+                        if (sh.fullPath == fullPath) { title = sh.title; break; }
+                    deckLoad(di, fullPath, title);
+                    deckTakeSurface(di, true);
+                    return;
+                }
                 int before = m_layerStack.count();
                 loadShader(fullPath);
                 if (m_layerStack.count() > before) {

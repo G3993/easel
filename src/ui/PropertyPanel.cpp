@@ -467,6 +467,8 @@ static bool sectionHeader(const char* label, bool* open,
 // Public wrappers so panels rendered OUTSIDE this class (Sources / Audio /
 // Mapping, which live in Application.cpp + WarpEditor.cpp) share the exact
 // same section-title and label rhythm — single source of truth, no drift.
+int PropertyPanel::sFluid3DTab = 0;
+
 bool PropertyPanel::PanelSectionHeader(const char* label, bool firstSection) {
     return sectionHeader(label, nullptr, firstSection);
 }
@@ -1062,12 +1064,12 @@ void audioBindPopup(const char* popupId, const char* paramLabel,
             float segW = (ImGui::GetContentRegionAvail().x - 2 * 4.0f) / 3.0f;
             for (int i = 0; i < 3; i++) {
                 if (i) ImGui::SameLine(0, 4);
-                ImGui::PushStyleColor(ImGuiCol_Button, on[i] ? ImVec4(0.961f, 0.965f, 0.973f, 0.85f)
-                                                             : ImVec4(1, 1, 1, 0.06f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on[i] ? ImVec4(0.961f, 0.965f, 0.973f, 0.95f)
-                                                                    : ImVec4(1, 1, 1, 0.14f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.961f, 0.965f, 0.973f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, on[i] ? ImVec4(0.05f, 0.06f, 0.08f, 1.0f) : ImVec4(1, 1, 1, 1));   // dark on the light pill
+                // a live signal reads BLUE; MIDI / OFF keep the light pill
+                bool blue = on[i] && i == 0;
+                ImGui::PushStyleColor(ImGuiCol_Button, blue ? ImVec4(0.29f, 0.62f, 1.0f, 0.9f) : on[i] ? ImVec4(0.961f, 0.965f, 0.973f, 0.85f) : ImVec4(1, 1, 1, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, blue ? ImVec4(0.35f, 0.68f, 1.0f, 1.0f) : on[i] ? ImVec4(0.961f, 0.965f, 0.973f, 0.95f) : ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, blue ? ImVec4(0.35f, 0.68f, 1.0f, 1.0f) : ImVec4(0.961f, 0.965f, 0.973f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, (on[i] && !blue) ? ImVec4(0.05f, 0.06f, 0.08f, 1.0f) : ImVec4(1, 1, 1, 1));
                 if (ImGui::Button(segs[i], ImVec2(segW, 0))) {
                     if (i == 0 && !isSnd) ab.signal = AudioSignal::Beat;
                     else if (i == 1 && !isMidi) {
@@ -3826,25 +3828,27 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     }
 
     // --- 3D Fluid (SPH) controls ---
+    // One tabbed section driven by FluidSource3D::params()/colors() — every
+    // slider is audio/MIDI-bindable, every color is a panel swatch row.
     if (layer->source && layer->source->typeName() == "Fluid3D") {
         auto* f3 = static_cast<FluidSource3D*>(layer->source.get());
 
         sectionBreak();
         static bool fluid3dOpen = true;
         if (sectionHeader("3D Fluid", &fluid3dOpen)) {
-            ImGui::Dummy(ImVec2(0, 4));
+            auto table  = f3->params();
+            auto ctable = f3->colors();
+            auto& bindings = f3->audioBindings();
 
-            // Bind-capable param: paramSlider + audio/MIDI bind popup + inline
-            // range, keyed by an id FluidSource3D::applyAudioBindings() maps back.
-            auto f3Param = [&](const char* pid, const char* label, float* v,
-                               float lo, float hi, const char* fmt) {
-                auto& bindings = f3->audioBindings();
+            // Bindable slider by param id (label / range come from the table).
+            auto P = [&](const char* pid, const char* fmt = "%.2f") {
+                const FluidSource3D::ParamDef* d = nullptr;
+                for (auto& e : table) if (!strcmp(e.id, pid)) { d = &e; break; }
+                if (!d) return;
                 auto bit = bindings.find(pid);
                 bool isBound = (bit != bindings.end() &&
                                 bit->second.signal != AudioSignal::None);
                 ImGui::PushID(pid);
-                // Live tone-colored marker on the main slider (see the shader
-                // float path) — the binding's current driven value in [lo,hi].
                 float liveDriven = 0.0f;
                 const float* livePtr = nullptr;
                 ImU32 tone = 0;
@@ -3852,15 +3856,15 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     const AudioBinding& lab = bit->second;
                     liveDriven = lab.rangeMin +
                         lab.smoothedValue * (lab.rangeMax - lab.rangeMin);
-                    liveDriven = std::max(lo, std::min(hi, liveDriven));
+                    liveDriven = std::max(d->lo, std::min(d->hi, liveDriven));
                     livePtr = &liveDriven;
                     tone = signalToneColor(lab.signal);
                 }
-                ParamSliderResult ps = paramSlider("##f3", label, v, lo, hi,
+                ParamSliderResult ps = paramSlider("##f3", d->label, d->ptr, d->lo, d->hi,
                                                    isBound, fmt, livePtr, tone);
                 if (ps.activated) undoNeeded = true;
                 if (ps.openBindMenu) ImGui::OpenPopup("##f3bind");
-                audioBindPopup("##f3bind", label, bindings, pid, lo, hi,
+                audioBindPopup("##f3bind", d->label, bindings, pid, d->lo, d->hi,
                                midi, ps.boltPos);
                 if (isBound) {
                     AudioBinding& abr = bindings[pid];
@@ -3868,166 +3872,43 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
                     ImGui::Indent(14.0f);
                     if (rangeSlider("##f3rng", "range",
-                                    &abr.rangeMin, &abr.rangeMax, lo, hi,
+                                    &abr.rangeMin, &abr.rangeMax, d->lo, d->hi,
                                     &liveRng, tone))
                         undoNeeded = true;
                     ImGui::Unindent(14.0f);
                 }
                 ImGui::PopID();
             };
-
-            f3Param("brightness",  "Brightness", &f3->m_brightness,  0.0f,  6.0f,  "%.2f");
-            ImGui::Checkbox("Auto-rotate", &f3->m_autoRotate);
-            if (f3->m_autoRotate)
-                f3Param("rotateSpeed", "Spin Speed", &f3->m_rotateSpeed, 0.0f, 2.0f, "%.2f");
-            f3Param("tilt", "Tilt", &f3->m_tilt, -1.57f, 1.57f, "%.2f");
-            f3Param("zoom", "Zoom", &f3->m_zoom, 0.5f, 4.0f, "%.2f");
-            f3Param("audioIntensity", "Audio Motion", &f3->m_audioIntensity, 0.0f, 1.0f, "%.2f");
-
-            sectionBreak();
-            ImGui::TextDisabled("Particles");
-            pillSlider("Fluid Amount", &f3->m_fillAmount, 0.0f, 1.0f, "%.2f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("How much fluid fills the container — more = more\n"
-                                  "particles, fuller. Reseeds as you drag.\n"
-                                  "(For finer detail / max particle count, raise\n"
-                                  "Sim Detail in Quality below.)");
-            f3Param("sphereScale", "Blob Size", &f3->m_sphereScale, 0.05f, 1.5f, "%.2f");
-            ImGui::Checkbox("Cube particles", &f3->m_particleCube);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Render particles as cubes instead of round blobs.");
-
-            sectionBreak();
-            ImGui::TextDisabled("Forces");
-            f3Param("sphereShape", "Container", &f3->m_sphereShape, 0.0f, 1.0f, "%.2f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Container shape: 0 = cube, 1 = sphere\n"
-                                  "(rounded box in between). Reseeds the fluid\n"
-                                  "when you cross between box and sphere.");
-            f3Param("gravity",    "Gravity",    &f3->m_gravity,    0.0f, 4.0f, "%.2f");
-            f3Param("vortex",     "Vortex",     &f3->m_vortex,     0.0f, 3.0f, "%.2f");
-            f3Param("turbulence", "Turbulence", &f3->m_turbulence, 0.0f, 2.0f, "%.2f");
-            f3Param("forceScale", "Cohesion",   &f3->m_forceScale, 0.1f, 4.0f, "%.2f");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Gravity: 0 = zero-g float, 1 = normal, >1 heavier.\n"
-                                  "Vortex: coherent swirl. Turbulence: chaotic churn.\n"
-                                  "Cohesion: SPH inter-particle force (surface tension).\n"
-                                  "All are audio-bindable; Audio Motion also pumps\n"
-                                  "vortex + turbulence as the sound gets louder.");
-            if (ImGui::Button("Reset Fluid"))
-                f3->reseed();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Re-seed the particle blob and clear all motion.\n"
-                                  "Use this to recover if the forces blow it out.");
-
-            // ── VJ: ride the whole look Low <-> High with the music ─────────
-            sectionBreak();
-            ImGui::TextDisabled("VJ");
-            // Mode: Low (edit chill) | High (edit intense) | Live (perform).
-            ImGui::RadioButton("Low",  &f3->m_vjMode, 0); ImGui::SameLine();
-            ImGui::RadioButton("High", &f3->m_vjMode, 1); ImGui::SameLine();
-            ImGui::RadioButton("Live", &f3->m_vjMode, 2);
-            if (f3->m_vjMode == 0) {
-                ImGui::TextDisabled("Dial your chill LOW look above — full control.");
-            } else if (f3->m_vjMode == 1) {
-                ImGui::TextDisabled("Dial your intense HIGH look above — full control.");
-            } else {
-                ImGui::TextDisabled("Performing: the music rides LOW <-> HIGH.");
-                const char* jsig[] = { "Energy", "Build", "Level", "Momentum" };
-                ImGui::SetNextItemWidth(-1);
-                ImGui::Combo("##jsig", &f3->m_journeySignal, jsig, IM_ARRAYSIZE(jsig));
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Which listening signal drives it.\n"
-                                      "Energy = the song's slow high/low arc.");
-                pillSlider("Drive Gain", &f3->m_journeyGain, 0.5f, 4.0f, "%.2f");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Turn up so quieter tracks still reach HIGH.");
-                ImGui::Checkbox("Grab fader", &f3->m_vjGrab);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Take manual control of the LOW<->HIGH fader\n"
-                                      "instead of the music.");
-                if (f3->m_vjGrab) {
-                    pillSlider("Fader", &f3->m_journeyPosManual, 0.0f, 1.0f, "%.2f");
-                } else {
-                    ImGui::ProgressBar(f3->m_journeyPos, ImVec2(-1, 6), "");  // live position
+            // Color swatch row by color id.
+            auto C = [&](const char* cid, const char* labelOverride = nullptr) {
+                for (auto& c : ctable) {
+                    if (strcmp(c.id, cid)) continue;
+                    glm::vec4 v(c.rgb[0], c.rgb[1], c.rgb[2], 1.0f);
+                    if (paramColorRow(cid, labelOverride ? labelOverride : c.label, &v)) {
+                        c.rgb[0] = v.x; c.rgb[1] = v.y; c.rgb[2] = v.z;
+                        undoNeeded = true;
+                    }
+                    return;
                 }
-            }
-
-            // Audio reactivity: a continuous Subtle->Intense slider + Shuffle
-            // that auto-binds a random set of params to the music (lives here
-            // in VJ now). Shuffle picks new params centred randomly in range.
-            // (No local label — audioPresetRow draws its own "Audio
-            // Reactivity" groupHeader now; a TextDisabled here doubled it.)
-            {
-                std::vector<PresetParam> pp = {
-                    { "brightness",     f3->m_brightness,     0.0f,  6.0f },
-                    { "rotateSpeed",    f3->m_rotateSpeed,    0.0f,  2.0f },
-                    { "tilt",           f3->m_tilt,          -1.57f, 1.57f },
-                    { "zoom",           f3->m_zoom,           0.5f,  4.0f },
-                    { "gravity",        f3->m_gravity,        0.0f,  4.0f },
-                    { "vortex",         f3->m_vortex,         0.0f,  3.0f },
-                    { "turbulence",     f3->m_turbulence,     0.0f,  2.0f },
-                    { "forceScale",     f3->m_forceScale,     0.1f,  4.0f },
-                    { "sphereScale",    f3->m_sphereScale,    0.05f, 1.5f },
-                    { "ambient",        f3->m_ambient,        0.0f,  1.0f },
-                    { "specular",       f3->m_specular,       0.0f,  3.0f },
-                    { "rim",            f3->m_rim,            0.0f,  1.0f },
-                    { "saturation",     f3->m_saturation,     0.0f,  2.0f },
-                    { "lightIntensity", f3->m_lightIntensity, 0.0f,  3.0f },
-                };
-                if (audioPresetRow(f3->audioBindings(), pp, layer->id))
-                    undoNeeded = true;
-            }
-
-            sectionBreak();
-            ImGui::TextDisabled("Colors");
-            ImGui::ColorEdit3("Liquid",    f3->m_deepColor,    ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Glow",      f3->m_glowColor,    ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("Rim",       f3->m_shallowColor, ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("BG Top",    f3->m_bgTop,        ImGuiColorEditFlags_NoInputs);
-            ImGui::ColorEdit3("BG Bottom", f3->m_bgBottom,     ImGuiColorEditFlags_NoInputs);
-            f3Param("rim",        "Rim Amount",  &f3->m_rim,        0.0f, 1.0f, "%.2f");
-            f3Param("saturation", "Saturation",  &f3->m_saturation, 0.0f, 2.0f, "%.2f");
-            f3Param("bgAlpha",    "BG Opacity",  &f3->m_bgAlpha,    0.0f, 1.0f, "%.2f");
-
-            sectionBreak();
-            ImGui::TextDisabled("Lighting");
-            ImGui::SliderFloat3("Light Dir",   f3->m_lightDir, -1.0f, 1.0f);
-            f3Param("lightIntensity", "Light Intensity", &f3->m_lightIntensity, 0.0f, 3.0f, "%.2f");
-            f3Param("ambient",        "Ambient",         &f3->m_ambient,        0.0f, 1.0f, "%.2f");
-            f3Param("specular",       "Specular",        &f3->m_specular,       0.0f, 3.0f, "%.2f");
-
-            sectionBreak();
-            // Quality / performance.
-            {
-                float rs = f3->m_renderScale * 100.0f;
-                if (pillSlider("Render Sharpness", &rs, 25.0f, 100.0f, "%.0f%%"))
-                    f3->m_renderScale = rs / 100.0f;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Render resolution as %% of the output zone.\n"
-                                      "100%% = crispest; lower = faster.");
-            }
-            {
-                float sr = (float)f3->m_simRes;
-                if (pillSlider("Sim Detail (grid)", &sr, 32.0f, 128.0f, "%.0f"))
-                    f3->m_simRes = (int)sr;
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("3D grid edge — particle count is roughly edge^3\n"
-                                      "(64 ~= 260K, 96 ~= 880K, 128 ~= 2.1M). Higher =\n"
-                                      "finer fluid detail, much higher GPU cost.\n"
-                                      "Reseeds on change.");
-            }
-            {
-                float ss = (float)f3->m_substeps;
-                if (pillSlider("Sim Substeps", &ss, 1.0f, 4.0f, "%.0f"))
-                    f3->m_substeps = (int)ss;
-            }
-
-            sectionBreak();
-            // ── Image — color the fluid surface with another layer ──────
-            ImGui::Checkbox("Image", &f3->m_imageEnabled);
-            if (f3->m_imageEnabled) {
-                auto& img = f3->imageSource();
+            };
+            auto T = [&](const char* id, const char* label, bool* b) {
+                if (paramToggleRow(id, label, b)) undoNeeded = true;
+            };
+            // Group label: dim small-caps; a thin rule separates later groups.
+            auto G = [&](const char* label, bool first = false) {
+                if (first) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, kDimText);
+                    ImGui::TextUnformatted(upperLabel(label).c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::Dummy(ImVec2(0, kStepY));
+                } else groupHeader(label);
+            };
+            auto E = [&](const char* id, const char* const* labels, int n, int* v) {
+                int r = pillGroup(id, labels, n, *v);
+                if (r != *v) { *v = r; undoNeeded = true; }
+            };
+            // Layer picker for a texture input (surface image / backdrop).
+            auto layerCombo = [&](const char* id, FluidSource3D::ImageRef& img) {
                 const char* curName = "(none)";
                 if (layerStack) {
                     for (int i = 0; i < layerStack->count(); i++) {
@@ -4040,7 +3921,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 }
                 dimLabel("SOURCE", kRowLabel, false);
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##f3ImgSrc", curName)) {
+                if (ImGui::BeginCombo(id, curName)) {
                     if (ImGui::Selectable("(none)", img.sourceLayerId == 0)) {
                         img.sourceLayerId = 0; img.textureId = 0; undoNeeded = true;
                     }
@@ -4058,24 +3939,291 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     }
                     ImGui::EndCombo();
                 }
-                f3Param("imageMix", "Image Amount", &f3->m_imageMix, 0.0f, 1.0f, "%.2f");
-                if (m_layerPanel) {
-                    ImGui::Dummy(ImVec2(0, 2));
-                    dimLabel("ADD AS SOURCE", kRowLabel, false);
-                    float avail = ImGui::GetContentRegionAvail().x;
-                    float bw = (avail - 12.0f) / 3.0f;
-                    auto addBtn = [&](const char* label, bool* flag) {
-                        if (ImGui::Button(label, ImVec2(bw, 0))) {
-                            *flag = true;
-                            m_layerPanel->postCreateBindFluid3DImage = f3;
-                            undoNeeded = true;
+            };
+
+            // Sub-tabs: a 2×3 equal-width segmented strip (six free-width
+            // pills wrap unevenly in the 300px column).
+            int& f3Tab = sFluid3DTab;
+            {
+                static const char* kTabs[] = { "Motion", "Particles", "Scene", "Light", "Look", "VJ" };
+                ImGui::Dummy(ImVec2(0, 2));
+                // On a tab change (click, OSC, Show page) bring the strip to
+                // the top of the panel so the new tab's controls are in view.
+                static int sPrevTab = -1;
+                if (sPrevTab != f3Tab) {
+                    if (sPrevTab >= 0) {
+                        float y = ImGui::GetCursorPosY() - ImGui::GetStyle().WindowPadding.y;
+                        ImGui::SetScrollY(std::max(0.0f, y));
+                    }
+                    sPrevTab = f3Tab;
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 100.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 5));
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
+                float avail = ImGui::GetContentRegionAvail().x;
+                float segW  = std::floor((avail - 2.0f * 6.0f) / 3.0f);
+                for (int i = 0; i < 6; i++) {
+                    if (i % 3) ImGui::SameLine();
+                    bool active = (i == f3Tab);
+                    if (active) {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        kColAccentV);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColAccentV);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColAccentV);
+                        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.06f, 0.07f, 0.10f, 1.0f));
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColCtrlBgActiveV);
+                        ImGui::PushStyleColor(ImGuiCol_Text,          kColValueV);
+                    }
+                    ImGui::PushID(i);
+                    if (ImGui::Button(kTabs[i], ImVec2(segW, 0))) f3Tab = i;
+                    ImGui::PopID();
+                    ImGui::PopStyleColor(4);
+                }
+                ImGui::PopStyleVar(3);
+                ImGui::Dummy(ImVec2(0, 8));
+            }
+
+            if (f3Tab == 0) {
+                // ── MOTION: everything that pushes the fluid around ──
+                G("Forces", true);
+                P("gravity"); P("gravityTiltX"); P("gravityTiltY");
+                P("vortex"); P("vortexLift");
+                P("turbulence"); P("turbScale"); P("turbSpeed");
+                P("audioIntensity");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Calm when quiet, churning when loud —\npumps vortex + turbulence with the music.");
+                G("Wind");
+                P("wind"); P("windAngle", "%.0f"); P("updraft"); P("gust");
+                G("Attractor");
+                P("attract");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Pull the fluid toward a point (+) or push it away (−).");
+                P("attractX"); P("attractY"); P("attractZ");
+                G("Fluid");
+                P("forceScale");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("SPH inter-particle force — how much the\nfluid holds together.");
+                P("viscosity"); P("tension"); P("restDensity");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Lower = the fluid wants to spread out (puffy),\nhigher = packs tighter.");
+                P("maxVel"); P("damping"); P("bounce"); P("simSpeed");
+                G("Container");
+                P("sphereShape");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("0 = cube, 1 = sphere (rounded box in between).\nReseeds when crossing between box and sphere.");
+                if (pillSlider("Fluid Amount", &f3->m_fillAmount, 0.0f, 1.0f, "%.2f")) undoNeeded = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How much of the container is filled. Reseeds as you drag.");
+                ImGui::Dummy(ImVec2(0, kRowGapY));
+                if (accentBtn("Reset Fluid", -1.0f)) f3->reseed();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Re-seed the fluid and clear all motion.\nUse this if the forces blow it out.");
+            } else if (f3Tab == 1) {
+                // ── PARTICLES: what a particle is, how many, how long ──
+                G("Surface", true);
+                static const char* kSurf[] = { "Particles", "Liquid" };
+                E("##f3surf", kSurf, 2, &f3->m_surfaceMode);
+                if (f3->m_surfaceMode == 0) {
+                    P("sphereScale");
+                    T("cube", "Cube particles", &f3->m_particleCube);
+                } else {
+                    P("isoLevel");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Density threshold of the smooth liquid skin —\nlower = fuller / blobbier, higher = thinner.");
+                }
+                P("velGlow");
+                G("Amount");
+                T("dbl", "Double particles", &f3->m_doubleDensity);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Seed two particles per cell (×2 count). Reseeds.");
+                {
+                    float sr = (float)f3->m_simRes;
+                    if (pillSlider("Sim Detail", &sr, 32.0f, 128.0f, "%.0f")) { f3->m_simRes = (int)sr; undoNeeded = true; }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("3D grid edge — particle count is roughly edge^3\n"
+                                          "(64 ~= 260K, 96 ~= 880K, 128 ~= 2.1M). Higher =\n"
+                                          "finer fluid, much higher GPU cost. Reseeds.");
+                    float ss = (float)f3->m_substeps;
+                    if (pillSlider("Sim Substeps", &ss, 1.0f, 4.0f, "%.0f")) { f3->m_substeps = (int)ss; undoNeeded = true; }
+                }
+                G("Lifetime");
+                P("lifetime", "%.1f s");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Particles die after about this long (0 = forever).\nPair with the Emitter so new ones keep coming.");
+                P("ageShrink"); P("ageTint"); C("ageColor");
+                G("Emitter");
+                T("emit", "Emitter", &f3->m_emitOn);
+                if (f3->m_emitOn) {
+                    static const char* kShape[] = { "Point", "Rain", "Fountain", "Ring" };
+                    E("##f3emit", kShape, 4, &f3->m_emitShape);
+                    P("emitRate"); P("emitSpeed"); P("emitSpread"); P("emitRadius");
+                    P("emitX"); P("emitY");
+                    if (f3->m_emitShape == 0 || f3->m_emitShape == 3) P("emitZ");
+                }
+                G("Quality");
+                {
+                    float rs = f3->m_renderScale * 100.0f;
+                    if (pillSlider("Render Scale", &rs, 25.0f, 200.0f, "%.0f%%")) { f3->m_renderScale = rs / 100.0f; undoNeeded = true; }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Render resolution as %% of the zone.\n100%% = native, 200%% = 2×2 supersampled (smooth\nedges, no sparkle), lower = faster.");
+                }
+            } else if (f3Tab == 2) {
+                // ── SCENE: background, sun, floor, cage, atmosphere ──
+                G("Background", true);
+                static const char* kBg[] = { "Gradient", "Solid", "Horizon", "Image", "Stars" };
+                E("##f3bg", kBg, 5, &f3->m_bgMode);
+                if (f3->m_bgMode == 1) C("bgBottom", "Color");
+                else { C("bgTop"); C("bgBottom"); }
+                if (f3->m_bgMode == 3) layerCombo("##f3BgSrc", f3->backdropSource());
+                if (f3->m_bgMode == 4) P("stars");
+                P("bgAlpha");
+                G("Horizon");
+                P("horizonAmt"); C("horizonColor");
+                G("Sun");
+                P("sunIntensity"); P("sunSize", "%.0f"); P("sunAzimuth", "%.0f"); P("sunElev", "%.0f"); C("sunColor");
+                G("Floor");
+                T("floor", "Floor", &f3->m_floorOn);
+                if (f3->m_floorOn) {
+                    P("floorGap"); P("floorReflect"); P("floorGrid"); P("floorFade");
+                    C("floorColor"); C("gridColor");
+                }
+                G("Cage");
+                P("cage");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Glowing edges of the container box.");
+                if (f3->m_cage > 0.0f) { P("cageWidth"); C("cageColor"); }
+                G("Atmosphere");
+                P("fog"); P("vignette");
+            } else if (f3Tab == 3) {
+                // ── LIGHT: key light + emissive orbs ──
+                G("Key Light", true);
+                P("lightAzimuth", "%.0f"); P("lightElev", "%.0f"); P("lightIntensity"); P("ambient");
+                G("Emissive Orbs");
+                ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
+                ImGui::TextWrapped("Glowing spheres in the scene: they light the fluid, "
+                                   "reflect in it and can push or pull it.");
+                ImGui::PopStyleColor();
+                P("orbGlow"); P("orbLight"); P("orbSpec");
+                static const char* kMotion[]  = { "Still", "Orbit", "Bob" };
+                static const char* kPhysics[] = { "None", "Solid", "Attract", "Repel" };
+                static const char* kOrbCol[]  = { "orb1Color", "orb2Color", "orb3Color", "orb4Color" };
+                static const char* kOrbName[] = { "Orb 1", "Orb 2", "Orb 3", "Orb 4" };
+                static const char* kOrbP[4][7] = {
+                    {"orb1Intensity","orb1Size","orb1Speed","orb1Radius","orb1Height","orb1Phase","orb1Force"},
+                    {"orb2Intensity","orb2Size","orb2Speed","orb2Radius","orb2Height","orb2Phase","orb2Force"},
+                    {"orb3Intensity","orb3Size","orb3Speed","orb3Radius","orb3Height","orb3Phase","orb3Force"},
+                    {"orb4Intensity","orb4Size","orb4Speed","orb4Radius","orb4Height","orb4Phase","orb4Force"},
+                };
+                for (int i = 0; i < FluidSource3D::kMaxOrbs; i++) {
+                    auto& o = f3->m_orbs[i];
+                    ImGui::PushID(i);
+                    thinSep();
+                    T("on", kOrbName[i], &o.enabled);
+                    if (o.enabled) {
+                        C(kOrbCol[i], "Color");
+                        P(kOrbP[i][0]); P(kOrbP[i][1]);
+                        dimLabel("MOTION", kRowLabel, false);
+                        E("##mot", kMotion, 3, &o.motion);
+                        if (o.motion == 1) { P(kOrbP[i][2]); P(kOrbP[i][3]); P(kOrbP[i][4]); P(kOrbP[i][5], "%.0f"); }
+                        else {
+                            if (pillSlider("X", &o.pos[0], -0.2f, 1.2f, "%.2f")) undoNeeded = true;
+                            if (pillSlider("Y", &o.pos[1], -0.2f, 1.2f, "%.2f")) undoNeeded = true;
+                            if (pillSlider("Z", &o.pos[2], -0.2f, 1.2f, "%.2f")) undoNeeded = true;
+                            if (o.motion == 2) { P(kOrbP[i][2]); P(kOrbP[i][3]); }
                         }
-                    };
-                    addBtn("+ Image",  &m_layerPanel->wantsAddImage);
-                    ImGui::SameLine(0, 6);
-                    addBtn("+ Video",  &m_layerPanel->wantsAddVideo);
-                    ImGui::SameLine(0, 6);
-                    addBtn("+ Shader", &m_layerPanel->wantsAddShader);
+                        dimLabel("PHYSICS", kRowLabel, false);
+                        E("##phy", kPhysics, 4, &o.physics);
+                        if (o.physics != 0) P(kOrbP[i][6]);
+                    }
+                    ImGui::PopID();
+                }
+            } else if (f3Tab == 4) {
+                // ── LOOK: colors, material, camera, image ──
+                G("Colors", true);
+                C("deepColor"); C("glowColor"); C("shallowColor");
+                P("rim"); P("brightness"); P("saturation"); P("fluidAlpha");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Opacity of the fluid itself — stack several\n3D Fluid layers with different colors.");
+                G("Material");
+                P("absorb");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Thin edges go light, thick bodies sink to the liquid colour.");
+                P("subsurface"); P("ao"); P("keySpec");
+                P("specular"); P("roughness"); P("fresnel"); P("refract"); P("selfReflect");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Blobs reflect each other (extra raymarch).");
+                G("Finish");
+                P("exposure"); P("contrast"); P("bloom"); P("bloomThreshold"); P("grain");
+                P("dof");
+                if (f3->m_dof > 0.0f) P("dofFocus");
+                G("Camera");
+                T("rot", "Auto-rotate", &f3->m_autoRotate);
+                if (f3->m_autoRotate) P("rotateSpeed");
+                P("tilt"); P("zoom"); P("camDist"); P("camHeight");
+                G("Image");
+                T("img", "Color from layer", &f3->m_imageEnabled);
+                if (f3->m_imageEnabled) {
+                    layerCombo("##f3ImgSrc", f3->imageSource());
+                    P("imageMix");
+                    if (m_layerPanel) {
+                        ImGui::Dummy(ImVec2(0, 2));
+                        dimLabel("ADD AS SOURCE", kRowLabel, false);
+                        float avail = ImGui::GetContentRegionAvail().x;
+                        float bw = (avail - 12.0f) / 3.0f;
+                        auto addBtn = [&](const char* label, bool* flag) {
+                            if (accentBtn(label, bw)) {
+                                *flag = true;
+                                m_layerPanel->postCreateBindFluid3DImage = f3;
+                                undoNeeded = true;
+                            }
+                        };
+                        addBtn("+ Image",  &m_layerPanel->wantsAddImage);
+                        ImGui::SameLine(0, 6);
+                        addBtn("+ Video",  &m_layerPanel->wantsAddVideo);
+                        ImGui::SameLine(0, 6);
+                        addBtn("+ Shader", &m_layerPanel->wantsAddShader);
+                    }
+                }
+            } else {
+                // ── VJ: ride the whole look Low <-> High with the music ──
+                G("Low / High", true);
+                static const char* kVj[] = { "Low", "High", "Live" };
+                E("##f3vj", kVj, 3, &f3->m_vjMode);
+                ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
+                if (f3->m_vjMode == 0)      ImGui::TextWrapped("Dial your chill LOW look in the other tabs.");
+                else if (f3->m_vjMode == 1) ImGui::TextWrapped("Dial your intense HIGH look in the other tabs.");
+                else                        ImGui::TextWrapped("Performing: the music rides LOW <-> HIGH.");
+                ImGui::PopStyleColor();
+                if (f3->m_vjMode == 2) {
+                    static const char* jsig[] = { "Energy", "Build", "Level", "Momentum" };
+                    E("##jsig", jsig, 4, &f3->m_journeySignal);
+                    if (pillSlider("Drive Gain", &f3->m_journeyGain, 0.5f, 4.0f, "%.2f")) undoNeeded = true;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Turn up so quieter tracks still reach HIGH.");
+                    T("grab", "Grab fader", &f3->m_vjGrab);
+                    if (f3->m_vjGrab) {
+                        if (pillSlider("Fader", &f3->m_journeyPosManual, 0.0f, 1.0f, "%.2f")) undoNeeded = true;
+                    } else {
+                        ImGui::Dummy(ImVec2(0, kRowGapY));
+                        ImGui::ProgressBar(f3->m_journeyPos, ImVec2(-1, 6), "");  // live position
+                    }
+                }
+                // Audio reactivity: Subtle->Intense + Shuffle over a curated
+                // set of params (audioPresetRow draws its own header).
+                {
+                    static const char* kPreset[] = {
+                        "brightness", "tilt", "zoom", "gravity", "vortex",   // never Spin
+                        "turbulence", "forceScale", "sphereScale", "ambient", "specular",
+                        "rim", "saturation", "lightIntensity", "viscosity", "tension",
+                        "attract", "wind", "orbGlow", "velGlow" };
+                    std::vector<PresetParam> pp;
+                    for (const char* id : kPreset)
+                        for (auto& d : table)
+                            if (!strcmp(d.id, id)) { pp.push_back({ d.id, *d.ptr, d.lo, d.hi }); break; }
+                    if (audioPresetRow(bindings, pp, layer->id))
+                        undoNeeded = true;
                 }
             }
         }

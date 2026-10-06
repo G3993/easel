@@ -751,6 +751,7 @@ private:
     void decksToFront();           // both decks on top, order kept — the crossfade is the output
     int    m_showTab = 0;                // 0 KNOBS · 1 TRANSITION · 2 TIMELINE
     int    m_deckXfadeCC = -1;           // learned crossfader CC (-1 = XL fader 8)
+    bool   m_showAutoMapArmed = false;   // an explicit AUTO-MAP / Re-map / More press (gates the audio pick only; the knob map itself always follows the target)
     bool   m_deckXfadeLearn = false;     // next CC that moves becomes the crossfader
     bool   m_deckXfadeLoaded = false;
     int    deckXfadeCC();
@@ -769,6 +770,12 @@ private:
     void usageNoteLoad(const std::string& path);
     void usageTick(float dt);
     void usageFlush(bool force);
+
+    // ── per-shader memory (ShaderPresets, ~/.easel/shader_presets.json) ──
+    // Every shader layer's inputs + reactivity bindings are snapshotted a
+    // few times a second; a change is stored and flushed 2 s later.
+    void   memoryTick();
+    double m_memoryNextT = 0.0;
 
     uint32_t m_showTargetLayerId = 0;   // 0 = automatic (selected / topmost)
     int m_showMapPage = 0;              // which page of 32 params is on the XL

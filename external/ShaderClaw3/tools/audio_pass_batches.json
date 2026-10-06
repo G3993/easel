@@ -1,0 +1,318 @@
+[
+ {
+  "kind": "no_audio",
+  "files": [
+   "st_ms2sd1fs.fs",
+   "text_james.fs",
+   "text_wave.fs",
+   "text_cascade.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "text_digifade.fs",
+   "text_coil.fs",
+   "text_flag.fs",
+   "text_bricks.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "text_spacy.fs",
+   "text_3dtype.fs",
+   "ascii_shader.fs",
+   "text_typewriter.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "text_ascii.fs",
+   "dispersion.fs",
+   "trapped.fs",
+   "cfd_paint.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "flow.fs",
+   "NYC.fs",
+   "blobscillator.fs",
+   "bricks_text.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "cascade_text.fs",
+   "coil_text.fs",
+   "digifade_text.fs",
+   "flag_text.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "james.fs",
+   "layers_text.fs",
+   "moveable_gradient.fs",
+   "multi_gradient.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "particles.fs",
+   "shine_text.fs",
+   "spacy_text.fs",
+   "text_3d.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "text_matrix.fs",
+   "text_unified.fs",
+   "wave_text.fs",
+   "dotconnector_clusters_text.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "morphing_organic_text.fs",
+   "images_maximalist_text.fs",
+   "emoji_swarm.fs",
+   "ripples.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "metal.fs",
+   "blob.fs",
+   "fireflow.fs",
+   "linear.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "pixy.fs",
+   "dancing_cubes.fs",
+   "cloud.fs",
+   "follow.fs"
+  ]
+ },
+ {
+  "kind": "no_audio",
+  "files": [
+   "nebulay.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "color_cube.fs",
+   "text_la_bloom.fs",
+   "balls.fs",
+   "ether.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "red_carpet.fs",
+   "carbon_fiber.fs",
+   "crystal_cubes.fs",
+   "data_sculpture.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "liquid_metal.fs",
+   "fluid_image.fs",
+   "ascii_filter.fs",
+   "turrell_chroma.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "opart_riley_waves.fs",
+   "hologram_glitch.fs",
+   "expressionism_kirchner.fs",
+   "constructivism_lissitzky.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "destijl_mondrian.fs",
+   "bauhaus_kandinsky.fs",
+   "abex_rothko.fs",
+   "shatter_grid.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "vapor_hologram.fs",
+   "basic_shapes_3d.fs",
+   "audio_particles_3d.fs",
+   "pbr_glass_dispersion.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "text_clusters.fs",
+   "pixel_players.fs",
+   "checkers.fs",
+   "holographic_foil.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "mandelbrot_zoom.fs",
+   "marble.fs",
+   "meteor_shower.fs",
+   "multi_layer_particles.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "particle_galaxy.fs",
+   "random_freeze.fs",
+   "time_glitch_rgbfs.fs",
+   "vishes.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "wave_interference.fs",
+   "gradient_text.fs",
+   "pixel_type_text.fs",
+   "circle_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "grid_text.fs",
+   "spiral_text.fs",
+   "forms_text.fs",
+   "doubleperson_convo_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "connectnumbers_text.fs",
+   "colorpantone_boxes_text.fs",
+   "highlighted_text.fs",
+   "digital_wave_grid_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "gradient_box_lines_text.fs",
+   "poster_type_text.fs",
+   "type_shapes_blobs_text.fs",
+   "gemstones_border_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "data_minimal_lines_text.fs",
+   "form_plus_lines_text.fs",
+   "shape_grid_circular_text.fs",
+   "images_3dshape_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "moving_circular_grid_text.fs",
+   "meaningful_forms_text.fs",
+   "sphere_images_text.fs",
+   "abstract_subtle_gradient_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "grid_colors_text.fs",
+   "maximalist_3dshapes_text.fs",
+   "meaning_text.fs",
+   "image_grid_colorbg_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "imagedrag_text.fs",
+   "images_grid_lines_text.fs",
+   "images_with_text.fs",
+   "shape_grid_text.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "shape_rotator.fs",
+   "glitch_god.fs",
+   "liquid_3d.fs",
+   "voronoi_growth.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "crystalline_flow.fs",
+   "world_cup_3d.fs",
+   "mandelbox_dive.fs",
+   "fractal_feedback_tunnel.fs"
+  ]
+ },
+ {
+  "kind": "low_audio",
+  "files": [
+   "ripple_field_3d.fs"
+  ]
+ },
+ {
+  "kind": "texture",
+  "files": [
+   "abex_rothko.fs",
+   "multi_layer_particles.fs",
+   "gemstones_border_text.fs",
+   "ripples.fs"
+  ]
+ },
+ {
+  "kind": "texture",
+  "files": [
+   "metal.fs",
+   "blob.fs",
+   "fireflow.fs",
+   "linear.fs"
+  ]
+ },
+ {
+  "kind": "texture",
+  "files": [
+   "crystalline_flow.fs",
+   "fluid_sound.fs"
+  ]
+ }
+]
