@@ -4912,7 +4912,6 @@ void Application::renderUI() {
                 // Test harness / mobile: add a Window Capture layer whose title
                 // contains the given text (case-insensitive). Mirrors the
                 // Sources > Screen "Add" button.
-#ifdef __APPLE__
                 std::string want = msg.strings[0];
                 for (auto& ch : want) ch = (char)tolower((unsigned char)ch);
                 auto wins = WindowCaptureSource::enumerateWindows();
@@ -4920,10 +4919,16 @@ void Application::renderUI() {
                 for (const auto& w : wins) {
                     std::string t = w.title;
                     for (auto& ch : t) ch = (char)tolower((unsigned char)ch);
-                    if (t.find(want) != std::string::npos) { addWindowCapture(w.windowID, w.title); done = true; break; }
+                    if (t.find(want) != std::string::npos) {
+#ifdef _WIN32
+                        addWindowCapture(w.hwnd, w.title);
+#else
+                        addWindowCapture(w.windowID, w.title);
+#endif
+                        done = true; break;
+                    }
                 }
                 if (!done) std::cerr << "[OSC] layer/add/window: no window matching '" << msg.strings[0] << "'\n";
-#endif
             } else if (msg.address == "/easel/layer/add/ndi"
                        && !msg.strings.empty()) {
                 // strings = [source] (plain add) or [source, slot] (managed add,
