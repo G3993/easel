@@ -33,6 +33,25 @@
 
 // SHOW deck layer keys (managedKey on the two mixer decks)
 static const char* kDeckKey[2] = {"show:A", "show:B"};
+
+// Clip a label to maxW with a trailing ellipsis. Drops whole UTF-8 code
+// points from the original text, so it always terminates ("…" is 3 bytes:
+// cutting 2 and re-appending it grew the string forever and froze SHOW).
+static std::string fitWithEllipsis(const std::string& text, float maxW) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxW) return text;
+    std::string base = text;
+    while (!base.empty()) {
+        base.pop_back();
+        while (!base.empty() && (static_cast<unsigned char>(base.back()) & 0xC0) == 0x80) base.pop_back();
+        if (!base.empty() && (static_cast<unsigned char>(base.back()) & 0xC0) == 0xC0) base.pop_back();
+        if (ImGui::CalcTextSize((base + "…").c_str()).x <= maxW) break;
+    }
+    return base + "…";
+}
+// Test hook (/easel/ui deckpick <0|1> <path>): the next frame presses that
+// library tile on that deck, through the same click path as the mouse.
+static int         s_dbgPickDeck = -1;
+static std::string s_dbgPickPath;
 static bool isDeckKey(const std::string& k) { return k == kDeckKey[0] || k == kDeckKey[1]; }
 #include <sstream>
 #include <algorithm>
@@ -4856,6 +4875,11 @@ void Application::renderUI() {
                     if (v == "gallery") UIManager::sGalleryFromShow = UIManager::sShowOpen;
                     UIManager::sGalleryOpen = (v == "gallery");
                     UIManager::sShowOpen    = (v == "show");
+                } else if (what == "deckpick" && msg.strings.size() >= 3) {
+                    s_dbgPickDeck = atoi(v.c_str()) ? 1 : 0;
+                    s_dbgPickPath = msg.strings[2];
+                    m_showLibraryDeck = s_dbgPickDeck;
+                    m_showTab = 0;
                 } else if (what == "scenetab") {
                     PropertyPanel::sSceneTab = std::max(0, std::min(2, atoi(v.c_str())));
                 } else if (what == "f3tab") {
@@ -23316,6 +23340,11 @@ void Application::renderShowPanel() {
                     ImVec2 p0 = ImGui::GetCursorScreenPos();
                     ImGui::PushID(n);
                     bool clicked = ImGui::InvisibleButton("##tile", ImVec2(tileW, tileH));
+                    if (di == s_dbgPickDeck && !s_dbgPickPath.empty() && e.fullPath.size() >= s_dbgPickPath.size()
+                        && e.fullPath.compare(e.fullPath.size() - s_dbgPickPath.size(), s_dbgPickPath.size(), s_dbgPickPath) == 0) {
+                        std::cerr << "[Show] test pick deck " << di << ": " << e.fullPath << std::endl;
+                        clicked = true; s_dbgPickPath.clear(); s_dbgPickDeck = -1;
+                    }
                     bool thov = ImGui::IsItemHovered();
                     // right-click: put this shader on a list / take it off one
                     if (ImGui::BeginPopupContextItem("##tileMenu")) {
@@ -23835,8 +23864,8 @@ void Application::renderShowPanel() {
                     }
                     // label, vertically centred, clipped to its column
                     std::string lbl = sp.label.empty() ? sp.name : sp.label;
+                    lbl = fitWithEllipsis(lbl, labelW - 6);
                     ImVec2 ls = ImGui::CalcTextSize(lbl.c_str());
-                    while (ls.x > labelW - 6 && lbl.size() > 3) { lbl = lbl.substr(0, lbl.size() - 2) + "…"; ls = ImGui::CalcTextSize(lbl.c_str()); }
                     pd->AddText(ImVec2(base.x + dotW + 2, cyy - ls.y * 0.5f),
                                 audio ? IM_COL32(120, 185, 255, 255) : IM_COL32(140, 148, 163, 255), lbl.c_str());
                     // slider on the same centre line
@@ -23886,8 +23915,7 @@ void Application::renderShowPanel() {
                 float nx = hx + bs.x + 20.0f;
                 float maxNameW = w - 2.0f * cardPad - (bs.x + 20.0f) - blendW - 8.0f;
                 std::string nm = L ? L->name : "empty deck";
-                ImVec2 ns = ImGui::CalcTextSize(nm.c_str());
-                while (ns.x > maxNameW && nm.size() > 3) { nm = nm.substr(0, nm.size() - 2) + "…"; ns = ImGui::CalcTextSize(nm.c_str()); }
+                nm = fitWithEllipsis(nm, maxNameW);
                 cd->AddText(ImVec2(nx, hy + 5), L ? kText : kDim, nm.c_str());
                 ImGui::SetCursorScreenPos(ImVec2(x + w - cardPad - blendW, hy));
                 ImGui::PushID(4700 + di);
