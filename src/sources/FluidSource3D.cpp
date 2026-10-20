@@ -310,7 +310,8 @@ float distance2border(vec3 p){
     return mix(boxd, sphd, uSphereShape);
 }
 vec4 border_grad(vec3 p){
-    const float dx = 0.001;
+)"
+R"(    const float dx = 0.001;
     const vec3 k = vec3(1,-1,0);
     return (k.xyyx*distance2border(p + k.xyy*dx) +
             k.yyxx*distance2border(p + k.yyx*dx) +
@@ -952,7 +953,8 @@ void TraceCell(inout Ray ray, vec3 p){
     Particle p0, p1;
     unpackParticles(LOAD3D(uParticles, p), p, p0, p1);
     float rad = 0.85*uSphereScale;
-    // box: grains shrink away over the last 12% of the grid in front of the
+)"
+R"(    // box: grains shrink away over the last 12% of the grid in front of the
     // opening, so the drain at the front is invisible
     if(uBox > 0.5) rad *= smoothstep(0.0, 0.12*size3d.y, p.y) * smoothstep(boxHi().y + 0.3, boxHi().y - 2.2, p.y);
     float v0 = pvar(p0.pos), v1 = pvar(p1.pos);
@@ -1192,7 +1194,8 @@ vec3 shadeBoxWall(vec3 p, vec3 n, vec3 rd){
     occ *= 1.0 - 0.3*depth;
     occ = mix(1.0, occ, uBoxShade);
     float diff = max(dot(n, light_dir), 0.0);
-    vec3 shT = ShadowRGB(p + n*0.75);
+)"
+R"(    vec3 shT = ShadowRGB(p + n*0.75);
     if(uDebugView == 1) return shT;
     if(uDebugView == 2) return vec3(shadowCubic(p + n*0.75).z/size3d.x);
     vec3 shDirect = mix(vec3(1.0), shT, uShadowStr);          // the key light is blocked
@@ -1430,7 +1433,8 @@ void main(){
     vec3 rd, ro;
     if(uSceneCam == 1){
         vec2 ndc = vUv*2.0 - 1.0;
-        vec4 p0 = uSceneInvVP*vec4(ndc, -1.0, 1.0);
+)"
+R"(        vec4 p0 = uSceneInvVP*vec4(ndc, -1.0, 1.0);
         vec4 p1 = uSceneInvVP*vec4(ndc,  1.0, 1.0);
         ro = p0.xyz/p0.w;
         rd = normalize(p1.xyz/p1.w - ro);

@@ -57,7 +57,9 @@ endif()
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        docking
+    # Pinned: v1.93.0-docking. The moving `docking` branch has since dropped
+    # names Easel still uses (ImGuiCol_TabActive, ImGuiSelectableFlags_DontClosePopups).
+    GIT_TAG        b916186e66aa3c02b72c6ca17455516512ed8049
 )
 FetchContent_GetProperties(imgui)
 if(NOT imgui_POPULATED)
