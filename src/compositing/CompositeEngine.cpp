@@ -1,7 +1,18 @@
 #include "compositing/CompositeEngine.h"
 #include "sources/ShaderSource.h"
+#include "sources/ModelSource.h"
+#include "sources/FluidSource3D.h"
+#include "sources/ParticleSource.h"
+#include <fstream>
+#include <sstream>
 #include "render/GLTransition.h"
+#include "scene/SceneCamera.h"
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <cstdio>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include <set>
 #include <string>
@@ -468,6 +479,33 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
     m_frame++;
     releaseIdleScratch();
 
+    // ── native 3D scene: depth + camera + sun (identity when off) ─────
+    const bool scene3D = this->scene3D() && ensureSceneResources();
+    scene::CameraMatrices camM;
+    scene::LightMatrices lightM;
+    float sceneAspect = (m_height > 0) ? (float)m_width / (float)m_height : 1.0f;
+    bool sceneLight = false, sceneShadow = false;
+    if (scene3D) {
+        for (int i = 0; i < 2; i++) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_fbo[i].fboId());
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_sceneDepth, 0);
+            glClearDepth(1.0);
+            glClear(GL_DEPTH_BUFFER_BIT);
+        }
+        if (m_scene->background.a > 0.0f) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_fbo[m_current].fboId());
+            glClearColor(m_scene->background.r, m_scene->background.g, m_scene->background.b, m_scene->background.a);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        Framebuffer::unbind();
+        camM = scene::buildCamera(m_scene->camera, sceneAspect);
+        lightM = scene::buildLight(m_scene->light, sceneAspect);
+        sceneLight = m_scene->light.enabled;
+        sceneShadow = sceneLight && m_scene->light.shadows && m_shadowMapTex != 0;
+    } else if (m_sceneDepth || m_shadowMapTex) {
+        releaseSceneResources();
+    }
+
     float dt = m_audio.time - m_lastTime;
     if (dt <= 0 || dt > 0.5f) dt = 1.0f / 60.0f; // clamp to sane range
     m_lastTime = m_audio.time;
@@ -520,8 +558,35 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         if (l && l->soloed) { anySoloed = true; break; }
     }
 
-    bool firstLayer = true;
-    for (int i = 0; i < (int)layers.size(); i++) {
+    // Draw order: stack order in 2D. In 3D, back-to-front from the camera
+    // (stack order breaks ties) so translucent cards layer correctly; the
+    // depth buffer handles the rest.
+    std::vector<int> order(layers.size());
+    std::iota(order.begin(), order.end(), 0);
+    if (scene3D) {
+        // Flat cards (no depth offset, no 3D rotation) all share the canvas
+        // plane: they keep stack order among themselves (one shared key, the
+        // plane's depth at the world origin) so a tilted camera never
+        // reorders them by where their centres happen to sit. Only cards
+        // that were placed in depth sort by their real centre depth.
+        std::vector<float> key(layers.size(), 0.0f);
+        float flatKey = (camM.view * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)).z;
+        for (size_t k = 0; k < layers.size(); k++) {
+            const auto& L = layers[k];
+            if (!L) continue;
+            bool placed = std::fabs(L->z3) > 1e-6f || L->rot3 != glm::vec3(0.0f);
+            if (!placed) { key[k] = flatKey; continue; }
+            glm::mat4 model = scene::cardModel(layerTransform(*L), sceneAspect, L->z3, L->rot3);
+            glm::vec4 v = camM.view * glm::vec4(scene::cardCenter(model), 1.0f);
+            key[k] = v.z;   // more negative = farther from the eye
+        }
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return key[a] < key[b] - 1e-6f; });
+        if (sceneShadow) renderShadowMap(layers, lightM.viewProj, sceneAspect, anySoloed);
+    }
+
+    bool firstLayer = !(scene3D && m_scene->background.a > 0.0f);
+    for (int oi = 0; oi < (int)layers.size(); oi++) {
+        const int i = order[oi];
         const auto& layer = layers[i];
 
         // Hard skip — double-click on a floating thumbnail toggles visible.
@@ -630,8 +695,100 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             if (ttex) baseTex = ttex;
         }
 
-        // Apply per-layer effects chain
-        GLuint layerTex = applyEffects(layer, baseTex);
+        // Apply per-layer effects chain (a mesh object in a 3D zone draws
+        // its own geometry; its preview texture is not what gets composited)
+        ModelSource* meshObj = scene3D ? dynamic_cast<ModelSource*>(layer->source.get()) : nullptr;
+        if (meshObj && (!meshObj->hasModel() || !meshObj->shadersOk())) meshObj = nullptr;
+        // A Fluid 3D in a 3D zone is a volume object: render its view through
+        // the zone camera now (sim already stepped in update()), then composite
+        // that view as a full-frame card that carries its own depth.
+        FluidSource3D* fluidObj = scene3D ? dynamic_cast<FluidSource3D*>(layer->source.get()) : nullptr;
+        // Particles in a 3D zone are drawn live into the world (billboards
+        // with depth), not as their flat preview texture.
+        ParticleSource* partObj = scene3D ? dynamic_cast<ParticleSource*>(layer->source.get()) : nullptr;
+        if (partObj && !partObj->sceneShaderOk()) partObj = nullptr;
+        glm::mat4 fluidModel(1.0f);
+        if (fluidObj) {
+            // fluid space: z-up grid [0,size]^3 -> unit-ish box centred on the
+            // card, y-up, front face toward the default camera; the box spans
+            // 1.2 card units so a scale-1 layer frames it like the old view.
+            const float S = (float)std::max(2, fluidObj->gridSize());
+            glm::mat4 toUnit = glm::scale(glm::mat4(1.0f), glm::vec3(1.2f / S))
+                             * glm::translate(glm::mat4(1.0f), glm::vec3(-0.5f * S));
+            glm::mat4 spin = glm::rotate(glm::mat4(1.0f), fluidObj->sceneSpin(), glm::vec3(0.0f, 0.0f, 1.0f));
+            glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            // The box's BACK face sits on the layer plane, so in the ortho view
+            // the liquid lies entirely in front of the flat cards (= stacked
+            // like 2D) and in perspective it stands out in front of them.
+            glm::mat4 frontOfPlane = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.6f));
+            fluidModel = scene::cardModel(layerTransform(*layer), sceneAspect, layer->z3, layer->rot3)
+                       * frontOfPlane * zUpToYUp * spin * toUnit;
+            glm::mat4 fluidToClip = camM.viewProj * fluidModel;
+            glm::vec3 dirFluid = glm::normalize(glm::inverse(glm::mat3(fluidModel)) * lightM.dir);
+            float lightLum = glm::dot(m_scene->light.color, glm::vec3(0.299f, 0.587f, 0.114f)) * m_scene->light.intensity;
+            float ambLum = glm::dot(m_scene->light.ambientColor, glm::vec3(0.299f, 0.587f, 0.114f)) * m_scene->light.ambient;
+            GLint keepFbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &keepFbo);
+            GLint keepVp[4]; glGetIntegerv(GL_VIEWPORT, keepVp);
+            fluidObj->renderSceneView(fluidToClip, sceneLight, dirFluid, lightLum, ambLum);
+            glBindFramebuffer(GL_FRAMEBUFFER, keepFbo);
+            glViewport(keepVp[0], keepVp[1], keepVp[2], keepVp[3]);
+        }
+        // An ISF shader with a ROLE in a 3D zone is rendered now, through the
+        // zone camera (sdf / volume write depth; post reads the composite so
+        // far through its first image input; emissive is drawn unlit).
+        // (A post role works in a flat zone too: it is a full-frame pass over
+        // the composite so far, rendered now with the base bound to its image
+        // input; the other roles only mean something in a world.)
+        ShaderSource* roleObj = dynamic_cast<ShaderSource*>(layer->source.get());
+        if (roleObj) {
+            const SceneRole r = roleObj->sceneRole();
+            const bool keep = (r == SceneRole::Post) || (scene3D && (r == SceneRole::Emissive || r == SceneRole::Volume || r == SceneRole::SDF));
+            if (!keep) roleObj = nullptr;
+        }
+        const bool rolePost = roleObj && roleObj->sceneRole() == SceneRole::Post;
+        const bool roleEmissive = roleObj && roleObj->sceneRole() == SceneRole::Emissive;
+        if (roleObj) {
+            SceneView sv;
+            if (scene3D) {
+                sv.model = scene::cardModel(layerTransform(*layer), sceneAspect, layer->z3, layer->rot3);
+                sv.view = camM.view; sv.proj = camM.proj; sv.camPos = camM.eye;
+                sv.lightOn = sceneLight;
+                sv.lightDir = lightM.dir;
+                sv.lightColor = m_scene->light.color * m_scene->light.intensity;
+                sv.ambient = m_scene->light.ambientColor * m_scene->light.ambient;
+                int pc = 0;
+                for (int li = 0; li < SceneParams::kMaxPointLights && pc < 4; li++) {
+                    const auto& PL = m_scene->pointLights[li];
+                    if (!PL.enabled || PL.intensity <= 0.0f) continue;
+                    sv.pointPos[pc] = glm::vec4(PL.pos, PL.radius);
+                    sv.pointCol[pc] = PL.color * PL.intensity;
+                    pc++;
+                }
+                sv.pointCount = sceneLight ? pc : 0;
+            } else {
+                // flat zone: the card as it lies, seen by the default camera
+                SceneCameraParams dcam;
+                scene::CameraMatrices dm = scene::buildCamera(dcam, sceneAspect);
+                sv.model = scene::cardModel(layerTransform(*layer), sceneAspect, 0.0f, glm::vec3(0.0f));
+                sv.view = dm.view; sv.proj = dm.proj; sv.camPos = dm.eye;
+            }
+            if (rolePost) {
+                std::string in = roleObj->firstImageInput();
+                if (!in.empty()) roleObj->bindImageInput(in, m_fbo[m_current].textureId(), m_width, m_height, 0, false);
+            }
+            GLint keepFbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &keepFbo);
+            GLint keepVp[4]; glGetIntegerv(GL_VIEWPORT, keepVp);
+            roleObj->renderSceneView(sv);
+            glBindFramebuffer(GL_FRAMEBUFFER, keepFbo);
+            glViewport(keepVp[0], keepVp[1], keepVp[2], keepVp[3]);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        // Full-frame objects with their own depth view (fluid, sdf / volume shaders)
+        const GLuint volDepthTex = fluidObj ? fluidObj->sceneDepthTexture()
+                                 : (roleObj && roleObj->sceneWantsDepth()) ? roleObj->sceneDepthTexture() : 0;
+        const bool fullFrame = volDepthTex != 0 || rolePost;
+        const bool unlitObj  = fullFrame || roleEmissive;
+        GLuint layerTex = (meshObj || partObj) ? baseTex : applyEffects(layer, baseTex);
 
         // Combine per-layer masks into a single mask texture (additive union)
         GLuint layerMaskTex = 0;
@@ -697,6 +854,14 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         glViewport(0, 0, m_width, m_height);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+        if (scene3D) {
+            // A card covers only its own pixels: start `next` as a copy of
+            // the accumulated base (depth is shared between the pair).
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, m_fbo[m_current].fboId());
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_fbo[next].fboId());
+            glBlitFramebuffer(0, 0, m_width, m_height, 0, 0, m_width, m_height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebuffer(GL_FRAMEBUFFER, m_fbo[next].fboId());
+        }
 
         float audioStrength = layer->audioReactive ? layer->audioStrength : 0.0f;
 
@@ -704,25 +869,11 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         // is always preserved.  scale (1,1) = source fills canvas height.
         // Layers look consistent regardless of canvas resolution/aspect.
         // When mosaic tiling is active, fill the canvas so the pattern covers everything.
-        bool mosaicFill = (layer->tileX > 1.0f || layer->tileY > 1.0f ||
-                           layer->mosaicMode != MosaicMode::Mirror);
-        glm::mat3 nativeScale(1.0f);
-        if (!mosaicFill) {
-            int lw = layer->width(), lh = layer->height();
-            if (lw > 0 && lh > 0 && m_width > 0 && m_height > 0) {
-                // Height-normalized: Y fills canvas, X preserves aspect
-                float srcAspect = (float)lw / lh;
-                float canvasAspect = (float)m_width / m_height;
-                nativeScale[0][0] = srcAspect / canvasAspect;
-                nativeScale[1][1] = 1.0f;
-            }
-        }
-        float canvasAspectRot = (m_height > 0) ? (float)m_width / (float)m_height : 1.0f;
-        glm::mat3 layerXform = layer->getTransformMatrix(canvasAspectRot) * nativeScale;
+        glm::mat3 layerXform = layerTransform(*layer);
 
         // --- Drop shadow pre-pass ---
         // Render layer silhouette → blur → composite with offset BEFORE the main layer draw
-        if (layer->dropShadowEnabled && layer->dropShadowOpacity > 0.001f) {
+        if (!scene3D && layer->dropShadowEnabled && layer->dropShadowOpacity > 0.001f) {
             // Ensure shadow FBOs match canvas size
             for (int fi = 0; fi < 2; fi++) {
                 if (m_shadowFBO[fi].width() != m_width || m_shadowFBO[fi].height() != m_height)
@@ -886,10 +1037,190 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             firstLayer = false;
         }
 
-        if (firstLayer && layer->blendMode == BlendMode::Normal) {
-            // First layer: just draw it directly
+        if (meshObj) {
+            // ── a mesh object standing in the zone's world ───────────────
+            glm::mat4 model = scene::cardModel(layerXform, sceneAspect, layer->z3, layer->rot3)
+                            * meshObj->spinMatrix() * meshObj->normalizeMatrix();
+            ShaderProgram& ms = meshObj->meshShader();
+            ms.use();
+            ms.setMat4("uModel", model);
+            ms.setMat4("uViewProj", camM.viewProj);
+            ms.setMat4("uLightVP", lightM.viewProj);
+            ms.setVec3("uCamPos", camM.eye);
+            ms.setVec3("uColor", meshObj->m_color);
+            ms.setFloat("uOpacity", effectiveOpacity);
+            ms.setFloat("uGloss", meshObj->m_gloss);
+            ms.setFloat("uMetal", meshObj->m_metal);
+            ms.setFloat("uEmissive", meshObj->m_emissive);
+            ms.setFloat("uWire", 0.0f);
+            ms.setBool("uLightOn", sceneLight);
+            ms.setVec3("uLightDir", lightM.dir);
+            ms.setVec3("uLightColor", m_scene->light.color * m_scene->light.intensity);
+            ms.setVec3("uAmbient", m_scene->light.ambientColor * m_scene->light.ambient);
+            ms.setBool("uShadowOn", sceneShadow);
+            ms.setFloat("uShadowStrength", m_scene->light.shadowStrength);
+            ms.setFloat("uShadowSoft", m_scene->light.shadowSoft);
+            ms.setFloat("uShadowTexel", m_shadowMapRes > 0 ? 1.0f / (float)m_shadowMapRes : 1.0f / 2048.0f);
+            ms.setInt("uShadowTaps", m_scene->tier <= 0 ? 1 : (m_scene->tier >= 2 ? 3 : 2));
+            {
+                int pc = 0;
+                for (int li = 0; li < SceneParams::kMaxPointLights; li++) {
+                    const auto& PL = m_scene->pointLights[li];
+                    if (!PL.enabled || PL.intensity <= 0.0f) continue;
+                    char nm[32];
+                    snprintf(nm, sizeof(nm), "uPointPos[%d]", pc);
+                    ms.setVec4(nm, glm::vec4(PL.pos, PL.radius));
+                    snprintf(nm, sizeof(nm), "uPointCol[%d]", pc);
+                    ms.setVec3(nm, PL.color * PL.intensity);
+                    pc++;
+                }
+                ms.setInt("uPointCount", sceneLight ? pc : 0);
+            }
+            ms.setInt("uShadowMap", 3);
+            ms.setBool("uFogOn", m_scene->fog.enabled);
+            ms.setVec3("uFogColor", m_scene->fog.color);
+            ms.setFloat("uFogDensity", m_scene->fog.density);
+            ms.setFloat("uFogStart", m_scene->fog.start);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, m_shadowMapTex);
+            glActiveTexture(GL_TEXTURE0);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // premultiplied over the base copy
+            for (auto& mg : meshObj->materials())
+                if (mg.mesh.isLoaded()) mg.mesh.draw();
+            if (meshObj->m_wire > 0.001f) {
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                glBlendFunc(GL_ONE, GL_ONE);
+                glDepthMask(GL_FALSE);
+                ms.setFloat("uWire", meshObj->m_wire);
+                for (auto& mg : meshObj->materials())
+                    if (mg.mesh.isLoaded()) mg.mesh.draw();
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                glDepthMask(GL_TRUE);
+            }
+            glDisable(GL_BLEND);
+            glDisable(GL_DEPTH_TEST);
+        } else if (partObj) {
+            // ── live particles standing in the zone's world ──────────────
+            glm::mat4 model = scene::cardModel(layerXform, sceneAspect, layer->z3, layer->rot3);
+            partObj->renderScene(model, camM.view, camM.proj, effectiveOpacity,
+                                 m_scene->fog.enabled, m_scene->fog.color, m_scene->fog.density, m_scene->fog.start, camM.eye);
+            glActiveTexture(GL_TEXTURE0);
+        } else if (scene3D) {
+            // ── the layer as a card in the zone's world ──────────────────
+            // A post role replaces the composite (its output already holds it).
+            const bool first = (firstLayer && layer->blendMode == BlendMode::Normal) || rolePost;
+            ShaderProgram& cs = volDepthTex ? m_volumeShader : m_cardShader;
+            glm::mat4 model = fullFrame ? glm::mat4(1.0f)
+                                        : scene::cardModel(layerXform, sceneAspect, layer->z3, layer->rot3);
+            cs.use();
+            cs.setMat4("uModel", model);
+            cs.setMat4("uViewProj", fullFrame ? glm::mat4(1.0f) : camM.viewProj);   // a full-frame view is already in clip space
+            cs.setMat4("uLightVP", lightM.viewProj);
+            cs.setBool("uFlipV", !fullFrame && layer->source && layer->source->isFlippedV());
+            if (volDepthTex) {
+                cs.setInt("uDepthTex", 4);
+                cs.setMat4("uInvViewProj", glm::inverse(camM.viewProj));
+                glActiveTexture(GL_TEXTURE4);
+                glBindTexture(GL_TEXTURE_2D, volDepthTex);
+            }
+            cs.setBool("uFogOn", m_scene->fog.enabled && !rolePost);
+            cs.setVec3("uFogColor", m_scene->fog.color);
+            cs.setFloat("uFogDensity", m_scene->fog.density);
+            cs.setFloat("uFogStart", m_scene->fog.start);
+            cs.setVec2("uBaseSize", glm::vec2((float)m_width, (float)m_height));
+            cs.setBool("uFirst", first);
+            cs.setInt("uBase", 0);
+            cs.setInt("uLayer", 1);
+            cs.setFloat("uOpacity", effectiveOpacity);
+            cs.setInt("uBlendMode", (int)layer->blendMode);
+            cs.setFloat("uTileX", layer->tileX);
+            cs.setFloat("uTileY", layer->tileY);
+            cs.setVec4("uCrop", glm::vec4(layer->cropLeft, layer->cropRight, layer->cropTop, layer->cropBottom));
+            cs.setInt("uMosaicMode", (int)layer->mosaicMode);
+            cs.setFloat("uMosaicDensity", layer->mosaicDensity);
+            cs.setFloat("uMosaicSpin", layer->mosaicSpin);
+            cs.setFloat("uTime", m_audio.time);
+            cs.setFloat("uFeather", layer->feather);
+            setAudioUniforms(m_cardShader, audioStrength);
+            {
+                float mt = glm::clamp((m_audio.time - layer->mosaicTransitionStart) / layer->mosaicTransitionDuration, 0.0f, 1.0f);
+                cs.setInt("uMosaicModeFrom", (int)layer->mosaicModeFrom);
+                cs.setFloat("uMosaicTransition", mt);
+            }
+            // lighting (a volume view is lit by its own renderer with the scene sun)
+            cs.setBool("uLightOn", sceneLight && !unlitObj);
+            cs.setVec3("uLightDir", lightM.dir);
+            cs.setVec3("uLightColor", m_scene->light.color * m_scene->light.intensity);
+            cs.setVec3("uAmbient", m_scene->light.ambientColor * m_scene->light.ambient);
+            cs.setBool("uShadowOn", sceneShadow && !unlitObj);
+            cs.setFloat("uShadowStrength", m_scene->light.shadowStrength);
+            cs.setFloat("uShadowSoft", m_scene->light.shadowSoft);
+            cs.setFloat("uShadowTexel", m_shadowMapRes > 0 ? 1.0f / (float)m_shadowMapRes : 1.0f / 2048.0f);
+            cs.setInt("uShadowTaps", m_scene->tier <= 0 ? 1 : (m_scene->tier >= 2 ? 3 : 2));
+            cs.setVec3("uCamPos", camM.eye);
+            {
+                int pc = 0;
+                for (int li = 0; li < SceneParams::kMaxPointLights; li++) {
+                    const auto& PL = m_scene->pointLights[li];
+                    if (!PL.enabled || PL.intensity <= 0.0f) continue;
+                    char nm[32];
+                    snprintf(nm, sizeof(nm), "uPointPos[%d]", pc);
+                    cs.setVec4(nm, glm::vec4(PL.pos, PL.radius));
+                    snprintf(nm, sizeof(nm), "uPointCol[%d]", pc);
+                    cs.setVec3(nm, PL.color * PL.intensity);
+                    pc++;
+                }
+                cs.setInt("uPointCount", (sceneLight && !unlitObj) ? pc : 0);
+            }
+            cs.setInt("uShadowMap", 3);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, m_shadowMapTex);
+            // base (accumulated) + the card's texture
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_fbo[m_current].textureId());
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, layerTex);
+            if (layerMaskTex) {
+                cs.setBool("uHasMask", true);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, layerMaskTex);
+                cs.setInt("uMask", 2);
+                cs.setFloat("uMaskFeather", 0.0f);
+                cs.setBool("uMaskInvert", layerMaskInvert);
+            } else {
+                cs.setBool("uHasMask", false);
+                cs.setFloat("uMaskFeather", 0.0f);
+                cs.setBool("uMaskInvert", false);
+            }
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_CULL_FACE);
+            // Coplanar cards (every layer starts at z = 0) z-fight under a
+            // tilted camera: each card's depth is computed from a different
+            // model matrix. Nudge later cards toward the eye by draw order
+            // so stack order wins on shared planes, exactly like 2D.
+            if (rolePost) glDepthMask(GL_FALSE);   // a post pass never touches the depth buffer
+            if (!fullFrame) {
+                glEnable(GL_POLYGON_OFFSET_FILL);
+                glPolygonOffset(-1.0f * (float)(oi + 1), -2.0f * (float)(oi + 1));
+            }
+            m_quad.draw();
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_DEPTH_TEST);
+            glActiveTexture(GL_TEXTURE0);
+        } else if ((firstLayer && layer->blendMode == BlendMode::Normal) || rolePost) {
+            // First layer: just draw it directly (a post role too: its output
+            // already holds the composite, so it replaces the base)
             m_passthroughShader.use();
-            m_passthroughShader.setMat3("uTransform", layerXform);
+            m_passthroughShader.setMat3("uTransform", rolePost ? glm::mat3(1.0f) : layerXform);   // a post pass is full-frame
             m_passthroughShader.setBool("uFlipV", layer->source && layer->source->isFlippedV());
             m_passthroughShader.setFloat("uOpacity", effectiveOpacity);
             m_passthroughShader.setInt("uTexture", 0);
@@ -974,10 +1305,12 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
             }
         }
 
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        m_quad.draw();
-        glDisable(GL_BLEND);
+        if (!scene3D) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            m_quad.draw();
+            glDisable(GL_BLEND);
+        }
 
         // ── Between-row shader blend ────────────────────────────────────
         // If a TimelineTransition has annotated this "to" layer, replace
@@ -1185,10 +1518,233 @@ void CompositeEngine::composite(const std::vector<std::shared_ptr<Layer>>& layer
         layer->rotation = savedRot;
     }
 
+    // Scene-wide ambient occlusion over the finished world (before the zone's
+    // own bloom / post): contact shadows where meshes, cards and volumes meet.
+    if (scene3D && m_scene->ao.enabled && m_scene->ao.strength > 0.001f && m_sceneDepth
+        && m_ssaoShader.id() && m_aoApplyShader.id())
+        renderSceneAO(camM.proj);
+
     Framebuffer::unbind();
 
 }
 
+void CompositeEngine::renderSceneAO(const glm::mat4& proj) {
+    // The composite is 2x supersampled, so /3 at the HD tier is ~720p of AO.
+    const int div = m_scene->tier <= 0 ? 4 : (m_scene->tier >= 2 ? 2 : 3);
+    const int aw = std::max(8, m_width / div), ah = std::max(8, m_height / div);
+    if (m_aoFBO.width() != aw || m_aoFBO.height() != ah) {
+        if (!m_aoFBO.create(aw, ah)) return;
+    }
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    // 1. AO from depth, half res (the AO target has no depth attachment, so
+    //    sampling the shared depth here is not a feedback loop).
+    m_aoFBO.bind();
+    glViewport(0, 0, aw, ah);
+    m_ssaoShader.use();
+    m_ssaoShader.setMat4("uModel", glm::mat4(1.0f));
+    m_ssaoShader.setMat4("uViewProj", glm::mat4(1.0f));
+    m_ssaoShader.setInt("uDepth", 0);
+    m_ssaoShader.setMat4("uProj", proj);
+    m_ssaoShader.setMat4("uInvProj", glm::inverse(proj));
+    m_ssaoShader.setFloat("uRadius", std::max(0.01f, m_scene->ao.radius));
+    m_ssaoShader.setVec2("uTexel", glm::vec2(1.0f / (float)m_width, 1.0f / (float)m_height));
+    m_ssaoShader.setInt("uTaps", m_scene->tier <= 0 ? 8 : (m_scene->tier >= 2 ? 16 : 12));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_sceneDepth);
+    m_quad.draw();
+    // 2. composite × AO into the other ping-pong (its depth attachment is
+    //    not sampled here; detach anyway so no driver sees a loop).
+    int next = 1 - m_current;
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo[next].fboId());
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    glViewport(0, 0, m_width, m_height);
+    m_aoApplyShader.use();
+    m_aoApplyShader.setMat4("uModel", glm::mat4(1.0f));
+    m_aoApplyShader.setMat4("uViewProj", glm::mat4(1.0f));
+    m_aoApplyShader.setInt("uColor", 0);
+    m_aoApplyShader.setInt("uAO", 1);
+    m_aoApplyShader.setVec2("uAOTexel", glm::vec2(1.0f / (float)aw, 1.0f / (float)ah));
+    m_aoApplyShader.setFloat("uStrength", m_scene->ao.strength);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_fbo[m_current].textureId());
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_aoFBO.textureId());
+    m_quad.draw();
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_sceneDepth, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    m_current = next;
+}
+
 GLuint CompositeEngine::resultTexture() const {
     return m_fbo[m_current].textureId();
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Native 3D scene support
+// ─────────────────────────────────────────────────────────────────────────
+
+glm::mat3 CompositeEngine::layerTransform(const Layer& layer) const {
+    // Native-size transform: normalized by canvas height so aspect ratio is
+    // always preserved. scale (1,1) = source fills canvas height. When
+    // mosaic tiling is active, fill the canvas so the pattern covers it.
+    bool mosaicFill = (layer.tileX > 1.0f || layer.tileY > 1.0f ||
+                       layer.mosaicMode != MosaicMode::Mirror);
+    glm::mat3 nativeScale(1.0f);
+    if (!mosaicFill) {
+        int lw = layer.width(), lh = layer.height();
+        if (lw > 0 && lh > 0 && m_width > 0 && m_height > 0) {
+            float srcAspect = (float)lw / lh;
+            float canvasAspect = (float)m_width / m_height;
+            nativeScale[0][0] = srcAspect / canvasAspect;
+            nativeScale[1][1] = 1.0f;
+        }
+    }
+    float canvasAspectRot = (m_height > 0) ? (float)m_width / (float)m_height : 1.0f;
+    return layer.getTransformMatrix(canvasAspectRot) * nativeScale;
+}
+
+bool CompositeEngine::ensureSceneResources() {
+    if (!m_sceneShadersTried) {
+        m_sceneShadersTried = true;
+        m_sceneShadersOk = m_cardShader.loadFromFiles("shaders/scene_card.vert", "shaders/scene_card.frag")
+                        && m_cardShadowShader.loadFromFiles("shaders/scene_shadow.vert", "shaders/scene_shadow.frag");
+        if (m_sceneShadersOk) {
+            // The volume variant = the card fragment with SCENE_DEPTH_TEX
+            // defined (writes gl_FragDepth from the object's own depth view).
+            auto slurp = [](const char* p) { std::ifstream f(p); std::stringstream ss; ss << f.rdbuf(); return ss.str(); };
+            std::string vs = slurp("shaders/scene_card.vert"), fs = slurp("shaders/scene_card.frag");
+            size_t nl = fs.find('\n');
+            if (nl != std::string::npos) fs.insert(nl + 1, "#define SCENE_DEPTH_TEX 1\n");
+            m_sceneShadersOk = m_volumeShader.loadFromSource(vs, fs);
+            if (!m_sceneShadersOk) std::cerr << "[Scene] volume shader: " << m_volumeShader.lastError() << std::endl;
+        }
+        if (m_sceneShadersOk) {
+            // AO is optional: a failure only disables it.
+            if (!m_ssaoShader.loadFromFiles("shaders/scene_card.vert", "shaders/scene_ssao.frag")
+                || !m_aoApplyShader.loadFromFiles("shaders/scene_card.vert", "shaders/scene_ao_apply.frag"))
+                std::cerr << "[Scene] AO shaders: " << m_ssaoShader.lastError() << m_aoApplyShader.lastError() << std::endl;
+        }
+        if (!m_sceneShadersOk) std::cerr << "[Scene] Failed to load scene shaders: " << m_cardShader.lastError() << std::endl;
+    }
+    if (!m_sceneShadersOk) return false;
+
+    // Sampleable depth shared by the ping-pong pair
+    if (!m_sceneDepth || m_sceneDepthW != m_width || m_sceneDepthH != m_height) {
+        if (m_sceneDepth) glDeleteTextures(1, &m_sceneDepth);
+        glGenTextures(1, &m_sceneDepth);
+        glBindTexture(GL_TEXTURE_2D, m_sceneDepth);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, m_width, m_height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        m_sceneDepthW = m_width; m_sceneDepthH = m_height;
+    }
+
+    // Shadow map (depth-only), sized by the zone's render tier
+    bool wantShadow = m_scene && m_scene->light.enabled && m_scene->light.shadows;
+    int res = m_scene ? m_scene->light.shadowRes : 2048;
+    if (m_scene) {
+        if (m_scene->tier <= 0) res = std::min(res, 1024);
+        else if (m_scene->tier >= 2) res = std::max(res, 4096);
+    }
+    res = std::max(256, std::min(res, 8192));
+    if (wantShadow && (!m_shadowMapTex || m_shadowMapRes != res)) {
+        if (m_shadowMapTex) glDeleteTextures(1, &m_shadowMapTex);
+        if (m_shadowMapFBO) glDeleteFramebuffers(1, &m_shadowMapFBO);
+        glGenTextures(1, &m_shadowMapTex);
+        glBindTexture(GL_TEXTURE_2D, m_shadowMapTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, res, res, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &m_shadowMapFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_shadowMapFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadowMapTex, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::cerr << "[Scene] shadow map FBO incomplete" << std::endl;
+            glDeleteFramebuffers(1, &m_shadowMapFBO); m_shadowMapFBO = 0;
+            glDeleteTextures(1, &m_shadowMapTex); m_shadowMapTex = 0;
+            m_shadowMapRes = 0;
+        } else {
+            m_shadowMapRes = res;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    } else if (!wantShadow && m_shadowMapTex) {
+        glDeleteTextures(1, &m_shadowMapTex); m_shadowMapTex = 0;
+        glDeleteFramebuffers(1, &m_shadowMapFBO); m_shadowMapFBO = 0;
+        m_shadowMapRes = 0;
+    }
+    return true;
+}
+
+void CompositeEngine::releaseSceneResources() {
+    for (int i = 0; i < 2; i++) {
+        if (!m_fbo[i].fboId()) continue;
+        glBindFramebuffer(GL_FRAMEBUFFER, m_fbo[i].fboId());
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (m_sceneDepth) { glDeleteTextures(1, &m_sceneDepth); m_sceneDepth = 0; }
+    m_sceneDepthW = m_sceneDepthH = 0;
+    m_aoFBO.destroy();
+    if (m_shadowMapTex) { glDeleteTextures(1, &m_shadowMapTex); m_shadowMapTex = 0; }
+    if (m_shadowMapFBO) { glDeleteFramebuffers(1, &m_shadowMapFBO); m_shadowMapFBO = 0; }
+    m_shadowMapRes = 0;
+}
+
+void CompositeEngine::renderShadowMap(const std::vector<std::shared_ptr<Layer>>& layers,
+                                      const glm::mat4& lightVP, float aspect, bool anySoloed) {
+    if (!m_shadowMapFBO) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, m_shadowMapFBO);
+    glViewport(0, 0, m_shadowMapRes, m_shadowMapRes);
+    glClearDepth(1.0);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    m_cardShadowShader.use();
+    m_cardShadowShader.setMat4("uLightVP", lightVP);
+    m_cardShadowShader.setInt("uTexture", 0);
+    glActiveTexture(GL_TEXTURE0);
+    for (const auto& L : layers) {
+        if (!L || !L->visible || L->userHidden || L->muted || !L->castShadow) continue;
+        if (anySoloed && !L->soloed) continue;
+        GLuint tex = L->textureId();
+        if (!tex || L->opacity <= 0.001f) continue;
+        glm::mat4 model = scene::cardModel(layerTransform(*L), aspect, L->z3, L->rot3);
+        if (auto* mo = dynamic_cast<ModelSource*>(L->source.get())) {
+            if (!mo->hasModel() || !mo->shadersOk()) continue;
+            ShaderProgram& mss = mo->meshShadowShader();
+            mss.use();
+            mss.setMat4("uLightVP", lightVP);
+            mss.setMat4("uModel", model * mo->spinMatrix() * mo->normalizeMatrix());
+            for (auto& mg : mo->materials())
+                if (mg.mesh.isLoaded()) mg.mesh.draw();
+            m_cardShadowShader.use();   // back to the card program for the rest
+            m_cardShadowShader.setMat4("uLightVP", lightVP);
+            m_cardShadowShader.setInt("uTexture", 0);
+            continue;
+        }
+        m_cardShadowShader.setMat4("uModel", model);
+        m_cardShadowShader.setBool("uFlipV", L->source && L->source->isFlippedV());
+        m_cardShadowShader.setVec4("uCrop", glm::vec4(L->cropLeft, L->cropRight, L->cropTop, L->cropBottom));
+        m_cardShadowShader.setFloat("uOpacity", L->opacity);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        m_quad.draw();
+    }
+    glDisable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_width, m_height);
 }

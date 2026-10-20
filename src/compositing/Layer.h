@@ -69,6 +69,14 @@ public:
     bool flipH = false;
     bool flipV = false;
 
+    // Native 3D scene (zone 3D mode): the card's depth offset toward the
+    // camera (world units; the canvas is 2 units tall) and its Euler
+    // rotation (degrees) about its own centre. Both zero = flat card, which
+    // renders identically to the 2D composite.
+    float z3 = 0.0f;
+    glm::vec3 rot3 = {0.0f, 0.0f, 0.0f};
+    bool castShadow = true;
+
     // Mosaic mode
     MosaicMode mosaicMode = MosaicMode::Mirror;
     float tileX = 1.0f, tileY = 1.0f;     // Mirror grid (float for audio smoothing)

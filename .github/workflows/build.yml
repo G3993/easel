@@ -2,9 +2,10 @@ name: Build
 
 on:
   push:
-    branches: [master]
+    branches: [master, easel-installation]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 jobs:
   macos:

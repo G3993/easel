@@ -18,6 +18,7 @@ public:
     bool wantsAddImage = false;
     bool wantsAddVideo = false;
     bool wantsAddShader = false;
+    bool wantsAddModel = false;    // native 3D model object
 
     // Post-create binder for the Fluid image-inject quick-add buttons.
     // When set alongside wantsAddImage/Video/Shader, Application binds the

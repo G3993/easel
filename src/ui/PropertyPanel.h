@@ -61,6 +61,9 @@ public:
     // 3D Fluid inspector sub-tab (0 Motion 1 Particles 2 Scene 3 Light 4 Look 5 VJ).
     // Static so the OSC test hook /easel/ui f3tab <n> can flip it.
     static int sFluid3DTab;
+    // Native 3D scene inspector tab (0 Camera, 1 Light, 2 Card); the layer
+    // list's Camera / Sun rows set it.
+    static int sSceneTab;
     void render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 SpeechState* speech = nullptr, MosaicAudioState* mosaicAudio = nullptr,
                 float appTime = 0.0f, LayerStack* layerStack = nullptr,

@@ -1553,6 +1553,20 @@ void Application::run() {
                     lp->opacity = std::max(0.0f, std::min(1.0f, it->second));
                 }
             }
+            // 3D scene lanes: camera, sun and point-light params of each
+            // zone, keyed by SceneParams::laneId(zone index) + the param id.
+            if (!m_animatedParams.empty()) {
+                for (size_t zi = 0; zi < m_zones.size(); zi++) {
+                    auto& zp = m_zones[zi];
+                    if (!zp) continue;
+                    const uint32_t lid = SceneParams::laneId((int)zi);
+                    for (const auto& d : zp->scene.params()) {
+                        auto it = m_animatedParams.find(Timeline::animKey(lid, d.id));
+                        if (it == m_animatedParams.end()) continue;
+                        *d.ptr = std::max(d.lo, std::min(d.hi, it->second));
+                    }
+                }
+            }
 
             // REC-button recording is indefinite/live (no Work-Area
             // auto-stop); the export flow below only fires for an explicit
@@ -1990,7 +2004,32 @@ void Application::run() {
 #endif
         if (effectiveFPS > 0.0f) {
             double frameDur = 1.0 / (double)effectiveFPS;
-            double remain   = frameDur - (glfwGetTime() - frameStart);
+            double work = glfwGetTime() - frameStart;
+            // Steady pacing. When a heavy layer (a 4K 3D fluid) cannot fit the
+            // display rate, an uncapped 35-50 fps shows frames for 1 and 2
+            // refreshes at random — that is the "stutter". Hold an even half
+            // rate instead (every frame shown for exactly two refreshes) until
+            // the work fits again; hysteresis so it does not flap.
+            static double s_workEma = 0.0; static int s_halfRate = 1;   // refreshes per frame (1 = full rate)
+            static int s_logN = 0; static double s_workMax = 0.0;
+            {
+                s_workEma += (work - s_workEma) * 0.06;
+                int need = (int)std::ceil((s_workEma + 0.0012) / frameDur);   // refreshes the work needs
+                need = std::max(1, std::min(4, need));
+                if (need > s_halfRate) s_halfRate = need;                                   // slow down at once
+                else if (need < s_halfRate && s_workEma < frameDur * (s_halfRate - 1) * 0.78) s_halfRate--;   // speed up with margin
+                frameDur *= (double)s_halfRate;
+            }
+            static const bool s_paceLog = (std::getenv("EASEL_FPS_LOG") != nullptr);
+            if (s_paceLog) {
+                s_workMax = std::max(s_workMax, work);
+                if (++s_logN >= 180) {
+                    std::cerr << "[Easel] frame work avg " << (s_workEma * 1000.0) << " ms, max " << (s_workMax * 1000.0)
+                              << " ms, pacing 1/" << s_halfRate << std::endl;
+                    s_logN = 0; s_workMax = 0.0;
+                }
+            }
+            double remain   = frameDur - work;
             if (remain > 0.0) {
                 // Sleep most of it, then spin the last ~1ms for accuracy.
                 if (remain > 0.002)
@@ -2413,6 +2452,22 @@ void Application::updateSources() {
         audioSigSilence = 1.0f - (q * q * (3.0f - 2.0f * q));   // smoothstep, inverted
     }
 
+    // Native 3D scene: camera / sun / point-light bindings per zone — the
+    // same binding model as shader params, applied before the composite.
+    {
+        float midAvgScene = (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f;
+        auto midiCC = [this](int ch, int cc) -> float { return m_midiManager.getCCValue(ch, cc); };
+        for (size_t zi = 0; zi < m_zones.size(); zi++) {
+            auto& zp = m_zones[zi];
+            if (zp) zp->index = (int)zi;   // the inspector + timeline address the scene by this
+            if (!zp || !zp->scene.enabled || zp->scene.audioBindings.empty()) continue;
+            zp->scene.applyAudioBindings(m_audioAnalyzer.smoothedRMS(), m_audioAnalyzer.bass(), midAvgScene,
+                                         m_audioAnalyzer.treble(), m_audioAnalyzer.beatDecay(), audioBindDt,
+                                         audioSigEnergy, audioSigBuild, audioSigDrop, audioSigSilence, audioSigMomentum,
+                                         midiCC);
+        }
+    }
+
     // Get mouse state for interactive shaders (normalized 0-1)
     double mx, my;
     glfwGetCursorPos(m_window, &mx, &my);
@@ -2745,6 +2800,19 @@ void Application::updateSources() {
 
             // Hologram-model layer — feed audio (drives the glitch) and honor
             // a "change model" request from its Properties panel.
+            if (layer->source->typeName() == "3D Model") {
+                auto* mo = static_cast<ModelSource*>(layer->source.get());
+                mo->applyAudioBindings(
+                    m_audioAnalyzer.smoothedRMS(), m_audioAnalyzer.bass(),
+                    (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f,
+                    m_audioAnalyzer.treble(), m_audioAnalyzer.beatDecay(), audioBindDt, &m_midiManager,
+                    audioSigEnergy, audioSigBuild, audioSigDrop, audioSigSilence, audioSigMomentum);
+                if (mo->m_requestModelDialog) {
+                    mo->m_requestModelDialog = false;
+                    std::string path = openFileDialog("3D Models\0*.obj;*.gltf;*.glb\0All Files\0*.*\0");
+                    if (!path.empty()) mo->loadModel(path);
+                }
+            }
             if (layer->source->typeName() == "Hologram Model") {
                 auto* hm = static_cast<HologramModelSource*>(layer->source.get());
                 float midAvg = (m_audioAnalyzer.lowMid() + m_audioAnalyzer.highMid()) * 0.5f;
@@ -3062,6 +3130,7 @@ void Application::compositeZone(OutputZone& zone) {
         audio.barPhase = m_bpmSync.barPhase();
         zone.compositor.setAudioState(audio);
     }
+    zone.compositor.setScene(&zone.scene);
     zone.compositor.composite(layers);
 
     GLuint sourceTex = zone.compositor.resultTexture();
@@ -4787,6 +4856,8 @@ void Application::renderUI() {
                     if (v == "gallery") UIManager::sGalleryFromShow = UIManager::sShowOpen;
                     UIManager::sGalleryOpen = (v == "gallery");
                     UIManager::sShowOpen    = (v == "show");
+                } else if (what == "scenetab") {
+                    PropertyPanel::sSceneTab = std::max(0, std::min(2, atoi(v.c_str())));
                 } else if (what == "f3tab") {
                     // 3D Fluid inspector sub-tab (test hook): 0..5
                     PropertyPanel::sFluid3DTab = std::max(0, std::min(5, atoi(v.c_str())));
@@ -4861,6 +4932,12 @@ void Application::renderUI() {
                     addFluid3D();
                     // (early-out — special generator token, not a file)
                 }
+                if (path == "__fluid3dbox__") {
+                    addFluid3DBox();
+                }
+                if (path == "__particles__") {
+                    addParticles();
+                }
                 // Hologram model token: "__hologram__" opens the picker;
                 // "__hologram__:/abs/model.glb" loads that model directly.
                 bool isHolo = (path.rfind("__hologram__", 0) == 0);
@@ -4870,12 +4947,22 @@ void Application::renderUI() {
                     if (c != std::string::npos) mp = path.substr(c + 1);
                     addHologramModel(mp);
                 }
+                // Native 3D model token: "__model__:/abs/model.glb"
+                bool isModelTok = (path.rfind("__model__", 0) == 0);
+                if (isModelTok) {
+                    std::string mp;
+                    size_t c = path.find(':');
+                    if (c != std::string::npos) mp = path.substr(c + 1);
+                    addModel(mp);
+                }
                 size_t dot = path.rfind('.');
                 std::string ext = (dot == std::string::npos)
                     ? std::string{} : path.substr(dot);
                 for (auto& c : ext) c = (char)tolower((unsigned char)c);
-                if (path == "__fluid__" || path == "__fluid3d__" || isHolo) {
+                if (path == "__fluid__" || path == "__fluid3d__" || path == "__fluid3dbox__" || path == "__particles__" || isHolo || isModelTok) {
                     // handled above
+                } else if (ext == ".glb" || ext == ".gltf" || ext == ".obj") {
+                    addModel(path);
                 } else if (ext == ".fs" || ext == ".frag" || ext == ".glsl") {
                     loadShader(path);
                 } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg"
@@ -5102,6 +5189,96 @@ void Application::renderUI() {
                 if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi] && m_zones[zi]->micEnabled) {
                     m_zones[zi]->pushToTalkActive = down;
                 }
+            } else if (msg.address == "/easel/zone/3d" || msg.address == "/easel/zone/camera"
+                       || msg.address == "/easel/zone/light" || msg.address == "/easel/zone/key") {
+                // Native 3D scene verbs. The zone is named by its first string
+                // arg (or the active zone when the first string is "" / absent
+                // and an int index is given, or nothing at all).
+                //   /easel/zone/3d <zone> <0|1>
+                //   /easel/zone/camera <zone> <param> <value>
+                //       perspective|azimuth|elevation|distance|fov|roll|dolly|
+                //       targetX|targetY|targetZ|reset
+                //   /easel/zone/light <zone> <param> <value>
+                //       enabled|azimuth|elevation|intensity|ambient|shadows|
+                //       shadowStrength|shadowSoft|shadowRes|tier|
+                //       color (3 floats)|ambientColor (3 floats)|reset
+                OutputZone* zp = nullptr;
+                size_t sIdx = 0;
+                if (!msg.strings.empty()) {
+                    for (auto& z : m_zones) if (z && z->name == msg.strings[0]) zp = z.get();
+                    if (zp) sIdx = 1;
+                }
+                if (!zp && !msg.ints.empty() && msg.strings.size() <= (msg.address == "/easel/zone/3d" ? 0u : 1u)) {
+                    int zi = msg.ints[0];
+                    if (zi >= 0 && zi < (int)m_zones.size()) zp = m_zones[zi].get();
+                }
+                if (msg.address == "/easel/zone/key") {
+                    //   /easel/zone/key <zone> <param> [value] — toggle a keyframe at the
+                    //   playhead (current value), or with a float: write that value into it
+                    if (!zp) for (auto& z : m_zones) if (z && z->index == m_activeZone) { zp = z.get(); break; }
+                    if (zp && msg.strings.size() > sIdx) {
+                        const std::string& pid = msg.strings[sIdx];
+                        for (const auto& d : zp->scene.params()) {
+                            if (pid != d.id) continue;
+                            if (!msg.floats.empty()) {
+                                float v = std::max(d.lo, std::min(d.hi, msg.floats[0]));
+                                *d.ptr = v;
+                                m_timeline.setKeyframeAt(SceneParams::laneId(zp->index), pid, m_timeline.playhead(), v);
+                            } else {
+                                m_timeline.toggleKeyframeAt(SceneParams::laneId(zp->index), pid, m_timeline.playhead(), *d.ptr);
+                            }
+                            std::cerr << "[Scene] keyframe " << pid << " @ " << m_timeline.playhead() << std::endl;
+                        }
+                    }
+                    continue;
+                }
+                if (!zp && m_activeZone >= 0 && m_activeZone < (int)m_zones.size()) zp = m_zones[m_activeZone].get();
+                float fv = !msg.floats.empty() ? msg.floats[0]
+                         : (msg.ints.size() > (sIdx == 1 || msg.strings.empty() ? 0u : 1u) ? (float)msg.ints.back() : 0.0f);
+                bool bv = fv != 0.0f;
+                if (zp && msg.address == "/easel/zone/3d") {
+                    zp->scene.enabled = bv;
+                    std::cerr << "[OSC] zone '" << zp->name << "' 3D " << (bv ? "on" : "off") << std::endl;
+                } else if (zp && msg.strings.size() > sIdx) {
+                    const std::string& prm = msg.strings[sIdx];
+                    auto& sc = zp->scene;
+                    if (msg.address == "/easel/zone/camera") {
+                        auto& c = sc.camera;
+                        if      (prm == "perspective") c.perspective = bv;
+                        else if (prm == "azimuth")     c.azimuth = fv;
+                        else if (prm == "elevation")   c.elevation = std::max(-89.0f, std::min(89.0f, fv));
+                        else if (prm == "distance")    c.distance = std::max(0.05f, fv);
+                        else if (prm == "fov")         c.fovDeg = fv;
+                        else if (prm == "roll")        c.roll = fv;
+                        else if (prm == "dolly")       c.dolly = fv;
+                        else if (prm == "targetX")     c.target.x = fv;
+                        else if (prm == "targetY")     c.target.y = fv;
+                        else if (prm == "targetZ")     c.target.z = fv;
+                        else if (prm == "reset")       c = SceneCameraParams{};
+                    } else {
+                        auto& l = sc.light;
+                        if      (prm == "enabled")        l.enabled = bv;
+                        else if (prm == "azimuth")        l.azimuth = fv;
+                        else if (prm == "elevation")      l.elevation = fv;
+                        else if (prm == "intensity")      l.intensity = std::max(0.0f, fv);
+                        else if (prm == "ambient")        l.ambient = std::max(0.0f, fv);
+                        else if (prm == "shadows")        l.shadows = bv;
+                        else if (prm == "shadowStrength") l.shadowStrength = std::max(0.0f, std::min(1.0f, fv));
+                        else if (prm == "shadowSoft")     l.shadowSoft = std::max(0.0f, fv);
+                        else if (prm == "fog")            sc.fog.enabled = bv;
+                        else if (prm == "fogDensity")     sc.fog.density = std::max(0.0f, fv);
+                        else if (prm == "fogStart")       sc.fog.start = std::max(0.0f, fv);
+                        else if (prm == "fogColor" && msg.floats.size() >= 3) sc.fog.color = glm::vec3(msg.floats[0], msg.floats[1], msg.floats[2]);
+                        else if (prm == "ao")             sc.ao.enabled = bv;
+                        else if (prm == "aoStrength")     sc.ao.strength = std::max(0.0f, std::min(2.0f, fv));
+                        else if (prm == "aoRadius")       sc.ao.radius = std::max(0.01f, fv);
+                        else if (prm == "shadowRes")      l.shadowRes = (int)fv;
+                        else if (prm == "tier")           sc.tier = std::max(0, std::min(2, (int)fv));
+                        else if (prm == "color" && msg.floats.size() >= 3)        l.color = glm::vec3(msg.floats[0], msg.floats[1], msg.floats[2]);
+                        else if (prm == "ambientColor" && msg.floats.size() >= 3) l.ambientColor = glm::vec3(msg.floats[0], msg.floats[1], msg.floats[2]);
+                        else if (prm == "reset")          l = SceneLightParams{};
+                    }
+                }
             } else if (msg.address == "/easel/audio/toshaders" && !msg.ints.empty()) {
                 // Global Audio -> Shaders switch (the panic off-switch).
                 m_audioToShaders = (msg.ints[0] != 0);
@@ -5206,6 +5383,20 @@ void Application::renderUI() {
                 m_timeline.stop();
             } else if (msg.address == "/easel/transport/toggle") {
                 m_timeline.togglePlay();
+            } else if (msg.address == "/easel/show/extra") {
+                //   /easel/show/extra <name|index>  — that extra (a shader /
+                //   fluid / particle layer, or "3D Scene · <zone>") takes the
+                //   SHOW knobs + MIDI, exactly like its chip or XL button.
+                auto ex = showExtraLayers();
+                Layer* pick = nullptr;
+                if (!msg.strings.empty()) {
+                    for (Layer* l : ex) if (l->name == msg.strings[0]) { pick = l; break; }
+                    if (!pick) for (Layer* l : ex) if (l->name.find(msg.strings[0]) != std::string::npos) { pick = l; break; }
+                } else if (!msg.ints.empty() && msg.ints[0] >= 0 && msg.ints[0] < (int)ex.size()) {
+                    pick = ex[msg.ints[0]];
+                }
+                if (pick) showTakeExtra(pick);
+                else std::cerr << "[Show] /easel/show/extra: no such extra (" << ex.size() << " listed)" << std::endl;
             } else if (msg.address == "/easel/transport/seek" && !msg.floats.empty()) {
                 m_timeline.seek((double)msg.floats[0]);
             } else if (msg.address.rfind("/easel/marker/", 0) == 0) {
@@ -5292,6 +5483,17 @@ void Application::renderUI() {
                         layer->scale = glm::vec2(msg.floats[0]);
                     else if (prop == "rotation" && !msg.floats.empty())
                         layer->rotation = msg.floats[0];
+                    // Native 3D scene: the layer as a card
+                    else if (prop == "z3" && !msg.floats.empty())
+                        layer->z3 = msg.floats[0];
+                    else if (prop == "rotX" && !msg.floats.empty())
+                        layer->rot3.x = msg.floats[0];
+                    else if (prop == "rotY" && !msg.floats.empty())
+                        layer->rot3.y = msg.floats[0];
+                    else if (prop == "rotZ" && !msg.floats.empty())
+                        layer->rot3.z = msg.floats[0];
+                    else if (prop == "castShadow" && !msg.ints.empty())
+                        layer->castShadow = msg.ints[0] != 0;
                     else if (prop.rfind("param/", 0) == 0) {
                         // M2 — live shader parameter writes from mobile.
                         // /easel/layer/N/param/<name> <float|int|string>
@@ -5379,6 +5581,19 @@ void Application::renderUI() {
     // 3-row chrome stack (macOS title bar + ImGui menu bar + workspace nav).
     // renderMenuBar() is kept as a no-op so any future caller doesn't break.
     UIManager::sFpsDisplay = ImGui::GetIO().Framerate;
+    // Optional whole-app fps diagnostic — set EASEL_FPS_LOG=1 in the environment.
+    {
+        static const bool s_fpsLog = (std::getenv("EASEL_FPS_LOG") != nullptr);
+        if (s_fpsLog) {
+            static int fc = 0;
+            if (++fc >= 180) {
+                fc = 0;
+                std::cerr << "[Easel] " << ImGui::GetIO().Framerate << " fps  layers=" << m_layerStack.count();
+                for (auto& zp : m_zones) std::cerr << "  zone " << zp->name << " " << zp->width << "x" << zp->height;
+                std::cerr << std::endl;
+            }
+        }
+    }
     m_ui.setupDockspace(transportBarH);
     // (renderVoiceCommandBar() removed — voice UI now lives in a popup
     // anchored to the mic icon next to System Audio in the transport bar.)
@@ -5633,6 +5848,7 @@ void Application::renderUI() {
             if (!path.empty()) loadVideo(path);
             bindNewLayerToFluid();
         }
+        if (m_layerPanel.wantsAddModel) { m_layerPanel.wantsAddModel = false; addModel(); }
         if (m_layerPanel.wantsAddShader) {
             std::string path = openFileDialog("ISF Shaders\0*.fs;*.frag;*.glsl\0All Files\0*.*\0");
             if (!path.empty()) loadShader(path);
@@ -7466,6 +7682,87 @@ void Application::renderUI() {
 
                 if (hov3) ParamRow::Tooltip("3D Fluid\n\nNative SPH 3D fluid (volumetric)");
                 if (clicked3) addFluid3D();
+
+                ImGui::PopID();
+                gridPos++;
+
+                // ── 3D Box tile: the SPH fluid inside a white box ────────
+                if (gridPos % cols != 0) ImGui::SameLine(0, cellPad);
+                ImGui::PushID("fluid3dbox-card");
+                ImVec2 cellPos4 = ImGui::GetCursorScreenPos();
+                bool clicked4 = ImGui::InvisibleButton("##f3btile", ImVec2(thumbSize, cellH));
+                bool hov4 = ImGui::IsItemHovered();
+                ImDrawList* d4 = ImGui::GetWindowDrawList();
+
+                ImU32 tileBg4   = hov4 ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 10);
+                ImU32 tileEdge4 = hov4 ? IM_COL32(255, 255, 255, 140) : IM_COL32(255, 255, 255, 50);
+                d4->AddRectFilled(cellPos4,
+                                  ImVec2(cellPos4.x + thumbSize, cellPos4.y + cellH),
+                                  tileBg4, 6.0f);
+                d4->AddRect(cellPos4,
+                            ImVec2(cellPos4.x + thumbSize, cellPos4.y + cellH),
+                            tileEdge4, 6.0f, 0, 1.0f);
+
+                ImVec2 thumbMin4(cellPos4.x + 4, cellPos4.y + 4);
+                ImVec2 thumbMax4(cellPos4.x + thumbSize - 4, cellPos4.y + thumbSize - 4);
+                d4->AddRectFilled(thumbMin4, thumbMax4, IM_COL32(70, 72, 78, 255), 4.0f);
+
+                // A white box in one-point perspective (front frame + back
+                // wall + converging edges) with a red/blue blob inside.
+                {
+                    float w4 = thumbMax4.x - thumbMin4.x, h4 = thumbMax4.y - thumbMin4.y;
+                    ImVec2 fo0(thumbMin4.x + w4 * 0.14f, thumbMin4.y + h4 * 0.14f);   // front outer
+                    ImVec2 fo1(thumbMax4.x - w4 * 0.14f, thumbMax4.y - h4 * 0.14f);
+                    float fr = w4 * 0.045f;                                           // frame width
+                    ImVec2 fi0(fo0.x + fr, fo0.y + fr), fi1(fo1.x - fr, fo1.y - fr); // opening
+                    ImVec2 bk0(thumbMin4.x + w4 * 0.30f, thumbMin4.y + h4 * 0.34f);  // back wall
+                    ImVec2 bk1(thumbMax4.x - w4 * 0.30f, thumbMax4.y - h4 * 0.22f);
+                    ImU32 wall  = IM_COL32(232, 233, 236, 255);
+                    ImU32 wallD = IM_COL32(205, 207, 212, 255);
+                    ImU32 wallS = IM_COL32(188, 190, 196, 255);
+                    // walls: ceiling, floor, sides as quads from the opening to the back wall
+                    d4->AddQuadFilled(fi0, ImVec2(fi1.x, fi0.y), ImVec2(bk1.x, bk0.y), bk0, wallD);          // ceiling
+                    d4->AddQuadFilled(ImVec2(fi0.x, fi1.y), fi1, bk1, ImVec2(bk0.x, bk1.y), wall);          // floor
+                    d4->AddQuadFilled(fi0, bk0, ImVec2(bk0.x, bk1.y), ImVec2(fi0.x, fi1.y), wallS);          // left
+                    d4->AddQuadFilled(ImVec2(fi1.x, fi0.y), fi1, bk1, ImVec2(bk1.x, bk0.y), wallS);          // right
+                    d4->AddRectFilled(bk0, bk1, wall);                                                       // back
+                    // frame
+                    d4->AddRect(ImVec2(fo0.x + fr * 0.5f, fo0.y + fr * 0.5f),
+                                ImVec2(fo1.x - fr * 0.5f, fo1.y - fr * 0.5f),
+                                IM_COL32(245, 246, 248, 255), 0.0f, 0, fr);
+                    // two liquids piled inside, spilling past the sill
+                    ImVec2 c((thumbMin4.x + thumbMax4.x) * 0.5f, thumbMin4.y + h4 * 0.58f);
+                    float rb = w4 * 0.17f;
+                    d4->AddCircleFilled(ImVec2(c.x - rb * 0.55f, c.y + rb * 0.35f), rb, IM_COL32(60, 150, 255, 255), 24);
+                    d4->AddCircleFilled(ImVec2(c.x + rb * 0.50f, c.y - rb * 0.25f), rb * 0.95f, IM_COL32(255, 60, 50, 255), 24);
+                    d4->AddCircleFilled(ImVec2(c.x - rb * 0.1f, c.y + rb * 0.8f), rb * 0.45f, IM_COL32(255, 90, 80, 255), 16);
+                    d4->AddCircleFilled(ImVec2(c.x + rb * 0.9f, c.y + rb * 0.75f), rb * 0.35f, IM_COL32(120, 190, 255, 255), 16);
+                }
+
+                // "+" sigil
+                {
+                    ImVec2 c(thumbMax4.x - (thumbMax4.x - thumbMin4.x) * 0.16f,
+                             thumbMin4.y + (thumbMax4.y - thumbMin4.y) * 0.16f);
+                    float arm = (thumbMax4.x - thumbMin4.x) * 0.10f;
+                    float thk = std::max(2.0f, arm * 0.28f);
+                    ImU32 plus = hov4 ? IM_COL32(255, 255, 255, 240)
+                                      : IM_COL32(235, 240, 255, 200);
+                    d4->AddRectFilled(ImVec2(c.x - arm, c.y - thk * 0.5f),
+                                      ImVec2(c.x + arm, c.y + thk * 0.5f), plus, thk * 0.5f);
+                    d4->AddRectFilled(ImVec2(c.x - thk * 0.5f, c.y - arm),
+                                      ImVec2(c.x + thk * 0.5f, c.y + arm), plus, thk * 0.5f);
+                }
+
+                const char* title4 = "3D Box";
+                ImVec2 ts4 = ImGui::CalcTextSize(title4);
+                d4->AddText(ImVec2(cellPos4.x + (thumbSize - ts4.x) * 0.5f,
+                                   cellPos4.y + thumbSize - 2),
+                            hov4 ? IM_COL32(255, 255, 255, 255)
+                                 : IM_COL32(220, 226, 235, 220),
+                            title4);
+
+                if (hov4) ParamRow::Tooltip("3D Box\n\nThe 3D fluid inside a white box in perspective —\nfixed camera, the liquid spills out toward you");
+                if (clicked4) addFluid3DBox();
 
                 ImGui::PopID();
                 gridPos++;
@@ -15475,6 +15772,56 @@ void Application::renderTimelinePanel() {
         return 0;
     };
 
+    // ── 3D Scene rows (above the layer tracks, like Camera / Light in the layer list) ──
+    // The scene is not a layer, so it has no track; its Automation lanes are
+    // addressed by SceneParams::laneId(zone). Draw one slim row per zone that
+    // owns at least one key, with a diamond at every key time (hover names
+    // the params there, click seeks the playhead to it).
+    for (size_t zi = 0; zi < m_zones.size(); zi++) {
+        auto& zp = m_zones[zi];
+        if (!zp) continue;
+        const uint32_t lid = SceneParams::laneId((int)zi);
+        std::map<double, std::string> keyTimes;   // time -> "param, param"
+        for (const auto& ln : m_timeline.lanes()) {
+            if (ln.layerId != lid || ln.kind != TimelineLaneKind::Automation) continue;
+            for (const auto& pt : ln.points) {
+                double tq = std::round(pt.time * 25.0) / 25.0;
+                auto& lbl = keyTimes[tq];
+                if (!lbl.empty()) lbl += ", ";
+                lbl += ln.paramName;
+            }
+        }
+        if (keyTimes.empty()) continue;
+        ImGui::PushID((int)(0x53000000u + zi));
+        const float rowH = 22.0f;
+        ImVec2 rO = ImGui::GetCursorScreenPos();
+        ImVec2 rT(rO.x + gutterW, rO.y);
+        ImGui::Dummy(ImVec2(gutterW + trackAreaW, rowH));
+        dl->AddRectFilled(rO, ImVec2(rO.x + gutterW - 4, rO.y + rowH), IM_COL32(255, 255, 255, 12), 6.0f);
+        dl->AddRectFilled(rT, ImVec2(rT.x + trackAreaW, rO.y + rowH), IM_COL32(120, 170, 255, 16), 6.0f);
+        char nm[96];
+        snprintf(nm, sizeof(nm), "3D Scene \xc2\xb7 %s", zp->name.c_str());
+        dl->AddText(ImVec2(rO.x + 10, rO.y + (rowH - 14.0f) * 0.5f), IM_COL32(170, 200, 255, 230), nm);
+        int ki = 0;
+        for (const auto& kv : keyTimes) {
+            float px = rT.x + timeToX(kv.first);
+            if (px < rT.x - 6 || px > rT.x + trackAreaW + 6) continue;
+            float py = rO.y + rowH * 0.5f;
+            const float h = 5.0f;
+            ImGui::PushID(ki++);
+            ImGui::SetCursorScreenPos(ImVec2(px - h - 2, py - h - 2));
+            bool clk = ImGui::InvisibleButton("##skey", ImVec2(h * 2 + 4, h * 2 + 4));
+            bool hov = ImGui::IsItemHovered();
+            ImU32 col = hov ? IM_COL32(255, 255, 255, 255) : IM_COL32(170, 200, 255, 230);
+            dl->AddQuadFilled(ImVec2(px, py - h), ImVec2(px + h, py), ImVec2(px, py + h), ImVec2(px - h, py), col);
+            if (hov) ImGui::SetTooltip("%.2fs \xe2\x80\x94 %s", kv.first, kv.second.c_str());
+            if (clk) m_timeline.seek(kv.first);
+            ImGui::PopID();
+        }
+        ImGui::PopID();
+        ImGui::Dummy(ImVec2(0, trackSpacing));
+    }
+
     uint32_t lastGroupId = 0;
     for (auto& track : m_timeline.tracks()) {
         // Emit a group header row when we cross into a new non-zero group.
@@ -17623,6 +17970,12 @@ void Application::renderNavBarPrefix() {
             if (ImGui::MenuItem("Add 3D Fluid")) {
                 addFluid3D();
             }
+            if (ImGui::MenuItem("Add 3D Box")) {
+                addFluid3DBox();
+            }
+            if (ImGui::MenuItem("Add 3D Model...")) {
+                addModel();
+            }
             if (ImGui::MenuItem("Add Hologram Model...")) {
                 addHologramModel();
             }
@@ -17801,6 +18154,12 @@ void Application::renderMenuBar_legacy() {
             }
             if (ImGui::MenuItem("Add 3D Fluid")) {
                 addFluid3D();
+            }
+            if (ImGui::MenuItem("Add 3D Box")) {
+                addFluid3DBox();
+            }
+            if (ImGui::MenuItem("Add 3D Model...")) {
+                addModel();
             }
             if (ImGui::MenuItem("Add Hologram Model...")) {
                 addHologramModel();
@@ -18216,6 +18575,8 @@ void Application::addFluid() {
 void Application::addFluid3D() {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto src = std::make_shared<FluidSource3D>();
+    // Memory: come back exactly as the last 3D Fluid was left.
+    if (const auto* snap = m_shaderPresets.findSnapshot(FluidSource3D::memoryKey(false))) src->applyMemory(*snap);
     int w = 1280, h = 720;
     if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
         w = m_zones[m_activeZone]->width;
@@ -18229,6 +18590,35 @@ void Application::addFluid3D() {
     layer->id = m_nextLayerId++;
     layer->source = src;
     layer->name = "3D Fluid";
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
+// Same simulation, different stage: a white open-front box in perspective,
+// camera fixed straight on, the fluid filling the box and spilling out of
+// the opening toward the viewer. It's a FluidSource3D with the box preset
+// (boxMode=1 + a tuned look), so the inspector / OSC / project file are the
+// same as the 3D Fluid's.
+void Application::addFluid3DBox() {
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<FluidSource3D>();
+    src->applyBoxPreset();
+    // Memory: come back exactly as the last 3D Box was left.
+    if (const auto* snap = m_shaderPresets.findSnapshot(FluidSource3D::memoryKey(true))) src->applyMemory(*snap);
+    int w = 1280, h = 720;
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    if (!src->init(w, h)) {
+        std::cerr << "Failed to init FluidSource3D (box)" << std::endl;
+        return;
+    }
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    layer->name = "3D Box";
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
@@ -18265,6 +18655,43 @@ void Application::addHologramModel(const std::string& pathArg) {
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;
     registerLayerWithZones(layer->id);
+}
+
+void Application::addModel(const std::string& pathArg) {
+    // Native 3D scene object: a lit mesh that stands in a 3D zone's world
+    // (and previews as a picture in a 2D zone). Picker when no path.
+    std::string path = pathArg;
+    if (path.empty()) {
+        path = openFileDialog(
+            "3D Models\0*.obj;*.gltf;*.glb\0OBJ Files\0*.obj\0"
+            "glTF Files\0*.gltf;*.glb\0All Files\0*.*\0");
+    }
+    if (path.empty()) return;
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    auto src = std::make_shared<ModelSource>();
+    if (!src->init(1024)) {
+        std::cerr << "Failed to init ModelSource" << std::endl;
+        return;
+    }
+    src->loadModel(path);
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->source = src;
+    {
+        std::string stem = path;
+        size_t sl = stem.find_last_of("/\\");
+        if (sl != std::string::npos) stem = stem.substr(sl + 1);
+        size_t dot = stem.rfind('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+        layer->name = stem.empty() ? "3D Model" : stem;
+    }
+    layer->scale = glm::vec2(0.6f, 0.6f);
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+    // A model wants a world: switch the active zone to 3D if it is flat.
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone])
+        m_zones[m_activeZone]->scene.enabled = true;
 }
 
 void Application::addMovingCompany() {
@@ -18444,7 +18871,7 @@ void Application::loadShader(const std::string& path) {
     if (source && source->audioBindings().empty() && !memoryKnowsReactivity) {
         std::vector<AudioPresetEngine::Param> pp;
         for (const auto& in : source->inputs()) {
-            if (in.type != "float") continue;
+            if (in.type != "float" || in.noAudio) continue;
             if (in.name.find("audio") != std::string::npos ||
                 in.name.find("Audio") != std::string::npos) continue;
             pp.push_back({ in.name, std::get<float>(in.value), in.minVal, in.maxVal });
@@ -18751,6 +19178,20 @@ void Application::setManagedLayerParam(const std::string& key, const std::string
         if (l->source && l->source->typeName() == "Fluid3D") {
             auto* f3 = static_cast<FluidSource3D*>(l->source.get());
             if (name == "reset") { f3->reseed(); return; }
+            // "defaults" = the Reset button (built-in look), "shuffle [seed]" = the Shuffle button.
+            if (name == "defaults") { f3->resetToDefaults(); return; }
+            // "shapeA <path>" / "shapeB <path>" bake a mesh into a shape slot; "clear" empties it.
+            if (name == "shapeA" || name == "shapeB") {
+                int slot = (name == "shapeB") ? 1 : 0;
+                std::string v = msg.strings.size() >= 3 ? msg.strings[2] : std::string();
+                if (v.empty() || v == "clear") f3->clearShape(slot); else f3->loadShape(slot, v);
+                return;
+            }
+            if (name == "shuffle") {
+                uint32_t seed = !msg.ints.empty() ? (uint32_t)msg.ints[0]
+                              : !msg.floats.empty() ? (uint32_t)msg.floats[0] : (uint32_t)std::rand();
+                f3->shuffle(seed); return;
+            }
             if (msg.floats.size() >= 3) {
                 for (auto& c : f3->colors())
                     if (name == c.id) { for (int k = 0; k < 3; k++) c.rgb[k] = msg.floats[k]; return; }
@@ -18908,7 +19349,7 @@ void Application::setManagedLayerAudioPreset(const std::string& key, const std::
             auto* shader = static_cast<ShaderSource*>(l->source.get());
             bindings = &shader->audioBindings();
             for (const auto& in : shader->inputs()) {
-                if (in.type != "float") continue;
+                if (in.type != "float" || in.noAudio) continue;
                 if (in.name.find("audio") != std::string::npos ||
                     in.name.find("Audio") != std::string::npos) continue;
                 pp.push_back({ in.name, std::get<float>(in.value),
@@ -19794,6 +20235,8 @@ void Application::saveProject(const std::string& path) {
         // runtime state and intentionally not persisted).
         zj["micDeviceId"] = z.micDeviceId;
         zj["micEnabled"] = z.micEnabled;
+        // Native 3D scene (toggle, camera, sun)
+        zj["scene"] = z.scene.toJson();
 
         zonesJson.push_back(zj);
     }
@@ -19814,6 +20257,11 @@ void Application::saveProject(const std::string& path) {
         layerJson["rotation"] = layer->rotation;
         layerJson["flipH"] = layer->flipH;
         layerJson["flipV"] = layer->flipV;
+        if (layer->z3 != 0.0f || layer->rot3 != glm::vec3(0.0f) || !layer->castShadow) {
+            layerJson["z3"] = layer->z3;
+            layerJson["rot3"] = {layer->rot3.x, layer->rot3.y, layer->rot3.z};
+            layerJson["castShadow"] = layer->castShadow;
+        }
         layerJson["mosaicMode"] = (int)layer->mosaicMode;
         layerJson["tileX"] = layer->tileX;
         layerJson["tileY"] = layer->tileY;
@@ -20024,6 +20472,7 @@ void Application::saveProject(const std::string& path) {
                 fc["simRes"]      = f->m_simRes;
                 fc["substeps"]    = f->m_substeps;
                 fc["renderScale"] = f->m_renderScale;
+                fc["shapeA"] = f->shapePath(0); fc["shapeB"] = f->shapePath(1); fc["shapeSeed"] = f->m_shapeSeed;
                 fc["imageEnabled"]       = f->m_imageEnabled;
                 fc["imageSourceLayerId"] = f->imageSource().sourceLayerId;
                 fc["backdropSourceLayerId"] = f->backdropSource().sourceLayerId;
@@ -20045,6 +20494,32 @@ void Application::saveProject(const std::string& path) {
                             abj["midiCC"]      = ab.midiCC;
                             abj["midiChannel"] = ab.midiChannel;
                         }
+                        abJson.push_back(abj);
+                    }
+                    if (!abJson.empty()) layerJson["audioBindings"] = abJson;
+                }
+            } else if (layer->source->typeName() == "3D Model") {
+                auto* mo = static_cast<ModelSource*>(layer->source.get());
+                json mc;
+                mc["color"] = {mo->m_color.r, mo->m_color.g, mo->m_color.b};
+                mc["gloss"] = mo->m_gloss;
+                mc["metal"] = mo->m_metal;
+                mc["emissive"] = mo->m_emissive;
+                mc["spin"] = mo->m_spin;
+                mc["wire"] = mo->m_wire;
+                mc["bob"] = mo->m_bob;
+                layerJson["modelConfig"] = mc;
+                const auto& audioBinds = mo->audioBindings();
+                if (!audioBinds.empty()) {
+                    json abJson = json::array();
+                    for (const auto& [name, ab] : audioBinds) {
+                        if (ab.signal == AudioSignal::None) continue;
+                        json abj;
+                        abj["param"] = name; abj["signal"] = (int)ab.signal;
+                        abj["rangeMin"] = ab.rangeMin; abj["rangeMax"] = ab.rangeMax;
+                        abj["smoothing"] = ab.smoothing;
+                        if (ab.character != 0.0f) abj["character"] = ab.character;
+                        if (ab.signal == AudioSignal::MidiCC) { abj["midiCC"] = ab.midiCC; abj["midiChannel"] = ab.midiChannel; }
                         abJson.push_back(abj);
                     }
                     if (!abJson.empty()) layerJson["audioBindings"] = abJson;
@@ -20450,6 +20925,7 @@ void Application::loadProjectBody(const json& j) {
             z->micDeviceId = zj.value("micDeviceId", std::string(""));
             z->micEnabled = zj.value("micEnabled", false);
             // pushToTalkActive is transient runtime state — never loaded from disk.
+            if (zj.contains("scene")) z->scene = SceneParams::fromJson(zj["scene"]);
 
             m_zones.push_back(std::move(z));
         }
@@ -20521,6 +20997,10 @@ void Application::loadProjectBody(const json& j) {
             layer->rotation = layerJson.value("rotation", 0.0f);
             layer->flipH = layerJson.value("flipH", false);
             layer->flipV = layerJson.value("flipV", false);
+            layer->z3 = layerJson.value("z3", 0.0f);
+            if (layerJson.contains("rot3") && layerJson["rot3"].is_array() && layerJson["rot3"].size() == 3)
+                layer->rot3 = glm::vec3(layerJson["rot3"][0].get<float>(), layerJson["rot3"][1].get<float>(), layerJson["rot3"][2].get<float>());
+            layer->castShadow = layerJson.value("castShadow", true);
             layer->mosaicMode = (MosaicMode)layerJson.value("mosaicMode", 0);
             layer->tileX = layerJson.value("tileX", 1.0f);
             layer->tileY = layerJson.value("tileY", 1.0f);
@@ -20790,6 +21270,9 @@ void Application::loadProjectBody(const json& j) {
                     src->m_simRes      = fc.value("simRes",      src->m_simRes);
                     src->m_substeps    = fc.value("substeps",    src->m_substeps);
                     src->m_renderScale = fc.value("renderScale", src->m_renderScale);
+                    src->m_shapeSeed = fc.value("shapeSeed", src->m_shapeSeed);
+                    src->m_pendingShape[0] = fc.value("shapeA", std::string());
+                    src->m_pendingShape[1] = fc.value("shapeB", std::string());
                     src->m_imageEnabled   = fc.value("imageEnabled", src->m_imageEnabled);
                     src->imageSource().sourceLayerId =
                         fc.value("imageSourceLayerId",
@@ -20884,6 +21367,9 @@ void Application::loadProjectBody(const json& j) {
                     src->m_simRes      = fc.value("simRes",      src->m_simRes);
                     src->m_substeps    = fc.value("substeps",    src->m_substeps);
                     src->m_renderScale = fc.value("renderScale", src->m_renderScale);
+                    src->m_shapeSeed = fc.value("shapeSeed", src->m_shapeSeed);
+                    src->m_pendingShape[0] = fc.value("shapeA", std::string());
+                    src->m_pendingShape[1] = fc.value("shapeB", std::string());
                     src->m_imageEnabled   = fc.value("imageEnabled", src->m_imageEnabled);
                     src->m_imageMix       = fc.value("imageMix",     src->m_imageMix);
                     src->imageSource().sourceLayerId =
@@ -20904,6 +21390,36 @@ void Application::loadProjectBody(const json& j) {
                             ab.rangeMin = abj.value("rangeMin", 0.0f);
                             ab.rangeMax = abj.value("rangeMax", 1.0f);
                             ab.smoothing = abj.value("smoothing", 0.55f);
+                            ab.character = abj.value("character", 0.0f);
+                            ab.midiCC = abj.value("midiCC", -1);
+                            ab.midiChannel = abj.value("midiChannel", -1);
+                            src->audioBindings()[abj.value("param", "")] = ab;
+                        }
+                    }
+                    layer->source = src;
+                }
+            } else if (sourceType == "3D Model") {
+                auto src = std::make_shared<ModelSource>();
+                if (src->init(1024)) {
+                    if (!sourcePath.empty()) src->loadModel(sourcePath);
+                    if (layerJson.contains("modelConfig")) {
+                        const auto& mc = layerJson["modelConfig"];
+                        if (mc.contains("color") && mc["color"].is_array() && mc["color"].size() == 3)
+                            src->m_color = glm::vec3(mc["color"][0].get<float>(), mc["color"][1].get<float>(), mc["color"][2].get<float>());
+                        src->m_gloss = mc.value("gloss", 0.55f);
+                        src->m_metal = mc.value("metal", 0.15f);
+                        src->m_emissive = mc.value("emissive", 0.0f);
+                        src->m_spin = mc.value("spin", 12.0f);
+                        src->m_wire = mc.value("wire", 0.0f);
+                        src->m_bob = mc.value("bob", 0.0f);
+                    }
+                    if (layerJson.contains("audioBindings")) {
+                        for (const auto& abj : layerJson["audioBindings"]) {
+                            AudioBinding ab;
+                            ab.signal = (AudioSignal)abj.value("signal", 0);
+                            ab.rangeMin = abj.value("rangeMin", 0.0f);
+                            ab.rangeMax = abj.value("rangeMax", 1.0f);
+                            ab.smoothing = abj.value("smoothing", 0.8f);
                             ab.character = abj.value("character", 0.0f);
                             ab.midiCC = abj.value("midiCC", -1);
                             ab.midiChannel = abj.value("midiChannel", -1);
@@ -21563,6 +22079,7 @@ std::map<std::string, AudioBinding>* Application::showBindingsFor(ContentSource*
     if (auto* fs = dynamic_cast<FluidSource*>(src))    return &fs->audioBindings();
     if (auto* f3 = dynamic_cast<FluidSource3D*>(src))  return &f3->audioBindings();
     if (auto* ps = dynamic_cast<ParticleSource*>(src)) return &ps->audioBindings();
+    if (auto* sk = dynamic_cast<SceneKnobSource*>(src)) return &sk->audioBindings();
     return nullptr;
 }
 
@@ -21598,6 +22115,17 @@ std::vector<Application::ShowParam> Application::showParamsFor(ContentSource* sr
         for (const auto& d : f3->params())
             if (d.flags & FluidSource3D::kBind)
                 out.push_back({d.id, d.label, *d.ptr, d.lo, d.hi});
+        return out;
+    } else if (auto* sk = dynamic_cast<SceneKnobSource*>(src)) {
+        // The zone's camera / sun / point-light table. Point-light params
+        // are labelled "X" / "Radius" under their light's header in the
+        // inspector; on a knob they need the light's number.
+        for (const auto& d : sk->scene->params()) {
+            std::string lbl = d.label;
+            if (!strncmp(d.id, "pl", 2) && d.id[2] >= '1' && d.id[2] <= '4' && d.id[3] == '.')
+                lbl = std::string("L") + d.id[2] + " " + lbl;
+            out.push_back({d.id, lbl, *d.ptr, d.lo, d.hi});
+        }
         return out;
     } else if (dynamic_cast<ParticleSource*>(src)) {
         static const T kPart[] = {
@@ -21757,10 +22285,9 @@ void Application::autoMapShaderToLCXL(ContentSource* src) {
 // selected layer if it's a shader, then the topmost visible shader layer.
 Layer* Application::resolveShowTarget() {
     if (m_showExtraTargetId != 0) {
-        for (int i = 0; i < m_layerStack.count(); i++) {
-            auto& l = m_layerStack[i];
-            if (l && l->id == m_showExtraTargetId && showBindingsFor(l->source.get())) return l.get();
-        }
+        Layer* xl = showLayerById(m_showExtraTargetId);
+        if (xl && showBindingsFor(xl->source.get())
+            && (!SceneParams::isSceneLane(xl->id) || m_zones[SceneParams::laneZone(xl->id)]->scene.enabled)) return xl;
         m_showExtraTargetId = 0;   // the extra went away; the decks take over again
     }
     if (Layer* d = deckLayer(m_deckTarget))     return d;
@@ -21936,15 +22463,27 @@ void Application::memoryTick() {
     if (now < m_memoryNextT) { m_shaderPresets.tick(now); return; }
     m_memoryNextT = now + 0.25;
     if (!m_showRunning) {
+        // 3D Fluid / 3D Box memory: one entry per kind — the TOPMOST layer
+        // of a kind is the one remembered (two of them would otherwise
+        // overwrite each other every tick).
+        const FluidSource3D* fluidTop[2] = { nullptr, nullptr };
         for (int i = 0; i < m_layerStack.count(); i++) {
             auto& l = m_layerStack[i];
-            if (!l || !l->source || !l->source->isShader()) continue;
+            if (!l || !l->source) continue;
+            if (l->source->typeName() == "Fluid3D") {
+                auto* f3 = static_cast<FluidSource3D*>(l->source.get());
+                fluidTop[f3->isBox() ? 1 : 0] = f3;
+                continue;
+            }
+            if (!l->source->isShader()) continue;
             auto* ss = dynamic_cast<ShaderSource*>(l->source.get());
             if (!ss || !ss->isInitialized()) continue;
             const std::string& p = ss->sourcePath();
             if (p.empty()) continue;
             m_shaderPresets.remember(usageKey(p), *ss);
         }
+        for (int k = 0; k < 2; k++)
+            if (fluidTop[k]) m_shaderPresets.rememberJson(fluidTop[k]->memoryKey(), fluidTop[k]->memorySnapshot());
     }
     m_shaderPresets.tick(now);
 }
@@ -21978,7 +22517,27 @@ std::vector<Layer*> Application::showExtraLayers() {
         if (l->managedKey == kDeckKey[0] || l->managedKey == kDeckKey[1]) continue;
         out.push_back(l.get());
     }
+    // Every 3D zone's scene is an extra too ("3D Scene · Main"): its camera
+    // and lights take the knobs like a shader would.
+    for (size_t zi = 0; zi < m_zones.size() && (int)out.size() < 14; zi++) {
+        auto& zp = m_zones[zi];
+        if (!zp || !zp->scene.enabled) continue;
+        zp->index = (int)zi;
+        out.push_back(zp->knobLayer());
+    }
     return out;
+}
+
+Layer* Application::showLayerById(uint32_t id) {
+    if (id == 0) return nullptr;
+    if (SceneParams::isSceneLane(id)) {
+        int zi = SceneParams::laneZone(id);
+        if (zi >= 0 && zi < (int)m_zones.size() && m_zones[zi]) { m_zones[zi]->index = zi; return m_zones[zi]->knobLayer(); }
+        return nullptr;
+    }
+    for (int i = 0; i < m_layerStack.count(); i++)
+        if (m_layerStack[i] && m_layerStack[i]->id == id) return m_layerStack[i].get();
+    return nullptr;
 }
 
 // An extra takes the knobs + MIDI: the deck (or previous extra) gives its
@@ -21994,12 +22553,12 @@ void Application::showTakeExtra(Layer* l) {
     };
     strip(deckLayer(m_deckTarget));
     if (m_showExtraTargetId != 0 && m_showExtraTargetId != l->id)
-        for (int i = 0; i < m_layerStack.count(); i++)
-            if (m_layerStack[i] && m_layerStack[i]->id == m_showExtraTargetId) { strip(m_layerStack[i].get()); break; }
+        strip(showLayerById(m_showExtraTargetId));
     m_showExtraTargetId = l->id;
     m_deckTargetPinned = true;
     m_showMapPage = 0;
-    layerToFront(l);   // it is the output now, not just the knobs
+    if (!SceneParams::isSceneLane(l->id))
+        layerToFront(l);   // it is the output now, not just the knobs (a scene is not a layer)
     autoMapShaderToLCXL(l->source.get());
     std::cerr << "[Show] extra takes the knobs: " << l->name << std::endl;
 }
@@ -22010,6 +22569,7 @@ void Application::showTakeExtra(Layer* l) {
 void Application::showReconcileExtras() {
     if (!m_showRunning) return;
     for (Layer* l : showExtraLayers()) {
+        if (SceneParams::isSceneLane(l->id)) continue;   // the scene is not a clip
         bool has = false;
         for (const auto& tr : m_timeline.tracks()) if (tr.layerId == l->id) { has = true; break; }
         if (has) continue;
@@ -22096,13 +22656,10 @@ void Application::deckLoad(int deck, const std::string& path, const std::string&
 void Application::deckTakeSurface(int deck, bool pin) {
     if (deck < 0 || deck > 1) return;
     if (m_showExtraTargetId != 0) {
-        for (int i = 0; i < m_layerStack.count(); i++)
-            if (m_layerStack[i] && m_layerStack[i]->id == m_showExtraTargetId) {
-                if (auto* pb = showBindingsFor(m_layerStack[i]->source.get()))
-                    for (auto it = pb->begin(); it != pb->end();)
-                        if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it); else ++it;
-                break;
-            }
+        if (Layer* xl = showLayerById(m_showExtraTargetId))
+            if (auto* pb = showBindingsFor(xl->source.get()))
+                for (auto it = pb->begin(); it != pb->end();)
+                    if (it->second.signal == AudioSignal::MidiCC) it = pb->erase(it); else ++it;
         m_showExtraTargetId = 0;
         m_showMapPage = 0;
         if (Layer* l = deckLayer(deck)) { m_deckTarget = deck; m_deckTargetPinned = pin; autoMapShaderToLCXL(l->source.get()); m_selectedLayer = deckLayerIndex(deck); return; }
@@ -22940,7 +23497,7 @@ void Application::renderShowPanel() {
             // click the main picture = the LAST layer you added takes the knobs
             // + MIDI (the newest extra; with no extras, the deck on air)
             Layer* newest = nullptr;
-            for (Layer* l : showExtraLayers()) if (!newest || l->id > newest->id) newest = l;
+            for (Layer* l : showExtraLayers()) { if (SceneParams::isSceneLane(l->id)) continue; if (!newest || l->id > newest->id) newest = l; }
             ImGui::SetCursorScreenPos(ImVec2(xM, y));
             ImGui::SetNextItemAllowOverlap();   // the AB button sits on the picture
             bool mainClick = ImGui::InvisibleButton("##mainpreview", ImVec2(mainW, previewH));

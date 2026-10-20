@@ -55,6 +55,10 @@ public:
     // Drop any saved preset for `shaderFile` (e.g. on delete).
     void clear(const std::string& shaderFile);
 
+    // Memory for things that are not shaders (the 3D Fluid / 3D Box): the
+    // caller builds the snapshot; same store, same debounce, same file.
+    bool rememberJson(const std::string& key, nlohmann::json snap);
+
     // Raw snapshot helpers — the same param-name → value shape the store
     // uses, but standalone so other systems (show presets, timeline clip
     // hot-swaps) can capture/apply without touching the persisted store.

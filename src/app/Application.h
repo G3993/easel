@@ -44,6 +44,7 @@
 #include "sources/FluidSource.h"
 #include "sources/FluidSource3D.h"
 #include "sources/HologramModelSource.h"
+#include "sources/ModelSource.h"
 #ifdef __APPLE__
 #include "sources/VisionTracker.h"
 #endif
@@ -613,7 +614,9 @@ private:
     void addParticles();
     void addFluid();
     void addFluid3D();
+    void addFluid3DBox();      // 3D Fluid inside a white open-front box, fixed straight-on camera
     void addHologramModel(const std::string& path = ""); // upload 3D model → glitchy hologram; empty path opens the picker
+    void addModel(const std::string& path = "");         // native 3D scene object (lit mesh); empty path opens the picker
     void addMovingCompany();   // F-117 flying through space (mesh source)
 #ifdef HAS_OPENCV
     void addWebcam(int cameraIndex, const std::string& deviceName = std::string());
@@ -744,6 +747,8 @@ private:
     uint32_t m_showExtraTargetId = 0;          // an extra currently holding the knobs
     std::vector<uint32_t> m_showExtraTrackIds; // tracks a show added for extras (layers stay)
     std::vector<Layer*> showExtraLayers();
+    // A layer by id: the stack first, then the zones' scene knob layers.
+    Layer* showLayerById(uint32_t id);
     void showTakeExtra(Layer* l);
     void showReconcileExtras();
     void resetShowParams(ContentSource* src);

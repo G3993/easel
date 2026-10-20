@@ -147,6 +147,16 @@ public:
     void removeModule(int index);
     void moveModule(int index, int direction); // -1 up, +1 down
 
+    // ── native 3D scene object ────────────────────────────────────────
+    // In a 3D zone the compositor draws the live particles straight into
+    // the zone's world (camera-facing billboards with depth test) instead
+    // of compositing the flat preview texture. `model` places the emitter
+    // like a card (particle xyz = card units, z toward the camera).
+    void renderScene(const glm::mat4& model, const glm::mat4& view, const glm::mat4& proj, float opacity,
+                     bool fogOn = false, const glm::vec3& fogColor = glm::vec3(0.0f), float fogDensity = 0.0f,
+                     float fogStart = 0.0f, const glm::vec3& camPos = glm::vec3(0.0f));
+    bool sceneShaderOk() const { return m_sceneShaderOk; }
+
     // Live stats (for debug overlay / UI)
     int liveParticleCount() const { return (int)m_particles.size(); }
 
@@ -193,6 +203,8 @@ private:
     // Rendering
     Framebuffer   m_output;
     ShaderProgram m_renderShader;
+    ShaderProgram m_sceneShader;      // billboards through a scene camera
+    bool          m_sceneShaderOk = false;
     GLuint        m_quadVAO    = 0;
     GLuint        m_quadVBO    = 0;
     GLuint        m_instanceVBO= 0;

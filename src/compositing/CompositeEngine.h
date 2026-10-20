@@ -3,6 +3,7 @@
 #include "render/ShaderProgram.h"
 #include "render/Mesh.h"
 #include "compositing/Layer.h"
+#include "scene/SceneParams.h"
 #include <vector>
 #include <memory>
 #include <map>
@@ -38,6 +39,11 @@ public:
     void composite(const std::vector<std::shared_ptr<Layer>>& layers);
 
     void setAudioState(const AudioState& state) { m_audio = state; }
+    // Native 3D scene: when the pointed-to params have enabled=true, layers
+    // are rendered as cards in a world (camera + sun + shadow map) instead
+    // of a flat stack. nullptr / disabled = the classic 2D path.
+    void setScene(const SceneParams* scene) { m_scene = scene; }
+    bool scene3D() const { return m_scene && m_scene->enabled; }
     float time() const { return m_audio.time; }
 
     GLuint resultTexture() const;
@@ -111,4 +117,25 @@ private:
 
     void clear();
     void setAudioUniforms(ShaderProgram& shader, float audioStrength);
+
+    // ── native 3D scene ──────────────────────────────────────────────
+    const SceneParams* m_scene = nullptr;
+    ShaderProgram m_cardShader;         // scene_card: a layer as a lit card
+    ShaderProgram m_cardShadowShader;   // scene_shadow: depth-only silhouette
+    ShaderProgram m_volumeShader;       // scene_card + SCENE_DEPTH_TEX: a pre-rendered view with its own depth (Fluid 3D)
+    ShaderProgram m_ssaoShader;         // scene_ssao: AO from the shared depth (half res)
+    ShaderProgram m_aoApplyShader;      // scene_ao_apply: composite × blurred AO
+    Framebuffer   m_aoFBO;              // half-res AO map
+    void renderSceneAO(const glm::mat4& proj);
+    bool m_sceneShadersTried = false;
+    bool m_sceneShadersOk = false;
+    GLuint m_sceneDepth = 0;            // sampleable depth shared by the ping-pong pair
+    int m_sceneDepthW = 0, m_sceneDepthH = 0;
+    GLuint m_shadowMapFBO = 0, m_shadowMapTex = 0;
+    int m_shadowMapRes = 0;
+    bool ensureSceneResources();
+    void releaseSceneResources();
+    glm::mat3 layerTransform(const Layer& layer) const;
+    void renderShadowMap(const std::vector<std::shared_ptr<Layer>>& layers,
+                         const glm::mat4& lightVP, float aspect, bool anySoloed);
 };

@@ -3,6 +3,8 @@
 #include "render/FontAtlas.h"
 #include "render/Texture.h"
 #include <nlohmann/json.hpp>
+#include "scene/SceneCamera.h"
+#include <glm/gtc/matrix_transform.hpp>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -68,6 +70,16 @@ bool ShaderSource::parseISF(const std::string& source) {
 
         m_description = j.value("DESCRIPTION", "");
         m_credit = j.value("CREDIT", "");
+        {
+            std::string role = j.value("ROLE", "");
+            if (role.empty() && j.contains("SCENE") && j["SCENE"].is_object()) role = j["SCENE"].value("ROLE", "");
+            for (auto& ch : role) ch = (char)tolower((unsigned char)ch);
+            m_role = (role == "surface")  ? SceneRole::Surface
+                   : (role == "emissive") ? SceneRole::Emissive
+                   : (role == "volume")   ? SceneRole::Volume
+                   : (role == "sdf")      ? SceneRole::SDF
+                   : (role == "post")     ? SceneRole::Post : SceneRole::None;
+        }
 
         m_inputs.clear();
         if (j.contains("INPUTS") && j["INPUTS"].is_array()) {
@@ -77,6 +89,7 @@ bool ShaderSource::parseISF(const std::string& source) {
                 param.type  = input.value("TYPE", "float");
                 param.label = input.value("LABEL", "");
                 param.group = input.value("GROUP", "");
+                param.noAudio = input.contains("AUDIO") && input["AUDIO"].is_boolean() && !input["AUDIO"].get<bool>();
 
                 if (param.type == "float") {
                     param.minVal = input.contains("MIN") ? jsonToFloat(input["MIN"], 0.0f) : 0.0f;
@@ -244,7 +257,8 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
 
     std::stringstream out;
     out << "#version 330 core\n";
-    out << "out vec4 FragColor;\n";
+    out << "layout(location = 0) out vec4 FragColor;\n";
+    out << "layout(location = 1) out vec4 isf_FragAux;\n";   // z = scene depth (SDF / volume roles)
     out << "in vec2 isf_FragNormCoord;\n";
     out << "\n";
 
@@ -429,9 +443,132 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "float audioAlive(float rest,float drive,float amount){ return rest+drive*amount; }\n"; // living baseline
     out << "\n";
 
-    out << body << "\n";
+    // --- Native 3D scene contract (always declared; a shader with a ROLE
+    // uses it, any other shader may). Card space = the layer's own plane,
+    // [-1,1] square, +z toward the camera; sceneModel takes it to the world.
+    out << "uniform mat4 sceneModel, sceneInvModel, sceneView, sceneProj, sceneViewProj, sceneInvViewProj;\n";
+    out << "uniform vec3 sceneCamPos;\n";
+    out << "uniform int  sceneActive;\n";
+    out << "uniform int  sceneLightOn;\n";
+    out << "uniform vec3 sceneLightDir, sceneLightColor, sceneAmbient;\n";
+    out << "uniform int  scenePointCount;\n";
+    out << "uniform vec4 scenePointPos[4];\n";
+    out << "uniform vec3 scenePointCol[4];\n";
+    const bool depthRole = (m_role == SceneRole::SDF || m_role == SceneRole::Volume);
+    if (depthRole)
+        out << "float sceneDepth = 1.0;\n";   // set to sceneDepthOf(hit) to sort against the world
+    out << "void sceneRay(vec2 uv, out vec3 ro, out vec3 rd){\n"
+           "  vec2 ndc = uv*2.0 - 1.0;\n"
+           "  vec4 p0 = sceneInvViewProj*vec4(ndc, -1.0, 1.0);\n"
+           "  vec4 p1 = sceneInvViewProj*vec4(ndc,  1.0, 1.0);\n"
+           "  vec3 w0 = p0.xyz/p0.w, w1 = p1.xyz/p1.w;\n"
+           "  vec3 c0 = (sceneInvModel*vec4(w0,1.0)).xyz, c1 = (sceneInvModel*vec4(w1,1.0)).xyz;\n"
+           "  ro = c0; rd = normalize(c1 - c0);\n"
+           "}\n";
+    out << "vec3 sceneCamPosCard(){ return (sceneInvModel*vec4(sceneCamPos,1.0)).xyz; }\n";
+    out << "float sceneDepthOf(vec3 pCard){ vec4 c = sceneViewProj*sceneModel*vec4(pCard,1.0); return clamp(c.z/c.w*0.5+0.5, 0.0, 1.0); }\n";
+    out << "vec3 sceneLightDirCard(){ return normalize(mat3(sceneInvModel)*sceneLightDir); }\n";
+    out << "vec3 sceneNormalWorld(vec3 nCard){ return normalize(transpose(mat3(sceneInvModel))*nCard); }\n";
+    out << "vec3 sceneShade(vec3 albedo, vec3 nCard, vec3 pCard, float gloss){\n"
+           "  vec3 n = sceneNormalWorld(nCard);\n"
+           "  vec3 pw = (sceneModel*vec4(pCard,1.0)).xyz;\n"
+           "  vec3 v = normalize(sceneCamPos - pw);\n"
+           "  vec3 col = albedo*sceneAmbient;\n"
+           "  if(sceneLightOn == 1){\n"
+           "    float nd = max(dot(n, sceneLightDir), 0.0);\n"
+           "    vec3 h = normalize(sceneLightDir + v);\n"
+           "    col += albedo*sceneLightColor*nd + sceneLightColor*pow(max(dot(n,h),0.0), mix(8.0,160.0,gloss*gloss))*gloss*0.5;\n"
+           "    for(int i=0;i<4;i++){ if(i>=scenePointCount) break;\n"
+           "      vec3 L = scenePointPos[i].xyz - pw; float d = length(L); L /= max(d,1e-4);\n"
+           "      float att = 1.0/(1.0 + d*d/max(scenePointPos[i].w*scenePointPos[i].w,1e-4));\n"
+           "      col += albedo*scenePointCol[i]*max(dot(n,L),0.0)*att; }\n"
+           "  } else { col += albedo*max(dot(n, normalize(vec3(0.4,0.7,0.6))),0.0)*0.8; }\n"
+           "  return col;\n"
+           "}\n";
+    out << "\n";
+
+    if (depthRole) {
+        // Wrap main so the depth the shader wrote lands in the side output.
+        body = std::regex_replace(body, std::regex("\\bvoid\\s+main\\s*\\(\\s*(void)?\\s*\\)"), "void isf_sceneMain()");
+        out << body << "\n";
+        out << "void main(){ isf_sceneMain(); isf_FragAux = vec4(0.0, 0.0, sceneDepth, 1.0); }\n";
+    } else {
+        out << body << "\n";
+    }
 
     return out.str();
+}
+
+std::string ShaderSource::firstImageInput() const {
+    for (const auto& in : m_inputs) if (in.type == "image") return in.name;
+    return "";
+}
+
+void ShaderSource::ensureAuxTexture() {
+    if (!sceneWantsDepth() || m_fbo.fboId() == 0) return;
+    int w = m_fbo.width(), h = m_fbo.height();
+    if (m_auxTex && m_auxW == w && m_auxH == h) return;
+    if (m_auxTex) glDeleteTextures(1, &m_auxTex);
+    glGenTextures(1, &m_auxTex);
+    glBindTexture(GL_TEXTURE_2D, m_auxTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);   // full float: half precision steps the depth into AO rings
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    GLint prev = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo.fboId());
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_auxTex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev);
+    m_auxW = w; m_auxH = h;
+}
+
+void ShaderSource::uploadSceneUniforms() {
+    SceneView v = m_sceneView;
+    if (!m_sceneActive) {
+        // Flat zone: a default perspective camera 3 units out, the card
+        // filling the frame, so an SDF shader looks the same on its own.
+        float aspect = m_height > 0 ? (float)m_width / (float)m_height : 1.0f;
+        SceneCameraParams cam; cam.perspective = true;
+        scene::CameraMatrices cm = scene::buildCamera(cam, aspect);
+        v = SceneView();
+        v.model = glm::scale(glm::mat4(1.0f), glm::vec3(aspect, 1.0f, 1.0f));
+        v.view = cm.view; v.proj = cm.proj; v.camPos = cm.eye;
+    }
+    glm::mat4 vp = v.proj * v.view;
+    m_shader.setMat4("sceneModel", v.model);
+    m_shader.setMat4("sceneInvModel", glm::inverse(v.model));
+    m_shader.setMat4("sceneView", v.view);
+    m_shader.setMat4("sceneProj", v.proj);
+    m_shader.setMat4("sceneViewProj", vp);
+    m_shader.setMat4("sceneInvViewProj", glm::inverse(vp));
+    m_shader.setVec3("sceneCamPos", v.camPos);
+    m_shader.setInt("sceneActive", m_sceneActive ? 1 : 0);
+    m_shader.setInt("sceneLightOn", v.lightOn ? 1 : 0);
+    m_shader.setVec3("sceneLightDir", v.lightDir);
+    m_shader.setVec3("sceneLightColor", v.lightColor);
+    m_shader.setVec3("sceneAmbient", v.ambient);
+    m_shader.setInt("scenePointCount", v.pointCount);
+    for (int i = 0; i < 4; i++) {
+        char nm[32];
+        snprintf(nm, sizeof(nm), "scenePointPos[%d]", i); m_shader.setVec4(nm, i < v.pointCount ? v.pointPos[i] : glm::vec4(0.0f));
+        snprintf(nm, sizeof(nm), "scenePointCol[%d]", i); m_shader.setVec3(nm, i < v.pointCount ? v.pointCol[i] : glm::vec3(0.0f));
+    }
+}
+
+void ShaderSource::renderSceneView(const SceneView& v) {
+    m_sceneView = v;
+    m_sceneActive = true;
+    m_sceneArmed = true;
+    GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+    GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+    GLboolean prevDepth = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    render();
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+    glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+    if (prevDepth) glEnable(GL_DEPTH_TEST);
 }
 
 std::string ShaderSource::translateVertex(const std::string& isfBody) {
@@ -816,6 +953,16 @@ void ShaderSource::suspend() {
 }
 
 void ShaderSource::update() {
+    // A 3D zone's compositor renders role shaders itself (renderSceneView)
+    // so the camera is this frame's; the arm lasts one frame.
+    const bool armed = m_sceneArmed;
+    m_sceneArmed = false;
+    if (armed) return;
+    m_sceneActive = false;
+    render();
+}
+
+void ShaderSource::render() {
     if (!m_initialized) {
         // Lazy revive after suspend(): rebuild the FBO storage. m_width/
         // m_height still track the host's setResolution() calls while
@@ -828,6 +975,9 @@ void ShaderSource::update() {
         m_frameIndex = 0;
         m_initialized = true;
     }
+    ensureAuxTexture();
+    static const GLenum kBufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    static const float  kAuxClear[4] = { 0.0f, 0.0f, 1.0f, 1.0f };   // depth 1 = nothing hit
 
     m_shader.use();
 
@@ -844,13 +994,22 @@ void ShaderSource::update() {
         m_clock += m_clockDelta;
     }
 
+    // ISF passes write their pixels straight: a blend state left on by the
+    // compositor or the UI would multiply a pass by its own alpha (which
+    // multi-pass shaders use for depth / emissive data, not coverage).
+    GLboolean prevBlend = glIsEnabled(GL_BLEND);
+    glDisable(GL_BLEND);
+
     if (m_passes.empty()) {
         // Single-pass shader (no PASSES in ISF header)
         m_fbo.bind();
+        if (m_auxTex) glDrawBuffers(2, kBufs);
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+        if (m_auxTex) glClearBufferfv(GL_COLOR, 1, kAuxClear);
         uploadUniforms(0, m_width, m_height);
         m_quad.draw();
+        if (m_auxTex) glDrawBuffers(1, kBufs);
         Framebuffer::unbind();
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -877,11 +1036,13 @@ void ShaderSource::update() {
             // Bind output
             glBindFramebuffer(GL_FRAMEBUFFER, outFBO->fboId());
             glViewport(0, 0, outFBO->width(), outFBO->height());
+            if (isFinal && m_auxTex) glDrawBuffers(2, kBufs);
 
             // Clear: skip for persistent passes, always clear final
             if (!pass.persistent || isFinal) {
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
+                if (isFinal && m_auxTex) glClearBufferfv(GL_COLOR, 1, kAuxClear);
             }
 
             // Upload uniforms with current pass index and dimensions
@@ -900,6 +1061,7 @@ void ShaderSource::update() {
             }
 
             m_quad.draw();
+            if (isFinal && m_auxTex) glDrawBuffers(1, kBufs);
 
             // Swap ping-pong after ANY targeted pass so subsequent passes (and
             // the final pass) read what this pass just wrote. Previously only
@@ -916,6 +1078,7 @@ void ShaderSource::update() {
     }
 
     renderMotionPass();
+    if (prevBlend) glEnable(GL_BLEND);
 
     // Restore default GL state so other sources (NDI, etc.) aren't affected
     glActiveTexture(GL_TEXTURE0);
@@ -1057,6 +1220,7 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     m_shader.setFloat("mouseDown", m_mouseDown);
     m_shader.setFloat("pinchHold", 0.0f);
     m_shader.setFloat("msgAge", m_msgAge);
+    uploadSceneUniforms();
 
     // Audio state (Shader-Claw naming convention)
     m_shader.setFloat("audioLevel", m_audioRMS);

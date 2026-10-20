@@ -241,6 +241,7 @@ find_package(OpenGL REQUIRED)
 add_executable(test_shaders
     src/test_shaders.cpp
     src/sources/ShaderSource.cpp
+    src/scene/SceneCamera.cpp
     src/render/ShaderProgram.cpp
     src/render/Framebuffer.cpp
     src/render/Mesh.cpp

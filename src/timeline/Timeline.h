@@ -271,6 +271,10 @@ public:
     // Creates the lane on first key. Returns the new "is animated" state.
     bool  toggleKeyframeAt(uint32_t layerId, const std::string& paramName,
                            double t, float currentValue, double epsilonSec = 0.04);
+    // Writes `value` into the key at t (creating lane / key as needed) —
+    // what a slider drag on an animated param does (auto-key).
+    void  setKeyframeAt(uint32_t layerId, const std::string& paramName,
+                        double t, float value, double epsilonSec = 0.04);
     // Linear interpolation between adjacent keyframes; clamps before/after.
     float evalLaneAt(const TimelineLane& lane, double t) const;
     // Walk all Automation lanes, write resolved values into out (keyed by

@@ -100,6 +100,53 @@ void main() {
 }
 )GLSL";
 
+// Scene variant: the same billboard, placed in the zone's world. The
+// particle position is a card-space point (uModel = the layer's card
+// matrix); the quad offset is applied in VIEW space so the sprite always
+// faces the camera, sized in world units via the model's x scale.
+static const char* kParticleSceneVert = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec4 aPosSize;
+layout(location = 2) in vec4 aRotColor;
+layout(location = 3) in float aAlpha;
+layout(location = 4) in vec2  aVelocity;
+out vec2 vUV;
+out vec4 vColor;
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uMotionBlur;
+uniform float uMinStretch;
+uniform float uOpacity;
+uniform int   uFogOn;
+uniform vec3  uFogColor;
+uniform float uFogDensity;
+uniform float uFogStart;
+uniform vec3  uCamPos;
+
+void main() {
+    float speed = length(aVelocity);
+    float c, s;
+    if (speed > 0.001) { vec2 dir = aVelocity / speed; c = dir.x; s = dir.y; }
+    else { c = cos(aRotColor.x); s = sin(aRotColor.x); }
+    float stretchX = 1.0 + speed * uMotionBlur * 30.0 + uMinStretch;
+    vec2 rotated = mat2(c, -s, s, c) * (aCorner * vec2(stretchX, 1.0));
+    float sx = length(uModel[0].xyz);          // world units per card unit
+    vec4 vp = uView * uModel * vec4(aPosSize.xyz, 1.0);
+    vp.xy += rotated * aPosSize.w * sx;
+    gl_Position = uProj * vp;
+    vUV    = aCorner + 0.5;
+    vec3 rgb = aRotColor.yzw;
+    if (uFogOn == 1) {
+        vec3 wp = (uModel * vec4(aPosSize.xyz, 1.0)).xyz;
+        float f = max(length(wp - uCamPos) - uFogStart, 0.0) * uFogDensity;
+        rgb = mix(rgb, uFogColor, 1.0 - exp(-f * f));
+    }
+    vColor = vec4(rgb, aAlpha * uOpacity);
+}
+)GLSL";
+
 // Fragment shader: tighter falloff curve so stretched streaks have a
 // visible bright core that fades quickly to the edges. Adds a "core
 // boost" that intensifies the centre to give an HDR/glow feel.
@@ -221,6 +268,8 @@ bool ParticleSource::init(int resolutionW, int resolutionH) {
     m_w = resolutionW;
     m_h = resolutionH;
 
+    m_sceneShaderOk = m_sceneShader.loadFromSource(kParticleSceneVert, kParticleFrag);
+    if (!m_sceneShaderOk) std::cerr << "[Particles] scene shader: " << m_sceneShader.lastError() << std::endl;
     if (!m_renderShader.loadFromSource(kParticleVert, kParticleFrag)) {
         std::cerr << "ParticleSource: failed to compile render shader\n";
         return false;
@@ -560,6 +609,37 @@ void ParticleSource::uploadInstances() {
         glBufferSubData(GL_ARRAY_BUFFER, 0, buf.size() * sizeof(float), buf.data());
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void ParticleSource::renderScene(const glm::mat4& model, const glm::mat4& view, const glm::mat4& proj, float opacity,
+                                 bool fogOn, const glm::vec3& fogColor, float fogDensity, float fogStart, const glm::vec3& camPos) {
+    if (!m_sceneShaderOk || m_particles.empty() || !m_quadVAO) return;
+    glEnable(GL_BLEND);
+    if (m_emitter.additive) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ONE);
+    else                    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);          // translucent sprites: test against the world, never occlude it
+    m_sceneShader.use();
+    m_sceneShader.setInt("uRenderMode", m_emitter.renderMode);
+    m_sceneShader.setMat4("uModel", model);
+    m_sceneShader.setMat4("uView", view);
+    m_sceneShader.setMat4("uProj", proj);
+    m_sceneShader.setFloat("uMotionBlur", m_emitter.motionBlur);
+    m_sceneShader.setFloat("uMinStretch", m_emitter.minStretch);
+    m_sceneShader.setFloat("uOpacity", opacity);
+    m_sceneShader.setInt("uFogOn", fogOn ? 1 : 0);
+    m_sceneShader.setVec3("uFogColor", fogColor);
+    m_sceneShader.setFloat("uFogDensity", fogDensity);
+    m_sceneShader.setFloat("uFogStart", fogStart);
+    m_sceneShader.setVec3("uCamPos", camPos);
+    glBindVertexArray(m_quadVAO);
+    glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, (GLsizei)m_particles.size());
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_BLEND);
 }
 
 void ParticleSource::renderParticles() {

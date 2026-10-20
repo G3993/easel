@@ -12,6 +12,31 @@
 #include <map>
 
 // ISF input parameter types
+// Native 3D scene role (ISF header "ROLE": surface | emissive | volume |
+// sdf | post). None = a plain 2D shader (a card facing the camera in 3D).
+enum class SceneRole { None = 0, Surface, Emissive, Volume, SDF, Post };
+inline const char* sceneRoleName(SceneRole r) {
+    switch (r) {
+        case SceneRole::Surface:  return "surface";
+        case SceneRole::Emissive: return "emissive";
+        case SceneRole::Volume:   return "volume";
+        case SceneRole::SDF:      return "sdf";
+        case SceneRole::Post:     return "post";
+        default: return "";
+    }
+}
+// What the compositor hands a role shader each frame (card -> world model,
+// the zone camera and lights). Uploaded as the scene* uniforms.
+struct SceneView {
+    glm::mat4 model{1.0f}, view{1.0f}, proj{1.0f};
+    glm::vec3 camPos{0.0f, 0.0f, 3.0f};
+    bool lightOn = false;
+    glm::vec3 lightDir{0.0f, 0.0f, 1.0f}, lightColor{1.0f}, ambient{0.35f};
+    int pointCount = 0;
+    glm::vec4 pointPos[4];
+    glm::vec3 pointCol[4];
+};
+
 struct ISFInput {
     std::string name;
     std::string type; // "float", "color", "bool", "point2D", "text"
@@ -24,6 +49,10 @@ struct ISFInput {
     //            empty = ungrouped (renders exactly as before this field existed).
     std::string label;
     std::string group;
+    //   "AUDIO": false → structural control (count, pitch, resolution…) that
+    //            no automatic reactivity recipe may bind. Manual bindings
+    //            still work; the inspector just never rolls it into a recipe.
+    bool noAudio = false;
 
     // Current value (variant for type safety)
     std::variant<float, glm::vec4, bool, glm::vec2, std::string> value;
@@ -195,6 +224,17 @@ public:
 
     bool isShader() const { return true; }
 
+    // ── native 3D scene role ──────────────────────────────────────────
+    SceneRole sceneRole() const { return m_role; }
+    bool sceneWantsDepth() const { return m_role == SceneRole::SDF || m_role == SceneRole::Volume; }
+    // The first image input (a post shader reads the composite through it).
+    std::string firstImageInput() const;
+    // Depth side-output (RGBA16F, z = scene depth 0..1) for SDF / volume roles.
+    GLuint sceneDepthTexture() const { return m_auxTex; }
+    // Render now through the zone camera; update() skips its own render on
+    // the frames the compositor drives (one-frame arm, like Fluid 3D).
+    void renderSceneView(const SceneView& v);
+
 private:
     ShaderProgram m_shader;
     Framebuffer m_fbo;
@@ -278,4 +318,15 @@ private:
 
     // Upload all uniforms to shader (pass index for multi-pass)
     void uploadUniforms(int passIndex = 0, int passWidth = 0, int passHeight = 0);
+
+    // ── native 3D scene role state ────────────────────────────────────
+    SceneRole m_role = SceneRole::None;
+    SceneView m_sceneView;
+    bool      m_sceneActive = false;   // uniforms come from the zone (else a default camera)
+    bool      m_sceneArmed = false;    // set by renderSceneView, consumed by the next update()
+    GLuint    m_auxTex = 0;            // depth side-output attached to m_fbo as COLOR_ATTACHMENT1
+    int       m_auxW = 0, m_auxH = 0;
+    void      ensureAuxTexture();
+    void      render();                // the body of update()
+    void      uploadSceneUniforms();
 };

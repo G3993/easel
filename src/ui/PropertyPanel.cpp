@@ -18,6 +18,7 @@
 #include "sources/FluidSource.h"
 #include "sources/FluidSource3D.h"
 #include "sources/HologramModelSource.h"
+#include "sources/ModelSource.h"
 #include "sources/MovingCompanySource.h"
 #include "app/DataBus.h"
 #include "app/MIDIManager.h"
@@ -175,14 +176,14 @@ static constexpr ImU32  kSepColor  = IM_COL32(255, 255, 255, 12);
 //   kInnerPad   inset between a label's text and the control that follows
 //   kFieldH     nominal control row height (label + gap + track)
 static constexpr float kStepY      = 4.0f;
-// Inter-element vertical gaps trimmed ~37% (single source of truth) so the
-// whole panel tightens uniformly into a denser grid. kStepY (base unit) and
-// kLabelGapY (label→track legibility) are intentionally NOT reduced — only
-// the empty padding BETWEEN rows/sections shrinks, never control content.
-static constexpr float kRowGapY    = kStepY * 1.25f;  // 5  — above a row (was 8)
+// Inter-element vertical gaps (single source of truth) set the panel's
+// rhythm. 2026-10-14: the trimmed grid read as "squeezed" on Lu's screen, so
+// the padding BETWEEN rows/sections went back up (row 5→9, section 10→16);
+// kStepY (base unit) and kLabelGapY (label→track legibility) stay as they are.
+static constexpr float kRowGapY    = kStepY * 2.25f;  // 9  — above a row (Lu 2026-10-14: "give it room to breathe"; was 5)
 static constexpr float kRowPadY    = kStepY * 1.25f;  // 5  — below a row (was 8)
 static constexpr float kLabelGapY  = kStepY * 2.5f;   // 10 — label→track (unchanged: legibility)
-static constexpr float kSectionGap = kStepY * 2.5f;   // 10 — sub-group gap (was 16)
+static constexpr float kSectionGap = kStepY * 4.0f;   // 16 — sub-group gap (was 10)
 static constexpr float kColGap     = kStepY * 3.0f;   // 12 — 2-col gutter
 static constexpr float kLabelColW  = 96.0f;           // label gutter width
 static constexpr float kInnerPad   = kStepY * 3.0f;   // 12 — text→control
@@ -593,6 +594,9 @@ struct ParamSliderResult {
     bool openBindMenu = false; // bolt clicked OR row right-clicked
     bool activated    = false; // drag just started — for undo snapshots
     ImVec2 boltPos    = ImVec2(0, 0); // screen pos of the sparkle (popup anchor)
+    float  valueX     = 0.0f;         // left edge of the value text (keyframe diamond sits before it)
+    float  rowY       = 0.0f;
+    float  labelH     = 0.0f;
 };
 // `liveVal` (optional, nullptr to disable): the binding's CURRENT audio-driven
 // value in [lo, hi], rendered as a thin tone-colored caret + triangle riding
@@ -653,6 +657,9 @@ static ParamSliderResult paramSlider(const char* id, const char* label, float* v
     dl->AddText(ImVec2(labelX, rowStart.y), kColValue, label);
     dl->AddText(ImVec2(rowStart.x + w - valSize.x, rowStart.y),
                 kColLabel, valbuf);
+    r.valueX = rowStart.x + w - valSize.x;
+    r.rowY   = rowStart.y;
+    r.labelH = labelH;
 
     // Right-click anywhere on the label row also opens the bind menu.
     float trackY = rowStart.y + labelH + kLabelGapY;
@@ -1373,6 +1380,210 @@ static bool audioPresetRow(std::map<std::string, AudioBinding>& bindings,
     return changed;
 }
 
+// ── Native 3D scene inspector ─────────────────────────────────────────
+// Shown at the top of Properties whenever the active zone's 3D toggle is
+// on. Camera and Light are zone-wide; Card edits the selected layer's
+// place in the world. Everything here is identity at its defaults, so a
+// freshly flipped zone renders exactly like its 2D self.
+int PropertyPanel::sSceneTab = 0;
+static void drawSceneSection(OutputZone& z, const std::shared_ptr<Layer>& layer, bool& undoNeeded, MIDIManager* midi, Timeline* m_timeline) {
+    int& sSceneTab = PropertyPanel::sSceneTab;
+    auto& sc = z.scene;
+    if (!sectionHeader("3D Scene", nullptr, /*firstSection=*/false)) return;
+
+    {
+        static const char* kTabs[] = { "Camera", "Light", "Card" };
+        ImGui::Dummy(ImVec2(0, 2));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 100.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 5));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
+        float avail = ImGui::GetContentRegionAvail().x;
+        float segW  = std::floor((avail - 2.0f * 6.0f) / 3.0f);
+        for (int i = 0; i < 3; i++) {
+            if (i) ImGui::SameLine();
+            bool active = (i == sSceneTab);
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        kColAccentV);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColAccentV);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColAccentV);
+                ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.06f, 0.07f, 0.10f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColCtrlBgActiveV);
+                ImGui::PushStyleColor(ImGuiCol_Text,          kColValueV);
+            }
+            ImGui::PushID(i);
+            if (ImGui::Button(kTabs[i], ImVec2(segW, 0))) sSceneTab = i;
+            ImGui::PopID();
+            ImGui::PopStyleColor(4);
+        }
+        ImGui::PopStyleVar(3);
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+
+    // Bindable slider: `pid` is the SceneParamDef id (bolt popover, range,
+    // live caret — the same affordance as shader and fluid params).
+    auto table = sc.params();
+    auto& bindings = sc.audioBindings;
+    auto S = [&](const char* pid, const char* labelOverride, float* /*unused*/, float /*lo*/, float /*hi*/, const char* fmt = "%.2f") {
+        const SceneParamDef* d = nullptr;
+        for (auto& e : table) if (!strcmp(e.id, pid)) { d = &e; break; }
+        if (!d) return;
+        auto bit = bindings.find(pid);
+        bool isBound = (bit != bindings.end() && bit->second.signal != AudioSignal::None);
+        ImGui::PushID(pid);
+        float liveDriven = 0.0f;
+        const float* livePtr = nullptr;
+        ImU32 tone = 0;
+        if (isBound) {
+            const AudioBinding& lab = bit->second;
+            liveDriven = lab.rangeMin + lab.smoothedValue * (lab.rangeMax - lab.rangeMin);
+            liveDriven = std::max(d->lo, std::min(d->hi, liveDriven));
+            livePtr = &liveDriven;
+            tone = signalToneColor(lab.signal);
+        }
+        ParamSliderResult ps = paramSlider("##sc", labelOverride ? labelOverride : d->label, d->ptr, d->lo, d->hi,
+                                           isBound, fmt, livePtr, tone);
+        if (ps.openBindMenu) ImGui::OpenPopup("##scbind");
+        audioBindPopup("##scbind", d->label, bindings, pid, d->lo, d->hi, midi, ps.boltPos);
+        // Keyframe diamond: a key at the playhead = filled; the param has a
+        // lane but no key here = outline; nothing yet = faint. Click toggles
+        // a key at the playhead with the current value (lane on first key).
+        if (m_timeline) {
+            const uint32_t lid = SceneParams::laneId(z.index);
+            const double   ph  = m_timeline->playhead();
+            const bool hasKey  = m_timeline->hasKeyframeAt(lid, pid, ph);
+            const bool hasLane = m_timeline->findLaneByParam(lid, pid) != nullptr;
+            const float sz = 12.0f;
+            ImVec2 c(ps.valueX - 12.0f, ps.rowY + ps.labelH * 0.5f);
+            const ImVec2 keepCursor = ImGui::GetCursorScreenPos();   // the diamond floats on the label row
+            ImGui::SetCursorScreenPos(ImVec2(c.x - sz * 0.5f - 2.0f, c.y - sz * 0.5f - 2.0f));
+            bool kclick = ImGui::InvisibleButton("##key", ImVec2(sz + 4.0f, sz + 4.0f));
+            bool khov = ImGui::IsItemHovered();
+            ImGui::SetCursorScreenPos(keepCursor);
+            ImDrawList* kdl = ImGui::GetWindowDrawList();
+            const float h = sz * 0.5f - 1.0f;
+            ImVec2 q[4] = { ImVec2(c.x, c.y - h), ImVec2(c.x + h, c.y), ImVec2(c.x, c.y + h), ImVec2(c.x - h, c.y) };
+            ImU32 kcol = hasKey ? kColAccent : (hasLane ? kColValue : (khov ? kColValue : kColLabel));
+            if (hasKey) kdl->AddQuadFilled(q[0], q[1], q[2], q[3], kcol);
+            else        kdl->AddQuad(q[0], q[1], q[2], q[3], kcol, hasLane ? 1.6f : 1.0f);
+            if (khov) ImGui::SetTooltip(hasKey ? "Remove keyframe at the playhead" : "Add keyframe at the playhead");
+            if (kclick) {
+                undoNeeded = true;
+                m_timeline->toggleKeyframeAt(lid, pid, ph, *d->ptr);
+            } else if (ps.changed && hasLane) {
+                // Auto-key: an animated param edited at the playhead writes
+                // the key there instead of fighting the lane next frame.
+                m_timeline->setKeyframeAt(lid, pid, ph, *d->ptr);
+            }
+        }
+        if (isBound) {
+            AudioBinding& abr = bindings[pid];
+            float liveRng = abr.rangeMin + abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
+            ImGui::Indent(14.0f);
+            rangeSlider("##scrng", "range", &abr.rangeMin, &abr.rangeMax, d->lo, d->hi, &liveRng, tone);
+            ImGui::Unindent(14.0f);
+        }
+        ImGui::PopID();
+    };
+
+    if (sSceneTab == 0) {
+        auto& c = sc.camera;
+        paramToggleRow("sc_persp", "Perspective", &c.perspective);
+        S("cam.azimuth",   nullptr, nullptr, 0, 0, "%.1f°");
+        S("cam.elevation", nullptr, nullptr, 0, 0, "%.1f°");
+        S("cam.distance",  nullptr, nullptr, 0, 0, "%.2f");
+        S("cam.fov",       "Field of view (0 = fit)", nullptr, 0, 0, "%.0f°");
+        S("cam.roll",      nullptr, nullptr, 0, 0, "%.1f°");
+        S("cam.dolly",     nullptr, nullptr, 0, 0, "%.2f");
+        S("cam.targetX",   nullptr, nullptr, 0, 0, "%.2f");
+        S("cam.targetY",   nullptr, nullptr, 0, 0, "%.2f");
+        S("cam.targetZ",   nullptr, nullptr, 0, 0, "%.2f");
+        ImGui::Dummy(ImVec2(0, 6));
+        if (accentBtn("Reset camera")) c = SceneCameraParams{};
+    } else if (sSceneTab == 1) {
+        auto& l = sc.light;
+        paramToggleRow("sc_lon", "Lighting", &l.enabled);
+        S("sun.azimuth",   nullptr, nullptr, 0, 0, "%.1f°");
+        S("sun.elevation", nullptr, nullptr, 0, 0, "%.1f°");
+        S("sun.intensity", nullptr, nullptr, 0, 0);
+        {
+            glm::vec4 col(l.color, 1.0f);
+            if (paramColorRow("sc_lcol", "Sun color", &col)) l.color = glm::vec3(col);
+        }
+        S("sun.ambient", nullptr, nullptr, 0, 0);
+        {
+            glm::vec4 col(l.ambientColor, 1.0f);
+            if (paramColorRow("sc_lacol", "Ambient color", &col)) l.ambientColor = glm::vec3(col);
+        }
+        paramToggleRow("sc_lsh", "Shadows", &l.shadows);
+        S("sun.shadowStrength", nullptr, nullptr, 0, 0);
+        S("sun.shadowSoft",     nullptr, nullptr, 0, 0);
+        // ── fog ──
+        ImGui::Dummy(ImVec2(0, 6));
+        paramToggleRow("sc_fog", "Fog", &sc.fog.enabled);
+        if (sc.fog.enabled) {
+            S("fog.density", nullptr, nullptr, 0, 0);
+            S("fog.start",   nullptr, nullptr, 0, 0);
+            glm::vec4 fc(sc.fog.color, 1.0f);
+            if (paramColorRow("sc_fogcol", "Fog color", &fc)) sc.fog.color = glm::vec3(fc);
+        }
+        // ── ambient occlusion ──
+        ImGui::Dummy(ImVec2(0, 6));
+        paramToggleRow("sc_ao", "Ambient occlusion", &sc.ao.enabled);
+        if (sc.ao.enabled) {
+            S("ao.strength", nullptr, nullptr, 0, 0);
+            S("ao.radius",   nullptr, nullptr, 0, 0);
+        }
+        // ── point lights ──
+        for (int li = 0; li < SceneParams::kMaxPointLights; li++) {
+            auto& PL = sc.pointLights[li];
+            char lbl[32]; snprintf(lbl, sizeof(lbl), "Light %d", li + 1);
+            char tid[32]; snprintf(tid, sizeof(tid), "sc_pl%d", li + 1);
+            ImGui::Dummy(ImVec2(0, 6));
+            paramToggleRow(tid, lbl, &PL.enabled);
+            if (!PL.enabled) continue;
+            char pid[16];
+            ImGui::Indent(10.0f);
+            snprintf(pid, sizeof(pid), "pl%d.x", li + 1);         S(pid, nullptr, nullptr, 0, 0);
+            snprintf(pid, sizeof(pid), "pl%d.y", li + 1);         S(pid, nullptr, nullptr, 0, 0);
+            snprintf(pid, sizeof(pid), "pl%d.z", li + 1);         S(pid, nullptr, nullptr, 0, 0);
+            snprintf(pid, sizeof(pid), "pl%d.intensity", li + 1); S(pid, nullptr, nullptr, 0, 0);
+            snprintf(pid, sizeof(pid), "pl%d.radius", li + 1);    S(pid, nullptr, nullptr, 0, 0);
+            {
+                char cid[24]; snprintf(cid, sizeof(cid), "sc_plc%d", li + 1);
+                glm::vec4 col(PL.color, 1.0f);
+                if (paramColorRow(cid, "Color", &col)) PL.color = glm::vec3(col);
+            }
+            ImGui::Unindent(10.0f);
+        }
+        {
+            static const char* kTiers[] = { "Preview", "HD", "Ultra" };
+            ImGui::Dummy(ImVec2(0, 6));
+            sc.tier = pillGroup("sc_tier", kTiers, 3, sc.tier);
+        }
+        paramColorRow("sc_bg", "Background", &sc.background);
+        ImGui::Dummy(ImVec2(0, 6));
+        if (accentBtn("Reset light")) { l = SceneLightParams{}; sc.background = glm::vec4(0.0f); for (auto& PL : sc.pointLights) PL = ScenePointLight{}; }
+    } else {
+        if (!layer) {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::TextDisabled("Select a layer to place it in the scene.");
+        } else {
+            auto r0 = paramSlider("sc_z3", "Depth (toward camera)", &layer->z3, -3.0f, 3.0f, false, "%.2f");
+            auto r1 = paramSlider("sc_rx", "Tilt X", &layer->rot3.x, -180.0f, 180.0f, false, "%.1f°");
+            auto r2 = paramSlider("sc_ry", "Tilt Y", &layer->rot3.y, -180.0f, 180.0f, false, "%.1f°");
+            auto r3 = paramSlider("sc_rz", "Spin Z", &layer->rot3.z, -180.0f, 180.0f, false, "%.1f°");
+            if (r0.activated || r1.activated || r2.activated || r3.activated) undoNeeded = true;
+            paramToggleRow("sc_cs", "Casts shadow", &layer->castShadow);
+            ImGui::Dummy(ImVec2(0, 6));
+            if (accentBtn("Flatten")) { undoNeeded = true; layer->z3 = 0.0f; layer->rot3 = glm::vec3(0.0f); }
+        }
+    }
+    ImGui::Dummy(ImVec2(0, 4));
+}
+
 void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                            SpeechState* speech, MosaicAudioState* mosaicAudio,
                            float appTime, LayerStack* layerStack,
@@ -1962,6 +2173,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
     // Silence unused-parameter warnings for sections now routed elsewhere.
     (void)bpmSync; (void)sceneManager;
 
+    // Native 3D scene controls — zone-wide, so they show with or without a
+    // selected layer, right under the Canvas block.
+    if (canvasZone && canvasZone->scene.enabled) {
+        drawSceneSection(*canvasZone, layer, undoNeeded, midi, m_timeline);
+    }
+
     if (!layer) {
         // Empty Properties — content appears only when a layer/shader/etc. is selected.
         ImGui::EndChild();   // ##propContent
@@ -2038,6 +2255,9 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
         if (layer->source) {
             typeLabel = layer->source->typeName();
             if      (typeLabel == "Shader")  typeLabel = "Shader · ISF";
+            if (typeLabel == "Shader · ISF")
+                if (auto* rss = dynamic_cast<ShaderSource*>(layer->source.get()))
+                    if (rss->sceneRole() != SceneRole::None) typeLabel += std::string(" · ") + sceneRoleName(rss->sceneRole());
             else if (typeLabel == "Fluid3D") typeLabel = "Fluid 3D";
         }
 
@@ -3835,7 +4055,13 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
         sectionBreak();
         static bool fluid3dOpen = true;
-        if (sectionHeader("3D Fluid", &fluid3dOpen)) {
+        if (sectionHeader(f3->isBox() ? "3D Box" : "3D Fluid", &fluid3dOpen)) {
+            if (canvasZone && canvasZone->scene.enabled) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.75f, 1.0f, 0.9f));
+                ImGui::TextWrapped("In the 3D scene: the zone's camera, sun and room replace this fluid's own camera, light and background. Move it with Position / Depth / Tilt like any layer.");
+                ImGui::PopStyleColor();
+                ImGui::Dummy(ImVec2(0, 4));
+            }
             auto table  = f3->params();
             auto ctable = f3->colors();
             auto& bindings = f3->audioBindings();
@@ -3941,6 +4167,24 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 }
             };
 
+            // Reset (back to the built-in look) + Shuffle (a fresh random
+            // look). Both reseed; the memory then remembers the result.
+            {
+                ImGui::Dummy(ImVec2(0, kRowGapY));
+                float rowW = ImGui::GetContentRegionAvail().x;
+                float bw   = (rowW - kColGap) * 0.5f;
+                if (accentBtn("Reset##f3defaults", bw)) { f3->resetToDefaults(); undoNeeded = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(f3->isBox() ? "Back to the 3D Box preset." : "Back to the 3D Fluid defaults.");
+                ImGui::SameLine(0, kColGap);
+                if (accentBtn("Shuffle##f3shuffle", bw)) {
+                    f3->shuffle((uint32_t)(ImGui::GetTime() * 1000.0) ^ (uint32_t)rand());
+                    undoNeeded = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A new random look: colours, motion, emitter, grain, light.\n"
+                                      "Keeps your box, camera and quality settings.");
+            }
             // Sub-tabs: a 2×3 equal-width segmented strip (six free-width
             // pills wrap unevenly in the 300px column).
             int& f3Tab = sFluid3DTab;
@@ -3991,6 +4235,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 P("gravity"); P("gravityTiltX"); P("gravityTiltY");
                 P("vortex"); P("vortexLift");
                 P("turbulence"); P("turbScale"); P("turbSpeed");
+                P("plume"); P("plumeScale");
+                P("splash"); P("splashRate");
+                P("breath");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slow swell and recede of the back flow and plumes.");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Splash: bursts that throw the mass up like water — on a timer and on beats.");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Plumes: big slow folds that rise from the back and roll toward the camera.");
                 P("audioIntensity");
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Calm when quiet, churning when loud —\npumps vortex + turbulence with the music.");
@@ -4010,9 +4260,11 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                     ImGui::SetTooltip("Lower = the fluid wants to spread out (puffy),\nhigher = packs tighter.");
                 P("maxVel"); P("damping"); P("bounce"); P("simSpeed");
                 G("Container");
-                P("sphereShape");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("0 = cube, 1 = sphere (rounded box in between).\nReseeds when crossing between box and sphere.");
+                if (!f3->isBox()) {
+                    P("sphereShape");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("0 = cube, 1 = sphere (rounded box in between).\nReseeds when crossing between box and sphere.");
+                }
                 if (pillSlider("Fluid Amount", &f3->m_fillAmount, 0.0f, 1.0f, "%.2f")) undoNeeded = true;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("How much of the container is filled. Reseeds as you drag.");
@@ -4027,6 +4279,14 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 E("##f3surf", kSurf, 2, &f3->m_surfaceMode);
                 if (f3->m_surfaceMode == 0) {
                     P("sphereScale");
+                    P("variation");
+                    P("grains");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sub-grains per particle: 1 = one bead, 4-6 = a velvet of tiny beads (costs render time).");
+                    P("foam"); C("foamColor");
+                    P("hueVar");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-grain hue speckle: oranges and pinks inside the red, teals inside the blue.");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Spread of particle size and shade — a packed mass reads\nas grains instead of identical beads.");
                     T("cube", "Cube particles", &f3->m_particleCube);
                 } else {
                     P("isoLevel");
@@ -4056,10 +4316,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 G("Emitter");
                 T("emit", "Emitter", &f3->m_emitOn);
                 if (f3->m_emitOn) {
-                    static const char* kShape[] = { "Point", "Rain", "Fountain", "Ring" };
-                    E("##f3emit", kShape, 4, &f3->m_emitShape);
-                    P("emitRate"); P("emitSpeed"); P("emitSpread"); P("emitRadius");
-                    P("emitX"); P("emitY");
+                    static const char* kShape[] = { "Point", "Rain", "Fountain", "Ring", "Jet", "Back Wall" };
+                    E("##f3emit", kShape, 6, &f3->m_emitShape);
+                    if (f3->m_emitShape == 4 && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Jet: sprays from the back wall toward the camera —\nin the 3D Box it shoots out of the opening.");
+                    if (f3->m_emitShape == 5 && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Back Wall: particles are born all over the back wall\nand grow out of it toward the camera.");
+                    P("emitRate"); P("emitSpeed"); P("emitSpread");
+                    if (f3->m_emitShape != 5) { P("emitRadius"); P("emitX"); }
+                    if (f3->m_emitShape == 4) P("emitZ");
+                    else if (f3->m_emitShape != 5) P("emitY");
                     if (f3->m_emitShape == 0 || f3->m_emitShape == 3) P("emitZ");
                 }
                 G("Quality");
@@ -4070,8 +4336,67 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         ImGui::SetTooltip("Render resolution as %% of the zone.\n100%% = native, 200%% = 2×2 supersampled (smooth\nedges, no sparkle), lower = faster.");
                 }
             } else if (f3Tab == 2) {
-                // ── SCENE: background, sun, floor, cage, atmosphere ──
-                G("Background", true);
+                // ── SCENE: box, background, sun, floor, cage, atmosphere ──
+                G("Box", true);
+                {
+                    bool bm = f3->isBox();
+                    if (paramToggleRow("box", "3D Box", &bm)) {
+                        if (bm && f3->m_boxMode < 0.5f) f3->applyBoxPreset();   // first switch: the tuned look
+                        f3->m_boxMode = bm ? 1.0f : 0.0f;
+                        undoNeeded = true;
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Put the fluid inside a white open-front box seen straight on.\n"
+                                          "The liquid fills the box and spills out of the opening toward you.");
+                }
+                if (f3->isBox()) {
+                    P("boxDepth");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How deep the box is. What's left of the sim volume is open air\n"
+                                          "in front of the opening — lower = more room to spill out. Reseeds.");
+                    P("boxFrame"); P("boxCamDist"); P("boxFit");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("1 = the opening exactly fills the frame (walls run off the edges).\nLower crops in, higher pulls back to show the frame and the room.");
+                    P("boxShade"); P("boxGlow"); P("boxLight");
+                    P("boxFlow"); P("boxLift");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Raises the box floor so the mass can pour out and hang over the lip.");
+                    G("Shapes");
+                    for (int sl = 0; sl < 2; sl++) {
+                        ImGui::PushID(sl);
+                        std::string sp = f3->shapePath(sl);
+                        std::string nm = sp.empty() ? "none" : sp.substr(sp.find_last_of("/\\") + 1);
+                        ImGui::TextUnformatted(sl == 0 ? "Model A" : "Model B");
+                        ImGui::SameLine(0, 8);
+                        ImGui::TextDisabled("%s", nm.c_str());
+                        float bw2 = (ImGui::GetContentRegionAvail().x - kColGap) * 0.5f;
+                        if (accentBtn("Load Model...", bw2)) {
+#ifdef __APPLE__
+                            extern std::string openFileDialog_mac(const char* filter);
+                            std::string picked = openFileDialog_mac("3D Models\0*.obj;*.gltf;*.glb\0\0");
+                            if (!picked.empty()) { f3->loadShape(sl, picked); undoNeeded = true; }
+#endif
+                        }
+                        ImGui::SameLine(0, kColGap);
+                        if (accentBtn("Clear", bw2)) { f3->clearShape(sl); undoNeeded = true; }
+                        ImGui::PopID();
+                    }
+                    if (f3->hasShape(0) || f3->hasShape(1)) {
+                        P("shapeHold");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How hard the mass is pulled into the model. 0 = free.");
+                        if (f3->hasShape(0) && f3->hasShape(1)) { P("shapeMix"); P("shapeCycle"); }
+                        P("shapeSize");
+                        T("shapeSeed", "Reseed inside the model", &f3->m_shapeSeed);
+                        if (accentBtn("Form Now", -1.0f)) f3->reseed();
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-seed the particles inside the model (A, B or the morph in between).");
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Raises the box floor so the mass can pour out and hang over the lip.");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Pushes the fluid from the back wall toward you. Pair with\n"
+                                          "the Jet emitter (Particles tab) for a steady back-to-front flow;\n"
+                                          "what reaches the front of the air fades out and leaves the sim.");
+                    C("boxColor");
+                }
+                G("Background");
                 static const char* kBg[] = { "Gradient", "Solid", "Horizon", "Image", "Stars" };
                 E("##f3bg", kBg, 5, &f3->m_bgMode);
                 if (f3->m_bgMode == 1) C("bgBottom", "Color");
@@ -4079,27 +4404,39 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 if (f3->m_bgMode == 3) layerCombo("##f3BgSrc", f3->backdropSource());
                 if (f3->m_bgMode == 4) P("stars");
                 P("bgAlpha");
-                G("Horizon");
-                P("horizonAmt"); C("horizonColor");
-                G("Sun");
-                P("sunIntensity"); P("sunSize", "%.0f"); P("sunAzimuth", "%.0f"); P("sunElev", "%.0f"); C("sunColor");
-                G("Floor");
-                T("floor", "Floor", &f3->m_floorOn);
-                if (f3->m_floorOn) {
-                    P("floorGap"); P("floorReflect"); P("floorGrid"); P("floorFade");
-                    C("floorColor"); C("gridColor");
+                if (!f3->isBox()) {
+                    G("Horizon");
+                    P("horizonAmt"); C("horizonColor");
+                    G("Sun");
+                    P("sunIntensity"); P("sunSize", "%.0f"); P("sunAzimuth", "%.0f"); P("sunElev", "%.0f"); C("sunColor");
+                    G("Floor");
+                    T("floor", "Floor", &f3->m_floorOn);
+                    if (f3->m_floorOn) {
+                        P("floorGap"); P("floorReflect"); P("floorGrid"); P("floorFade");
+                        C("floorColor"); C("gridColor");
+                    }
+                    G("Cage");
+                    P("cage");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Glowing edges of the container box.");
+                    if (f3->m_cage > 0.0f) { P("cageWidth"); C("cageColor"); }
                 }
-                G("Cage");
-                P("cage");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Glowing edges of the container box.");
-                if (f3->m_cage > 0.0f) { P("cageWidth"); C("cageColor"); }
                 G("Atmosphere");
                 P("fog"); P("vignette");
             } else if (f3Tab == 3) {
                 // ── LIGHT: key light + emissive orbs ──
                 G("Key Light", true);
                 P("lightAzimuth", "%.0f"); P("lightElev", "%.0f"); P("lightIntensity"); P("ambient");
+                P("lightDrift");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slow arc of the key light so the shadows crawl.");
+                P("shadowSoft");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Angular size of the light. Shadows stay crisp where the\n"
+                                      "fluid touches a surface and go soft the further the\n"
+                                      "occluder is from it (contact hardening).");
+                P("shadowStr"); P("shadowTint");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Light passing through the liquid picks up its colour.");
                 G("Emissive Orbs");
                 ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
                 ImGui::TextWrapped("Glowing spheres in the scene: they light the fluid, "
@@ -4142,7 +4479,12 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             } else if (f3Tab == 4) {
                 // ── LOOK: colors, material, camera, image ──
                 G("Colors", true);
-                C("deepColor"); C("glowColor"); C("shallowColor");
+                C("deepColor"); C("deepColor2");
+                P("twoTone");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Two liquids: how much of the fluid is born as Liquid 2\n"
+                                      "(0 = all Liquid 1). The two bodies mix where they meet.\nReseeds.");
+                C("glowColor"); C("shallowColor");
                 P("rim"); P("brightness"); P("saturation"); P("fluidAlpha");
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Opacity of the fluid itself — stack several\n3D Fluid layers with different colors.");
@@ -4159,9 +4501,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                 P("dof");
                 if (f3->m_dof > 0.0f) P("dofFocus");
                 G("Camera");
-                T("rot", "Auto-rotate", &f3->m_autoRotate);
-                if (f3->m_autoRotate) P("rotateSpeed");
-                P("tilt"); P("zoom"); P("camDist"); P("camHeight");
+                if (f3->isBox()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
+                    ImGui::TextWrapped("Fixed, straight on. Distance + fit live in Scene > Box.");
+                    ImGui::PopStyleColor();
+                    P("zoom"); P("camHeight"); P("tilt");
+                } else {
+                    T("rot", "Auto-rotate", &f3->m_autoRotate);
+                    if (f3->m_autoRotate) P("rotateSpeed");
+                    P("tilt"); P("zoom"); P("camDist"); P("camHeight");
+                }
                 G("Image");
                 T("img", "Color from layer", &f3->m_imageEnabled);
                 if (f3->m_imageEnabled) {
@@ -4210,21 +4559,24 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
                         ImGui::ProgressBar(f3->m_journeyPos, ImVec2(-1, 6), "");  // live position
                     }
                 }
-                // Audio reactivity: Subtle->Intense + Shuffle over a curated
-                // set of params (audioPresetRow draws its own header).
-                {
-                    static const char* kPreset[] = {
-                        "brightness", "tilt", "zoom", "gravity", "vortex",   // never Spin
-                        "turbulence", "forceScale", "sphereScale", "ambient", "specular",
-                        "rim", "saturation", "lightIntensity", "viscosity", "tension",
-                        "attract", "wind", "orbGlow", "velGlow" };
-                    std::vector<PresetParam> pp;
-                    for (const char* id : kPreset)
-                        for (auto& d : table)
-                            if (!strcmp(d.id, id)) { pp.push_back({ d.id, *d.ptr, d.lo, d.hi }); break; }
-                    if (audioPresetRow(bindings, pp, layer->id))
-                        undoNeeded = true;
-                }
+            }
+            // Audio Reactivity (amount / Shuffle / Off) sits under every tab,
+            // like the shader inspector — it used to hide inside VJ.
+            ImGui::Dummy(ImVec2(0, kRowGapY));
+            // Audio reactivity: Subtle->Intense + Shuffle over a curated
+            // set of params (audioPresetRow draws its own header).
+            {
+                static const char* kPreset[] = {
+                    "brightness", "tilt", "zoom", "gravity", "vortex",   // never Spin
+                    "turbulence", "forceScale", "sphereScale", "ambient", "specular",
+                    "rim", "saturation", "lightIntensity", "viscosity", "tension",
+                    "attract", "wind", "orbGlow", "velGlow" };
+                std::vector<PresetParam> pp;
+                for (const char* id : kPreset)
+                    for (auto& d : table)
+                        if (!strcmp(d.id, id)) { pp.push_back({ d.id, *d.ptr, d.lo, d.hi }); break; }
+                if (audioPresetRow(bindings, pp, layer->id))
+                    undoNeeded = true;
             }
         }
     }
@@ -4267,6 +4619,73 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             pillSlider("Chromatic Split",&P.chromaShift,  0.0f, 0.04f, "%.3f");
             pillSlider("Beam Haze",      &P.beamHaze,     0.0f, 1.5f,  "%.2f");
             pillSlider("Audio React",    &P.audioReact,   0.0f, 2.0f,  "%.2f");
+        }
+    }
+
+    // --- Native 3D model object ---
+    if (layer->source && layer->source->typeName() == "3D Model") {
+        auto* mo = static_cast<ModelSource*>(layer->source.get());
+        sectionBreak();
+        static bool modelOpen = true;
+        if (sectionHeader("3D Model", &modelOpen)) {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::PushStyleColor(ImGuiCol_Button,        kColCtrlBgV);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kColCtrlBgHoverV);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  kColCtrlBgActiveV);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+            if (ImGui::Button(mo->hasModel() ? "Change Model..." : "Load Model...", ImVec2(-1, 0)))
+                mo->m_requestModelDialog = true;
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            if (!mo->hasModel()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
+                ImGui::TextWrapped("No model loaded — load an .obj / .glb.");
+                ImGui::PopStyleColor();
+            }
+            if (canvasZone && !canvasZone->scene.enabled) {
+                ImGui::PushStyleColor(ImGuiCol_Text, kColLabelV);
+                ImGui::TextWrapped("This zone is flat: the model shows as a picture. Turn on 3D to place it in the world.");
+                ImGui::PopStyleColor();
+            }
+            sectionBreak();
+            {
+                glm::vec4 col(mo->m_color, 1.0f);
+                if (paramColorRow("mo_col", "Color", &col)) mo->m_color = glm::vec3(col);
+            }
+            auto table = mo->params();
+            auto& bindings = mo->audioBindings();
+            auto P = [&](const char* pid, const char* fmt = "%.2f") {
+                const ModelSource::ParamDef* d = nullptr;
+                for (auto& e : table) if (!strcmp(e.id, pid)) { d = &e; break; }
+                if (!d) return;
+                auto bit = bindings.find(pid);
+                bool isBound = (bit != bindings.end() && bit->second.signal != AudioSignal::None);
+                ImGui::PushID(pid);
+                float liveDriven = 0.0f; const float* livePtr = nullptr; ImU32 tone = 0;
+                if (isBound) {
+                    const AudioBinding& lab = bit->second;
+                    liveDriven = std::max(d->lo, std::min(d->hi, lab.rangeMin + lab.smoothedValue * (lab.rangeMax - lab.rangeMin)));
+                    livePtr = &liveDriven; tone = signalToneColor(lab.signal);
+                }
+                ParamSliderResult ps = paramSlider("##mo", d->label, d->ptr, d->lo, d->hi, isBound, fmt, livePtr, tone);
+                if (ps.activated) undoNeeded = true;
+                if (ps.openBindMenu) ImGui::OpenPopup("##mobind");
+                audioBindPopup("##mobind", d->label, bindings, pid, d->lo, d->hi, midi, ps.boltPos);
+                if (isBound) {
+                    AudioBinding& abr = bindings[pid];
+                    float liveRng = abr.rangeMin + abr.smoothedValue * (abr.rangeMax - abr.rangeMin);
+                    ImGui::Indent(14.0f);
+                    if (rangeSlider("##morng", "range", &abr.rangeMin, &abr.rangeMax, d->lo, d->hi, &liveRng, tone)) undoNeeded = true;
+                    ImGui::Unindent(14.0f);
+                }
+                ImGui::PopID();
+            };
+            P("spin", "%.1f°/s");
+            P("gloss");
+            P("metal");
+            P("emissive");
+            P("wire");
+            P("bob");
         }
     }
 
@@ -4447,7 +4866,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
 
             std::vector<PresetParam> pp;
             for (const auto& in : inputs) {
-                if (in.type != "float") continue;
+                if (in.type != "float" || in.noAudio) continue;
                 if (in.name.find("audio") != std::string::npos ||
                     in.name.find("Audio") != std::string::npos) continue;
                 pp.push_back({ in.name, std::get<float>(in.value),

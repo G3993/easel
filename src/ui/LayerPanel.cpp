@@ -1,4 +1,5 @@
 #include "ui/LayerPanel.h"
+#include "ui/PropertyPanel.h"
 #include "ui/UIManager.h"
 #include "ui/LucideIcons.h"
 #include "sources/FluidSource3D.h"
@@ -293,7 +294,7 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             ImGui::GetStyle().WindowRounding, 0, 1.0f);
     }
 
-    wantsAddImage = wantsAddVideo = wantsAddShader = false;
+    wantsAddImage = wantsAddVideo = wantsAddShader = wantsAddModel = false;
     removedLayerIds.clear();
 
     ImDrawList* draw = ImGui::GetWindowDrawList();
@@ -344,9 +345,65 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
             if (ImGui::MenuItem("Image...")) wantsAddImage = true;
             if (ImGui::MenuItem("Video...")) wantsAddVideo = true;
             if (ImGui::MenuItem("Shader...")) wantsAddShader = true;
+            if (ImGui::MenuItem("3D Model...")) wantsAddModel = true;
             ImGui::EndPopup();
         }
         ImGui::SetCursorScreenPos(afterHeader);
+    }
+
+    // ── Native 3D scene items: Camera and Sun rows above the layers ──
+    // Shown only while the active zone's 3D toggle is on. Clicking one
+    // opens that tab of the 3D Scene section in Properties.
+    if (zones && activeZone >= 0 && activeZone < (int)zones->size() && (*zones)[activeZone]
+        && (*zones)[activeZone]->scene.enabled) {
+        ImFont* font = ImGui::GetFont();
+        auto& sc = (*zones)[activeZone]->scene;
+        const float rh = 34.0f;
+        struct Item { const char* name; const char* caption; int tab; bool on; };
+        int plOn = 0;
+        for (auto& PL : sc.pointLights) if (PL.enabled) plOn++;
+        char sunCap[48];
+        snprintf(sunCap, sizeof(sunCap), sc.light.enabled ? (plOn ? "Sun + %d point" : "Sun, lighting on") : "Lighting off", plOn);
+        Item items[2] = {
+            { "Camera", sc.camera.perspective ? "Perspective" : "Orthographic", 0, true },
+            { "Light",  sunCap, 1, sc.light.enabled },
+        };
+        for (int it = 0; it < 2; it++) {
+            ImVec2 rMin = ImGui::GetCursorScreenPos();
+            ImVec2 rMax(rMin.x + panelWidth, rMin.y + rh);
+            ImGui::PushID(it + 9000);
+            ImGui::InvisibleButton("##sceneItem", ImVec2(panelWidth, rh));
+            bool hov = ImGui::IsItemHovered();
+            bool sel = (PropertyPanel::sSceneTab == items[it].tab) && hov;
+            if (hov) draw->AddRectFilled(rMin, rMax, kRowHoverFill, LP::kRowR);
+            (void)sel;
+            // glyph: a small ring for the camera, a dot for the sun
+            float cy = rMin.y + rh * 0.5f, cx = rMin.x + LP::kPadX + 10.0f;
+            if (it == 0) {
+                draw->AddCircle(ImVec2(cx, cy), 6.0f, kTextSecondary, 16, 1.4f);
+                draw->AddCircleFilled(ImVec2(cx, cy), 2.0f, kTextSecondary, 8);
+            } else {
+                draw->AddCircleFilled(ImVec2(cx, cy), 4.0f, items[it].on ? kTextPrimary : kTextTertiary, 12);
+                for (int k = 0; k < 8; k++) {
+                    float a = (float)k * 0.785398f;
+                    draw->AddLine(ImVec2(cx + cosf(a) * 6.0f, cy + sinf(a) * 6.0f),
+                                  ImVec2(cx + cosf(a) * 8.0f, cy + sinf(a) * 8.0f),
+                                  items[it].on ? kTextPrimary : kTextTertiary, 1.2f);
+                }
+            }
+            float nx = cx + 18.0f;
+            draw->AddText(font, ImGui::GetFontSize(), ImVec2(nx, cy - ImGui::GetFontSize() * 0.5f - 6.0f),
+                          kTextPrimary, items[it].name);
+            draw->AddText(font, LP::kCaptionSize, ImVec2(nx, cy + 2.0f), kTextTertiary, items[it].caption);
+            if (ImGui::IsItemClicked()) PropertyPanel::sSceneTab = items[it].tab;
+            if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::PopID();
+        }
+        ImGui::Dummy(ImVec2(0, 4));
+        draw->AddLine(ImVec2(ImGui::GetCursorScreenPos().x + LP::kPadX, ImGui::GetCursorScreenPos().y),
+                      ImVec2(ImGui::GetCursorScreenPos().x + panelWidth - LP::kPadX, ImGui::GetCursorScreenPos().y),
+                      UITokens::kHairlineSoft, 1.0f);
+        ImGui::Dummy(ImVec2(0, 4));
     }
 
     // Row rhythm — 52px rows on a 56px pitch (4px vertical gap).

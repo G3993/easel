@@ -166,6 +166,15 @@ bool ShaderPresets::remember(const std::string& shaderFile, const ShaderSource& 
     return true;
 }
 
+bool ShaderPresets::rememberJson(const std::string& key, json snap) {
+    if (key.empty() || !snap.is_object()) return false;
+    auto it = m_presets.find(key);
+    if (it != m_presets.end() && it->second == snap) return false;
+    m_presets[key] = std::move(snap);
+    if (!m_dirty) { m_dirty = true; m_dirtyT = -1.0; }
+    return true;
+}
+
 void ShaderPresets::tick(double now, double settle) {
     if (!m_dirty) return;
     if (m_dirtyT < 0.0) { m_dirtyT = now; return; }

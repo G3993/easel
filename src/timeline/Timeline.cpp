@@ -271,6 +271,22 @@ bool Timeline::toggleKeyframeAt(uint32_t layerId, const std::string& paramName,
               });
     return true;
 }
+void Timeline::setKeyframeAt(uint32_t layerId, const std::string& paramName,
+                             double t, float value, double epsilonSec) {
+    TimelineLane* lane = findLaneByParam(layerId, paramName);
+    if (!lane) {
+        addLane(layerId, TimelineLaneKind::Automation, paramName);
+        lane = findLaneByParam(layerId, paramName);
+        if (!lane) return;
+    }
+    for (auto& p : lane->points)
+        if (std::abs(p.time - t) <= epsilonSec) { p.value = value; return; }
+    TimelineLanePoint p; p.time = t; p.value = value;
+    lane->points.push_back(p);
+    std::sort(lane->points.begin(), lane->points.end(),
+              [](const TimelineLanePoint& a, const TimelineLanePoint& b){ return a.time < b.time; });
+}
+
 float Timeline::evalLaneAt(const TimelineLane& lane, double t) const {
     if (lane.points.empty()) return 0.0f;
     if (lane.points.size() == 1) return lane.points.front().value;

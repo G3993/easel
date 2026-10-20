@@ -2379,6 +2379,36 @@ void ViewportPanel::renderNavBar(bool stageActive,
 
         ImGui::SameLine(0, 12);
 
+        // 3D chip — the zone's native 3D toggle. Off: flat 2D composite.
+        // On: layers stand as cards in a world with a camera and a sun
+        // (orthographic by default, so the frame does not change until
+        // the camera is moved). Scene controls live in Properties.
+        {
+            const char* lbl3d = "3D";
+            ImVec2 sz3d = ImGui::CalcTextSize(lbl3d);
+            const float pad3d = 9.0f;
+            float w3d = sz3d.x + pad3d * 2.0f;
+            ImVec2 cur = ImGui::GetCursorScreenPos();
+            bool clicked = ImGui::InvisibleButton("##scene3dChip", ImVec2(w3d, fsBtnSize));
+            bool hov = ImGui::IsItemHovered();
+            bool on = az.scene.enabled;
+            ImDrawList* dl = navFG;
+            float ry = cur.y + 4.0f, rh = fsBtnSize - 8.0f;
+            ImU32 fill = on ? IM_COL32(235, 240, 250, 235)
+                            : (hov ? IM_COL32(255, 255, 255, 22) : IM_COL32(255, 255, 255, 12));
+            dl->AddRectFilled(ImVec2(cur.x, ry), ImVec2(cur.x + w3d, ry + rh), fill, rh * 0.5f);
+            if (!on) dl->AddRect(ImVec2(cur.x, ry), ImVec2(cur.x + w3d, ry + rh),
+                                 IM_COL32(255, 255, 255, 40), rh * 0.5f, 0, 1.0f);
+            ImU32 tcol = on ? IM_COL32(18, 19, 22, 255)
+                            : (hov ? IM_COL32(235, 240, 250, 240) : IM_COL32(170, 175, 185, 230));
+            dl->AddText(ImVec2(cur.x + pad3d, cur.y + (fsBtnSize - sz3d.y) * 0.5f), tcol, lbl3d);
+            if (clicked) az.scene.enabled = !az.scene.enabled;
+            if (hov) ImGui::SetTooltip(on ? "3D scene ON — camera and sun in Properties"
+                                          : "Turn this zone into a 3D scene");
+        }
+
+        ImGui::SameLine(0, 12);
+
         // Composition chip + Fullscreen
         {
             static const char* presetLabels[] = {

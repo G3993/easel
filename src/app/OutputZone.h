@@ -2,6 +2,8 @@
 #include "compositing/CompositeEngine.h"
 #include "render/Framebuffer.h"
 #include "app/AudioAnalyzer.h"
+#include "scene/SceneParams.h"
+#include "sources/SceneKnobSource.h"
 #ifdef HAS_NDI
 #include "app/NDIOutput.h"
 #endif
@@ -23,6 +25,23 @@ struct OutputZone {
     int compPreset = 0; // resolution preset index
 
     CompositeEngine compositor;
+    // Native 3D scene state (the zone's 3D toggle, camera, sun). Handed to
+    // the compositor every frame; saved with the zone.
+    SceneParams scene;
+    int index = 0;          // position in Application::m_zones (refreshed every frame)
+    // The scene as a SHOW extra: a layer that lives here, never in the layer
+    // stack, with the scene's lane id (SceneParams::laneId) and a knob adapter
+    // source. Lazily built; renamed to follow the zone.
+    std::shared_ptr<Layer> sceneKnobLayer;
+    Layer* knobLayer() {
+        if (!sceneKnobLayer) {
+            sceneKnobLayer = std::make_shared<Layer>();
+            sceneKnobLayer->source = std::make_shared<SceneKnobSource>(&scene);
+        }
+        sceneKnobLayer->id = SceneParams::laneId(index);
+        sceneKnobLayer->name = "3D Scene \xc2\xb7 " + name;
+        return sceneKnobLayer.get();
+    }
     Framebuffer warpFBO;
     Framebuffer readbackFBO; // vertically-flipped copy of warpFBO for CPU readback
     GLuint canvasTexture = 0; // post-mask, pre-warp texture for canvas preview

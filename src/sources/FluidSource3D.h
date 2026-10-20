@@ -6,6 +6,8 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
+#include <glm/glm.hpp>
 
 // Native 3D smoothed-particle-hydrodynamics fluid, ported from Wyatt's
 // shadertoy "Particle cluster grid SPH 3D" (shadertoy.com/view/mstfzS).
@@ -52,6 +54,21 @@ public:
     int width() const override { return m_outW; }
     int height() const override { return m_outH; }
     int zoneWidth() const  { return m_zoneW; }
+    // ── native 3D scene object ────────────────────────────────────────
+    // In a 3D zone the compositor renders the liquid through the ZONE
+    // camera instead of the built-in orbit: it hands over fluid-space →
+    // clip (so rays are generated from the inverse) and the sun in fluid
+    // space; the pass writes a real scene depth (sceneDepthTexture().z)
+    // that cards and meshes depth-test against. update() skips its own
+    // render on frames the compositor drives (one-frame arm flag).
+    void renderSceneView(const glm::mat4& fluidToClip, bool lightOn, const glm::vec3& lightDirFluid,
+                         float lightIntensity, float ambient);
+    GLuint sceneDepthTexture() const { return m_hdrAux; }
+    int    gridSize() const { return m_size; }     // size3d, fluid-space units
+    // Auto-rotate as a spin of the liquid about its own up axis (radians);
+    // the camera is the zone's, so the world turns instead.
+    float  sceneSpin() const { return (m_autoRotate && !isBox()) ? -m_rotateSpeed * m_time : 0.0f; }
+    bool   sceneDriven() const { return m_sceneView.on; }
     int zoneHeight() const { return m_zoneH; }
     std::string typeName() const override { return "Fluid3D"; }
     std::string sourcePath() const override { return "__fluid3d__"; }
@@ -59,11 +76,40 @@ public:
     // Re-run the seed block (clears velocities, restocks the initial blob).
     // Recovers from any chaotic/blown-out state the force fields can reach.
     void reseed() { m_frame = 0; }
+    bool loadShape(int slot, const std::string& path);   // bake a .obj/.gltf/.glb into shape slot 0/1
+    void clearShape(int slot);
+    bool hasShape(int slot) const { return slot >= 0 && slot < 2 && m_shapeVol[slot].tex != 0; }
+    const std::string& shapePath(int slot) const { return m_shapePath[slot & 1]; }
+
+    // "3D Box": the same sim inside a white open-front box seen straight on
+    // (gallery LED-wall look). applyBoxPreset() sets the mode + a tuned look;
+    // the mode itself is just the boxMode param so a project / OSC can flip it.
+    void applyBoxPreset();
+    bool isBox() const { return m_boxMode > 0.5f; }
+    void boxExtents(float& bw, float& bh) const;   // visible box w/h as fractions of the grid
 
     // Copy every user-facing setting (params, colors, modes, orbs, bindings)
     // from another instance — used by Layer > Duplicate so each copy gets its
     // OWN simulation that can be colored / driven / blended independently.
     void copyConfigFrom(const FluidSource3D& o);
+
+    // ── Memory / Reset / Shuffle ──────────────────────────────────────
+    // Memory: the same "remember whatever I left" the shaders have. The
+    // snapshot is every user-facing setting (params, colours, modes, orbs,
+    // sim quality) + the SOUND bindings; it is stored under memoryKey() in
+    // ~/.easel/shader_presets.json and applied to every NEW 3D Fluid / 3D
+    // Box (projects carry their own config and are left alone).
+    static const char* memoryKey(bool box) { return box ? "__fluid3dbox__" : "__fluid3d__"; }
+    const char* memoryKey() const { return memoryKey(isBox()); }
+    nlohmann::json memorySnapshot() const;
+    void applyMemory(const nlohmann::json& snap);
+    // Back to the built-in look (the plain fluid's defaults, or the 3D Box
+    // preset when in box mode). Keeps the sim resolution and the image /
+    // backdrop hookups. Reseeds.
+    void resetToDefaults();
+    // A fresh, curated random look: colours, motion, emitter, grain, light.
+    // Stays inside the box / camera / quality you have. Reseeds.
+    void shuffle(uint32_t seed);
 
     // ── Audio/MIDI-reactive parameter bindings ────────────────────────
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
@@ -125,6 +171,44 @@ public:
     float m_floorColor[3] = {0.075f, 0.08f, 0.105f};  // dark glossy floor
     float m_gridColor[3]  = {1.00f, 1.00f, 1.00f};
     float m_cageColor[3]  = {1.00f, 1.00f, 1.00f};
+    float m_deepColor2[3] = {1.00f, 0.16f, 0.10f};    // Liquid 2 (per-particle tone bit)
+    float m_boxColor[3]   = {0.94f, 0.94f, 0.95f};    // 3D Box walls
+
+    // ── 3D Box ────────────────────────────────────────────────────────
+    float m_boxMode       = 0.0f;     // 1 = white open-front box, fixed straight-on camera
+    float m_boxDepth      = 0.7f;     // visible depth as a fraction of the grid; the rest is open air in front
+    float m_boxFrame      = 0.045f;   // wall thickness seen around the opening (× size)
+    float m_boxCamDist    = 3.0f;     // camera distance from the opening (× size)
+    float m_boxFit        = 0.92f;    // opening height as a fraction of the frame's short side
+    float m_boxShade      = 0.7f;     // corner / depth occlusion
+    float m_boxGlow       = 1.0f;     // fluid colour bounce onto the walls
+    float m_boxLight      = 1.0f;     // key light on the walls
+    float m_boxFlow       = 0.0f;     // steady push from the back wall toward the camera
+    float m_twoTone       = 0.0f;     // fraction of the fluid born as Liquid 2 (reseeds)
+    float m_variation     = 0.0f;     // per-particle size/shade variation (0 = original uniform spheres)
+    float m_grains        = 1.0f;     // sub-grains rendered per particle (1 = classic spheres, up to 6)
+    float m_foam          = 0.0f;     // white foam tone on thin / fast parts of the mass
+    float m_foamColor[3]  = {1.0f, 0.97f, 0.95f};
+    float m_boxLift       = 0.0f;     // box floor raised above the grid floor so spill can sag over the lip
+    float m_plume         = 0.0f;     // large-scale plume flow (mushroom caps rolling from the back)
+    // Shapes: two baked mesh SDFs the mass can form, hold and morph between
+    float m_shapeHold     = 0.0f;     // pull toward the shape surface (0 = off)
+    float m_shapeMix      = 0.0f;     // 0 = shape A, 1 = shape B
+    float m_shapeCycle    = 0.0f;     // seconds for an automatic A→B→A morph (0 = manual)
+    float m_shapeSize     = 1.0f;     // shape scale inside the box
+    bool  m_shapeSeed     = true;     // reseed fills the shape instead of the block
+    std::string m_shapePath[2];
+    std::string m_pendingShape[2];   // set by the project loader, baked on the first update
+    // Splashes: random impulse bursts (and on beats) that throw the mass up
+    float m_splash        = 0.0f;
+    float m_splashRate    = 2.5f;     // seconds between bursts
+    float m_hueVar        = 0.0f;     // per-grain hue speckle (0..1)
+    float m_breath        = 0.0f;     // slow swell of the back flow / plumes (0..1)
+    float m_lightDrift    = 0.0f;     // slow arc of the key light so shadows crawl (0..1)
+    float m_plumeScale    = 1.0f;
+    bool  m_boxPrev       = false;    // reseed trackers
+    float m_boxDepthPrev  = -1.0f;
+    float m_twoTonePrev   = -1.0f;
 
     // ── Camera / render ───────────────────────────────────────────────
     float m_brightness    = 1.6f;     // diffuse multiplier (HDR + ACES: 2.5 blew out)
@@ -138,6 +222,9 @@ public:
     // ── Lighting / material ───────────────────────────────────────────
     float m_lightAzimuth   = 50.6f;   // degrees around the vertical axis
     float m_lightElev      = 28.5f;   // degrees above the horizon
+    float m_shadowSoft     = 0.6f;    // light angular size → penumbra grows with occluder distance
+    float m_shadowStr      = 0.8f;    // how dark cast shadows get
+    float m_shadowTint     = 0.5f;    // liquid colour carried by light passing through the mass
     float m_lightDir[3]    = {0.820f, 1.000f, 0.702f}; // derived each frame from az/el
     float m_lightIntensity = 1.0f;    // diffuse key intensity
     float m_ambient        = 0.14f;   // ambient fill (shadow floor)
@@ -288,8 +375,23 @@ public:
 
 private:
     struct Volume { GLuint tex = 0; int size = 0; GLint internalFmt = 0; };
+    Volume m_shapeVol[2];
+    Volume m_shapeNull;
+    struct SplashEv { float pos[3] = {0, 0, 0}; double t0 = -100.0; bool on = false; };
+    SplashEv m_splashEv[3];
+    double m_nextSplash = 0.0;
+    bool   m_beatLatch = false;
+    float  m_audioBeat = 0.0f;
+    void   fireSplash(double now);
     struct FBO    { GLuint fbo = 0, tex = 0; int w = 0, h = 0; };
 
+    struct SceneView {
+        bool on = false, lightOn = false;
+        glm::mat4 vp{1.0f}, invVP{1.0f};
+        glm::vec3 lightDir{0.0f, 0.0f, 1.0f};
+        float lightIntensity = 1.0f, ambient = 0.14f;
+    } m_sceneView;
+    bool   m_sceneArmed = false;  // set by renderSceneView; consumed by the next update()
     bool   m_ready = false;
     bool   m_suspended = false;  // volumes dropped by suspend(); update() revives
     int    m_outW = 1280, m_outH = 720;   // actual render-target dims (scaled)
@@ -309,6 +411,7 @@ private:
     GLuint m_hdrAux = 0;         // RGBA16F: x = depth, y = thickness (DOF)
     FBO    m_bloomA, m_bloomB;   // ¼-res bloom ping-pong
     GLuint m_volFBO = 0;         // layered-render FBO, retargeted per Z slice
+    GLuint m_mipSampler = 0;     // trilinear-mipmap sampler for the cone-traced shadow pass
 
     GLuint m_progA = 0, m_progB = 0, m_progC = 0, m_progD = 0, m_progRender = 0;
     GLuint m_progBloomDown = 0, m_progBloomBlur = 0, m_progPost = 0;
@@ -338,4 +441,5 @@ private:
     // inside the GL-state-saved region).
     void reallocVolumes();
     void reallocOutput();
+    float effectiveScale() const;   // renderScale × the 4K pixel cap
 };
