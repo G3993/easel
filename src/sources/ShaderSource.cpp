@@ -171,6 +171,36 @@ bool ShaderSource::parseISF(const std::string& source) {
             }
         }
 
+        // Parse IMPORTED — images shipped with the shader (ISF spec). Object form
+        // { "name": { "PATH": "file.png" } } or array form [{ "NAME", "PATH" }].
+        m_importedPaths.clear();
+        if (j.contains("IMPORTED")) {
+            auto addImported = [&](const std::string& name, const std::string& path) {
+                if (name.empty() || path.empty()) return;
+                m_importedPaths[name] = path;
+                for (const auto& in : m_inputs) if (in.name == name) return;
+                ISFInput param;
+                param.name = name;
+                param.label = name;
+                param.type = "image";
+                param.value = false;
+                param.imported = true;
+                m_inputs.push_back(std::move(param));
+            };
+            const auto& imp = j["IMPORTED"];
+            if (imp.is_object()) {
+                for (auto& [name, v] : imp.items()) {
+                    if (v.is_object() && v.contains("PATH") && v["PATH"].is_string())
+                        addImported(name, v["PATH"].get<std::string>());
+                }
+            } else if (imp.is_array()) {
+                for (const auto& v : imp) {
+                    if (v.is_object() && v.contains("NAME") && v.contains("PATH") && v["PATH"].is_string())
+                        addImported(v["NAME"].get<std::string>(), v["PATH"].get<std::string>());
+                }
+            }
+        }
+
         // Parse PASSES — multi-pass buffer names
         m_passBuffers.clear();
         if (j.contains("PASSES") && j["PASSES"].is_array()) {
@@ -594,6 +624,8 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
         return false;
     }
 
+    loadImportedTextures();
+
     if (!m_initialized) {
         if (!m_fbo.create(m_width, m_height)) {
             std::cerr << "Failed to create shader FBO" << std::endl;
@@ -995,6 +1027,30 @@ void ShaderSource::setMouseState(float x, float y, bool down) {
     m_mouseX = x;
     m_mouseY = y;
     m_mouseDown = down ? 1.0f : 0.0f;
+}
+
+void ShaderSource::loadImportedTextures() {
+    if (m_importedPaths.empty()) return;
+    std::string dir;
+    auto slash = m_path.find_last_of("/\\");
+    if (slash != std::string::npos) dir = m_path.substr(0, slash + 1);
+    for (const auto& [name, rel] : m_importedPaths) {
+        std::string full = (!rel.empty() && (rel[0] == '/' || rel.find(':') != std::string::npos)) ? rel : dir + rel;
+        auto it = m_importedTextures.find(name);
+        if (it == m_importedTextures.end() || it->second.first != full || !it->second.second) {
+            auto tex = std::make_unique<Texture>();
+            if (!tex->loadFromFile(full)) {
+                std::cerr << "ISF IMPORTED image failed to load: " << full << std::endl;
+                continue;
+            }
+            m_importedTextures[name] = {full, std::move(tex)};
+            it = m_importedTextures.find(name);
+        }
+        const Texture* t = it->second.second.get();
+        // sourceLayerId 0: never refreshed from another layer, never saved in projects.
+        // Texture::loadFromFile flips rows on load, so report it as flipped.
+        bindImageInput(name, t->id(), t->width(), t->height(), 0, true);
+    }
 }
 
 void ShaderSource::bindImageInput(const std::string& name, GLuint texId, int w, int h, uint32_t sourceLayerId, bool flippedV) {

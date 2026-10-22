@@ -4,6 +4,7 @@
 #include "render/ShaderProgram.h"
 #include "render/Framebuffer.h"
 #include "render/Mesh.h"
+#include "render/Texture.h"
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -57,6 +58,10 @@ struct ISFInput {
     //   "TARGET": "seed"   -> on tap, randomize the named float param.
     bool        momentary  = false;
     std::string eventTarget;
+
+    // ISF "IMPORTED" image: shipped next to the shader file and bound
+    // automatically (e.g. a baked SDF atlas). Hidden from the property panel.
+    bool imported = false;
 };
 
 // Ping-pong FBO pair for persistent ISF pass buffers
@@ -216,6 +221,12 @@ private:
 
     // Image input bindings (input name -> external texture)
     std::map<std::string, ImageBinding> m_imageBindings;
+
+    // ISF IMPORTED images: input name -> path (relative to the shader file),
+    // and the textures loaded for them (kept alive for the shader's lifetime).
+    std::map<std::string, std::string> m_importedPaths;
+    std::map<std::string, std::pair<std::string, std::unique_ptr<Texture>>> m_importedTextures;
+    void loadImportedTextures();
 
     // Audio-reactive bindings (param name -> binding)
     std::map<std::string, AudioBinding> m_audioBindings;

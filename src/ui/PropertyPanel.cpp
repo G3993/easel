@@ -4099,7 +4099,7 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             // before scrolling through sliders/dropdowns.
             for (int i = 0; i < (int)inputs.size(); i++) {
                 if (inputs[i].group == "Audio Reactivity") continue;
-                if (inputs[i].type == "image") paramOrder.push_back(i);
+                if (inputs[i].type == "image" && !inputs[i].imported) paramOrder.push_back(i);
             }
             // Pass 2: everything else (except EASING_TYPE which goes last).
             for (int i = 0; i < (int)inputs.size(); i++) {
