@@ -14377,7 +14377,7 @@ void Application::renderShowDeck(float width, float height, GLuint programTex,
             // dropdown does. Scoped down to the one source Show can offer
             // on its own: m_deckWebcam, opened lazily on first pick.
             for (auto& in : shader->inputs()) {
-                if (in.type != "image") continue;
+                if (in.type != "image" || !in.importedPath.empty()) continue;
                 ImGui::PushID(in.name.c_str());
                 const char* lbl = !in.label.empty() ? in.label.c_str() : in.name.c_str();
                 ImGui::AlignTextToFramePadding();

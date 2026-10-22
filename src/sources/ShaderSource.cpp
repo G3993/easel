@@ -186,6 +186,27 @@ bool ShaderSource::parseISF(const std::string& source) {
             }
         }
 
+        // ISF "IMPORTED" images — object {name: {PATH}} or array [{NAME, PATH}]
+        // become hidden image inputs, bound to the file in bindImportedImages().
+        if (j.contains("IMPORTED")) {
+            auto addImported = [&](const std::string& name, const json& e) {
+                if (name.empty() || !e.is_object() || !e.contains("PATH") || !e["PATH"].is_string()) return;
+                for (const auto& in : m_inputs) if (in.name == name) return;
+                ISFInput param;
+                param.name = name;
+                param.type = "image";
+                param.value = false;
+                param.importedPath = e["PATH"].get<std::string>();
+                m_inputs.push_back(std::move(param));
+            };
+            const auto& imp = j["IMPORTED"];
+            if (imp.is_object()) {
+                for (auto it = imp.begin(); it != imp.end(); ++it) addImported(it.key(), it.value());
+            } else if (imp.is_array()) {
+                for (const auto& e : imp) addImported(e.value("NAME", ""), e);
+            }
+        }
+
         appendMotionKitInputs();
 
         // Parse PASSES — multi-pass buffer names
@@ -500,7 +521,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
 }
 
 std::string ShaderSource::firstImageInput() const {
-    for (const auto& in : m_inputs) if (in.type == "image") return in.name;
+    for (const auto& in : m_inputs) if (in.type == "image" && in.importedPath.empty()) return in.name;
     return "";
 }
 
@@ -875,6 +896,7 @@ bool ShaderSource::loadFromCode(const std::string& isfSource) {
         createPassFBOs();
     }
 
+    bindImportedImages();
     return true;
 }
 
@@ -930,6 +952,7 @@ bool ShaderSource::reload(const std::string& isfSource) {
     if (m_passBuffers != oldPassBuffers) {
         createPassFBOs();
     }
+    bindImportedImages();
     return true;
 }
 
@@ -1468,6 +1491,22 @@ void ShaderSource::bindImageInput(const std::string& name, GLuint texId, int w, 
 
 void ShaderSource::unbindImageInput(const std::string& name) {
     m_imageBindings.erase(name);
+}
+
+void ShaderSource::bindImportedImages() {
+    std::string dir;
+    auto slash = m_path.find_last_of("/\\");
+    if (slash != std::string::npos) dir = m_path.substr(0, slash + 1);
+    for (const auto& in : m_inputs) {
+        if (in.importedPath.empty()) continue;
+        const std::string& rel = in.importedPath;
+        bool absolute = rel[0] == '/' || (rel.size() > 1 && rel[1] == ':');
+        std::string full = absolute ? rel : dir + rel;
+        auto it = m_imageBindings.find(in.name);
+        if (it != m_imageBindings.end() && it->second.filePath == full && it->second.textureId) continue;
+        if (!bindImageFileInput(in.name, full))
+            std::cerr << "ISF IMPORTED image failed to load: " << full << std::endl;
+    }
 }
 
 bool ShaderSource::bindImageFileInput(const std::string& name, const std::string& path) {

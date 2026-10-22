@@ -86,6 +86,11 @@ struct ISFInput {
     //   "TARGET": "seed"   -> on tap, randomize the named float param.
     bool        momentary  = false;
     std::string eventTarget;
+
+    // ISF "IMPORTED" image (data texture shipped next to the .fs, e.g. a
+    // baked SDF atlas): path relative to the shader. Auto-bound on load,
+    // hidden from the TEXTURE pickers.
+    std::string importedPath;
 };
 
 // Ping-pong FBO pair for persistent ISF pass buffers
@@ -198,6 +203,7 @@ public:
     void bindImageInput(const std::string& name, GLuint texId, int w, int h, uint32_t sourceLayerId, bool flippedV = false);
     // Bind an image FILE directly (the source owns the loaded texture).
     bool bindImageFileInput(const std::string& name, const std::string& path);
+    void bindImportedImages();
     void unbindImageInput(const std::string& name);
 
     // Global Motion Ease (0 = raw audio, 1 = very smooth): attack/release
