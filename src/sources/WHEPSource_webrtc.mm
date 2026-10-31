@@ -153,6 +153,15 @@ struct WHEPSource::Impl : std::enable_shared_from_this<WHEPSource::Impl> {
     RTCVideoTrack* track = nil;
     EaselWHEPPeer* peer = nil;
     std::string location;              // WHEP session resource (DELETE on teardown)
+    // Etherea live room links (https://host/live/<room>#<token>, the
+    // agent server's player page): same WebRTC, the room's own signaling —
+    // GET config (TURN servers), POST offer -> JSON {sdp, sessionID},
+    // GET state (presence, ~1 Hz), POST leave. Bearer = the #token.
+    bool room = false;
+    std::string roomBase, token, liveSession;
+    NSArray<RTCIceServer*>* iceServers = nil;
+    double gatherStart = 0.0;
+    bool statePollBusy = false;
     int sessions = 0, reconnects = 0;
 
     // shared with the main thread
@@ -189,9 +198,15 @@ struct WHEPSource::Impl : std::enable_shared_from_this<WHEPSource::Impl> {
 
     void setStatus(const std::string& s) {
         std::lock_guard<std::mutex> l(statusMx);
-        if (s != status) std::cerr << "[WHEP] " << url << ": " << s << std::endl;
+        if (s != status) std::cerr << "[WHEP] " << displayUrl() << ": " << s << std::endl;
         status = s;
     }
+    // the URL without its #token (logs, stats, names never carry the secret)
+    std::string displayUrl() const { return url.substr(0, url.find('#')); }
+    void configureUrl(const std::string& u);
+    NSMutableURLRequest* roomRequest(const std::string& op, NSString* method, const std::string& sessionId);
+    void createPeer(int g);
+    void leaveRoom(const std::string& sessionId, bool wait);
 
     // ── session (all on q) ──
     void start();
@@ -243,6 +258,75 @@ struct WHEPSource::Impl : std::enable_shared_from_this<WHEPSource::Impl> {
 - (void)peerConnection:(RTCPeerConnection*)pc didOpenDataChannel:(RTCDataChannel*)dc {}
 @end
 
+namespace {
+NSDictionary* jsonObject(NSData* d) {
+    if (!d) return nil;
+    id o = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+    return [o isKindOfClass:[NSDictionary class]] ? (NSDictionary*)o : nil;
+}
+// {ok, data, error:{code, message}} -> data, or the error text
+NSDictionary* roomData(NSData* d, std::string& err, std::string& code) {
+    NSDictionary* j = jsonObject(d);
+    if (!j) { err = "bad reply"; return nil; }
+    if (![j[@"ok"] boolValue]) {
+        NSDictionary* e = [j[@"error"] isKindOfClass:[NSDictionary class]] ? j[@"error"] : nil;
+        err = e[@"message"] ? toStd(e[@"message"]) : "refused";
+        code = e[@"code"] ? toStd(e[@"code"]) : "";
+        return nil;
+    }
+    return [j[@"data"] isKindOfClass:[NSDictionary class]] ? j[@"data"] : @{};
+}
+} // namespace
+
+void WHEPSource::Impl::configureUrl(const std::string& u) {
+    url = u;
+    room = false; roomBase.clear(); token.clear(); liveSession.clear(); iceServers = nil;
+    size_t hash = u.find('#');
+    size_t scheme = u.find("://");
+    if (hash == std::string::npos || scheme == std::string::npos) return;
+    size_t pathStart = u.find('/', scheme + 3);
+    size_t live = pathStart == std::string::npos ? std::string::npos : u.find("/live/", pathStart);
+    if (live == std::string::npos || live > hash) return;
+    size_t idStart = live + 6;
+    size_t idEnd = u.find_first_of("/?#", idStart);
+    std::string roomId = u.substr(idStart, idEnd - idStart);
+    if (roomId.empty()) return;
+    room = true;
+    token = u.substr(hash + 1);
+    roomBase = u.substr(0, pathStart) + "/api/live/rooms/" + roomId + "/";
+}
+
+NSMutableURLRequest* WHEPSource::Impl::roomRequest(const std::string& op, NSString* method, const std::string& sessionId) {
+    NSURL* ru = [NSURL URLWithString:[NSString stringWithUTF8String:(roomBase + op).c_str()]];
+    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:ru];
+    req.HTTPMethod = method;
+    req.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [req setValue:[NSString stringWithFormat:@"Bearer %s", token.c_str()] forHTTPHeaderField:@"Authorization"];
+    [req setValue:[NSString stringWithUTF8String:sessionId.c_str()] forHTTPHeaderField:@"X-Live-Session"];
+    [req setValue:@"" forHTTPHeaderField:@"X-Feed-Lease"];
+    return req;
+}
+
+// End our place in the room (the WHEP DELETE of a live room).
+void WHEPSource::Impl::leaveRoom(const std::string& sessionId, bool wait) {
+    if (sessionId.empty() || roomBase.empty()) return;
+    NSMutableURLRequest* req = roomRequest("leave", @"POST", sessionId);
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    std::string shortId = sessionId.substr(0, 8);
+    if (wait) {
+        NSHTTPURLResponse* r = syncRequest(req, nullptr, 1.5);
+        std::cerr << "[WHEP] room leave " << shortId << " -> " << (r ? (int)r.statusCode : 0) << std::endl;
+    } else {
+        req.timeoutInterval = 4.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData*, NSURLResponse* r, NSError*) {
+                int code = [r isKindOfClass:[NSHTTPURLResponse class]] ? (int)((NSHTTPURLResponse*)r).statusCode : 0;
+                std::cerr << "[WHEP] room leave " << shortId << " -> " << code << std::endl;
+            }] resume];
+    }
+}
+
 void WHEPSource::Impl::start() {
     wantRunning = true;
     backoffIdx = 0;
@@ -273,16 +357,55 @@ void WHEPSource::Impl::startSession() {
     sessionStart = nowSec();
     sessions++;
     setStatus(sessions > 1 ? "reconnecting" : "connecting");
+    if (!room) { createPeer(g); return; }
 
+    // live room: its TURN servers first (media relays across the NATs)
+    std::weak_ptr<Impl> w = shared_from_this();
+    NSMutableURLRequest* req = roomRequest("config", @"GET", "");
+    req.timeoutInterval = 8.0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData* d, NSURLResponse*, NSError* err) {
+            std::string why, code;
+            NSDictionary* data = err ? nil : roomData(d, why, code);
+            if (err) why = toStd(err.localizedDescription);
+            NSMutableArray<RTCIceServer*>* servers = [NSMutableArray array];
+            for (NSDictionary* sv in ([data[@"iceServers"] isKindOfClass:[NSArray class]] ? data[@"iceServers"] : @[])) {
+                if (![sv isKindOfClass:[NSDictionary class]]) continue;
+                id urls = sv[@"urls"] ?: sv[@"url"];
+                NSArray* list = [urls isKindOfClass:[NSArray class]] ? urls : (urls ? @[urls] : @[]);
+                if (!list.count) continue;
+                [servers addObject:[[RTCIceServer alloc] initWithURLStrings:list
+                                                                   username:sv[@"username"]
+                                                                 credential:sv[@"credential"]]];
+            }
+            dispatch_async(q, ^{
+                auto m = w.lock();
+                if (!m || m->gen != g) return;
+                if (!data) { m->fail(code == "room_offline" ? "host offline" : "room: " + why); return; }
+                m->iceServers = servers;
+                m->createPeer(g);
+            });
+        }] resume];
+}
+
+void WHEPSource::Impl::createPeer(int g) {
+    if (gen != g || !wantRunning) return;
+    gatherStart = nowSec();
     RTCConfiguration* cfg = [[RTCConfiguration alloc] init];
     cfg.sdpSemantics = RTCSdpSemanticsUnifiedPlan;
     cfg.bundlePolicy = RTCBundlePolicyMaxBundle;
     cfg.rtcpMuxPolicy = RTCRtcpMuxPolicyRequire;
     cfg.continualGatheringPolicy = RTCContinualGatheringPolicyGatherOnce;
-    cfg.iceServers = @[];            // LAN: host candidates only
-    // UDP only: MediaMTX serves ICE on UDP 8189, and an ICE-TCP pair would
-    // turn every lost packet into a head-of-line stall
-    cfg.tcpCandidatePolicy = RTCTcpCandidatePolicyDisabled;
+    if (room) {
+        // the room's STUN/TURN; a direct route still wins when there is one
+        cfg.iceServers = iceServers ?: @[];
+        cfg.iceTransportPolicy = RTCIceTransportPolicyAll;
+    } else {
+        cfg.iceServers = @[];        // LAN: host candidates only
+        // UDP only: MediaMTX serves ICE on UDP 8189, and an ICE-TCP pair
+        // would turn every lost packet into a head-of-line stall
+        cfg.tcpCandidatePolicy = RTCTcpCandidatePolicyDisabled;
+    }
     RTCMediaConstraints* cons = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:nil optionalConstraints:nil];
 
     peer = [[EaselWHEPPeer alloc] initWithImpl:shared_from_this() gen:g];
@@ -320,7 +443,8 @@ void WHEPSource::Impl::startSession() {
 // first) — WHEP is non-trickle here, the candidates ride in the SDP.
 void WHEPSource::Impl::postOffer(int g) {
     if (gen != g || !pc) return;
-    if (pc.iceGatheringState != RTCIceGatheringStateComplete && nowSec() - sessionStart < 2.0) {
+    // TURN allocations take longer than host candidates: give a room 4 s
+    if (pc.iceGatheringState != RTCIceGatheringStateComplete && nowSec() - gatherStart < (room ? 4.0 : 2.0)) {
         std::weak_ptr<Impl> w = shared_from_this();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC), q, ^{
             if (auto m = w.lock()) m->postOffer(g);
@@ -331,7 +455,7 @@ void WHEPSource::Impl::postOffer(int g) {
     if (!sdp) { fail("no local description"); return; }
 
     NSURL* u = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
-    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:u];
+    NSMutableURLRequest* req = room ? roomRequest("offer", @"POST", "") : [NSMutableURLRequest requestWithURL:u];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/sdp" forHTTPHeaderField:@"Content-Type"];
     req.HTTPBody = [sdp dataUsingEncoding:NSUTF8StringEncoding];
@@ -348,9 +472,21 @@ void WHEPSource::Impl::postOffer(int g) {
             NSHTTPURLResponse* hr = [r isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse*)r : nil;
             NSString* answer = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
             NSString* loc = hr ? [hr valueForHTTPHeaderField:@"Location"] : nil;
+            std::string roomErr, roomCode, roomSession;
+            bool isRoom = false;
+            if (auto m0 = w.lock()) isRoom = m0->room;
+            if (isRoom) {
+                // live room: JSON {ok, data:{sdp, sessionID, participantID}}
+                loc = nil;
+                NSDictionary* data = err ? nil : roomData(d, roomErr, roomCode);
+                answer = [data[@"sdp"] isKindOfClass:[NSString class]] ? data[@"sdp"] : nil;
+                roomSession = [data[@"sessionID"] isKindOfClass:[NSString class]] ? toStd(data[@"sessionID"]) : "";
+            }
             dispatch_async(q, ^{
                 auto m = w.lock();
                 if (!m) {
+                    // (a room session left behind here expires with the
+                    // room's presence timeout; nothing to call without m)
                     // source gone mid-POST: still free the session on the server
                     if (loc) {
                         NSURL* lu = [NSURL URLWithString:loc relativeToURL:u];
@@ -361,8 +497,16 @@ void WHEPSource::Impl::postOffer(int g) {
                     return;
                 }
                 if (loc) m->location = toStd([[NSURL URLWithString:loc relativeToURL:u] absoluteString]);
-                if (m->gen != g) { m->teardown(false); return; }
-                if (err || !hr || (hr.statusCode != 201 && hr.statusCode != 200) || answer.length == 0) {
+                if (m->room) {
+                    if (m->gen != g) { m->leaveRoom(roomSession, false); return; }   // a late answer: leave it at once
+                    m->liveSession = roomSession;
+                    if (!answer.length) {
+                        m->fail(roomCode == "room_offline" ? "host offline"
+                              : "room: " + (err ? toStd(err.localizedDescription) : roomErr));
+                        return;
+                    }
+                } else if (m->gen != g) { m->teardown(false); return; }
+                if (!m->room && (err || !hr || (hr.statusCode != 201 && hr.statusCode != 200) || answer.length == 0)) {
                     std::string why = err ? toStd(err.localizedDescription)
                                           : ("HTTP " + std::to_string(hr ? (int)hr.statusCode : 0));
                     m->fail("signaling: " + why);
@@ -389,8 +533,12 @@ void WHEPSource::Impl::teardown(bool waitForDelete) {
     playing = false;
     if (track && peer) [track removeRenderer:peer];
     track = nil;
-    // DELETE first, then close: closing first makes the server end the
-    // session on its own and the DELETE then 404s.
+    // DELETE / leave first, then close: closing first makes the server end
+    // the session on its own and the DELETE then 404s.
+    if (!liveSession.empty()) {
+        leaveRoom(liveSession, waitForDelete);
+        liveSession.clear();
+    }
     if (!location.empty()) {
         NSURL* lu = [NSURL URLWithString:[NSString stringWithUTF8String:location.c_str()]];
         NSMutableURLRequest* del = [NSMutableURLRequest requestWithURL:lu];
@@ -444,6 +592,30 @@ void WHEPSource::Impl::tick() {
         if (t - sessionStart > 8.0) fail("no media after 8s");
     } else if (st == St::Playing) {
         if (t - lastFrameT.load() > 3.0) fail("no frames for 3s");
+    }
+    if (room && !liveSession.empty() && !statePollBusy && statsTick % 4 == 2 &&
+        (st == St::Playing || st == St::Connecting)) {
+        // presence, like the player page's poll: still joined, host still live
+        statePollBusy = true;
+        std::weak_ptr<Impl> w = shared_from_this();
+        int g = gen;
+        NSMutableURLRequest* req = roomRequest("state", @"GET", liveSession);
+        req.timeoutInterval = 5.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData* d, NSURLResponse*, NSError* err) {
+                std::string why, code;
+                NSDictionary* data = err ? nil : roomData(d, why, code);
+                dispatch_async(q, ^{
+                    auto m = w.lock();
+                    if (!m) return;
+                    m->statePollBusy = false;
+                    if (m->gen != g || !data) return;     // a missed poll is not a failure
+                    if ([data[@"broadcasting"] isKindOfClass:[NSNumber class]] && ![data[@"broadcasting"] boolValue])
+                        m->fail("host offline");
+                    else if (m->st == St::Playing && [data[@"joined"] isKindOfClass:[NSNumber class]] && ![data[@"joined"] boolValue])
+                        m->fail("dropped from the room");
+                });
+            }] resume];
     }
     if (++statsTick % 4 == 0 && pc && (st == St::Playing || st == St::Connecting)) {
         std::weak_ptr<Impl> w = shared_from_this();
@@ -533,7 +705,7 @@ void WHEPSource::Impl::logStats(RTCStatisticsReport* r, double t) {
         "\"delivered\":%llu,\"presented\":%llu,\"skipped\":%llu,"
         "\"deliveredPerSec\":%llu,\"presentedPerSec\":%llu,\"skippedPerSec\":%llu,\"maxPresentGapMs\":%.1f,"
         "\"sessions\":%d,\"reconnects\":%d}\n",
-        t, (long)time(nullptr), url.c_str(), (int)st, frameW.load(), frameH.load(),
+        t, (long)time(nullptr), displayUrl().c_str(), (int)st, frameW.load(), frameH.load(),
         num(in, @"framesPerSecond"), num(in, @"framesReceived"), num(in, @"framesDecoded"), num(in, @"framesDropped"),
         num(in, @"freezeCount"), num(in, @"totalFreezesDuration"), num(in, @"pauseCount"),
         num(in, @"packetsReceived"), num(in, @"packetsLost"), num(in, @"nackCount"), num(in, @"pliCount"), num(in, @"firCount"),
@@ -631,7 +803,7 @@ bool WHEPSource::connect(const std::string& whepUrl) {
     std::string u = whepUrl;
     dispatch_async(m->q, ^{
         if (mm->wantRunning) mm->stop();
-        mm->url = u;
+        mm->configureUrl(u);
         mm->suspended = false;
         mm->start();
     });

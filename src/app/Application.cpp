@@ -19633,8 +19633,9 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     layer->id = m_nextLayerId++;
     layer->source = source;
     {
-        // ".../joyai-graphics/whep" -> "joyai-graphics"
-        std::string path = whepUrl;
+        // ".../joyai-graphics/whep" -> "joyai-graphics"; a live-room link
+        // ".../live/<room>?player=1#<token>" -> "<room>" (never the token)
+        std::string path = whepUrl.substr(0, whepUrl.find_first_of("?#"));
         while (!path.empty() && path.back() == '/') path.pop_back();
         if (path.size() > 5 && path.compare(path.size() - 5, 5, "/whep") == 0) path.resize(path.size() - 5);
         layer->name = "WHEP: " + path.substr(path.rfind('/') + 1);
