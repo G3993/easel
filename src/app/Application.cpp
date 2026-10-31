@@ -5389,6 +5389,12 @@ void Application::renderUI() {
                     uint32_t lid = m_layerStack[layerIdx]->id;
                     m_timeline.removeClip(lid, clipId);
                 }
+#ifdef HAS_WHEP
+            } else if (msg.address == "/easel/stream/connect" && !msg.strings.empty()) {
+                // /easel/stream/connect <url> — same as the Sources panel's
+                // Network stream field (WHEP for http(s), FFmpeg for srt/rtmp)
+                connectNetworkStream(msg.strings[0]);
+#endif
             } else if (msg.address == "/easel/layer/move" && msg.ints.size() >= 2) {
                 int from = msg.ints[0];
                 int to   = msg.ints[1];
@@ -8499,6 +8505,30 @@ void Application::renderUI() {
                     addWHEPSource(WHEPSource::discoverUrl());
                 }
                 ImGui::PopStyleColor(4);
+
+                // Network stream: one URL, any transport. http(s)://…/whep
+                // = WebRTC (WHEP); srt:// or rtmp:// = the FFmpeg video path.
+                ImGui::Dummy(ImVec2(0, 6));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.92f, 1.0f));
+                ImGui::Text("Network stream");
+                ImGui::PopStyleColor();
+                if (!m_whepUrlBuf[0])
+                    snprintf(m_whepUrlBuf, sizeof(m_whepUrlBuf), "%s", "http://192.168.0.51:8889/joyai-graphics/whep");
+                ImGui::SetNextItemWidth(-1);
+                bool enter = ImGui::InputText("##netUrl", m_whepUrlBuf, sizeof(m_whepUrlBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("http(s)://host/path/whep = WebRTC (WHEP)\nsrt://... or rtmp://... = FFmpeg");
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.06f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.20f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
+                if (ImGui::Button("Connect", ImVec2(-1, 0)) || enter) connectNetworkStream(m_whepUrlBuf);
+                ImGui::PopStyleColor(4);
+                if (m_whepConnecting) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.62f, 0.66f, 1.0f));
+                    ImGui::TextWrapped("%s", m_whepConnecting->statusText().c_str());
+                    ImGui::PopStyleColor();
+                }
 #endif
             }
         }
@@ -19558,6 +19588,33 @@ void Application::removeZoneByName(const std::string& zoneName) {
 }
 
 #ifdef HAS_WHEP
+// One entry point for a network stream URL (Sources panel, OSC):
+// http(s) -> WHEP (WebRTC), srt/rtmp -> FFmpeg VideoSource (live).
+void Application::connectNetworkStream(const std::string& url) {
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+        addWHEPSource(url);
+        return;
+    }
+    if (url.rfind("srt://", 0) == 0 || url.rfind("rtmp://", 0) == 0 || url.rfind("rtmps://", 0) == 0) {
+        m_undoStack.pushState(m_layerStack, m_selectedLayer);
+        auto source = std::make_shared<VideoSource>();
+        if (!source->load(url)) {
+            std::cerr << "[Stream] could not open " << url << std::endl;
+            return;
+        }
+        source->play();
+        auto layer = std::make_shared<Layer>();
+        layer->id = m_nextLayerId++;
+        layer->source = source;
+        layer->name = "Stream: " + url.substr(url.find("://") + 3);
+        m_layerStack.addLayer(layer);
+        m_selectedLayer = m_layerStack.count() - 1;
+        registerLayerWithZones(layer->id);
+        return;
+    }
+    std::cerr << "[Stream] unsupported URL: " << url << std::endl;
+}
+
 void Application::addWHEPSource(const std::string& whepUrl) {
     m_undoStack.pushState(m_layerStack, m_selectedLayer);
     auto source = std::make_shared<WHEPSource>();
@@ -19575,7 +19632,13 @@ void Application::addWHEPSource(const std::string& whepUrl) {
     auto layer = std::make_shared<Layer>();
     layer->id = m_nextLayerId++;
     layer->source = source;
-    layer->name = "WHEP: " + whepUrl.substr(whepUrl.rfind('/') + 1);
+    {
+        // ".../joyai-graphics/whep" -> "joyai-graphics"
+        std::string path = whepUrl;
+        while (!path.empty() && path.back() == '/') path.pop_back();
+        if (path.size() > 5 && path.compare(path.size() - 5, 5, "/whep") == 0) path.resize(path.size() - 5);
+        layer->name = "WHEP: " + path.substr(path.rfind('/') + 1);
+    }
 
     m_layerStack.addLayer(layer);
     m_selectedLayer = m_layerStack.count() - 1;

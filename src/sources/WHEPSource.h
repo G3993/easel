@@ -1,6 +1,11 @@
 #pragma once
 #ifdef HAS_WHEP
 
+#if defined(__APPLE__) && defined(EASEL_WEBRTC_MAC)
+// macOS: libwebrtc (WebRTC.xcframework) receiver — see WHEPSource_webrtc.h.
+#include "sources/WHEPSource_webrtc.h"
+#else
+
 #include "sources/ContentSource.h"
 #include "render/Texture.h"
 #include <string>
@@ -110,4 +115,5 @@ private:
     bool m_useWebView = false;
 };
 
+#endif // EASEL_WEBRTC_MAC
 #endif // HAS_WHEP

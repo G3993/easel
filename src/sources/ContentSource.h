@@ -20,6 +20,9 @@ public:
     virtual int height() const = 0;
     virtual std::string typeName() const = 0;
     virtual std::string sourcePath() const { return ""; }
+    // One short live status line (network streams: "live 2592x1440",
+    // "retry in 2s: ice failed"); shown under the layer name. Empty = none.
+    virtual std::string statusText() const { return ""; }
 
     // Type queries
     virtual bool isVideo() const { return false; }

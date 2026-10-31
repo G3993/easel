@@ -131,12 +131,28 @@ endif()
 # present on this machine. Configure with -DEASEL_ENABLE_WHEP=ON (after
 # installing OpenSSL) to build it.
 option(EASEL_ENABLE_WHEP "Build WHEP/WebRTC source (needs libdatachannel + OpenSSL)" OFF)
-if(FFMPEG_FOUND AND EASEL_ENABLE_WHEP)
+# macOS: the WHEP source on Google's libwebrtc (WebRTC.xcframework from
+# github.com/stasel/WebRTC — scripts/fetch-webrtc.sh puts it in
+# external/webrtc). Jitter buffer, NACK, VideoToolbox decode; replaces the
+# libdatachannel / WKWebView path on the Mac. Windows is unchanged.
+set(EASEL_WEBRTC_FW_DIR "${CMAKE_SOURCE_DIR}/external/webrtc/WebRTC.xcframework/macos-x86_64_arm64")
+option(EASEL_WEBRTC_MAC "macOS WHEP receive on libwebrtc (needs external/webrtc)" ON)
+if(APPLE AND EASEL_WEBRTC_MAC AND EXISTS "${EASEL_WEBRTC_FW_DIR}/WebRTC.framework")
+    set(HAS_WHEP TRUE)
+    set(HAS_WEBRTC_MAC TRUE)
+    list(FILTER SOURCES EXCLUDE REGEX ".*WHEPSource\\.cpp$")
+    list(FILTER SOURCES EXCLUDE REGEX ".*WHEPSource_mac\\.mm$")
+    set_source_files_properties("${CMAKE_SOURCE_DIR}/src/sources/WHEPSource_webrtc.mm"
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc -F${EASEL_WEBRTC_FW_DIR}")
+    message(STATUS "WHEP source enabled (macOS libwebrtc: ${EASEL_WEBRTC_FW_DIR})")
+elseif(FFMPEG_FOUND AND EASEL_ENABLE_WHEP)
     FetchContent_MakeAvailable(libdatachannel)
     set(HAS_WHEP TRUE)
+    list(FILTER SOURCES EXCLUDE REGEX ".*WHEPSource_webrtc\\.mm$")
     message(STATUS "WHEP source enabled (libdatachannel + FFmpeg)")
 else()
     set(HAS_WHEP FALSE)
+    set(HAS_WEBRTC_MAC FALSE)
     list(FILTER SOURCES EXCLUDE REGEX ".*WHEP.*")
     message(STATUS "WHEP source disabled (set -DEASEL_ENABLE_WHEP=ON + OpenSSL to enable)")
 endif()
@@ -395,7 +411,17 @@ if(HAS_NDI)
     endif()
 endif()
 
-if(HAS_WHEP)
+if(HAS_WEBRTC_MAC)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHEP=1 EASEL_WEBRTC_MAC=1)
+    target_link_options(${PROJECT_NAME} PRIVATE "-F${EASEL_WEBRTC_FW_DIR}" "-Wl,-rpath,@executable_path/../Frameworks")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework WebRTC" "-framework CoreVideo" "-framework IOSurface")
+    # embed before the codesign steps below (--deep re-signs it with the app)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Frameworks"
+        COMMAND rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Frameworks/WebRTC.framework"
+        COMMAND ditto "${EASEL_WEBRTC_FW_DIR}/WebRTC.framework" "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Frameworks/WebRTC.framework"
+        COMMENT "Embedding WebRTC.framework")
+elseif(HAS_WHEP)
     target_link_libraries(${PROJECT_NAME} PRIVATE LibDataChannel::LibDataChannel)
     target_compile_definitions(${PROJECT_NAME} PRIVATE HAS_WHEP=1)
     if(NOT WIN32)
@@ -474,7 +500,7 @@ target_link_libraries(test_databus PRIVATE Catch2::Catch2WithMain)
 # Phase M.0 RenderBackend abstraction smoke test — disabled until RenderBackend_GL.cpp is implemented.
 # add_executable(test_render_backend tests/test_render_backend.cpp src/render/RenderBackend_GL.cpp)
 
-if(HAS_WHEP)
+if(HAS_WHEP AND NOT HAS_WEBRTC_MAC)
     set(TEST_WHEP_SOURCES
         tests/test_whep_source.cpp
         src/sources/WHEPSource.cpp

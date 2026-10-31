@@ -224,6 +224,8 @@ static void drawLayerRow(ImDrawList* draw, const std::shared_ptr<Layer>& layer,
     if (layer->source) {
         std::string type = layer->source->typeName();
         if (type == "WindowCapture") type = "Window";
+        std::string st = layer->source->statusText();
+        if (!st.empty()) type += "  " + st;
         if (layer->muted) type += "  Muted";
         draw->AddText(font, LP::kCaptionSize, ImVec2(g.nameX, capY),
                       kTextTertiary, type.c_str());

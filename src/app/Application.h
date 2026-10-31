@@ -909,6 +909,7 @@ private:
     std::shared_ptr<WHEPSource> m_whepConnecting; // tracks in-progress connection
     std::string m_whepStatus;
     void addWHEPSource(const std::string& whepUrl);
+    void connectNetworkStream(const std::string& url);
     void addScopeRTMP();
 #endif
 
