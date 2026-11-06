@@ -3,265 +3,259 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Download Easel</title>
-<meta name="description" content="Easel Studio — real-time visual instrument with the ShaderClaw3 shader library and the Studio Pack. Downloads for macOS (Apple Silicon) and Windows.">
+<title>Easel</title>
+<meta name="description" content="Easel. Shaders, sound and surfaces in one instrument. Download for Mac and Windows.">
+<meta property="og:title" content="Easel">
+<meta property="og:description" content="Shaders, sound and surfaces in one instrument.">
+<meta property="og:image" content="https://g3993.github.io/easel/img/gallery.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0a0a0b; --panel: #121214; --panel-2: #18181b; --line: #26262b;
-    --text: #f2f2f3; --dim: #9a9aa2; --faint: #6b6b73; --accent: #ffffff;
-    --ok: #8fe3a6;
-    --r: 14px;
+    --bg: #f5f4f0;
+    --paper: #ffffff;
+    --ink: #161616;
+    --grey: #84837e;
+    --rule: #dddbd4;
+    --accent: #e4572e;   /* one orange, used sparingly */
+    --sans: -apple-system, BlinkMacSystemFont, Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
-  body { background: var(--bg); color: var(--text); font: 15px/1.6 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-  a { color: inherit; }
-  code, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; }
-  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+  body { background: var(--bg); color: var(--ink); font: 17px/1.5 var(--sans); -webkit-font-smoothing: antialiased; letter-spacing: -0.005em; }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 22px; }
 
-  header { display: flex; align-items: center; justify-content: space-between; padding: 24px 0; }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; }
-  .mark { width: 22px; height: 22px; border-radius: 6px; background: conic-gradient(from 200deg, #fff, #777, #fff); }
-  header nav a { color: var(--dim); text-decoration: none; margin-left: 20px; font-size: 14px; }
-  header nav a:hover { color: var(--text); }
+  nav { position: sticky; top: 0; z-index: 10; background: rgba(245,244,240,.82); backdrop-filter: saturate(180%) blur(16px); -webkit-backdrop-filter: saturate(180%) blur(16px); border-bottom: 1px solid rgba(0,0,0,.06); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 52px; font-size: 14px; }
+  .logo { font-weight: 600; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+  nav .links { display: flex; gap: 26px; color: var(--grey); }
+  nav .links a:hover { color: var(--ink); }
+  nav .get { color: var(--ink); }
+  @media (max-width: 480px) { nav .links a:not(.get) { display: none; } }
 
-  .hero { padding: 64px 0 40px; border-bottom: 1px solid var(--line); }
-  .eyebrow { color: var(--dim); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; }
-  h1 { font-size: clamp(40px, 7vw, 72px); line-height: 1.02; margin: 12px 0 16px; letter-spacing: -.03em; }
-  .lede { color: var(--dim); font-size: 18px; max-width: 620px; margin: 0 0 28px; }
-  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px; border-radius: 999px; font-weight: 600; text-decoration: none; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 15px; }
-  .btn:hover { border-color: #3a3a40; }
-  .btn.primary { background: var(--accent); color: #0a0a0b; border-color: var(--accent); }
-  .btn.primary:hover { background: #e6e6e8; }
-  .meta { color: var(--faint); font-size: 13px; margin-top: 14px; }
-  .meta b { color: var(--dim); font-weight: 500; }
+  .hero { text-align: center; padding: 96px 0 56px; }
+  .kicker { color: var(--grey); font-size: 15px; margin: 0 0 10px; }
+  h1 { font-size: clamp(56px, 11vw, 112px); line-height: 1; letter-spacing: -.045em; font-weight: 600; margin: 0; }
+  .sub { font-size: clamp(21px, 3vw, 28px); line-height: 1.25; letter-spacing: -.02em; margin: 18px auto 0; max-width: 640px; color: #3a3a38; }
+  .actions { display: flex; gap: 28px; justify-content: center; align-items: center; margin-top: 34px; flex-wrap: wrap; }
+  .btn { display: inline-block; background: var(--ink); color: #fff; padding: 13px 26px; border-radius: 999px; font-size: 16px; font-weight: 500; }
+  .btn:hover { background: #000; }
+  .more { color: var(--ink); font-size: 16px; }
+  .more::after { content: " ›"; }
+  .more:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .fine { color: var(--grey); font-size: 13px; margin-top: 18px; }
 
-  section { padding: 48px 0; border-bottom: 1px solid var(--line); }
-  h2 { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 0 0 20px; font-weight: 600; }
-  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-  .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  @media (max-width: 760px) { .grid, .grid.three { grid-template-columns: 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 24px; min-width: 0; }
-  .card h3 { margin: 0 0 4px; font-size: 20px; letter-spacing: -.01em; }
-  .card .sub { color: var(--faint); font-size: 13px; margin-bottom: 18px; }
-  .card p { color: var(--dim); margin: 0 0 14px; }
-  .card .btn { width: 100%; justify-content: center; }
-  .or { color: var(--faint); font-size: 12px; text-align: center; margin: 16px 0 8px; letter-spacing: .1em; text-transform: uppercase; }
-  .cmd { position: relative; background: #050506; border: 1px solid var(--line); border-radius: 10px; padding: 12px 52px 12px 14px; overflow-x: auto; white-space: nowrap; }
-  .cmd code { color: #d8d8dc; }
-  .copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--dim); border-radius: 7px; font-size: 12px; padding: 5px 8px; cursor: pointer; }
-  .copy:hover { color: var(--text); }
-  .copy.done { color: var(--ok); }
-  .card.here { border-color: #4a4a52; box-shadow: 0 0 0 1px #4a4a52 inset; }
-  .tag { display: inline-block; font-size: 11px; color: #0a0a0b; background: var(--accent); border-radius: 999px; padding: 2px 8px; margin-left: 8px; vertical-align: 3px; font-weight: 600; }
+  figure { margin: 0; }
+  .shot { border-radius: 14px; overflow: hidden; background: #0b0b0c; box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 30px 60px -20px rgba(0,0,0,.28); }
+  .shot img { display: block; width: 100%; height: auto; }
 
-  .stat { font-size: 34px; font-weight: 700; letter-spacing: -.02em; }
-  .stat + p { margin-top: 2px; }
-  ol.steps { margin: 0; padding-left: 20px; color: var(--dim); }
-  ol.steps li { margin: 6px 0; }
-  ol.steps b { color: var(--text); font-weight: 600; }
-  ul.plain { margin: 0; padding-left: 18px; color: var(--dim); }
-  ul.plain li { margin: 5px 0; }
-  .note { color: var(--faint); font-size: 13px; }
+  section.wrap { margin-top: 140px; }
+  @media (max-width: 720px) { section.wrap { margin-top: 96px; } }
+  .center { text-align: center; }
+  h2 { font-size: clamp(36px, 6vw, 56px); line-height: 1.05; letter-spacing: -.035em; font-weight: 600; margin: 0 0 14px; }
+  .lead { font-size: 21px; line-height: 1.4; color: #3a3a38; max-width: 620px; margin: 0 auto; letter-spacing: -.015em; }
 
-  #notes { color: var(--dim); font-size: 14px; max-height: 280px; overflow: auto; }
-  #notes h4 { color: var(--text); margin: 14px 0 6px; font-size: 14px; }
-  #notes ul { margin: 0 0 8px; padding-left: 18px; }
-  #notes p { margin: 0 0 8px; }
-  #notes code { background: #050506; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
-  @media (max-width: 600px) { header nav a:not(:first-child) { display: none; } }
-  footer { padding: 32px 0 48px; color: var(--faint); font-size: 13px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .facts { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--ink); margin-top: 56px; }
+  .fact { padding: 18px 24px 0 0; }
+  .fact .n { font-family: var(--mono); font-size: 12px; color: var(--grey); }
+  .fact .big { font-size: 40px; font-weight: 600; letter-spacing: -.035em; margin: 22px 0 6px; line-height: 1; }
+  .fact p { margin: 0; color: #3a3a38; font-size: 15px; max-width: 260px; }
+  @media (max-width: 720px) {
+    .facts { grid-template-columns: 1fr; border-top: 0; }
+    .fact { border-top: 1px solid var(--ink); padding-bottom: 28px; }
+  }
+
+  .panel { background: var(--paper); border-radius: 18px; padding: 44px; margin-top: 48px; }
+  @media (max-width: 720px) { .panel { padding: 28px 18px; } }
+  .seg { display: inline-flex; background: #eceae4; border-radius: 999px; padding: 3px; }
+  .seg button { border: 0; background: transparent; font: 500 14px var(--sans); color: var(--grey); padding: 8px 20px; border-radius: 999px; cursor: pointer; }
+  .seg button[aria-selected="true"] { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .os { display: none; margin-top: 30px; }
+  .os.on { display: block; }
+  .step { color: var(--grey); font-size: 14px; margin: 0 0 10px; }
+  .cmd { display: flex; align-items: center; gap: 12px; background: var(--bg); border-radius: 12px; padding: 12px 12px 12px 18px; }
+  .cmd code { font: 14px var(--mono); flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  .cmd code::-webkit-scrollbar { display: none; }
+  .copy { flex: none; border: 0; background: var(--ink); color: #fff; font: 500 13px var(--sans); border-radius: 999px; padding: 7px 14px; cursor: pointer; }
+  .copy.done { background: var(--accent); }
+  .alt { margin-top: 16px; font-size: 15px; color: var(--grey); }
+  .alt a { color: var(--ink); }
+  .alt a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .note { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--rule); color: var(--grey); font-size: 14px; }
+  .note code, .specs code { font: 13px var(--mono); word-break: break-all; }
+
+  .pair { display: flex; gap: 28px; justify-content: center; margin-top: 26px; flex-wrap: wrap; }
+
+  .specs { margin-top: 48px; border-top: 1px solid var(--ink); }
+  .row { display: grid; grid-template-columns: 220px 1fr; gap: 24px; padding: 22px 0; border-bottom: 1px solid var(--rule); }
+  .row h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .row div { color: #3a3a38; font-size: 15px; }
+  .row div p { margin: 0 0 6px; }
+  @media (max-width: 720px) { .row { grid-template-columns: 1fr; gap: 6px; } }
+
+  footer { padding: 120px 0 48px; color: var(--grey); font-size: 13px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer .line { border-top: 1px solid var(--rule); padding-top: 20px; width: 100%; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  footer a:hover { color: var(--ink); }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="brand"><span class="mark" aria-hidden="true"></span>Easel</div>
-    <nav>
-      <a href="#download">Download</a>
+
+<nav>
+  <div class="wrap">
+    <a class="logo" href="#"><span class="dot" aria-hidden="true"></span>Easel</a>
+    <div class="links">
       <a href="#shaderclaw">ShaderClaw</a>
-      <a href="#setup">Setup</a>
-      <a href="https://github.com/G3993/easel/releases">All releases</a>
-    </nav>
-  </header>
-
-  <div class="hero">
-    <div class="eyebrow">Easel Studio · <span id="ver">latest release</span></div>
-    <h1>A real-time visual instrument.</h1>
-    <p class="lede">Live shaders, audio reactivity, projection mapping, MIDI and NDI in one app. This build includes the full ShaderClaw3 library and opens on the Studio Pack.</p>
-    <div class="cta">
-      <a class="btn primary" id="heroBtn" href="#download">Download Easel</a>
-      <a class="btn" href="#download">Other platforms</a>
+      <a href="#specs">Specs</a>
+      <a class="get" href="#install">Download</a>
     </div>
-    <div class="meta" id="heroMeta">Free · macOS 26+ (Apple Silicon) and Windows 10/11 x64</div>
   </div>
+</nav>
 
-  <section id="download">
-    <h2>Download</h2>
-    <div class="grid">
-      <div class="card" id="card-mac">
-        <h3>macOS</h3>
-        <div class="sub">Apple Silicon (M1 or newer) · macOS 26 Tahoe or newer · <span data-size="Easel-mac-arm64.zip">zip</span></div>
-        <p>Recommended: paste this into Terminal. It installs Easel to Applications, adds the ShaderClaw3 library at <code>~/ShaderClaw3</code>, and skips the “damaged app” warning.</p>
-        <div class="cmd"><code>curl -fsSL https://g3993.github.io/easel/install.sh | bash</code><button class="copy">Copy</button></div>
-        <div class="or">or download</div>
-        <a class="btn" href="https://github.com/G3993/easel/releases/latest/download/Easel-mac-arm64.zip">Easel-mac-arm64.zip</a>
-        <p class="note" style="margin-top:12px">From the zip: unzip, drag Easel.app to Applications. If macOS says it is damaged, run <code>xattr -dr com.apple.quarantine /Applications/Easel.app</code> once.</p>
-      </div>
-      <div class="card" id="card-win">
-        <h3>Windows</h3>
-        <div class="sub">Windows 10/11 · 64-bit · <span data-size="Easel-windows-x64.zip">zip</span></div>
-        <p>Recommended: paste this into PowerShell. It installs Easel to your user folder with Desktop and Start Menu shortcuts. Run it again later to update.</p>
-        <div class="cmd"><code>irm https://g3993.github.io/easel/install.ps1 | iex</code><button class="copy">Copy</button></div>
-        <div class="or">or download</div>
-        <a class="btn" href="https://github.com/G3993/easel/releases/latest/download/Easel-windows-x64.zip">Easel-windows-x64.zip</a>
-        <p class="note" style="margin-top:12px">Portable: unzip the whole folder anywhere and run Easel.exe. If SmartScreen warns, choose “More info” → “Run anyway”.</p>
-      </div>
-    </div>
-  </section>
+<header class="hero wrap">
+  <p class="kicker">Easel Studio</p>
+  <h1>Play light.</h1>
+  <p class="sub">Shaders, sound and surfaces in one instrument.</p>
+  <div class="actions">
+    <a class="btn" id="primary" href="#install">Download</a>
+    <a class="more" href="#install">Install with one line</a>
+  </div>
+  <p class="fine" id="fine">Free. For Mac and Windows.</p>
+</header>
 
-  <section>
-    <h2>What's inside</h2>
-    <div class="grid three">
-      <div class="card"><div class="stat">340+</div><p>Shaders from the ShaderClaw3 library, bundled in the app. Works offline.</p></div>
-      <div class="card"><div class="stat">Studio Pack</div><p>34 studio shaders. The gallery and both SHOW decks open on it. Copy it, regroup it, or build your own groups.</p></div>
-      <div class="card"><div class="stat">Tools</div><p>SHOW mixer with A/B decks, projection mapping and masks, audio and MIDI binding, NDI in/out, screen and window capture, timeline.</p></div>
-    </div>
-  </section>
-
-  <section id="shaderclaw">
-    <h2>ShaderClaw</h2>
-    <div class="grid">
-      <div class="card">
-        <h3>Shader library</h3>
-        <div class="sub">github.com/G3993/ShaderClaw3</div>
-        <p>Easel already carries a copy. To get new shaders as they're published, or to add your own, keep a live copy at <code>~/ShaderClaw3</code>. The Mac installer sets this up. Easel loads it automatically on launch.</p>
-        <div class="cmd"><code>git clone --depth 1 https://github.com/G3993/ShaderClaw3.git ~/ShaderClaw3</code><button class="copy">Copy</button></div>
-        <p class="note" style="margin-top:12px">Update later with <code>git -C ~/ShaderClaw3 pull</code>. On Windows the bundled copy is used; to use a live one, rename the <code>ShaderClaw3</code> folder next to Easel.exe and clone to <code>%USERPROFILE%\ShaderClaw3</code>.</p>
-      </div>
-      <div class="card">
-        <h3>ShaderClaw editor</h3>
-        <div class="sub">Write and preview ISF shaders</div>
-        <p>Use it in the browser, no install needed:</p>
-        <a class="btn" href="https://shaderclaw.vercel.app" target="_blank" rel="noopener">Open ShaderClaw online</a>
-        <div class="or">or run it locally (Node 18+)</div>
-        <div class="cmd"><code>cd ~/ShaderClaw3 && npm install && npm start</code><button class="copy">Copy</button></div>
-        <p class="note" style="margin-top:12px">Then open <code>http://localhost:7778</code>. Shaders you save into <code>ShaderClaw3/shaders</code> show up in Easel's gallery.</p>
-      </div>
-    </div>
-  </section>
-
-  <section id="setup">
-    <h2>First run</h2>
-    <div class="grid">
-      <div class="card">
-        <h3>macOS</h3>
-        <ol class="steps">
-          <li>Open Easel. When macOS asks, allow <b>Screen &amp; System Audio Recording</b> (for audio reactivity and window capture), plus <b>Microphone</b> and <b>Camera</b> if you use them.</li>
-          <li>If you missed a prompt: System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording → turn on Easel, then reopen it.</li>
-          <li>Open the <b>Gallery</b> to browse the Studio Pack, then send a shader to <b>SHOW</b>.</li>
-        </ol>
-      </div>
-      <div class="card">
-        <h3>Windows</h3>
-        <ol class="steps">
-          <li>Run Easel from the Desktop shortcut, or run Easel.exe in the unzipped folder.</li>
-          <li>Audio reactivity follows your default output device. Choose a microphone in the Audio tab.</li>
-          <li>Optional: install the <b>NDI Runtime</b> from ndi.video for NDI send and receive.</li>
-        </ol>
-      </div>
-    </div>
-    <div class="card" style="margin-top:16px">
-      <h3>Good to know</h3>
-      <ul class="plain">
-        <li>MIDI starts <b>off</b>. Click the MIDI pill to turn it on. Launch Control XL (classic and mk3) is mapped automatically.</li>
-        <li>Your projects, groups and shader settings are stored in <code>~/.easel</code>. Updating Easel keeps them.</li>
-        <li>Builds are not notarized by Apple or signed for Windows, so expect the first-launch warnings described above.</li>
-      </ul>
-    </div>
-  </section>
-
-  <section>
-    <h2>Release notes</h2>
-    <div id="notes" class="card">Loading…</div>
-  </section>
-
-  <footer>
-    <span>Easel · <a href="https://github.com/G3993/easel">source</a> · <a href="https://github.com/G3993/ShaderClaw3">ShaderClaw3</a></span>
-    <span id="published"></span>
-  </footer>
+<div class="wrap">
+  <figure class="shot"><img src="img/gallery.jpg" width="2400" height="1506" alt="The Easel gallery showing the Studio Pack shaders"></figure>
 </div>
 
+<section class="wrap">
+  <div class="center">
+    <h2>Everything, included.</h2>
+    <p class="lead">The full ShaderClaw library ships inside the app. Open it and the Studio Pack is ready to play. No account, no connection needed.</p>
+  </div>
+  <div class="facts">
+    <div class="fact"><span class="n">01</span><div class="big">357</div><p>Shaders, each with motion, colour and texture controls.</p></div>
+    <div class="fact"><span class="n">02</span><div class="big">34</div><p>Studio Pack shaders, ready in the gallery and on both decks.</p></div>
+    <div class="fact"><span class="n">03</span><div class="big">0</div><p>Accounts or connections required. It runs offline.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="center" style="margin-bottom:48px">
+    <h2>Two decks. One fader.</h2>
+    <p class="lead">Cue a shader, shape it, take it live. Launch Control XL maps itself.</p>
+  </div>
+  <figure class="shot"><img src="img/show.jpg" width="2400" height="1506" alt="Easel SHOW page with two decks and a crossfader" loading="lazy"></figure>
+</section>
+
+<section class="wrap" id="install">
+  <div class="center">
+    <h2>Install.</h2>
+    <p class="lead">Paste one line. Easel installs itself and opens.</p>
+  </div>
+  <div class="panel">
+    <div class="center">
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="true" data-os="mac">Mac</button>
+        <button role="tab" aria-selected="false" data-os="win">Windows</button>
+      </div>
+    </div>
+
+    <div class="os on" id="os-mac">
+      <p class="step">In Terminal</p>
+      <div class="cmd"><code>curl -fsSL https://g3993.github.io/easel/install.sh | bash</code><button class="copy">Copy</button></div>
+      <p class="alt">Or <a href="https://github.com/G3993/easel/releases/latest/download/Easel-mac-arm64.zip">download the app</a> <span data-size="Easel-mac-arm64.zip"></span></p>
+      <p class="note">Requires Apple silicon and macOS 26 or later. On first launch, allow Screen &amp; System Audio Recording so Easel can hear your music. If macOS says a downloaded app is damaged, run <code>xattr -dr com.apple.quarantine /Applications/Easel.app</code>.</p>
+    </div>
+
+    <div class="os" id="os-win">
+      <p class="step">In PowerShell</p>
+      <div class="cmd"><code>irm https://g3993.github.io/easel/install.ps1 | iex</code><button class="copy">Copy</button></div>
+      <p class="alt">Or <a href="https://github.com/G3993/easel/releases/latest/download/Easel-windows-x64.zip">download the portable app</a> <span data-size="Easel-windows-x64.zip"></span></p>
+      <p class="note">Windows 10 or 11, 64-bit. If SmartScreen appears, choose More info, then Run anyway. For NDI, install the NDI Runtime from ndi.video.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap center" id="shaderclaw">
+  <h2>Write your own.</h2>
+  <p class="lead">ShaderClaw is where the shaders are made. Save one into the library and it appears in Easel.</p>
+  <div class="pair">
+    <a class="more" href="https://shaderclaw.vercel.app" target="_blank" rel="noopener">Open ShaderClaw</a>
+    <a class="more" href="https://github.com/G3993/ShaderClaw3">Shader library</a>
+  </div>
+</section>
+
+<section class="wrap" id="specs">
+  <h2>Tech specs.</h2>
+  <div class="specs">
+    <div class="row"><h3>Version</h3><div><p id="ver">Latest release</p><p><a class="more" href="https://github.com/G3993/easel/releases/latest">Release notes</a></p></div></div>
+    <div class="row"><h3>Mac</h3><div><p>Apple silicon (M1 or later)</p><p>macOS 26 Tahoe or later</p></div></div>
+    <div class="row"><h3>Windows</h3><div><p>Windows 10 or 11, 64-bit</p><p>GPU with OpenGL 4.1</p></div></div>
+    <div class="row"><h3>Library</h3><div><p>357 ShaderClaw shaders, Studio Pack of 34</p><p>Optional live library at <code>~/ShaderClaw3</code></p></div></div>
+    <div class="row"><h3>Play</h3><div><p>Two decks with crossfader and transitions</p><p>Timeline, show builder, groups</p></div></div>
+    <div class="row"><h3>Inputs</h3><div><p>System audio, microphone, MIDI</p><p>Camera, screen and window capture, NDI</p></div></div>
+    <div class="row"><h3>Outputs</h3><div><p>Multiple projectors with warping and masks</p><p>NDI, recording</p></div></div>
+    <div class="row"><h3>Your work</h3><div><p>Projects and settings live in <code>~/.easel</code> and are kept when you update.</p></div></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="line">
+      <span><span class="dot" aria-hidden="true"></span>&nbsp; Easel</span>
+      <span><a href="https://github.com/G3993/easel">Source</a> &nbsp;·&nbsp; <a href="https://github.com/G3993/easel/releases">All releases</a></span>
+    </div>
+  </div>
+</footer>
+
 <script>
-  // Copy buttons
+  function show(os) {
+    document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-selected', b.dataset.os === os));
+    document.getElementById('os-mac').classList.toggle('on', os === 'mac');
+    document.getElementById('os-win').classList.toggle('on', os === 'win');
+  }
+  document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => show(b.dataset.os)));
+
   document.querySelectorAll('.copy').forEach(b => b.addEventListener('click', async () => {
-    const txt = b.parentElement.querySelector('code').textContent;
-    try { await navigator.clipboard.writeText(txt); b.textContent = 'Copied'; b.classList.add('done'); }
+    try { await navigator.clipboard.writeText(b.previousElementSibling.textContent); b.textContent = 'Copied'; b.classList.add('done'); }
     catch { b.textContent = 'Select'; }
-    setTimeout(() => { b.textContent = 'Copy'; b.classList.remove('done'); }, 1600);
+    setTimeout(() => { b.textContent = 'Copy'; b.classList.remove('done'); }, 1500);
   }));
 
-  // Point the hero button at this visitor's platform.
+  // Point the main button at this computer's download.
   const ua = navigator.userAgent, plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
   const isWin = /Win/i.test(plat) || /Windows/i.test(ua);
   const isMac = !isWin && (/Mac/i.test(plat) || /Mac OS X/i.test(ua));
-  const hero = document.getElementById('heroBtn');
+  const primary = document.getElementById('primary');
   if (isMac) {
-    hero.textContent = 'Download for Mac';
-    hero.href = 'https://github.com/G3993/easel/releases/latest/download/Easel-mac-arm64.zip';
-    document.getElementById('card-mac').classList.add('here');
-    document.querySelector('#card-mac h3').insertAdjacentHTML('beforeend', '<span class="tag">This computer</span>');
+    primary.textContent = 'Download for Mac';
+    primary.href = 'https://github.com/G3993/easel/releases/latest/download/Easel-mac-arm64.zip';
   } else if (isWin) {
-    hero.textContent = 'Download for Windows';
-    hero.href = 'https://github.com/G3993/easel/releases/latest/download/Easel-windows-x64.zip';
-    document.getElementById('card-win').classList.add('here');
-    document.querySelector('#card-win h3').insertAdjacentHTML('beforeend', '<span class="tag">This computer</span>');
+    primary.textContent = 'Download for Windows';
+    primary.href = 'https://github.com/G3993/easel/releases/latest/download/Easel-windows-x64.zip';
+    show('win');
   }
 
-  // Tiny markdown for release notes: headings, bullets, **bold**, `code`, links.
-  function md(src) {
-    const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const inline = t => esc(t)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-      .replace(/(https:\/\/[^\s<)]+)/g, '<a href="$1">$1</a>');
-    let out = '', list = false;
-    for (const raw of src.replace(/\r/g, '').split('\n')) {
-      const line = raw.trim();
-      if (line.startsWith('```')) continue;
-      if (/^[-*] /.test(line)) { if (!list) { out += '<ul>'; list = true; } out += '<li>' + inline(line.slice(2)) + '</li>'; continue; }
-      if (list) { out += '</ul>'; list = false; }
-      if (!line) continue;
-      const h = line.match(/^#+\s*(.*)/);
-      out += h ? '<h4>' + inline(h[1]) + '</h4>' : '<p>' + inline(line) + '</p>';
-    }
-    return out + (list ? '</ul>' : '');
-  }
-
-  // Latest release info (version, sizes, notes). Download links work without it.
+  // Version and sizes from the latest release. Links work without this.
   fetch('https://api.github.com/repos/G3993/easel/releases/latest')
-    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(r => r.ok ? r.json() : Promise.reject())
     .then(rel => {
-      document.getElementById('ver').textContent = rel.tag_name;
-      const d = new Date(rel.published_at);
-      const when = d.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
-      document.getElementById('published').textContent = rel.tag_name + ' · ' + when;
-      document.getElementById('heroMeta').innerHTML = 'Free · <b>' + rel.tag_name + '</b> · released ' + when + ' · macOS 26+ (Apple Silicon) and Windows 10/11 x64';
+      const v = rel.tag_name.replace(/^v/, '');
+      const when = new Date(rel.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+      document.getElementById('fine').textContent = 'Free. Version ' + v + '. For Mac and Windows.';
+      document.getElementById('ver').textContent = v + ', released ' + when;
       const sizes = {};
       (rel.assets || []).forEach(a => sizes[a.name] = a.size);
       document.querySelectorAll('[data-size]').forEach(el => {
         const s = sizes[el.dataset.size];
-        el.textContent = s ? (s / 1048576).toFixed(0) + ' MB' : 'building…';
+        if (s) el.textContent = '(' + Math.round(s / 1048576) + ' MB)';
       });
-      document.getElementById('notes').innerHTML = md(rel.body || 'No notes.');
     })
-    .catch(() => {
-      document.getElementById('notes').innerHTML = 'See <a href="https://github.com/G3993/easel/releases">all releases on GitHub</a>.';
-    });
+    .catch(() => {});
 </script>
 </body>
 </html>
