@@ -215,6 +215,12 @@ if(APPLE)
         set_source_files_properties("${i}" PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources/assets/icons")
     endforeach()
+    # Top-level images (test card + duck sprite) loaded as assets/<name>.png.
+    file(GLOB EASEL_ASSET_IMAGES "${CMAKE_SOURCE_DIR}/assets/*.png")
+    foreach(i ${EASEL_ASSET_IMAGES})
+        set_source_files_properties("${i}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/assets")
+    endforeach()
     set(EASEL_DEFAULT_PRESET "${CMAKE_SOURCE_DIR}/default.easel")
     set_source_files_properties("${EASEL_DEFAULT_PRESET}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
@@ -230,7 +236,7 @@ if(APPLE)
 
     add_executable(${PROJECT_NAME} MACOSX_BUNDLE
         ${SOURCES} ${KISS_FFT_SRC}
-        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} ${EASEL_MODELS} "${EASEL_DEFAULT_PRESET}")
+        "${EASEL_ICON}" ${EASEL_SHADERS} ${EASEL_PARTICLE_SHADERS} ${EASEL_GL_TRANSITIONS} ${EASEL_TAB_ICONS} ${EASEL_ASSET_IMAGES} ${EASEL_MODELS} "${EASEL_DEFAULT_PRESET}")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Easel"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.etherealmachine.easel"

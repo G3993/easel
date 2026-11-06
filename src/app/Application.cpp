@@ -1125,17 +1125,20 @@ bool Application::init() {
                     {
                         namespace fs = std::filesystem;
                         std::error_code ec;
-                        fs::path bundledThumbs = fs::path(path).parent_path() / "thumbs";
                         fs::path cache = fs::path(home) / ".easel" / "shader_thumbs";
-                        if (fs::is_directory(bundledThumbs, ec)) {
+                        // The library's own thumbs/, then the app's bundled copy
+                        // (a fresh ~/ShaderClaw3 clone ships none).
+                        int seeded = 0;
+                        for (fs::path bundledThumbs : { fs::path(path).parent_path() / "thumbs",
+                                                        fs::path(bundled).parent_path() / "thumbs" }) {
+                            if (!fs::is_directory(bundledThumbs, ec)) continue;
                             fs::create_directories(cache, ec);
-                            int seeded = 0;
                             for (const auto& f : fs::directory_iterator(bundledThumbs, ec)) {
                                 fs::path dst = cache / f.path().filename();
                                 if (!fs::exists(dst, ec) && fs::copy_file(f.path(), dst, ec)) seeded++;
                             }
-                            if (seeded) std::cout << "[Thumbs] seeded " << seeded << " previews from the package" << std::endl;
                         }
+                        if (seeded) std::cout << "[Thumbs] seeded " << seeded << " previews from the package" << std::endl;
                     }
                     std::cout << "[ShaderClaw] Auto-connected to: " << path << std::endl;
                     break;
