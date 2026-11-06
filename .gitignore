@@ -38,3 +38,4 @@ smithers.db-wal
 .claude/worktrees/
 external/webrtc/
 build-*/
+dist/

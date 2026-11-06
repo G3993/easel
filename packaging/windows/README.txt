@@ -16,8 +16,9 @@ FIRST RUN
    and the .dll files must stay next to Easel.exe.
 2. Double-click Easel.exe. If SmartScreen warns, click "More info" →
    "Run anyway" (the build is unsigned).
-3. The ShaderClaw3 shader library (ShaderClaw3\shaders, 250+ shaders) is
-   auto-connected on launch. To use a live library instead, put one at
+3. The ShaderClaw3 shader library (ShaderClaw3\shaders, 340+ shaders) is
+   auto-connected on launch. This is the STUDIO edition: the gallery and
+   the SHOW decks open on the Studio Pack group. To use a live library instead, put one at
    %USERPROFILE%\ShaderClaw3\shaders — the bundled copy still wins on
    Windows; delete/rename ShaderClaw3\ in this folder to prefer yours.
 

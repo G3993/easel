@@ -35,7 +35,7 @@ jobs:
           Remove-Item ffmpeg.zip
 
       - name: Configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DEASEL_FEATURED_PACK=studio
 
       - name: Build
         run: cmake --build build --config Release -j --target Easel
@@ -66,6 +66,8 @@ jobs:
           }
 
           Copy-Item packaging/windows/README.txt $out -Force
+          # Ship an empty starting project, never the dev machine's zones/NDI setup.
+          Set-Content -Path "$out/default.easel" -Value '{"layers":[]}' -NoNewline
           Get-ChildItem $out | Format-Table Name, Length
           Compress-Archive -Path $out -DestinationPath Easel-windows-x64.zip -Force
           (Get-Item Easel-windows-x64.zip).Length / 1MB
@@ -85,6 +87,6 @@ jobs:
           if (-not $tag) { $tag = "${{ github.ref_name }}" }
           gh release view $tag 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "Easel $tag" --notes "Portable builds. Windows: unzip, run Easel.exe (see README.txt inside)."
+            gh release create $tag --title "Easel $tag" --notes "Download page: https://g3993.github.io/easel/"
           }
           gh release upload $tag Easel-windows-x64.zip --clobber

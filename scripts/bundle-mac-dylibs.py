@@ -84,6 +84,8 @@ if "@executable_path/../Frameworks" not in rpaths(exe_main):
     tool("-add_rpath", "@executable_path/../Frameworks", exe_main)
 for f in os.listdir(fw):   # libs loaded from libs also search their own folder
     p = os.path.join(fw, f)
+    if not f.endswith(".dylib"):
+        continue  # embedded .frameworks (WebRTC) carry their own rpaths
     if "@loader_path" not in rpaths(p):
         r = subprocess.run(["install_name_tool", "-add_rpath", "@loader_path", p], capture_output=True, text=True)
 print(f"bundled {len(done)} dylibs into {fw}")
