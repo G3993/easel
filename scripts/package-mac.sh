@@ -74,14 +74,14 @@ else
   RT=(--options runtime --timestamp)
 fi
 find "$APP/Contents" -name '*.dylib' -not -path '*.framework/*' -print0 |
-  xargs -0 -I{} codesign --force "${RT[@]}" --sign "$SIGN" {} 2>/dev/null
+  xargs -0 -I{} codesign --force ${RT[@]+"${RT[@]}"} --sign "$SIGN" {} 2>/dev/null
 for fw in "$APP"/Contents/Frameworks/*.framework; do
-  [ -d "$fw" ] && codesign --force "${RT[@]}" --sign "$SIGN" "$fw" 2>/dev/null
+  [ -d "$fw" ] && codesign --force ${RT[@]+"${RT[@]}"} --sign "$SIGN" "$fw" 2>/dev/null
 done
 if [ "$SIGN" = "-" ]; then
   codesign --force --sign - "$APP"
 else
-  codesign --force "${RT[@]}" --entitlements packaging/mac/Easel.entitlements --sign "$SIGN" "$APP"
+  codesign --force ${RT[@]+"${RT[@]}"} --entitlements packaging/mac/Easel.entitlements --sign "$SIGN" "$APP"
 fi
 codesign --verify --deep --strict "$APP"
 
