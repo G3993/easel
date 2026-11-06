@@ -534,7 +534,7 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
 
                         char label[256];
                         if (!claimedBy.empty()) {
-                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                            snprintf(label, sizeof(label), "%s  %dx%d  (shared with %s)",
                                      (*monitors)[mi].name.c_str(),
                                      (*monitors)[mi].width, (*monitors)[mi].height,
                                      claimedBy.c_str());
@@ -550,20 +550,13 @@ void ViewportPanel::render(GLuint texture, MappingProfile* mapping,
                         }
                         bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
                         if (ImGui::Selectable(label, sel)) {
-                            // Steal: set the other zone to None
-                            if (!claimedBy.empty()) {
-                                for (int zi = 0; zi < (int)zones->size(); zi++) {
-                                    if (zi == ai) continue;
-                                    auto& oz = *(*zones)[zi];
-                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
-                                        oz.outputDest = OutputDest::None;
-                                        oz.outputMonitor = -1;
-                                        break;
-                                    }
-                                }
-                            }
+                            // Zones SHARE a projector (each keeps its own mapping): the other
+                            // zone keeps it too.
                             az.outputDest = OutputDest::Fullscreen;
                             az.outputMonitor = mi;
+                            // the projector's identity too, or the next launch
+                            // re-resolves the zone by a stale name and leaves it waiting
+                            az.outputMonitorName = ProjectorOutput::monitorKey(*monitors, mi);
                         }
                         if (!claimedBy.empty()) {
                             ImGui::PopStyleColor();
@@ -2328,7 +2321,7 @@ void ViewportPanel::renderNavBar(bool stageActive,
                         }
                         char label[256];
                         if (!claimedBy.empty()) {
-                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                            snprintf(label, sizeof(label), "%s  %dx%d  (shared with %s)",
                                      (*monitors)[mi].name.c_str(),
                                      (*monitors)[mi].width, (*monitors)[mi].height,
                                      claimedBy.c_str());
@@ -2341,19 +2334,12 @@ void ViewportPanel::renderNavBar(bool stageActive,
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 0.6f));
                         bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
                         if (ImGui::Selectable(label, sel)) {
-                            if (!claimedBy.empty()) {
-                                for (int zi = 0; zi < (int)zones->size(); zi++) {
-                                    if (zi == ai) continue;
-                                    auto& oz = *(*zones)[zi];
-                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
-                                        oz.outputDest = OutputDest::None;
-                                        oz.outputMonitor = -1;
-                                        break;
-                                    }
-                                }
-                            }
+                            // zones share a projector: the other zone keeps it too
                             az.outputDest = OutputDest::Fullscreen;
                             az.outputMonitor = mi;
+                            // the projector's identity too, or the next launch
+                            // re-resolves the zone by a stale name and leaves it waiting
+                            az.outputMonitorName = ProjectorOutput::monitorKey(*monitors, mi);
                         }
                         if (!claimedBy.empty()) ImGui::PopStyleColor();
                         ImGui::PopID();
@@ -2772,7 +2758,7 @@ void ViewportPanel::renderZoneOutputDock(
                         }
                         char label[256];
                         if (!claimedBy.empty()) {
-                            snprintf(label, sizeof(label), "%s  %dx%d  (-> %s)",
+                            snprintf(label, sizeof(label), "%s  %dx%d  (shared with %s)",
                                      (*monitors)[mi].name.c_str(),
                                      (*monitors)[mi].width, (*monitors)[mi].height,
                                      claimedBy.c_str());
@@ -2785,19 +2771,12 @@ void ViewportPanel::renderZoneOutputDock(
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 0.6f));
                         bool sel = (az.outputDest == OutputDest::Fullscreen && az.outputMonitor == mi);
                         if (ImGui::Selectable(label, sel)) {
-                            if (!claimedBy.empty()) {
-                                for (int zi = 0; zi < (int)zones->size(); zi++) {
-                                    if (zi == ai) continue;
-                                    auto& oz = *(*zones)[zi];
-                                    if (oz.outputDest == OutputDest::Fullscreen && oz.outputMonitor == mi) {
-                                        oz.outputDest = OutputDest::None;
-                                        oz.outputMonitor = -1;
-                                        break;
-                                    }
-                                }
-                            }
+                            // zones share a projector: the other zone keeps it too
                             az.outputDest = OutputDest::Fullscreen;
                             az.outputMonitor = mi;
+                            // the projector's identity too, or the next launch
+                            // re-resolves the zone by a stale name and leaves it waiting
+                            az.outputMonitorName = ProjectorOutput::monitorKey(*monitors, mi);
                         }
                         if (!claimedBy.empty()) ImGui::PopStyleColor();
                         ImGui::PopID();

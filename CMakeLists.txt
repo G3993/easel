@@ -108,6 +108,7 @@ file(GLOB_RECURSE SOURCES
 if(APPLE)
     file(GLOB_RECURSE OBJCXX_SOURCES src/*.mm)
     list(APPEND SOURCES ${OBJCXX_SOURCES})
+    set_source_files_properties(src/net/SdkHttp_mac.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 
 # Exclude test harness and VideoSource as needed
@@ -616,6 +617,14 @@ if(NOT APPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_SOURCE_DIR}/default.easel $<TARGET_FILE_DIR:${PROJECT_NAME}>/default.easel
     )
+endif()
+
+# Edition pack: the packs.json group this build opens on — the gallery and
+# both SHOW library decks start on it as an editable list. Empty = none.
+#   cmake -B build-studio -DEASEL_FEATURED_PACK=studio
+set(EASEL_FEATURED_PACK "" CACHE STRING "packs.json group the gallery + SHOW library open on (e.g. studio)")
+if(EASEL_FEATURED_PACK)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE EASEL_FEATURED_PACK="${EASEL_FEATURED_PACK}")
 endif()
 
 # Bundled ShaderClaw3 shader library (git submodule external/ShaderClaw3).

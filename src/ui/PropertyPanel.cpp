@@ -4172,7 +4172,16 @@ void PropertyPanel::render(std::shared_ptr<Layer> layer, bool& maskEditMode,
             {
                 ImGui::Dummy(ImVec2(0, kRowGapY));
                 float rowW = ImGui::GetContentRegionAvail().x;
-                float bw   = (rowW - kColGap) * 0.5f;
+                float bw   = (rowW - kColGap * 2.0f) / 3.0f;
+                // AUTO: one switch for everything that moves by itself
+                {
+                    bool on = f3->autoOn();
+                    if (accentBtn(on ? "AUTO ON##f3auto" : "AUTO OFF##f3auto", bw)) { f3->setAuto(!on); undoNeeded = true; }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(on ? "Things move by themselves (audio reactivity, Audio Motion,\nBreath, Light Drift, Auto Morph). Click to freeze them all."
+                                             : "Automatic movement is OFF - only your knobs move it.\nClick to bring it all back exactly as it was.");
+                    ImGui::SameLine(0, kColGap);
+                }
                 if (accentBtn("Reset##f3defaults", bw)) { f3->resetToDefaults(); undoNeeded = true; }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(f3->isBox() ? "Back to the 3D Box preset." : "Back to the 3D Fluid defaults.");

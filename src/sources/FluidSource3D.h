@@ -114,6 +114,11 @@ public:
     // ── Audio/MIDI-reactive parameter bindings ────────────────────────
     std::map<std::string, AudioBinding>& audioBindings() { return m_audioBindings; }
     const std::map<std::string, AudioBinding>& audioBindings() const { return m_audioBindings; }
+    // AUTO switch: off = everything that moves by itself stops (audio
+    // bindings, Audio Motion, Breath, Light Drift, Auto Morph); on = all of
+    // it comes back exactly as it was. MIDI knob bindings are untouched.
+    bool autoOn() const { return !m_autoParked; }
+    void setAuto(bool on);
     void applyAudioBindings(float level, float bass, float mid, float high,
                             float beat, float dt, class MIDIManager* midi = nullptr,
                             float energy = 0.0f, float build = 0.0f, float drop = 0.0f,
@@ -213,6 +218,7 @@ public:
     // ── Camera / render ───────────────────────────────────────────────
     float m_brightness    = 1.6f;     // diffuse multiplier (HDR + ACES: 2.5 blew out)
     bool  m_autoRotate    = true;
+    float m_boxSpin       = 0.0f;     // box mode: accumulated gravity spin angle (rad)
     float m_rotateSpeed   = 0.2f;     // mstfzS: angles = vec2(0.2*iTime, -0.5)
     float m_tilt          = -0.62f;   // a little more top-down so the floor reads
     float m_zoom          = 1.0f;     // camera zoom (1 = original; >1 zooms in)
@@ -442,4 +448,7 @@ private:
     void reallocVolumes();
     void reallocOutput();
     float effectiveScale() const;   // renderScale × the 4K pixel cap
+    bool m_autoParked = false;
+    std::map<std::string, float> m_autoSavedVals;
+    std::map<std::string, AudioBinding> m_autoSavedBindings;
 };

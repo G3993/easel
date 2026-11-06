@@ -60,6 +60,34 @@ int ProjectorOutput::findMonitorByKey(const std::vector<MonitorInfo>& mons, cons
     // same name + ordinal but a different mode (the projector changed resolution): still it
     std::string stem = key.substr(0, key.find(' '));
     for (int i = 0; i < (int)mons.size(); i++) { std::string k = monitorKey(mons, i); if (k.substr(0, k.find(' ')) == stem) return i; }
+    // two of the same model: macOS renames them "JMGO" -> "JMGO (1)" / "JMGO (2)"
+    // (and back when one is unplugged). Match on the base name; the saved
+    // ordinal / "(n)" picks which of them, ordered by their "(n)".
+    {
+        auto base = [](const std::string& n, int& num) {
+            num = 0;
+            size_t lp = n.rfind(" (");
+            if (lp != std::string::npos && n.size() > lp + 3 && n.back() == ')') {
+                std::string d = n.substr(lp + 2, n.size() - lp - 3);
+                if (!d.empty() && d.find_first_not_of("0123456789") == std::string::npos) { num = std::stoi(d); return n.substr(0, lp); }
+            }
+            return n;
+        };
+        std::string kname = key.substr(0, key.find('#'));
+        int knum = 0;
+        std::string kbase = base(kname, knum);
+        int kord = 0;
+        size_t hp = key.find('#');
+        if (hp != std::string::npos) kord = std::atoi(key.c_str() + hp + 1);
+        int want = knum > 0 ? knum - 1 : kord;
+        std::vector<std::pair<int, int>> same;   // ("(n)", index)
+        for (int i = 0; i < (int)mons.size(); i++) {
+            int n = 0;
+            if (base(mons[i].name, n) == kbase) same.push_back({n, i});
+        }
+        std::sort(same.begin(), same.end());
+        if (!same.empty()) return same[std::min(want, (int)same.size() - 1)].second;
+    }
     // an unnamed projector ("Display N" / "" stem): match on size alone
     std::string sz = key.substr(key.rfind(' ') + 1);
     bool anon = stem.empty() || stem.rfind("Display", 0) == 0 || key[0] == '#';
@@ -243,12 +271,21 @@ void ProjectorOutput::destroy() {
 }
 
 void ProjectorOutput::present(GLuint texture) {
-    presentCrop(texture, 0.0f, 0.0f, 1.0f, 1.0f);
+    presentStack(&texture, 1, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
 void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
                                   float uScaleX, float uScaleY) {
-    if (!m_window || !texture) return;
+    presentStack(&texture, 1, uOffX, uOffY, uScaleX, uScaleY);
+}
+
+// Several zones on ONE projector: each zone's own warped frame (its own
+// corner pin / mesh, black outside it) drawn into the same window and
+// combined with MAX, so black never covers the other zone's light and the
+// draw order doesn't matter. One swap per frame.
+void ProjectorOutput::presentStack(const GLuint* textures, int count, float uOffX, float uOffY,
+                                   float uScaleX, float uScaleY) {
+    if (!m_window || count <= 0) return;
     if ((m_placeCheck++ % 30) == 0) ensurePlacement();   // twice a second
 
     // Check if close was requested (e.g. Escape pressed on projector window)
@@ -284,9 +321,22 @@ void ProjectorOutput::presentCrop(GLuint texture, float uOffX, float uOffY,
     m_shader.setVec2("uUVScale",  glm::vec2(uScaleX, uScaleY));
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texture);
-
-    m_quad.draw();
+    bool blending = false;
+    for (int i = 0; i < count; i++) {
+        if (!textures[i]) continue;
+        if (blending) {
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_MAX);
+            glBlendFunc(GL_ONE, GL_ONE);
+        }
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        m_quad.draw();
+        blending = true;
+    }
+    if (blending && count > 1) {
+        glBlendEquation(GL_FUNC_ADD);
+        glDisable(GL_BLEND);
+    }
 
     glfwSwapBuffers(m_window);
     glfwMakeContextCurrent(m_mainWindow);

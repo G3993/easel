@@ -29,6 +29,9 @@ struct OutputZone {
     // the compositor every frame; saved with the zone.
     SceneParams scene;
     int index = 0;          // position in Application::m_zones (refreshed every frame)
+    // Stable identity for per-zone layer transforms (Layer::zoneXforms).
+    // Survives renames; assigned on first use, saved with the zone.
+    std::string xformKey;
     // The scene as a SHOW extra: a layer that lives here, never in the layer
     // stack, with the scene's lane id (SceneParams::laneId) and a knob adapter
     // source. Lazily built; renamed to follow the zone.
@@ -43,6 +46,7 @@ struct OutputZone {
         return sceneKnobLayer.get();
     }
     Framebuffer warpFBO;
+    Framebuffer mapPatternFBO; // MAPPING / mask-edit calibration pattern at the zone's own size (round circles)
     Framebuffer readbackFBO; // vertically-flipped copy of warpFBO for CPU readback
     GLuint canvasTexture = 0; // post-mask, pre-warp texture for canvas preview
 

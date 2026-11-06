@@ -1635,7 +1635,12 @@ bool UIManager::isPanelVisible(const char* title) const {
     // a submit-without-dockspace frame. Mapping/Zones have no strip.
     if (m_rightDockCollapsedApplied &&
         sMode != WorkspaceMode::Mapping && sMode != WorkspaceMode::Zones) {
-        if (eq("Layers") || eq("Sources") || eq("Mapping") ||
+        // Layers is NOT here: it docks into the LEFT float (rail Canvas
+        // toggle), so folding the right dock must not hide it — that stale
+        // gate (from when Layers lived on the right) made the Layers column
+        // vanish whenever the inspector was folded, leaving no way to
+        // reorder the stack.
+        if (eq("Sources") || eq("Mapping") ||
             eq("Properties") || eq("Audio") || eq("MIDI") ||
             eq("Media") || eq("Zones"))
             return false;

@@ -52,9 +52,14 @@ static std::string fitWithEllipsis(const std::string& text, float maxW) {
 // library tile on that deck, through the same click path as the mouse.
 static int         s_dbgPickDeck = -1;
 static std::string s_dbgPickPath;
+static std::string s_dbgGalleryPick;   // OSC /easel/ui gallerypick <path>: a gallery tile click (test harness)
 static bool isDeckKey(const std::string& k) { return k == kDeckKey[0] || k == kDeckKey[1]; }
+static bool isSimToken(const std::string& p) {
+    return p == "__fluid__" || p == "__fluid3d__" || p == "__fluid3dbox__" || p == "__particles__";
+}
 #include <sstream>
 #include <algorithm>
+#include <random>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
@@ -95,6 +100,23 @@ constexpr int kMk3KnobC[8]     = {29, 30, 31, 32, 33, 34, 35, 36};
 constexpr int kMk3Fader[8]     = { 5,  6,  7,  8,  9, 10, 11, 12};
 constexpr int kMk3BtnRow1[8]   = {37, 38, 39, 40, 41, 42, 43, 44};
 constexpr int kMk3BtnRow2[8]   = {45, 46, 47, 48, 49, 50, 51, 52};
+}
+
+// Mask shapes live in 0-1 UV of the surface they clip, so a preset built
+// with equal x/y radii stretches with the surface (a "circle" on a 16:9
+// output is an oval). Squash the long axis by the surface aspect so
+// Circle / Tri / Oct / Star come out true on screen and on the projector.
+static void trueShape(MaskPath& path, float aspect) {
+    if (!(aspect > 0.0f) || std::fabs(aspect - 1.0f) < 1e-3f) return;
+    const float sx = aspect > 1.0f ? 1.0f / aspect : 1.0f;
+    const float sy = aspect > 1.0f ? 1.0f : aspect;
+    for (auto& pt : path.points()) {
+        pt.position.x = 0.5f + (pt.position.x - 0.5f) * sx;
+        pt.position.y = 0.5f + (pt.position.y - 0.5f) * sy;
+        pt.handleIn.x *= sx;  pt.handleIn.y *= sy;
+        pt.handleOut.x *= sx; pt.handleOut.y *= sy;
+    }
+    path.markDirty();
 }
 
 static void glfwErrorCallback(int error, const char* description) {
@@ -169,6 +191,9 @@ static nlohmann::json easelPrefsLoad();
 static void easelPrefsSet(const char* key, const nlohmann::json& v);
 extern std::string saveFileDialog_mac(const char* filter, const char* defaultExt);
 #endif
+// (re-declared for every platform: the Etherea SDK panel uses them too)
+static nlohmann::json easelPrefsLoad();
+static void easelPrefsSet(const char* key, const nlohmann::json& v);
 
 static std::string openFileDialog(const char* filter) {
 #ifdef _WIN32
@@ -447,6 +472,99 @@ static bool drawVSliderWidgetLight(const char* id, float* value, bool midiBound,
     d->AddRect(ImVec2(cx - 6.5f, fy - 5.0f), ImVec2(cx + 6.5f, fy + 5.0f), IM_COL32(0, 0, 0, 35), 2.0f);
     ImGui::PopID();
     return changed;
+}
+
+const std::string& Application::zoneXformKey(OutputZone& z) {
+    if (z.xformKey.empty()) {
+        static std::mt19937 rng{std::random_device{}()};
+        for (;;) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "z%08x", (unsigned)rng());
+            bool taken = false;
+            for (auto& zp : m_zones) if (zp && zp->xformKey == buf) taken = true;
+            if (!taken) { z.xformKey = buf; break; }
+        }
+    }
+    return z.xformKey;
+}
+
+// ── SPAN canvas ─────────────────────────────────────────────────────────
+std::vector<OutputZone*> Application::spanZones() {
+    std::vector<OutputZone*> out;
+    if (m_span.layout == 0) return out;
+    if (!m_span.members.empty()) {
+        for (auto& zp : m_zones) if (zp && m_span.members.count(zoneXformKey(*zp))) out.push_back(zp.get());
+    } else {
+        for (auto& zp : m_zones) if (zp && zp->outputDest == OutputDest::Fullscreen) out.push_back(zp.get());
+    }
+    if (out.size() < 2) { out.clear(); return out; }
+    if (m_span.reverse) std::reverse(out.begin(), out.end());
+    return out;
+}
+
+bool Application::spanSlice(const OutputZone* z, glm::vec4& slice, int* totalW, int* totalH) {
+    auto zs = spanZones();
+    if (zs.empty()) return false;
+    const bool side = (m_span.layout == 1);
+    int sum = 0, mx = 0, at = -1, off = 0;
+    for (size_t i = 0; i < zs.size(); i++) {
+        int along  = side ? zs[i]->width  : zs[i]->height;
+        int across = side ? zs[i]->height : zs[i]->width;
+        if (zs[i] == z) { at = (int)i; off = sum; }
+        sum += std::max(1, along);
+        mx = std::max(mx, across);
+    }
+    if (totalW) *totalW = side ? sum : mx;
+    if (totalH) *totalH = side ? mx : sum;
+    if (at < 0) return false;
+    int along = std::max(1, side ? z->width : z->height);
+    float a0 = (float)off / sum, aw = (float)along / sum;
+    slice = side ? glm::vec4(a0, 0.0f, aw, 1.0f) : glm::vec4(0.0f, a0, 1.0f, aw);
+    return true;
+}
+
+// A layer spans when it is on every span zone (a layer kept to one zone
+// stays whole in that zone).
+bool Application::layerSpans(const Layer* L) {
+    if (!L) return false;
+    auto zs = spanZones();
+    if (zs.empty()) return false;
+    for (auto* z : zs) {
+        bool in = z->showAllLayers
+            ? (L->managedKey.empty() || isDeckKey(L->managedKey) || z->visibleLayerIds.count(L->id))
+            : z->visibleLayerIds.count(L->id) > 0;
+        if (!in) return false;
+    }
+    return true;
+}
+
+// Moving a layer moves it in the zone you are in, nowhere else. The live
+// transform fields belong to the active zone: switching zones parks them in
+// the old zone's slot and loads the new zone's; a zone that has never seen
+// the layer gets its own copy of where it is now. Other zones composite with
+// their copy swapped in (compositeZone).
+void Application::syncZoneXforms() {
+    if (m_zones.empty()) return;
+    std::string cur = zoneXformKey(activeZone());
+    if (cur != m_xformLiveKey) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& L = m_layerStack[i];
+            if (!L) continue;
+            if (!m_xformLiveKey.empty()) L->zoneXforms[m_xformLiveKey] = L->xform();
+            auto it = L->zoneXforms.find(cur);
+            if (it != L->zoneXforms.end()) L->setXform(it->second);
+        }
+        m_xformLiveKey = cur;
+    }
+    for (int i = 0; i < m_layerStack.count(); i++) {
+        auto& L = m_layerStack[i];
+        if (!L) continue;
+        for (auto& zp : m_zones) {
+            if (!zp) continue;
+            const std::string& k = zoneXformKey(*zp);
+            if (k != cur && !L->zoneXforms.count(k)) L->zoneXforms[k] = L->xform();
+        }
+    }
 }
 
 MappingProfile* Application::mappingForZone(OutputZone& z) {
@@ -731,6 +849,14 @@ bool Application::init() {
             std::cerr << "Failed to load assets/duck.png\n";
     }
 
+    // Live MAPPING calibration patterns + the mask-handle overlay. If either
+    // fails to load, the baked m_mapPatterns / m_maskGrid textures below are
+    // the fallback and no handles get burned into the output.
+    if (!m_mapPatternShader.loadFromFiles("shaders/passthrough.vert", "shaders/mappattern.frag"))
+        std::cerr << "Failed to load mappattern.frag - using the baked patterns\n";
+    if (!m_maskHandlesShader.loadFromFiles("shaders/passthrough.vert", "shaders/maskhandles.frag"))
+        std::cerr << "Failed to load maskhandles.frag - no mask handles on the output\n";
+
     // Generate white alignment grid texture. Shown INSTEAD of the test
     // pattern while a mask (canvas or layer) is being added/edited so the
     // user can see crisp alignment lines while mapping the masked surface.
@@ -876,6 +1002,14 @@ bool Application::init() {
     // Auto-connect to Etherea (no session ID — server gives us the active session)
     m_ethereaClient.connect("http://localhost:7860");
 
+    // Etherea SDK control (prompt + abstraction on Tulip's show). Only the
+    // address/key are set here — nothing is read until the panel is opened
+    // and nothing is ever written without a user action.
+    m_ethereaSdk.setConnection(
+        easelPrefsLoad().value("ethereaSdkUrl", std::string("http://127.0.0.1:8767")),
+        EthereaSdkClient::loadKey());
+    m_ethereaSdk.start();
+
     // Cue: parallel realtime cue harness. Pushes transcript + actions into DataBus.
     m_cueClient.setTranscriptCallback([this](const std::string& text, bool isFinal, const std::string& /*speaker*/) {
         pushCueWords(text, isFinal);   // sets cue.latest + cue.words (new-words delta)
@@ -944,8 +1078,16 @@ bool Application::init() {
         m_ndiSources = m_ndiFinder.sources();
         // Auto-start composition output (suppressed on receive-only boxes:
         // daisy sets EASEL_NO_NDI_OUTPUT=1 so it never advertises NDI senders)
-        if (!getenv("EASEL_NO_NDI_OUTPUT")) m_ndiOutput.create("Lu");
+        if (!getenv("EASEL_NO_NDI_OUTPUT")) m_ndiOutput.create(featuredPack().empty() ? "Lu" : "Easel");   // an edition build isn't Lu's machine
     }
+#endif
+
+    // MIDI starts the way it was left. First launch: off in client editions
+    // (opt-in), on in the house build where the controller lives.
+#ifdef EASEL_FEATURED_PACK
+    m_midiUserDisconnected = !easelPrefsLoad().value("midiEnabled", false);
+#else
+    m_midiUserDisconnected = !easelPrefsLoad().value("midiEnabled", true);
 #endif
 
     // Auto-connect to ShaderClaw shaders directory
@@ -977,6 +1119,24 @@ bool Application::init() {
             for (const auto& path : candidates) {
                 if (std::filesystem::exists(path)) {
                     m_shaderClaw.connect(path);
+                    // A packaged library ships previews beside it
+                    // (ShaderClaw3/thumbs): seed the cache with any missing,
+                    // so a fresh install opens with every tile filled.
+                    {
+                        namespace fs = std::filesystem;
+                        std::error_code ec;
+                        fs::path bundledThumbs = fs::path(path).parent_path() / "thumbs";
+                        fs::path cache = fs::path(home) / ".easel" / "shader_thumbs";
+                        if (fs::is_directory(bundledThumbs, ec)) {
+                            fs::create_directories(cache, ec);
+                            int seeded = 0;
+                            for (const auto& f : fs::directory_iterator(bundledThumbs, ec)) {
+                                fs::path dst = cache / f.path().filename();
+                                if (!fs::exists(dst, ec) && fs::copy_file(f.path(), dst, ec)) seeded++;
+                            }
+                            if (seeded) std::cout << "[Thumbs] seeded " << seeded << " previews from the package" << std::endl;
+                        }
+                    }
                     std::cout << "[ShaderClaw] Auto-connected to: " << path << std::endl;
                     break;
                 }
@@ -1305,6 +1465,7 @@ void Application::run() {
         }
 
         updateSources();
+        tickThumbJobs();   // previews render in the same GL context/state as the layers
 
 #ifdef HAS_FFMPEG
         // Re-sync the audio device list after hot-plug events (interface
@@ -2098,6 +2259,7 @@ void Application::run() {
         m_closingStep.store(3);
         m_ethereaClient.disconnect();
         m_cueClient.disconnect();
+        m_ethereaSdk.stop();
 
         m_closingStep.store(4);
 #ifdef HAS_NDI
@@ -2512,6 +2674,11 @@ void Application::updateSources() {
         } else if (l->source->typeName() == "Fluid") {
             uint32_t sid = static_cast<FluidSource*>(l->source.get())->imageSource().sourceLayerId;
             if (sid) referencedSources.insert(sid);
+        } else if (auto* ssr = dynamic_cast<ShaderSource*>(l->source.get())) {
+            // a shader reading another layer (TEXTURE input, WebRTC Stream
+            // shader) keeps that layer playing even when it's hidden
+            for (const auto& [nm, b] : ssr->imageBindings())
+                if (b.sourceLayerId) referencedSources.insert(b.sourceLayerId);
         }
     }
 
@@ -2561,6 +2728,14 @@ void Application::updateSources() {
                         }
                     }
                     if (sw == 0 || sh == 0) { sw = activeZone().width; sh = activeZone().height; }
+                    // SPAN: render once at the whole span canvas (each zone
+                    // shows its slice). Capped near 4K pixel count.
+                    int tw = 0, th = 0; glm::vec4 sl;
+                    if (layerSpans(layer.get()) && spanSlice(spanZones().front(), sl, &tw, &th)) {
+                        double px = (double)tw * th, cap = 3840.0 * 2160.0;
+                        double k = px > cap ? std::sqrt(cap / px) : 1.0;
+                        sw = std::max(16, (int)(tw * k)); sh = std::max(16, (int)(th * k));
+                    }
                 }
                 shaderSrc->setResolution(sw, sh);
                 // Baked-in audio reactivity removed: shaders no longer receive
@@ -2685,6 +2860,25 @@ void Application::updateSources() {
                 );
                 shaderSrc->setMouseState(normMX, normMY, mousePressed);
 
+                // Live-stream inputs: an image input named "liveStream" is fed
+                // from the WebRTC/WHEP stream layer (the WebRTC Stream shader),
+                // so it works on SHOW decks without picking a texture by hand.
+                for (const auto& in : shaderSrc->inputs()) {
+                    if (in.type != "image" || in.name != "liveStream") continue;
+                    auto& b = shaderSrc->imageBindings()[in.name];
+                    if (!b.filePath.empty()) continue;
+                    bool alive = false;
+                    if (b.sourceLayerId)
+                        for (int j = 0; j < m_layerStack.count(); j++)
+                            if (m_layerStack[j] && m_layerStack[j]->id == b.sourceLayerId && m_layerStack[j]->source) { alive = true; break; }
+                    if (!alive) {
+                        b.sourceLayerId = 0; b.textureId = 0; b.width = b.height = 0;
+                        for (int j = 0; j < m_layerStack.count(); j++) {
+                            auto& cand = m_layerStack[j];
+                            if (cand && cand->source && cand->source->typeName() == "WHEP") { b.sourceLayerId = cand->id; break; }
+                        }
+                    }
+                }
                 // Refresh image input bindings (texture IDs may change each frame)
                 for (auto& [name, binding] : shaderSrc->imageBindings()) {
                     if (binding.sourceLayerId == 0) continue;
@@ -3070,6 +3264,7 @@ void Application::compositeAndWarp() {
         (m_ui.isPanelVisible("Stage") &&
          UIManager::sMode == UIManager::WorkspaceMode::Stage);
     OutputZone* active = m_zones.empty() ? nullptr : &activeZone();
+    syncZoneXforms();
     for (int i = 0; i < (int)m_zones.size(); i++) {
         auto& zone = *m_zones[i];
         // a Fullscreen zone whose projector is unplugged (waiting, index -1)
@@ -3099,6 +3294,22 @@ void Application::compositeAndWarp() {
 
 void Application::compositeZone(OutputZone& zone) {
     if (!zone.ensureGpu()) return;
+    // A zone other than the one being edited draws every layer at ITS
+    // transform: swap the zone's copy in for this composite, back after.
+    struct XformSwap {
+        std::vector<std::pair<Layer*, Layer::ZoneXform>> saved;
+        ~XformSwap() { for (auto it = saved.rbegin(); it != saved.rend(); ++it) it->first->setXform(it->second); }
+    } xformSwap;
+    if (!zone.xformKey.empty() && zone.xformKey != m_xformLiveKey) {
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& L = m_layerStack[i];
+            if (!L) continue;
+            auto it = L->zoneXforms.find(zone.xformKey);
+            if (it == L->zoneXforms.end()) continue;
+            xformSwap.saved.push_back({L.get(), L->xform()});
+            L->setXform(it->second);
+        }
+    }
     // Filter layers by zone visibility.
     // "Show all" covers HUMAN-added layers only: agent-managed feed layers
     // (managedKey set — e.g. the FluxRT layer inside a published bus zone)
@@ -3149,6 +3360,36 @@ void Application::compositeZone(OutputZone& zone) {
         audio.barPhase = m_bpmSync.barPhase();
         zone.compositor.setAudioState(audio);
     }
+    // SPAN: every layer that spans is mapped from the big canvas into this
+    // zone's slice — scale up by 1/slice, shift so the slice centres here.
+    {
+        // The compositor keeps a layer's native aspect (CompositeEngine::
+        // layerTransform: x scaled by layerAspect/canvasAspect), so solve for
+        // the transform that lands the layer where it would sit on the big
+        // canvas: total = D * (bigTransform - c). Exact for unrotated layers.
+        glm::vec4 sl; int TW = 0, TH = 0;
+        if (spanSlice(&zone, sl, &TW, &TH) && TW > 0 && TH > 0 && zone.width > 0 && zone.height > 0) {
+            glm::vec2 D(1.0f / sl.z, 1.0f / sl.w);
+            glm::vec2 c(2.0f * sl.x - 1.0f + sl.z, 1.0f - 2.0f * sl.y - sl.w);   // slice centre, NDC (+y up)
+            const float bigAsp  = (float)TW / TH;
+            const float zoneAsp = (float)zone.width / zone.height;
+            for (auto& L : layers) {
+                if (!L || !layerSpans(L.get())) continue;
+                xformSwap.saved.push_back({L.get(), L->xform()});
+                bool mosaicFill = (L->tileX > 1.0f || L->tileY > 1.0f || L->mosaicMode != MosaicMode::Mirror);
+                float nBig = 1.0f, nZone = 1.0f;
+                if (!mosaicFill && L->width() > 0 && L->height() > 0) {
+                    float la = (float)L->width() / L->height();
+                    nBig = la / bigAsp; nZone = la / zoneAsp;
+                }
+                glm::vec2 a = L->anchor, S = L->scale;
+                glm::vec2 t = L->position + a - S * a;                 // big-canvas translation
+                glm::vec2 S2(D.x * S.x * nBig / nZone, D.y * S.y);
+                L->scale    = S2;
+                L->position = D * (t - c) - a + S2 * a;
+            }
+        }
+    }
     zone.compositor.setScene(&zone.scene);
     zone.compositor.composite(layers);
 
@@ -3181,18 +3422,23 @@ void Application::compositeZone(OutputZone& zone) {
     // the mapping. Reverts automatically the moment mask edit mode exits
     // (m_maskEditMode is cleared together with the active mask index).
     // Pure visual aid — masking math/mapping/persistence are untouched.
-    if (m_maskEditMode) {
-        sourceTex = m_maskGrid.id();
+    // SHOW / Gallery are pages laid over the workspace: while one is up, the
+    // output is the show, never a calibration aid left over from Mapping.
+    const bool pageUp = UIManager::sShowOpen || UIManager::sGalleryOpen;
+    if (m_maskEditMode && !pageUp) {
+        GLuint g = renderMapPattern(zone, 0, false, false);   // grid at the zone's own aspect, no corner rings
+        sourceTex = g ? g : m_maskGrid.id();
     }
     // MAPPING workspace: always show the selected black/white calibration
     // pattern as the warp source (overrides live content AND the color test
     // pattern) so the user aligns geometry to crisp lines. Takes precedence
     // over the mask-edit grid above since it's the deliberate mapping aid.
-    if (UIManager::sMode == UIManager::WorkspaceMode::Mapping) {
+    if (UIManager::sMode == UIManager::WorkspaceMode::Mapping && !pageUp) {
         int pi = m_warpEditor.testPatternIndex();
         if (pi < 0) pi = 0;
         if (pi >= kMapPatternCount) pi = kMapPatternCount - 1;
-        sourceTex = m_mapPatterns[pi].id();
+        GLuint live = renderMapPattern(zone, pi, m_warpEditor.testPatternAnimate());
+        sourceTex = live ? live : m_mapPatterns[pi].id();
     }
 
     // Canvas-level masks (MappingProfile). These now clip the FINAL warped
@@ -3576,6 +3822,82 @@ void Application::compositeZone(OutputZone& zone) {
         m_quad.draw();
         Framebuffer::unbind();
     }
+
+    // Mask being edited: its handles go onto the projected frame too.
+    drawMaskHandlesOnOutput(zone, mpMask);
+}
+
+// The calibration pattern for one zone, drawn live at the zone's own size so
+// rings stay round and cells square whatever the output aspect. Returns 0
+// when the shader isn't available (caller falls back to the baked textures).
+GLuint Application::renderMapPattern(OutputZone& zone, int pattern, bool animate, bool markers) {
+    if (m_mapPatternShader.id() == 0 || zone.width <= 0 || zone.height <= 0) return 0;
+    if (zone.mapPatternFBO.width() != zone.width || zone.mapPatternFBO.height() != zone.height)
+        zone.mapPatternFBO.create(zone.width, zone.height);
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    zone.mapPatternFBO.bind();
+    glViewport(0, 0, zone.width, zone.height);
+    m_mapPatternShader.use();
+    m_mapPatternShader.setMat3("uTransform", glm::mat3(1.0f));
+    m_mapPatternShader.setBool("uFlipV", false);
+    m_mapPatternShader.setInt("uPattern", pattern);
+    m_mapPatternShader.setBool("uAnimate", animate);
+    m_mapPatternShader.setBool("uMarkers", markers);
+    m_mapPatternShader.setFloat("uTime", (float)glfwGetTime());
+    m_mapPatternShader.setVec2("uRes", glm::vec2((float)zone.width, (float)zone.height));
+    m_quad.draw();
+    Framebuffer::unbind();
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    return zone.mapPatternFBO.textureId();
+}
+
+// While a canvas mask is being edited, burn its outline + anchor handles
+// into the final output (warpFBO) so they show on the PROJECTOR, where the
+// mask is actually lined up — not only as ImGui overlays in the editor.
+// Canvas-mask points live in the same 0-1 output UV space as warpFBO.
+void Application::drawMaskHandlesOnOutput(OutputZone& zone, MappingProfile* mp) {
+    if (!m_maskEditMode || m_selectedLayer >= 0 || !mp || m_maskHandlesShader.id() == 0) return;
+    if (UIManager::sShowOpen || UIManager::sGalleryOpen) return;   // a page is up: output is the show
+    if (mp->activeMaskIndex < 0 || mp->activeMaskIndex >= (int)mp->masks.size()) return;
+    const MaskPath& path = mp->masks[mp->activeMaskIndex].path;
+    if (path.count() < 1) return;
+    std::vector<glm::vec2> outline = path.count() >= 2 ? path.tessellate(12) : std::vector<glm::vec2>{};
+    if (outline.size() > 160) {             // decimate to the shader's budget
+        std::vector<glm::vec2> d;
+        float step = outline.size() / 160.0f;
+        for (int i = 0; i < 160; i++) d.push_back(outline[(size_t)(i * step)]);
+        outline.swap(d);
+    }
+    std::vector<glm::vec2> anchors;
+    for (const auto& pt : path.points()) {
+        if (anchors.size() >= 48) break;
+        anchors.push_back(pt.position);
+    }
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    zone.warpFBO.bind();
+    glViewport(0, 0, zone.width, zone.height);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    m_maskHandlesShader.use();
+    GLuint prog = m_maskHandlesShader.id();
+    m_maskHandlesShader.setMat3("uTransform", glm::mat3(1.0f));
+    m_maskHandlesShader.setBool("uFlipV", false);
+    m_maskHandlesShader.setVec2("uRes", glm::vec2((float)zone.width, (float)zone.height));
+    m_maskHandlesShader.setFloat("uTime", (float)glfwGetTime());
+    m_maskHandlesShader.setInt("uOutlineCount", (int)outline.size());
+    m_maskHandlesShader.setBool("uClosed", path.closed());
+    m_maskHandlesShader.setInt("uAnchorCount", (int)anchors.size());
+    m_maskHandlesShader.setInt("uSelected", m_viewportPanel.maskSelectedPoint());
+    if (!outline.empty())
+        glUniform2fv(glGetUniformLocation(prog, "uOutline"), (GLsizei)outline.size(), &outline[0].x);
+    if (!anchors.empty())
+        glUniform2fv(glGetUniformLocation(prog, "uAnchors"), (GLsizei)anchors.size(), &anchors[0].x);
+    m_quad.draw();
+    glDisable(GL_BLEND);
+    Framebuffer::unbind();
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 }
 
 void Application::renderReadbackFBO(OutputZone& zone) {
@@ -3718,6 +4040,9 @@ void Application::presentOutputs() {
 
     // Track which monitor indices are still needed
     std::set<int> neededMonitors;
+    // Zones can share a projector: each keeps its own warp, and all of a
+    // monitor's zones are presented together after the loop.
+    std::map<int, std::vector<GLuint>> projectorFrames;
 
     // Per-zone output routing
     for (int i = 0; i < (int)m_zones.size(); i++) {
@@ -3750,7 +4075,7 @@ void Application::presentOutputs() {
                         zone.height != proj->projectorHeight()) {
                         zone.resize(proj->projectorWidth(), proj->projectorHeight());
                     }
-                    proj->present(zone.warpFBO.textureId());
+                    projectorFrames[zone.outputMonitor].push_back(zone.warpFBO.textureId());
                 }
             }
         }
@@ -3798,6 +4123,12 @@ void Application::presentOutputs() {
             }
         }
 #endif
+    }
+
+    for (auto& [mi, frames] : projectorFrames) {
+        auto it = m_projectors.find(mi);
+        if (it != m_projectors.end() && it->second->isActive())
+            it->second->presentStack(frames.data(), (int)frames.size());
     }
 
     // Spanned mode: for each monitor slice, crop its [u0,u1] half out of the
@@ -4119,6 +4450,15 @@ void Application::duplicateZone(int index) {
 
     auto z = std::make_unique<OutputZone>();
     z->name = src.name + " Copy";
+    {
+        const std::string sk = zoneXformKey(src), nk = zoneXformKey(*z);
+        for (int i = 0; i < m_layerStack.count(); i++) {
+            auto& L = m_layerStack[i];
+            if (!L) continue;
+            auto it = L->zoneXforms.find(sk);
+            L->zoneXforms[nk] = (sk == m_xformLiveKey || it == L->zoneXforms.end()) ? L->xform() : it->second;
+        }
+    }
     z->width = src.width;
     z->height = src.height;
     z->compPreset = src.compPreset;
@@ -4626,6 +4966,7 @@ void Application::renderUI() {
     // Viewport and LayerPanel handle their own deselect on empty-space click.
 
     handleDroppedFiles();
+    ensureFeaturedPack();   // no-op after the first connected frame
 
     // Process MIDI events
     {
@@ -4648,6 +4989,23 @@ void Application::renderUI() {
                 m_midiCCValues[ev.channel][ev.number] = ev.value / 127.0f;
                 // First sighting of each CC number goes to the log once — the
                 // breadcrumb that tells us what a controller actually sends.
+                // The XL generation, learned from what the hardware sends:
+                // CC 21-28 only exists as the XL 3's middle knob row, 49-56
+                // only as the classic XL's bottom row. Fixes "row 2 dead,
+                // row 3 drives row 2" whatever the device is called.
+                if (m_midiManager.hasLaunchControl() &&
+                    ((ev.number >= 21 && ev.number <= 28) || (ev.number >= 49 && ev.number <= 56))) {
+                    bool mk3 = ev.number <= 28;
+                    if (!m_showLCXLDetected || m_showLCXLMk3 != mk3) {
+                        bool changed = (lcxlMk3() != mk3);
+                        m_showLCXLMk3 = mk3;
+                        m_showLCXLDetected = true;
+                        std::cerr << "[Show] XL layout: " << (mk3 ? "XL 3" : "classic")
+                                  << " (learned from CC " << ev.number << ")" << std::endl;
+                        if (changed)
+                            if (Layer* t = resolveShowTarget()) autoMapShaderToLCXL(t->source.get());
+                    }
+                }
                 static bool sSeen[128] = {};
                 if (!sSeen[ev.number]) {
                     sSeen[ev.number] = true;
@@ -4875,6 +5233,32 @@ void Application::renderUI() {
                     if (v == "gallery") UIManager::sGalleryFromShow = UIManager::sShowOpen;
                     UIManager::sGalleryOpen = (v == "gallery");
                     UIManager::sShowOpen    = (v == "show");
+                } else if (what == "testmask") {
+                    // /easel/ui testmask 1 — a 4-corner canvas mask in edit mode (test harness)
+                    if (!m_zones.empty()) if (auto* mp = mappingForZone(activeZone())) {
+                        MappingMask m;
+                        m.name = "Canvas " + std::to_string(mp->masks.size() + 1);
+                        if (v == "circle") {   // the Circle preset button's exact path
+                            m.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f});
+                            trueShape(m.path, activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f);
+                        } else {
+                            m.path.addPoint({0.18f, 0.20f}); m.path.addPoint({0.80f, 0.16f});
+                            m.path.addPoint({0.84f, 0.82f}); m.path.addPoint({0.15f, 0.78f});
+                            m.path.setClosed(true);
+                        }
+                        mp->masks.push_back(std::move(m));
+                        mp->activeMaskIndex = (int)mp->masks.size() - 1;
+                        m_maskEditMode = true;
+                        m_selectedLayer = -1;
+                    }
+                } else if (what == "thumbs") {
+                    // /easel/ui thumbs refresh — re-render every library preview
+                    if (v == "refresh") queueAllThumbs();
+                    else queueThumb(msg.strings[1], true);
+                } else if (what == "gallerypick") {
+                    // /easel/ui gallerypick <shader path or file> — same routing as a tile click
+                    s_dbgGalleryPick = msg.strings[1];
+                    UIManager::sGalleryOpen = true;
                 } else if (what == "deckpick" && msg.strings.size() >= 3) {
                     s_dbgPickDeck = atoi(v.c_str()) ? 1 : 0;
                     s_dbgPickPath = msg.strings[2];
@@ -4911,6 +5295,15 @@ void Application::renderUI() {
                     // slider, so the chosen transition runs at that position.
                     float xv = std::max(0.0f, std::min(1.0f, (float)atof(v.c_str())));
                     takeOverFromShowGlobal(); decksToFront(); m_deckBlend = xv; m_deckAnim = false;
+                } else if (what == "deckblend" && msg.strings.size() >= 3) {
+                    // /easel/ui deckblend <a|b> <mode name> — a deck's blend mode
+                    int di = (v == "b" || v == "1") ? 1 : 0;
+                    for (int i = 0; i < (int)BlendMode::COUNT; i++) {
+                        std::string nm = blendModeName((BlendMode)i), want = msg.strings[2];
+                        for (auto& c : nm) c = (char)tolower((unsigned char)c);
+                        for (auto& c : want) c = (char)tolower((unsigned char)c);
+                        if (nm == want) m_deckBlendModes[di] = (BlendMode)i;
+                    }
                 } else if (what == "secs") {
                     m_deckTransSecs = (float)atof(v.c_str());
                 } else if (what == "library") {
@@ -4939,8 +5332,11 @@ void Application::renderUI() {
                     int di = (v == "a" || v == "0") ? 0 : (v == "b" || v == "1") ? 1 : -1;
                     if (di >= 0 && deckLayer(di)) deckTakeSurface(di, true);
                 } else if (what == "pattern") {
-                    // /easel/ui pattern <0-5> — the MAPPING test pattern (test harness)
+                    // /easel/ui pattern <0-6> — the MAPPING test pattern (test harness)
                     m_warpEditor.setTestPatternIndex(atoi(v.c_str()));
+                } else if (what == "patternanim") {
+                    // /easel/ui patternanim 1|0 — animate the MAPPING test pattern
+                    m_warpEditor.setTestPatternAnimate(v == "1" || v == "on" || v == "true");
                 }
             } else if (msg.address == "/easel/layer/add" && !msg.strings.empty()) {
                 // Programmatic layer add — used by the bridge test harness
@@ -5395,6 +5791,23 @@ void Application::renderUI() {
                 // Network stream field (WHEP for http(s), FFmpeg for srt/rtmp)
                 connectNetworkStream(msg.strings[0]);
 #endif
+            } else if (msg.address == "/easel/span") {
+                // /easel/span <0 off | 1 side by side | 2 stacked> [reverse 0/1]
+                if (!msg.ints.empty()) m_span.layout = std::clamp(msg.ints[0], 0, 2);
+                else if (!msg.floats.empty()) m_span.layout = std::clamp((int)msg.floats[0], 0, 2);
+                else if (!msg.strings.empty()) {
+                    const std::string& v = msg.strings[0];
+                    m_span.layout = (v == "side" || v == "h") ? 1 : (v == "stack" || v == "stacked" || v == "v") ? 2 : 0;
+                }
+                if (msg.ints.size() >= 2) m_span.reverse = msg.ints[1] != 0;
+            } else if (msg.address == "/easel/layer/xform" && !msg.ints.empty() && msg.floats.size() >= 2) {
+                // /easel/layer/xform <layerIndex> <x> <y> [scale] — moves the
+                // layer in the ACTIVE zone only (per-zone transforms)
+                int li = msg.ints[0];
+                if (li >= 0 && li < m_layerStack.count() && m_layerStack[li]) {
+                    m_layerStack[li]->position = {msg.floats[0], msg.floats[1]};
+                    if (msg.floats.size() >= 3) m_layerStack[li]->scale = glm::vec2(msg.floats[2]);
+                }
             } else if (msg.address == "/easel/layer/move" && msg.ints.size() >= 2) {
                 int from = msg.ints[0];
                 int to   = msg.ints[1];
@@ -6041,10 +6454,8 @@ void Application::renderUI() {
                                  zMonitors[mi].width, zMonitors[mi].height);
                         bool sel = (z.outputDest == OutputDest::Fullscreen && z.outputMonitor == mi);
                         if (ImGui::Selectable(lbl, sel)) {
-                            for (auto& oz : m_zones)
-                                if (oz.get() != &z && oz->outputDest == OutputDest::Fullscreen && oz->outputMonitor == mi) {
-                                    oz->outputDest = OutputDest::None; oz->outputMonitor = -1;
-                                }
+                            // other zones on this projector KEEP it: zones share
+                            // a projector, each with its own mapping
                             z.outputDest = OutputDest::Fullscreen; z.outputMonitor = mi;
                             z.outputMonitorName = ProjectorOutput::monitorKey(zMonitors, mi);
                         }
@@ -6187,13 +6598,13 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(zc[0], zc[1], zc[2], 1.0f));
                 if (ImGui::Button("Rect##c", ImVec2(shapeW, 0))) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
                 ImGui::SameLine();
-                if (ImGui::Button("Circle##c", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
+                if (ImGui::Button("Circle##c", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); trueShape(mask.path, activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f); }
                 ImGui::SameLine();
-                if (ImGui::Button("Tri##c", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); }
+                if (ImGui::Button("Tri##c", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); trueShape(mask.path, activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f); }
                 ImGui::SameLine();
-                if (ImGui::Button("Oct##c", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); }
+                if (ImGui::Button("Oct##c", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); trueShape(mask.path, activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f); }
                 ImGui::SameLine();
-                if (ImGui::Button("Star##c", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
+                if (ImGui::Button("Star##c", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); trueShape(mask.path, activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f); }
                 ImGui::PopStyleColor(4);
             }
         }
@@ -6280,6 +6691,11 @@ void Application::renderUI() {
             }
             ImGui::PopStyleColor(4);
 
+            auto layerMaskAspect = [&]() -> float {
+                if (maskLayer && maskLayer->source && maskLayer->source->height() > 0)
+                    return (float)maskLayer->source->width() / (float)maskLayer->source->height();
+                return activeZone().height > 0 ? (float)activeZone().width / (float)activeZone().height : 1.0f;
+            };
             // Shape presets for active mask
             if (m_maskEditMode && maskLayer->activeMaskIndex >= 0 &&
                 maskLayer->activeMaskIndex < (int)maskLayer->masks.size()) {
@@ -6291,13 +6707,13 @@ void Application::renderUI() {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 if (ImGui::Button("Rect", ImVec2(shapeW, 0))) { mask.path.makeRectangle({0.5f, 0.5f}, {0.6f, 0.6f}); }
                 ImGui::SameLine();
-                if (ImGui::Button("Circle", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); }
+                if (ImGui::Button("Circle", ImVec2(shapeW, 0))) { mask.path.makeEllipse({0.5f, 0.5f}, {0.3f, 0.3f}); trueShape(mask.path, layerMaskAspect()); }
                 ImGui::SameLine();
-                if (ImGui::Button("Tri", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); }
+                if (ImGui::Button("Tri", ImVec2(shapeW, 0))) { mask.path.makeTriangle({0.5f, 0.5f}, 0.3f); trueShape(mask.path, layerMaskAspect()); }
                 ImGui::SameLine();
-                if (ImGui::Button("Oct", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); }
+                if (ImGui::Button("Oct", ImVec2(shapeW, 0))) { mask.path.makePolygon({0.5f, 0.5f}, 0.3f, 8); trueShape(mask.path, layerMaskAspect()); }
                 ImGui::SameLine();
-                if (ImGui::Button("Star", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); }
+                if (ImGui::Button("Star", ImVec2(shapeW, 0))) { mask.path.makeStar({0.5f, 0.5f}, 0.3f, 0.15f, 5); trueShape(mask.path, layerMaskAspect()); }
                 ImGui::PopStyleColor(4);
 
                 // Alignment tools (visible when 2+ points selected)
@@ -8314,7 +8730,7 @@ void Application::renderUI() {
                     }
                     if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
                         if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Lu");
+                            m_ndiOutput.create(featuredPack().empty() ? "Lu" : "Easel");
                         } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
                             m_ndiOutput.destroy();
                         }
@@ -8827,6 +9243,7 @@ void Application::renderUI() {
         }
 #endif
         } // end collapsible Voice section
+        drawEthereaSdkPanel();
     }
     }  // end Etherea section
 
@@ -9280,7 +9697,7 @@ void Application::renderUI() {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 1.0f));
                     if (ImGui::Checkbox("Easel  (composition)", &m_ndiOutputEnabled)) {
                         if (m_ndiOutputEnabled && !m_ndiOutput.isActive()) {
-                            m_ndiOutput.create("Lu");
+                            m_ndiOutput.create(featuredPack().empty() ? "Lu" : "Easel");
                         } else if (!m_ndiOutputEnabled && m_ndiOutput.isActive()) {
                             m_ndiOutput.destroy();
                         }
@@ -9887,17 +10304,17 @@ void Application::renderUI() {
                 // "None" option to disconnect
                 if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                     m_midiManager.closeDevice();
-                    m_midiUserDisconnected = true;   // stop auto-reconnecting
+                    setMidiEnabled(false);
                 }
                 if (ImGui::Selectable("All devices", m_midiManager.isAllDevices())) {
                     m_midiManager.openAll();
-                    m_midiUserDisconnected = false;
+                    setMidiEnabled(true);
                 }
                 for (int i = 0; i < (int)devices.size(); i++) {
                     bool selected = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
                     if (ImGui::Selectable(devices[i].c_str(), selected)) {
                         m_midiManager.openDevice(i);
-                        m_midiUserDisconnected = false;
+                        setMidiEnabled(true);
                     }
                 }
                 ImGui::EndCombo();
@@ -12131,17 +12548,17 @@ void Application::renderShowMidiBar() {
         if (ImGui::BeginCombo("##showMidiDev", mlabel.c_str())) {
             if (ImGui::Selectable("None", !m_midiManager.isOpen())) {
                 m_midiManager.closeDevice();
-                m_midiUserDisconnected = true;
+                setMidiEnabled(false);
             }
             if (!mdevs.empty() && ImGui::Selectable("All devices", m_midiManager.isAllDevices())) {
                 m_midiManager.openAll();
-                m_midiUserDisconnected = false;
+                setMidiEnabled(true);
             }
             for (int i = 0; i < (int)mdevs.size(); i++) {
                 bool sel = (m_midiManager.isOpen() && m_midiManager.deviceIndex() == i);
                 if (ImGui::Selectable(mdevs[i].c_str(), sel)) {
                     m_midiManager.openDevice(i);
-                    m_midiUserDisconnected = false;
+                    setMidiEnabled(true);
                 }
             }
             ImGui::EndCombo();
@@ -12520,7 +12937,7 @@ void Application::renderCanvasKnobBank() {
     };
     static const int kFaderCC_XL[Application::kFaderBankCount]  = { 77, 78, 79, 80, 81, 82, 83, 84 };
     static const int kFaderCC_XL3[Application::kFaderBankCount] = { 5, 6, 7, 8, 9, 10, 11, 12 };
-    const bool isXL3 = m_midiManager.isLaunchControlXL3();
+    const bool isXL3 = lcxlMk3();
     const int* kKnobCC  = isXL3 ? kKnobCC_XL3  : kKnobCC_XL;
     const int* kFaderCC = isXL3 ? kFaderCC_XL3 : kFaderCC_XL;
     static const char* kTargetNames[] = {
@@ -12734,6 +13151,56 @@ void Application::loadDeckPlaylists() {
     }
 }
 
+std::string Application::featuredPack() {
+    if (const char* e = getenv("EASEL_FEATURED_PACK")) return e;
+#ifdef EASEL_FEATURED_PACK
+    return EASEL_FEATURED_PACK;
+#else
+    return std::string();
+#endif
+}
+
+int Application::deckPlaylistIndex(const std::string& name) const {
+    for (int i = 0; i < (int)m_deckPlaylists.size(); i++)
+        if (m_deckPlaylists[i].name == name) return i;
+    return -1;
+}
+
+// The edition's pack becomes a real list on THIS machine (paths resolved
+// against the connected library, so a list saved elsewhere still works):
+// every pack shader is added, paths that no longer exist are dropped, and
+// shaders the user added by hand stay. Gallery + both SHOW decks open on it.
+void Application::ensureFeaturedPack() {
+    if (m_featuredPackDone) return;
+    if (!m_shaderClaw.isConnected() || m_shaderClaw.shaders().empty()) return;
+    m_featuredPackDone = true;
+    std::string pack = featuredPack();
+    if (pack.empty()) return;
+    if (!m_deckPlaylistsLoaded) { loadDeckPlaylists(); m_deckPlaylistsLoaded = true; }
+    std::string listName = pack;
+    for (auto& ch : listName) ch = (char)toupper((unsigned char)ch);
+    listName += " PACK";
+    int li = deckPlaylistIndex(listName);
+    if (li < 0) { m_deckPlaylists.push_back({listName, {}}); li = (int)m_deckPlaylists.size() - 1; }
+    auto& paths = m_deckPlaylists[li].shaderPaths;
+    paths.erase(std::remove_if(paths.begin(), paths.end(),
+                [](const std::string& p) { return !std::filesystem::exists(p); }), paths.end());
+    int added = 0;
+    for (const auto& e : m_shaderClaw.shaders()) {
+        if (e.group != pack) continue;
+        if (std::find(paths.begin(), paths.end(), e.fullPath) == paths.end()) { paths.push_back(e.fullPath); added++; }
+    }
+    if (paths.empty()) {   // the pack isn't in this library at all
+        std::cerr << "[Groups] featured pack '" << pack << "' has no shaders here" << std::endl;
+        return;
+    }
+    saveDeckPlaylists();
+    m_deckPlaylistSel[0] = m_deckPlaylistSel[1] = li;
+    m_galleryGroup = "list:" + listName;
+    std::cerr << "[Groups] featured pack " << listName << ": " << paths.size()
+              << " shaders (" << added << " new)" << std::endl;
+}
+
 void Application::saveDeckPlaylists() {
     std::string path = deckPlaylistsPath();
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
@@ -12842,7 +13309,7 @@ void Application::renderShowDeck(float width, float height, GLuint programTex,
     // further down when the widgets themselves are drawn.
     static const int kDeckFaderCC_XL[8]  = { 77, 78, 79, 80, 81, 82, 83, 84 };
     static const int kDeckFaderCC_XL3[8] = { 5, 6, 7, 8, 9, 10, 11, 12 };   // Launch Control XL 3
-    const int* kDeckFaderCC = m_midiManager.isLaunchControlXL3() ? kDeckFaderCC_XL3 : kDeckFaderCC_XL;
+    const int* kDeckFaderCC = lcxlMk3() ? kDeckFaderCC_XL3 : kDeckFaderCC_XL;
     bool deckFaderMidiBound[8] = {};
     {
         float live = m_midiManager.getCCValue(-1, kDeckFaderCC[0]);
@@ -13953,7 +14420,7 @@ void Application::renderShowDeck(float width, float height, GLuint programTex,
         21, 22, 23, 24, 25, 26, 27, 28,
         29, 30, 31, 32, 33, 34, 35, 36,
     };
-    const int* kShowKnobCC = m_midiManager.isLaunchControlXL3() ? kShowKnobCC_XL3 : kShowKnobCC_XL;
+    const int* kShowKnobCC = lcxlMk3() ? kShowKnobCC_XL3 : kShowKnobCC_XL;
     // extraGapAfterLocalCol: local column index (0-2, -1 = disabled) after
     // which an extra half-margin gap is inserted — used to widen the gap
     // between screen columns 5 and 6 (A's local columns 0 and 1) by 50%,
@@ -19171,6 +19638,190 @@ void Application::ensureManagedFluidLayer(const std::string& slot, bool threeD) 
     registerLayerWithZones(layer->id);
 }
 
+std::shared_ptr<ContentSource> Application::makeSimSource(const std::string& token, std::string& name) {
+    int w = 1280, h = 720;   // the active zone's size, so the sim's aspect is right
+    if (m_activeZone >= 0 && m_activeZone < (int)m_zones.size() && m_zones[m_activeZone]) {
+        w = m_zones[m_activeZone]->width;
+        h = m_zones[m_activeZone]->height;
+    }
+    if (token == "__fluid__") {
+        auto f = std::make_shared<FluidSource>();
+        if (!f->init(w, h)) return nullptr;
+        name = "Fluid Simulation";
+        return f;
+    }
+    if (token == "__fluid3d__" || token == "__fluid3dbox__") {
+        bool box = token == "__fluid3dbox__";
+        auto f3 = std::make_shared<FluidSource3D>();
+        if (box) f3->applyBoxPreset();
+        if (const auto* snap = m_shaderPresets.findSnapshot(FluidSource3D::memoryKey(box))) f3->applyMemory(*snap);
+        if (!f3->init(w, h)) return nullptr;
+        name = box ? "3D Box" : "3D Fluid";
+        return f3;
+    }
+    if (token == "__particles__") {
+        auto p = std::make_shared<ParticleSource>();
+        if (!p->init()) return nullptr;
+        name = "Particle System";
+        return p;
+    }
+    return nullptr;
+}
+
+// A managed slot (a SHOW deck) takes a simulation. Always a fresh source:
+// picking a sim from the library is an explicit "start this".
+void Application::ensureManagedSimLayer(const std::string& slot, const std::string& token) {
+    if (slot.empty()) return;
+    std::string name;
+    auto src = makeSimSource(token, name);
+    if (!src) { std::cerr << "[Show] sim " << token << " failed to init\n"; return; }
+    m_undoStack.pushState(m_layerStack, m_selectedLayer);
+    for (auto& l : m_layerStack.layers()) {
+        if (!l || l->managedKey != slot) continue;
+        l->source = src;
+        l->name = name;
+        l->opacity = 1.0f;
+        m_dataBus.bind(l->id, "msg", "");
+        return;
+    }
+    auto layer = std::make_shared<Layer>();
+    layer->id = m_nextLayerId++;
+    layer->managedKey = slot;
+    layer->source = src;
+    layer->name = name;
+    m_layerStack.addLayer(layer);
+    m_selectedLayer = m_layerStack.count() - 1;
+    registerLayerWithZones(layer->id);
+}
+
+const std::vector<ShaderClawBridge::ShaderEntry>& Application::libraryEntries() {
+    const auto& sh = m_shaderClaw.shaders();
+    if (m_libraryEntriesFor == sh.size() && !m_libraryEntries.empty()) return m_libraryEntries;
+    m_libraryEntries.clear();
+    static const struct { const char* token; const char* title; const char* desc; } kSims[] = {
+        {"__fluid__",      "Fluid",     "2D fluid simulation"},
+        {"__fluid3d__",    "3D Fluid",  "3D particle fluid"},
+        {"__fluid3dbox__", "3D Box",    "two liquids in a white box"},
+        {"__particles__",  "Particles", "particle system"},
+    };
+    // Live inputs (WebRTC Stream) sit at the very top of the library
+    auto isLive = [](const ShaderClawBridge::ShaderEntry& e) {
+        return std::find(e.categories.begin(), e.categories.end(), "Live Input") != e.categories.end();
+    };
+    for (const auto& e : sh) if (isLive(e)) m_libraryEntries.push_back(e);
+    for (const auto& k : kSims) {
+        ShaderClawBridge::ShaderEntry e;
+        e.title = k.title; e.description = k.desc;
+        e.file = k.token; e.fullPath = k.token;
+        e.type = "sim"; e.categories = {"Simulation"}; e.group = "simulations";
+        m_libraryEntries.push_back(std::move(e));
+    }
+    for (const auto& e : sh) if (!isLive(e)) m_libraryEntries.push_back(e);
+    m_libraryEntriesFor = sh.size();
+    return m_libraryEntries;
+}
+
+std::string Application::thumbPathFor(const std::string& fullPathOrToken) {
+    const char* home = getenv("HOME");
+    if (!home || !*home) home = getenv("USERPROFILE");
+    std::string stem = fullPathOrToken;
+    size_t sp = stem.find_last_of("/\\");
+    if (sp != std::string::npos) stem = stem.substr(sp + 1);
+    size_t d = stem.find_last_of('.');
+    if (d != std::string::npos) stem = stem.substr(0, d);
+    return std::string(home ? home : ".") + "/.easel/shader_thumbs/" + stem + ".png";
+}
+
+void Application::queueThumb(const std::string& path, bool front) {
+    if (path.empty()) return;
+    if (m_thumbJob && m_thumbJob->path == path) return;
+    if (std::find(m_thumbQueue.begin(), m_thumbQueue.end(), path) != m_thumbQueue.end()) return;
+    if (front) m_thumbQueue.push_front(path); else m_thumbQueue.push_back(path);
+    m_thumbQueuedTotal++;
+}
+
+// REFRESH THUMBNAILS: every library item, re-rendered from where it is now.
+void Application::queueAllThumbs() {
+    for (const auto& e : libraryEntries())
+        if (e.type != "transition") queueThumb(e.fullPath);
+    std::cerr << "[Thumbs] refresh queued: " << m_thumbQueue.size() << " items" << std::endl;
+}
+
+void Application::tickThumbJobs() {
+    const int kW = 384, kH = 216;   // 16:9, like the output
+    if (!m_thumbJob) {
+        if (m_thumbQueue.empty()) { m_thumbQueuedTotal = 0; return; }
+        std::string path = m_thumbQueue.front();
+        m_thumbQueue.pop_front();
+        auto job = std::make_unique<ThumbJob>();
+        job->path = path;
+        job->start = glfwGetTime();
+        if (isSimToken(path)) {
+            std::string nm;
+            job->src = makeSimSource(path, nm);
+            job->sim = true;
+        } else {
+            auto ss = std::make_shared<ShaderSource>();
+            ss->setResolution(kW, kH);
+            if (ss->loadFromFile(path)) {
+                std::string base = path.substr(path.find_last_of("/\\") + 1);
+                m_shaderPresets.apply(base, *ss);   // its current look, not the defaults
+                job->src = ss;
+            }
+        }
+        if (!job->src) {   // unloadable: mark done so the tile stops waiting
+            m_scThumbnails[path].ready = true;
+            return;
+        }
+        m_thumbJob = std::move(job);
+    }
+    ThumbJob& j = *m_thumbJob;
+    j.src->update();
+    j.frames++;
+    const double warm = j.sim ? 10.0 : 1.0;   // sims need time to fill the frame
+    if (glfwGetTime() - j.start < warm || j.frames < 8) return;
+
+    GLuint tex = j.src->textureId();
+    int sw = j.src->width(), sh = j.src->height();
+    if (tex && sw > 0 && sh > 0) {
+        if (m_thumbFBO.width() != kW || m_thumbFBO.height() != kH) m_thumbFBO.create(kW, kH);
+        GLint prevRead = 0, prevDraw = 0, vp[4];
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+        glGetIntegerv(GL_VIEWPORT, vp);
+        GLuint srcFbo = 0;
+        glGenFramebuffers(1, &srcFbo);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFbo);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_thumbFBO.fboId());
+        // fit the source's aspect into 16:9 by centre-cropping
+        int cx0 = 0, cy0 = 0, cx1 = sw, cy1 = sh;
+        float sa = (float)sw / (float)sh, ta = (float)kW / (float)kH;
+        if (sa > ta) { int w = (int)(sh * ta); cx0 = (sw - w) / 2; cx1 = cx0 + w; }
+        else if (sa < ta) { int h = (int)(sw / ta); cy0 = (sh - h) / 2; cy1 = cy0 + h; }
+        glBlitFramebuffer(cx0, cy0, cx1, cy1, 0, 0, kW, kH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_thumbFBO.fboId());
+        std::vector<unsigned char> px((size_t)kW * kH * 4);
+        glReadPixels(0, 0, kW, kH, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;   // tiles are opaque
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+        glDeleteFramebuffers(1, &srcFbo);
+        glViewport(vp[0], vp[1], vp[2], vp[3]);
+        std::string png = thumbPathFor(j.path);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(png).parent_path(), ec);
+        stbi_flip_vertically_on_write(1);
+        stbi_write_png(png.c_str(), kW, kH, 4, px.data(), kW * 4);
+        stbi_flip_vertically_on_write(0);
+        auto& entry = m_scThumbnails[j.path];
+        if (!entry.texture) entry.texture = std::make_shared<Texture>();
+        entry.texture->loadFromFile(png);
+        entry.ready = true;
+    }
+    m_thumbJob.reset();
+}
+
 void Application::removeManagedLayer(const std::string& slot) {
     if (slot.empty()) return;
     for (int i = m_layerStack.count() - 1; i >= 0; i--) {
@@ -20161,7 +20812,7 @@ void Application::applyNdiNetworkSettings(bool reinit) {
         if (NDIRuntime::instance().isAvailable()) {
             m_ndiFinder.create();
             m_ndiSources = m_ndiFinder.sources();
-            if (m_ndiOutputEnabled) m_ndiOutput.create("Lu");
+            if (m_ndiOutputEnabled) m_ndiOutput.create(featuredPack().empty() ? "Lu" : "Easel");
         }
     } else {
         // No runtime (or reinit not requested): persist config for the next launch.
@@ -20297,6 +20948,8 @@ void Application::saveProject(const std::string& path) {
         mappingsJson.push_back(mj);
     }
     j["mappings"] = mappingsJson;
+    j["span"] = { {"layout", m_span.layout}, {"reverse", m_span.reverse},
+                  {"members", std::vector<std::string>(m_span.members.begin(), m_span.members.end())} };
 
     // Save zones
     json zonesJson = json::array();
@@ -20304,6 +20957,7 @@ void Application::saveProject(const std::string& path) {
         auto& z = *zonePtr;
         json zj;
         zj["name"] = z.name;
+        zj["xformKey"] = zoneXformKey(z);
         zj["width"] = z.width;
         zj["height"] = z.height;
         zj["mappingIndex"] = z.mappingIndex;
@@ -20345,6 +20999,16 @@ void Application::saveProject(const std::string& path) {
         layerJson["rotation"] = layer->rotation;
         layerJson["flipH"] = layer->flipH;
         layerJson["flipV"] = layer->flipV;
+        if (!m_xformLiveKey.empty()) layer->zoneXforms[m_xformLiveKey] = layer->xform();
+        if (!layer->zoneXforms.empty()) {
+            json zx = json::object();
+            for (const auto& [k, x] : layer->zoneXforms)
+                zx[k] = {{"position", {x.position.x, x.position.y}}, {"scale", {x.scale.x, x.scale.y}},
+                         {"anchor", {x.anchor.x, x.anchor.y}}, {"rotation", x.rotation},
+                         {"flipH", x.flipH}, {"flipV", x.flipV}, {"z3", x.z3},
+                         {"rot3", {x.rot3.x, x.rot3.y, x.rot3.z}}};
+            layerJson["zoneXforms"] = zx;
+        }
         if (layer->z3 != 0.0f || layer->rot3 != glm::vec3(0.0f) || !layer->castShadow) {
             layerJson["z3"] = layer->z3;
             layerJson["rot3"] = {layer->rot3.x, layer->rot3.y, layer->rot3.z};
@@ -20965,6 +21629,13 @@ void Application::loadProjectBody(const json& j) {
     }
 
 
+    m_span = {};
+    if (j.contains("span") && j["span"].is_object()) {
+        m_span.layout  = std::clamp(j["span"].value("layout", 0), 0, 2);
+        m_span.reverse = j["span"].value("reverse", false);
+        if (j["span"].contains("members") && j["span"]["members"].is_array())
+            for (const auto& k : j["span"]["members"]) if (k.is_string()) m_span.members.insert(k.get<std::string>());
+    }
     if (version >= 2 && j.contains("zones")) {
         // v2 format: multiple zones
         m_zones.clear();
@@ -20975,6 +21646,8 @@ void Application::loadProjectBody(const json& j) {
         for (const auto& zj : j["zones"]) {
             auto z = std::make_unique<OutputZone>();
             z->name = zj.value("name", "Zone");
+            z->xformKey = zj.value("xformKey", std::string{});
+            m_xformLiveKey.clear();   // the loaded layers' live fields = their saved active-zone transform
             z->width = zj.value("width", 1920);
             z->height = zj.value("height", 1080);
             z->showAllLayers = zj.value("showAllLayers", true);
@@ -21153,6 +21826,23 @@ void Application::loadProjectBody(const json& j) {
             if (layerJson.contains("scale")) {
                 layer->scale = {layerJson["scale"][0].get<float>(),
                                 layerJson["scale"][1].get<float>()};
+            }
+            if (layerJson.contains("zoneXforms") && layerJson["zoneXforms"].is_object()) {
+                try {
+                    for (auto it = layerJson["zoneXforms"].begin(); it != layerJson["zoneXforms"].end(); ++it) {
+                        const auto& v = it.value();
+                        Layer::ZoneXform x;
+                        if (v.contains("position")) x.position = {v["position"][0].get<float>(), v["position"][1].get<float>()};
+                        if (v.contains("scale"))    x.scale    = {v["scale"][0].get<float>(), v["scale"][1].get<float>()};
+                        if (v.contains("anchor"))   x.anchor   = {v["anchor"][0].get<float>(), v["anchor"][1].get<float>()};
+                        x.rotation = v.value("rotation", 0.0f);
+                        x.flipH = v.value("flipH", false);
+                        x.flipV = v.value("flipV", false);
+                        x.z3 = v.value("z3", 0.0f);
+                        if (v.contains("rot3")) x.rot3 = {v["rot3"][0].get<float>(), v["rot3"][1].get<float>(), v["rot3"][2].get<float>()};
+                        layer->zoneXforms[it.key()] = x;
+                    }
+                } catch (...) {}
             }
 
             std::string sourceType = layerJson.value("sourceType", "");
@@ -22179,6 +22869,7 @@ std::vector<Application::ShowParam> Application::showParamsFor(ContentSource* sr
     if (auto* ss = dynamic_cast<ShaderSource*>(src)) {
         for (const auto& in : ss->inputs()) {
             if (in.type != "float" && in.type != "long") continue;
+            if (in.name == "kitTexMode" || in.name == "kitTexFit") continue;   // combos in the TEXTURE row
             float cur = std::holds_alternative<float>(in.value)
                       ? std::get<float>(in.value) : in.minVal;
             out.push_back({in.name, in.label.empty() ? in.name : in.label,
@@ -22244,20 +22935,19 @@ std::vector<Layer*> Application::showShaderSlots() {
 // The active layout's control banks: 0 = faders, 1-3 = knob rows top down.
 // First call sniffs the connected device names — a "LCXL3" anywhere means
 // the Mk3 map; the classic factory template otherwise.
+bool Application::lcxlMk3() {
+    if (m_showLCXLDetected) return m_showLCXLMk3;   // settled by hand or by traffic
+    bool mk3 = m_midiManager.isLaunchControlXL3();
+    if (mk3 != m_showLCXLMk3)
+        std::cerr << "[Show] XL layout: " << (mk3 ? "XL 3" : "classic") << " (device name)" << std::endl;
+    m_showLCXLMk3 = mk3;
+    return mk3;
+}
+
 const int* Application::lcxlBank(int idx) {
-    if (!m_showLCXLDetected) {
-        m_showLCXLDetected = true;
-        for (const auto& n : m_midiManager.listDevices()) {
-            if (n.find("LCXL3") != std::string::npos ||
-                n.find("XL 3") != std::string::npos ||
-                n.find("XL3") != std::string::npos) { m_showLCXLMk3 = true; break; }
-        }
-        std::cerr << "[Show] XL layout: " << (m_showLCXLMk3 ? "Mk3" : "classic")
-                  << " (auto-detected)" << std::endl;
-    }
     static const int* kClassic[4] = {kLCXLFader, kLCXLKnobA, kLCXLKnobB, kLCXLKnobC};
     static const int* kMk3[4]     = {kMk3Fader,  kMk3KnobA,  kMk3KnobB,  kMk3KnobC};
-    return (m_showLCXLMk3 ? kMk3 : kClassic)[idx & 3];
+    return (lcxlMk3() ? kMk3 : kClassic)[idx & 3];
 }
 
 // Bind every fader + knob to this shader's float params, in order:
@@ -22323,8 +23013,7 @@ void Application::autoMapShaderToLCXL(ContentSource* src) {
     }
 
     // Eligible = every param not claimed by an audio signal (the controller
-    // maps around those, never over them). The surface holds 32 controls;
-    // a source with more params gets PAGES of 32 — MORE steps through them.
+    // maps around those, never over them).
     std::vector<const ShowParam*> elig;
     for (const auto& p : params) {
         auto it = bmap.find(p.name);
@@ -22338,35 +23027,134 @@ void Application::autoMapShaderToLCXL(ContentSource* src) {
         if (it->second.signal == AudioSignal::MidiCC) it = bmap.erase(it);
         else ++it;
     }
-    // 31 controls per page: the crossfader's CC stays out of every page.
-    const int xfCC = deckXfadeCC();
-    int pages = elig.empty() ? 1 : ((int)elig.size() + 30) / 31;
-    if (m_showMapPage >= pages) m_showMapPage = 0;   // MORE wraps to page 1
-    size_t off = (size_t)m_showMapPage * 31;
 
-    // Knobs first, top row down, faders last: the XL3's encoders are
-    // endless, so they pick up a fresh shader with no stale position —
-    // faders carry the params where an absolute throw makes sense.
+    // ── Layout by ROLE, not declaration order, so every shader reads the
+    // same on the surface: knob row 1 = MOTION (the host kit's Speed/Drift/
+    // Spin/Breath/Sway, then the shader's own movement params), row 2 =
+    // COLOR (host Hue/Sat/Brightness/Contrast, then the shader's hue,
+    // saturation, glow...), row 3 = FORM (size, count, density...), faders
+    // = FX (audio react, grain, glitch...). Leftovers fill the free slots,
+    // then MORE pages. Mode selectors (long) and housekeeping params go last.
+    enum Role { kMotion, kColor, kForm, kFx, kLate, kTail, kSkip };
+    auto has = [](const std::string& s, std::initializer_list<const char*> keys) {
+        for (const char* k : keys) if (s.find(k) != std::string::npos) return true;
+        return false;
+    };
+    ShaderSource* ssrc = dynamic_cast<ShaderSource*>(src);
+    // Host kit params (ShaderSource MOTION/COLOR kit). When the shader has
+    // its own control with the same label ("Spin", "Speed", "Sway"), the
+    // shader's wins the slot and the host one goes to a later page, so a
+    // row never shows the same word twice.
+    static const char* kKitNames[] = {"motionClock", "motionDrift", "motionSpin", "motionBreath",
+                                      "motionSway", "colorHue", "colorSat", "colorBright", "colorContrast"};
+    auto lower = [](std::string v) { for (auto& ch : v) ch = (char)tolower((unsigned char)ch); return v; };
+    auto isKit = [&](const std::string& nm) {
+        for (const char* k : kKitNames) if (nm == k) return true;
+        return false;
+    };
+    std::set<std::string> ownLabels;
+    for (const auto& p : params) if (!isKit(p.name)) ownLabels.insert(lower(p.label));
+    auto roleOf = [&](const ShowParam& p) -> Role {
+        std::string n = lower(p.name + " " + p.label);
+        if (isKit(p.name) && ownLabels.count(lower(p.label))) return kLate;
+        if (has(n, {"renderscale", "render scale", "showstate", "show state"})) return kSkip;
+        if (ssrc) {
+            for (const auto& in : ssrc->inputs())
+                if (in.name == p.name && in.type == "long")   // mode switches
+                    return has(n, {"background", "bgmode", "bgsel", "palettemode", "studio palette"})
+                         ? kTail : kLate;
+        }
+        if (has(n, {"flower"})) return kForm;   // "flow" would read it as motion
+        if (has(n, {"period", "lifecycle", "life cycle"})) return kLate;
+        if (has(n, {"audioreact", "audio react", "dynamics", "grain", "glitch", "chroma", "rgbsplit", "fabric", "felt",
+                    "rgb split", "film", "pixelat", "mosh", "tear", "crt", "scanline", "scan bar",
+                    "haze", "fog", "trail", "paper", "riso", "dither", "noise", "stipple", "erosion",
+                    "flicker", "xray", "x-ray", "readout", "tracker", "boil"})) return kFx;
+        if (has(n, {"motion", "speed", "flow", "spin", "sway", "swing", "dance", "wiggle", "drift",
+                    "swim", "swirl", "twist", "orbit", "pulse", "bob", "tempo", "jump", "squash",
+                    "jelly", "ruffle", "sweep", "rotation", "gaze", "saccade", "blink", "travel",
+                    "morph", "turbulence", "shimmer", "slither", "warp", "breath", "cycle"})) return kMotion;
+        if (has(n, {"color", "colour", "hue", "sat", "palamount", "palette amount", "glow", "bloom",
+                    "exposure", "contrast", "bright", "iridesc", "sheen", "gloss", "highlight",
+                    "shadow", "tint", "accent", "halo", "light", "rim", "specular", "fluoresc",
+                    "prism", "dispersion", "glint", "acid"})) return kColor;
+        return kForm;
+    };
+    std::vector<const ShowParam*> byRole[6];   // kMotion..kTail
+    for (const ShowParam* p : elig) {
+        Role r = roleOf(*p);
+        if (r != kSkip) byRole[r].push_back(p);
+    }
+
+    // banks: 0-2 = knob rows top to bottom, 3 = faders. The crossfader's CC
+    // stays out of every page.
+    const int xfCC = deckXfadeCC();
     const int* banks[4] = {lcxlBank(1), lcxlBank(2), lcxlBank(3), lcxlBank(0)};
-    int bi = 0, ki = 0;
-    for (size_t i = off; i < elig.size() && bi < 4; i++) {
-        while (bi < 4 && banks[bi][ki] == xfCC) { if (++ki == 8) { ki = 0; bi++; } }
-        if (bi >= 4) break;
-        const ShowParam& p = *elig[i];
-        AudioBinding& b = bmap[p.name];
+    struct Slot { int cc; const ShowParam* p; };
+    auto emptyPage = [&]() {
+        std::vector<Slot> page;
+        for (int bi = 0; bi < 4; bi++)
+            for (int ki = 0; ki < 8; ki++)
+                if (banks[bi][ki] != xfCC) page.push_back({banks[bi][ki], nullptr});
+        return page;
+    };
+    std::vector<std::vector<Slot>> pages;
+    std::vector<const ShowParam*> rest;
+    {
+        // page 1: each role into its own bank, overflow kept in role order
+        std::vector<Slot> page = emptyPage();
+        auto bankSlots = [&](int bi) {
+            std::vector<Slot*> v;
+            for (auto& sl : page)
+                for (int ki = 0; ki < 8; ki++)
+                    if (sl.cc == banks[bi][ki]) { v.push_back(&sl); break; }
+            return v;
+        };
+        const Role bankRole[4] = {kMotion, kColor, kForm, kFx};
+        for (int bi = 0; bi < 4; bi++) {
+            auto& list = byRole[bankRole[bi]];
+            auto slots = bankSlots(bi);
+            size_t i = 0;
+            for (; i < list.size() && i < slots.size(); i++) slots[i]->p = list[i];
+            for (; i < list.size(); i++) rest.push_back(list[i]);
+        }
+        for (const ShowParam* p : byRole[kLate]) rest.push_back(p);
+        // leftovers fill the free slots: form row, faders, colour, motion
+        const int fillOrder[4] = {2, 3, 1, 0};
+        size_t ri = 0;
+        for (int fo = 0; fo < 4 && ri < rest.size(); fo++)
+            for (Slot* sl : bankSlots(fillOrder[fo]))
+                if (!sl->p && ri < rest.size()) sl->p = rest[ri++];
+        rest.erase(rest.begin(), rest.begin() + ri);
+        pages.push_back(std::move(page));
+        // background / palette switches never take a page-1 gap: MORE only
+        for (const ShowParam* p : byRole[kTail]) rest.push_back(p);
+    }
+    while (!rest.empty()) {   // MORE: the remainder, 31 at a time, in order
+        std::vector<Slot> page = emptyPage();
+        size_t ri = 0;
+        for (auto& sl : page) if (ri < rest.size()) sl.p = rest[ri++];
+        rest.erase(rest.begin(), rest.begin() + ri);
+        pages.push_back(std::move(page));
+    }
+    if (m_showMapPage >= (int)pages.size()) m_showMapPage = 0;   // MORE wraps to page 1
+    int bound = 0;
+    for (const Slot& sl : pages[m_showMapPage]) {
+        if (!sl.p) continue;
+        AudioBinding& b = bmap[sl.p->name];
         b.signal      = AudioSignal::MidiCC;
-        b.midiCC      = banks[bi][ki];
+        b.midiCC      = sl.cc;
         b.midiChannel = -1;                 // any channel: every template works
-        b.rangeMin    = p.lo;
-        b.rangeMax    = p.hi;
+        b.rangeMin    = sl.p->lo;
+        b.rangeMax    = sl.p->hi;
         b.rampTime    = 0.0f;               // a hand on a knob wants NOW
         b.smoothing   = 0.0f;               // 1:1 — the param IS the control
         b.character   = 0.0f;
-        if (++ki == 8) { ki = 0; bi++; }
+        bound++;
     }
-    std::cerr << "[Show] AUTO-MAP: bound " << (bi * 8 + ki)
-              << " params (page " << (m_showMapPage + 1) << "/" << pages
-              << ")" << std::endl;
+    std::cerr << "[Show] AUTO-MAP: bound " << bound
+              << " params (page " << (m_showMapPage + 1) << "/" << pages.size()
+              << ", " << (lcxlMk3() ? "XL 3" : "classic XL") << ")" << std::endl;
 }
 
 // The layer the SHOW surface drives: the button-picked layer wins, then the
@@ -22724,7 +23512,8 @@ void Application::deckEnsureRouted(int deck) {
 
 void Application::deckLoad(int deck, const std::string& path, const std::string& title) {
     if (deck < 0 || deck > 1 || path.empty()) return;
-    ensureManagedShaderLayer(kDeckKey[deck], path);
+    if (isSimToken(path)) ensureManagedSimLayer(kDeckKey[deck], path);
+    else                  ensureManagedShaderLayer(kDeckKey[deck], path);
     Layer* l = deckLayer(deck);
     if (!l) return;
     deckEnsureRouted(deck);
@@ -22824,7 +23613,7 @@ void Application::deckTick(float dt) {
         if (!sPrimed) { sSeenMaxId = maxId; sPrimed = true; }
         else if (newest && maxId > sSeenMaxId) {
             sSeenMaxId = maxId;
-            if (!m_midiManager.isOpen()) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
+            if (!m_midiManager.isOpen() && !m_midiUserDisconnected) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
             // The new layer takes the SHOW knobs either way, so the centre
             // surface names its params at once. Without a control surface
             // this is label-only: the knob map never moves a param until a
@@ -22895,7 +23684,7 @@ void Application::deckTick(float dt) {
         Layer* only = A ? A : B;
         only->opacity = 1.0f;
         only->visible = true;
-        only->blendMode = BlendMode::Normal;
+        only->blendMode = m_deckBlendModes[only == B ? 1 : 0];   // blends onto the layers under it
         only->betweenRowActive = false;
         return;
     }
@@ -22928,6 +23717,21 @@ void Application::deckTick(float dt) {
 
     A->betweenRowActive = false;
     B->betweenRowActive = false;
+    // A blend mode on either deck = the decks STACK like layers: each deck
+    // blends onto everything under it with its own mode (the bottom deck onto
+    // the canvas layers, the top deck onto that), and the crossfader becomes
+    // two level faders that are both full in the middle — so a centred
+    // fader shows A and B blended together at full strength.
+    if (m_deckBlendModes[0] != BlendMode::Normal || m_deckBlendModes[1] != BlendMode::Normal) {
+        float aAmt = std::min(1.0f, 2.0f * (1.0f - mix));
+        float bAmt = std::min(1.0f, 2.0f * mix);
+        A->opacity = aAmt; A->blendMode = m_deckBlendModes[0];
+        B->opacity = bAmt; B->blendMode = m_deckBlendModes[1];
+        bool keepLive = m_showRunning || UIManager::sShowOpen;
+        A->visible = keepLive || aAmt > 0.001f;
+        B->visible = keepLive || bAmt > 0.001f;
+        return;
+    }
     bot->opacity   = 1.0f;
     bot->blendMode = BlendMode::Normal;
     top->opacity   = topAmt;
@@ -22961,6 +23765,190 @@ static void easelPrefsSet(const char* key, const nlohmann::json& v) {
     if (out.is_open()) out << j.dump(1);
 }
 
+// ── Etherea SDK control panel: Cue prompt + primary-model strength ──────────
+// All HTTP lives in EthereaSdkClient's threads; this only reads snapshots.
+// Opening the panel triggers a status READ; it never writes defaults.
+void Application::drawEthereaSdkPanel() {
+    ImGui::Dummy(ImVec2(0, 12));
+    if (!PropertyPanel::PanelSectionHeader("Etherea Control")) return;
+    m_ethereaSdk.heartbeat();
+    EthereaSdkClient::Snapshot s = m_ethereaSdk.snapshot();
+
+    const ImVec4 kDim(0.588f, 0.588f, 0.588f, 1.0f);
+    const ImVec4 kText(0.85f, 0.88f, 0.92f, 0.95f);
+    const ImVec4 kWarn(0.95f, 0.72f, 0.45f, 1.0f);
+    auto label = [&](const char* t) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+        ImGui::TextUnformatted(t);
+        ImGui::PopStyleColor();
+    };
+    auto pill = [](const char* t, bool primary, float w) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        primary ? ImVec4(0.06f, 0.07f, 0.09f, 1) : ImVec4(1, 1, 1, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, primary ? ImVec4(0.12f, 0.13f, 0.16f, 1) : ImVec4(1, 1, 1, 0.16f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  primary ? ImVec4(0.18f, 0.20f, 0.24f, 1) : ImVec4(1, 1, 1, 0.24f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.96f, 0.97f, 0.98f, 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+        bool hit = ImGui::Button(t, ImVec2(w, 0));
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+        return hit;
+    };
+
+    // ── Connection ──
+    static char sUrl[256] = {0};
+    static char sKey[256] = {0};
+    static bool sUrlInit = false;
+    if (!sUrlInit) {
+        sUrlInit = true;
+        snprintf(sUrl, sizeof(sUrl), "%s", s.baseUrl.c_str());
+    }
+    {
+        bool ok = s.reachable && s.statusLoaded && !s.authFailed;
+        ImU32 dot = ok ? IM_COL32(120, 220, 140, 255)
+                       : (s.authFailed || (!s.reachable && !s.connError.empty())) ? IM_COL32(235, 110, 100, 255)
+                       : IM_COL32(160, 160, 160, 255);
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float h = ImGui::GetTextLineHeight();
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(cp.x + 5, cp.y + h * 0.5f), 4.0f, dot);
+        ImGui::Dummy(ImVec2(14, h));
+        ImGui::SameLine();
+        std::string st = !s.hasKey ? "No SDK key"
+                       : s.authFailed ? "Key rejected — polling stopped"
+                       : ok ? ("Connected · " + (s.providerLabel.empty() ? s.provider : s.providerLabel)
+                               + (s.observedStatus.empty() ? "" : " · " + s.observedStatus))
+                       : !s.connError.empty() ? ("Can't reach SDK: " + s.connError)
+                       : "Reading status…";
+        ImGui::PushStyleColor(ImGuiCol_Text, kText);
+        ImGui::TextWrapped("%s", st.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::TreeNodeEx("SDK connection", ImGuiTreeNodeFlags_NoTreePushOnOpen | (s.hasKey ? 0 : ImGuiTreeNodeFlags_DefaultOpen))) {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##sdkurl", "http://127.0.0.1:8767", sUrl, sizeof(sUrl));
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Agent SDK base URL. 127.0.0.1 only works when Easel runs on Tulip;\n"
+                              "from another machine use Tulip's reachable SDK address.");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##sdkkey", s.hasKey ? "key loaded (leave blank to keep)" : "SDK key",
+                                 sKey, sizeof(sKey), ImGuiInputTextFlags_Password);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Stored in ~/.easel/etherea_sdk_key (or set EASEL_AGENT_API_KEY).\n"
+                              "Never written to project files or logs.");
+        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (pill("Apply", true, w)) {
+            if (sKey[0]) { EthereaSdkClient::saveKey(sKey); memset(sKey, 0, sizeof(sKey)); }
+            easelPrefsSet("ethereaSdkUrl", std::string(sUrl));
+            m_ethereaSdk.setConnection(sUrl, EthereaSdkClient::loadKey());
+        }
+        ImGui::SameLine();
+        if (pill("Refresh", false, w)) m_ethereaSdk.requestRefresh();
+    }
+
+    // ── Prompt ──
+    ImGui::Dummy(ImVec2(0, 6));
+    label("PROMPT");
+    static char sDraft[1024] = {0};
+    static uint64_t sSeenSeq = 0;
+    if (s.promptSeq != sSeenSeq) {
+        sSeenSeq = s.promptSeq;
+        if (s.clearDraft) sDraft[0] = 0;   // delivered — failures keep the draft
+    }
+    ImGui::InputTextMultiline("##ethPrompt", sDraft, sizeof(sDraft),
+                              ImVec2(-1, ImGui::GetTextLineHeight() * 3.5f));
+    bool canSend = s.hasKey && !s.authFailed && !s.promptInFlight && sDraft[0] != 0 && !s.baseUrl.empty();
+    {
+        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        ImGui::BeginDisabled(!canSend);
+        if (pill(s.promptInFlight ? "Sending…" : "Send", true, w)) m_ethereaSdk.sendPrompt(sDraft, false);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Steer the current scene via Cue");
+        ImGui::SameLine();
+        if (pill("New scene", false, w)) m_ethereaSdk.sendPrompt(sDraft, true);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Ask Cue to cut to a new scene with these words");
+        ImGui::EndDisabled();
+    }
+    if (!s.promptText.empty()) {
+        bool bad = s.promptKind == "refused" || s.promptKind == "error" || s.promptKind == "timeout";
+        ImGui::PushStyleColor(ImGuiCol_Text, bad ? kWarn : kText);
+        ImGui::TextWrapped("%s", s.promptText.c_str());
+        ImGui::PopStyleColor();
+        if (!s.appliedPrompt.empty()) {
+            std::string ap = s.appliedPrompt.size() > 220 ? s.appliedPrompt.substr(0, 217) + "..." : s.appliedPrompt;
+            ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+            ImGui::TextWrapped("Generated: %s", ap.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+
+    // ── Abstraction (primary model strength) ──
+    ImGui::Dummy(ImVec2(0, 8));
+    label("ABSTRACTION");
+    // Wire value is 0..1; the UI curve comes from the server's capabilities.
+    double uiMax = s.uiMax > 0 ? s.uiMax : 1.0, uiExp = s.uiExp > 0 ? s.uiExp : 1.0;
+    auto toWire = [&](double p) { return uiMax * std::pow(std::max(0.0, p), uiExp); };
+    auto toPos  = [&](double w) { return std::pow(std::max(0.0, w) / uiMax, 1.0 / uiExp); };
+
+    static bool sDragging = false;
+    static float sPos = 0.0f;
+    bool haveReadback = s.hasTarget || s.hasValue;
+    double shownWire = s.gestureLocal ? s.localValue : (s.hasTarget ? s.target : s.value);
+    double shownPos = toPos(shownWire);
+    bool outOfRange = haveReadback && !s.gestureLocal && shownPos > 1.0 + 1e-6;
+    if (!sDragging) sPos = (float)std::min(1.0, shownPos);   // visual clamp only — never written back
+
+    bool enabled = s.inputEnabled && (haveReadback || sDragging);
+    char fmt[64];
+    if (!haveReadback && !sDragging) snprintf(fmt, sizeof(fmt), "—");
+    else snprintf(fmt, sizeof(fmt), "%.3f", sDragging ? toWire(sPos) : shownWire);
+    ImGui::BeginDisabled(!enabled && !sDragging);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::SliderFloat("##ethStrength", &sPos, 0.0f, 1.0f, fmt, ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemActivated()) sDragging = m_ethereaSdk.beginGesture();
+    if (sDragging && ImGui::IsItemEdited()) m_ethereaSdk.setGestureValue(toWire(sPos));
+    if (sDragging && ImGui::IsItemDeactivated()) { m_ethereaSdk.endGesture(); sDragging = false; }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Shader influence on the active model (%s).\n"
+                          "0 = no new shader detail. Same direction as the SDK / phone.",
+                          s.provider.empty() ? "unknown" : s.provider.c_str());
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+    if (!s.statusLoaded) {
+        ImGui::TextWrapped("Waiting for model status…");
+    } else if (!s.supportsStrength) {
+        ImGui::TextWrapped("%s has no strength control.", s.provider.c_str());
+    } else if (!s.available) {
+        ImGui::TextWrapped("%s not available (%s).", s.provider.c_str(), s.observedStatus.c_str());
+    } else {
+        std::string line;
+        char b[160];
+        if (s.hasTarget) { snprintf(b, sizeof(b), "target %.3f", s.target); line += b; }
+        if (s.hasValue)  { snprintf(b, sizeof(b), "%sapplied %.3f", line.empty() ? "" : " · ", s.value); line += b; }
+        if (s.hasSettled) line += s.settled ? " · settled" : " · settling";
+        if (s.revision >= 0) line += " · rev " + std::to_string(s.revision);
+        if (line.empty()) line = "No strength readback yet";
+        ImGui::TextWrapped("%s", line.c_str());
+    }
+    ImGui::PopStyleColor();
+    if (outOfRange) {
+        ImGui::PushStyleColor(ImGuiCol_Text, kWarn);
+        ImGui::TextWrapped("Live value %.3f is above this slider's range (max %.3f) — left as is.", shownWire, uiMax);
+        ImGui::PopStyleColor();
+    }
+    if (!s.writeMsg.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, s.writeError ? kWarn : kDim);
+        ImGui::TextWrapped("%s", s.writeMsg.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (!s.operationSummary.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.588f, 0.588f, 0.588f, 0.6f));
+        ImGui::TextWrapped("Last model operation (history): %s", s.operationSummary.c_str());
+        ImGui::PopStyleColor();
+    }
+}
+
 void Application::setVoiceContinuous(bool on) {
     m_voiceContinuous = on;
     if (on) {
@@ -22979,6 +23967,11 @@ int Application::deckXfadeCC() {
         m_deckXfadeCC = easelPrefsLoad().value("xfadeCC", -1);
     }
     return m_deckXfadeCC >= 0 ? m_deckXfadeCC : lcxlBank(0)[7];
+}
+
+void Application::setMidiEnabled(bool on) {
+    m_midiUserDisconnected = !on;
+    easelPrefsSet("midiEnabled", on);
 }
 
 void Application::deckXfadeSave() {
@@ -23353,7 +24346,7 @@ void Application::renderShowPanel() {
                         ImGui::Separator();
                         ImGui::BeginChild("##pkList", ImVec2(0, 0), false);
                         int pn = 0;
-                        for (const auto& pe : m_shaderClaw.shaders()) {
+                        for (const auto& pe : libraryEntries()) {
                             if (pe.type == "transition") continue;
                             std::string pt = pe.title.empty() ? pe.file : pe.title;
                             if (!pq.empty()) {
@@ -23374,7 +24367,7 @@ void Application::renderShowPanel() {
                     }
                     n = 1;
                 }
-                for (const auto& e : m_shaderClaw.shaders()) {
+                for (const auto& e : libraryEntries()) {
                     if (e.type == "transition") continue;
                     if (onList && !listHas(listSel, e.fullPath)) continue;
                     std::string t = e.title.empty() ? e.file : e.title;
@@ -23398,6 +24391,8 @@ void Application::renderShowPanel() {
                             if (!en.texture) en.texture = std::make_shared<Texture>();
                             if (en.texture->loadFromFile(png)) { en.ready = true; ttex = en.texture->id(); }
                             cacheLoads++;
+                        } else if (tit == m_scThumbnails.end() || !tit->second.ready) {
+                            queueThumb(e.fullPath);   // never rendered: make one
                         }
                     }
                     if (n % cols != 0) ImGui::SameLine(0, tgap);
@@ -23445,6 +24440,14 @@ void Application::renderShowPanel() {
                     if (ttex) gd->AddImageRounded((ImTextureID)(intptr_t)ttex, tmin, tmax, ImVec2(0, 1), ImVec2(1, 0),
                                                   IM_COL32(255, 255, 255, thov ? 255 : 225), 5.0f);
                     else      gd->AddRectFilled(tmin, tmax, IM_COL32(255, 255, 255, thov ? 30 : 16), 5.0f);
+                    if (e.type == "sim" && !ttex) {   // until its preview renders: a labelled card
+                        gd->AddRectFilledMultiColor(tmin, tmax, IM_COL32(40, 70, 110, 255), IM_COL32(20, 30, 60, 255),
+                                                    IM_COL32(10, 12, 20, 255), IM_COL32(30, 50, 90, 255));
+                        const char* tag = "SIMULATION";
+                        ImVec2 ts2 = ImGui::CalcTextSize(tag);
+                        gd->AddText(ImVec2((tmin.x + tmax.x - ts2.x) * 0.5f, (tmin.y + tmax.y - ts2.y) * 0.5f),
+                                    IM_COL32(200, 220, 255, thov ? 255 : 190), tag);
+                    }
                     if (cur || thov)
                         gd->AddRect(tmin, tmax, cur ? kBlue : IM_COL32(255, 255, 255, 120), 5.0f, 0, cur ? 2.0f : 1.0f);
                     std::string lbl = t;
@@ -23457,7 +24460,7 @@ void Application::renderShowPanel() {
                         // play next) becomes the picked shader, so the timeline keeps
                         // rolling with the pick in the rotation rather than swapping
                         // it back out at the next clip edge.
-                        if (m_showRunning && L) {
+                        if (m_showRunning && L && !isSimToken(e.fullPath)) {
                             double ph = m_timeline.playhead();
                             TimelineClip* hit = nullptr; TimelineClip* next = nullptr;
                             for (auto& tr : m_timeline.tracks()) {
@@ -23514,9 +24517,65 @@ void Application::renderShowPanel() {
             }
             // centre: the page's name. LIBRARY lives on the decks, AUTO-MAP
             // and RESET in the transition row under the crossfader.
-            const char* mid = "SHOW";
-            ImVec2 ms = ImGui::CalcTextSize(mid);
-            d->AddText(ImVec2(xM + (mainW - ms.x) * 0.5f, y + 8), IM_COL32(120, 128, 142, 140), mid);
+            // PROJECTORS: separate pictures, or one canvas across the zones
+            // (SPAN — side by side or stacked). Always visible, page centre.
+            {
+                const char* cap = "PROJECTORS";
+                const char* opt[3] = { "Separate", "One canvas: side by side", "One canvas: stacked" };
+                const char* tip[3] = { "every projector zone shows the whole picture",
+                                       "one picture across the zones, left to right",
+                                       "one picture across the zones, top to bottom (ceiling above wall)" };
+                const float ph = 26.0f, padX = 12.0f;
+                float wOpt[3], total = 0;
+                for (int i = 0; i < 3; i++) { wOpt[i] = ImGui::CalcTextSize(opt[i]).x + 2 * padX; total += wOpt[i]; }
+                ImVec2 cs = ImGui::CalcTextSize(cap);
+                const bool canSwap = m_span.layout != 0;
+                const float swapW = canSwap ? ImGui::CalcTextSize("SWAP").x + 20.0f : 0.0f;
+                float full = cs.x + 10.0f + total + (canSwap ? 6.0f + swapW : 0.0f);
+                float x = xM + std::max(0.0f, (mainW - full) * 0.5f);
+                float yy = y + (headerH - 4 - ph) * 0.5f;
+                d->AddText(ImVec2(x, yy + (ph - cs.y) * 0.5f), IM_COL32(120, 128, 142, 200), cap);
+                x += cs.x + 10.0f;
+                ImVec2 g0(x, yy), g1(x + total, yy + ph);
+                d->AddRectFilled(g0, g1, IM_COL32(255, 255, 255, 14), ph * 0.5f);
+                for (int i = 0; i < 3; i++) {
+                    ImGui::SetCursorScreenPos(ImVec2(x, yy));
+                    ImGui::PushID(4900 + i);
+                    bool clk = ImGui::InvisibleButton("##proj", ImVec2(wOpt[i], ph));
+                    bool hov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    bool sel = m_span.layout == i;
+                    if (sel) d->AddRectFilled(ImVec2(x + 2, yy + 2), ImVec2(x + wOpt[i] - 2, yy + ph - 2),
+                                              i == 0 ? IM_COL32(255, 255, 255, 235) : kBlue, ph * 0.5f);
+                    else if (hov) d->AddRectFilled(ImVec2(x + 2, yy + 2), ImVec2(x + wOpt[i] - 2, yy + ph - 2), IM_COL32(255, 255, 255, 30), ph * 0.5f);
+                    ImVec2 ts = ImGui::CalcTextSize(opt[i]);
+                    d->AddText(ImVec2(x + (wOpt[i] - ts.x) * 0.5f, yy + (ph - ts.y) * 0.5f),
+                               sel ? IM_COL32(12, 13, 16, 255) : IM_COL32(214, 220, 230, hov ? 255 : 170), opt[i]);
+                    if (hov) {
+                        if (i != 0 && spanZones().empty() && m_zones.size() < 2) ImGui::SetTooltip("%s\n(needs two zones)", tip[i]);
+                        else ImGui::SetTooltip("%s", tip[i]);
+                    }
+                    if (clk) m_span.layout = i;
+                    x += wOpt[i];
+                }
+                if (canSwap) {
+                    x += 6.0f;
+                    ImGui::SetCursorScreenPos(ImVec2(x, yy));
+                    bool clk = ImGui::InvisibleButton("##spanSwap", ImVec2(swapW, ph));
+                    bool hov = ImGui::IsItemHovered();
+                    d->AddRectFilled(ImVec2(x, yy), ImVec2(x + swapW, yy + ph), IM_COL32(255, 255, 255, m_span.reverse ? 60 : (hov ? 34 : 14)), ph * 0.5f);
+                    const char* sw = "SWAP";
+                    ImVec2 ts = ImGui::CalcTextSize(sw);
+                    d->AddText(ImVec2(x + (swapW - ts.x) * 0.5f, yy + (ph - ts.y) * 0.5f), IM_COL32(230, 235, 245, 230), sw);
+                    if (hov) {
+                        auto zs = spanZones();
+                        std::string order;
+                        for (size_t i = 0; i < zs.size(); i++) order += (i ? (m_span.layout == 1 ? "  |  " : "  /  ") : "") + zs[i]->name;
+                        ImGui::SetTooltip("swap the order of the zones\nnow: %s", order.c_str());
+                    }
+                    if (clk) m_span.reverse = !m_span.reverse;
+                }
+            }
         }
         y += headerH;
 
@@ -23584,6 +24643,11 @@ void Application::renderShowPanel() {
             OutputZone& z = activeZone();
             GLuint tex = z.canvasTexture ? z.canvasTexture : z.compositor.resultTexture();
             float aspect = (z.height > 0) ? (float)z.width / (float)z.height : 16.0f / 9.0f;
+            // SPAN on: preview the whole joined canvas (each zone's slice in place)
+            auto spanZs = spanZones();
+            int spanTW = 0, spanTH = 0; glm::vec4 spanSl0;
+            const bool spanPreview = !spanZs.empty() && spanSlice(spanZs.front(), spanSl0, &spanTW, &spanTH) && spanTW > 0 && spanTH > 0;
+            if (spanPreview) aspect = (float)spanTW / (float)spanTH;
             float ph = previewH, pw = ph * aspect;
             if (pw > mainW) { pw = mainW; ph = pw / aspect; }
             ImVec2 p0(xM + (mainW - pw) * 0.5f, y + (previewH - ph) * 0.5f);
@@ -23602,7 +24666,17 @@ void Application::renderShowPanel() {
                 else deckTakeSurface(onAirDeck, true);
             }
             d->AddRectFilled(ImVec2(xM, y), ImVec2(xM + mainW, y + previewH), IM_COL32(0, 0, 0, 255), 6.0f);
-            if (tex) d->AddImageRounded((ImTextureID)(intptr_t)tex, p0, ImVec2(p0.x + pw, p0.y + ph), ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 6.0f);
+            if (spanPreview) {
+                for (auto* sz : spanZs) {
+                    glm::vec4 sl;
+                    if (!spanSlice(sz, sl)) continue;
+                    GLuint zt = sz->canvasTexture ? sz->canvasTexture : sz->compositor.resultTexture();
+                    ImVec2 q0(p0.x + sl.x * pw, p0.y + sl.y * ph), q1(q0.x + sl.z * pw, q0.y + sl.w * ph);
+                    if (zt) d->AddImage((ImTextureID)(intptr_t)zt, q0, q1, ImVec2(0, 1), ImVec2(1, 0));
+                    d->AddRect(q0, q1, IM_COL32(255, 255, 255, 50), 0.0f, 0, 1.0f);   // the seam
+                    d->AddText(ImVec2(q0.x + 6, q1.y - 18), IM_COL32(255, 255, 255, 150), sz->name.c_str());
+                }
+            } else if (tex) d->AddImageRounded((ImTextureID)(intptr_t)tex, p0, ImVec2(p0.x + pw, p0.y + ph), ImVec2(0, 1), ImVec2(1, 0), IM_COL32(255, 255, 255, 255), 6.0f);
             bool mainActive = newest && target == newest;
             d->AddRect(ImVec2(xM, y), ImVec2(xM + mainW, y + previewH), IM_COL32(255, 255, 255, mainHov ? 90 : 30), 6.0f);
             {   // ON AIR pill — the program output is what the audience sees
@@ -23619,6 +24693,38 @@ void Application::renderShowPanel() {
                 ImVec2 t1(xM + mainW - 10, y + previewH - 8), t0(t1.x - ts.x - 14, t1.y - ts.y - 6);
                 d->AddRectFilled(t0, t1, kBlue, 999.0f);
                 d->AddText(ImVec2(t0.x + 7, t0.y + 3), IM_COL32(12, 13, 16, 255), tag.c_str());
+            }
+            // SPAN on: which zones make up the one canvas (click to toggle)
+            if (m_span.layout != 0 && m_zones.size() >= 2) {
+                auto cur = spanZones();
+                float cx = xM + 10.0f, cy = y + previewH - 36.0f;
+                const char* cap = "IN THE CANVAS";
+                ImVec2 cs = ImGui::CalcTextSize(cap);
+                d->AddRectFilled(ImVec2(cx - 4, cy - 2), ImVec2(cx + cs.x + 8, cy + 26), IM_COL32(0, 0, 0, 150), 13.0f);
+                d->AddText(ImVec2(cx + 2, cy + (24 - cs.y) * 0.5f), IM_COL32(220, 225, 235, 200), cap);
+                cx += cs.x + 14.0f;
+                for (size_t zi = 0; zi < m_zones.size(); zi++) {
+                    OutputZone* zp = m_zones[zi].get();
+                    if (!zp) continue;
+                    bool in = std::find(cur.begin(), cur.end(), zp) != cur.end();
+                    ImVec2 ts = ImGui::CalcTextSize(zp->name.c_str());
+                    float cw = ts.x + 22.0f, ch = 24.0f;
+                    ImGui::SetCursorScreenPos(ImVec2(cx, cy));
+                    ImGui::PushID(4950 + (int)zi);
+                    bool clk = ImGui::InvisibleButton("##spanZone", ImVec2(cw, ch));
+                    bool hov = ImGui::IsItemHovered();
+                    ImGui::PopID();
+                    d->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + cw, cy + ch), in ? kBlue : IM_COL32(0, 0, 0, hov ? 210 : 160), 12.0f);
+                    d->AddText(ImVec2(cx + 11, cy + (ch - ts.y) * 0.5f), in ? IM_COL32(12, 13, 16, 255) : IM_COL32(220, 225, 235, hov ? 255 : 170), zp->name.c_str());
+                    if (hov) { mainHov = false; ImGui::SetTooltip(in ? "click: take %s out of the canvas" : "click: add %s to the canvas", zp->name.c_str()); }
+                    if (clk) {
+                        if (m_span.members.empty()) for (auto* c : cur) m_span.members.insert(zoneXformKey(*c));
+                        const std::string& k = zoneXformKey(*zp);
+                        if (in) m_span.members.erase(k); else m_span.members.insert(k);
+                        if (m_span.members.empty()) m_span.members.insert("-");   // explicit: none
+                    }
+                    cx += cw + 6.0f;
+                }
             }
             if (mainHov) ImGui::SetTooltip(newest ? "click: knobs + MIDI on the last layer you added (%s)" : "click: knobs + MIDI on the deck on air", newest ? newest->name.c_str() : "");
             ImGui::SetCursorScreenPos(ImVec2(xM + 10, y + 10));
@@ -23809,7 +24915,7 @@ void Application::renderShowPanel() {
                 float total = wAuto + g + wTr + g + wSec + g + wMidi + g + wReset;
                 ImGui::SetCursorScreenPos(ImVec2(xM + std::max(0.0f, (mainW - total) * 0.5f), rowY));
                 if (ImGui::Button("AUTO-MAP", ImVec2(wAuto, 0)) && target) {
-                    if (!m_midiManager.isOpen()) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
+                    if (!m_midiManager.isOpen() && !m_midiUserDisconnected) { auto devs = m_midiManager.listDevices(); if (!devs.empty()) m_midiManager.openAll(); }
                     m_showAutoMapArmed = m_midiManager.isOpen();
                     m_showMapPage = 0; autoMapShaderToLCXL(target->source.get());
                 }
@@ -23867,9 +24973,173 @@ void Application::renderShowPanel() {
         // and its footer used to run to the last pixel of the window.
         const float kShowFloor = 10.0f;   // inside the column card
         float contentH = origin.y + avail.y - y - kShowFloor;
-        ImGui::SetCursorScreenPos(ImVec2(origin.x, yDeck));
-        ImGui::BeginChild("##showTab", ImVec2(avail.x, contentH + (y - yDeck)), false, ImGuiWindowFlags_NoScrollbar);
-        ImDrawList* cd = ImGui::GetWindowDrawList();
+        // Each column gets its OWN child window. One page-wide child used to
+        // start at yDeck and sat on top of the transport row, so the
+        // crossfader / transition row under it never got a click.
+        ImDrawList* cd = nullptr;
+
+        // a deck's COLOURS, right under its header: one swatch per ISF colour
+        // input (click = picker), the shader's palette switch if it has one,
+        // SHUFFLE (a fresh harmonious set; just a new hue when the shader has
+        // no colour inputs) and reset. Returns where the param list starts.
+        auto colorStrip = [&](int di, float x, float w) -> float {
+            ShaderSource* ss = shaderOf(decks[di]);
+            if (!ss) return y;
+            auto& ins = ss->inputs();
+            std::vector<ISFInput*> cols;
+            ISFInput* pal = nullptr;
+            for (auto& in : ins) {
+                if (in.type == "color" && std::holds_alternative<glm::vec4>(in.value)) cols.push_back(&in);
+                else if (!pal && in.type == "long" && !in.longLabels.empty()) {
+                    std::string n = in.name + " " + in.label;
+                    for (auto& ch : n) ch = (char)std::tolower((unsigned char)ch);
+                    if (n.find("palette") != std::string::npos || n.find("scheme") != std::string::npos ||
+                        n.find("colo") != std::string::npos || n.find("theme") != std::string::npos ||
+                        n.find("tint") != std::string::npos)
+                        pal = &in;
+                }
+            }
+            ImGui::PushID(4800 + di);
+            const float sw = 20.0f, sg = 6.0f, rowH = 28.0f;
+            const float wShuf = ImGui::CalcTextSize("SHUFFLE").x + 18.0f, wRes = 26.0f;
+            float cy = y + 2.0f;
+            {
+                const char* tag = "COLOR";
+                ImVec2 ts = ImGui::CalcTextSize(tag);
+                cd->AddText(ImVec2(x, cy + (rowH - ts.y) * 0.5f), IM_COL32(120, 128, 142, 200), tag);
+                float sx = x + ts.x + 10.0f;
+                float sxMax = x + w - wShuf - wRes - 2.0f * sg;
+                // how many swatches fit; when not all do, one slot goes to a
+                // "+n" chip that opens the full list
+                int nFit = std::max(0, (int)((sxMax - sx + sg) / (sw + sg)));
+                if ((int)cols.size() > nFit) nFit = std::max(0, nFit - 1);
+                for (size_t i = 0; i < cols.size(); i++) {
+                    if ((int)i >= nFit) {
+                        char more[8]; snprintf(more, sizeof(more), "+%d", (int)(cols.size() - i));
+                        ImGui::SetCursorScreenPos(ImVec2(sx, cy + (rowH - sw) * 0.5f));
+                        if (ImGui::Button(more, ImVec2(0, sw))) ImGui::OpenPopup("##allCols");
+                        break;
+                    }
+                    ImGui::PushID((int)i);
+                    glm::vec4 c = std::get<glm::vec4>(cols[i]->value);
+                    ImGui::SetCursorScreenPos(ImVec2(sx, cy + (rowH - sw) * 0.5f));
+                    std::string tip = cols[i]->label.empty() ? cols[i]->name : cols[i]->label;
+                    if (ImGui::ColorButton(tip.c_str(), ImVec4(c.r, c.g, c.b, 1.0f),
+                                           ImGuiColorEditFlags_NoAlpha, ImVec2(sw, sw)))
+                        ImGui::OpenPopup("##pick");
+                    if (ImGui::BeginPopup("##pick")) {
+                        ImGui::TextDisabled("%s", tip.c_str());
+                        float rgb[3] = {c.r, c.g, c.b};
+                        if (ImGui::ColorPicker3("##cp", rgb, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_PickerHueWheel))
+                            ss->setColor(cols[i]->name, glm::vec4(rgb[0], rgb[1], rgb[2], c.a));
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
+                    sx += sw + sg;
+                }
+                if (cols.empty() && !pal)
+                    cd->AddText(ImVec2(sx, cy + (rowH - ts.y) * 0.5f), IM_COL32(120, 128, 142, 120), "hue");
+                if (ImGui::BeginPopup("##allCols")) {
+                    for (size_t i = 0; i < cols.size(); i++) {
+                        ImGui::PushID(100 + (int)i);
+                        glm::vec4 c = std::get<glm::vec4>(cols[i]->value);
+                        float rgb[3] = {c.r, c.g, c.b};
+                        std::string lb = cols[i]->label.empty() ? cols[i]->name : cols[i]->label;
+                        if (ImGui::ColorEdit3(lb.c_str(), rgb, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel))
+                            ss->setColor(cols[i]->name, glm::vec4(rgb[0], rgb[1], rgb[2], c.a));
+                        ImGui::PopID();
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+            // SHUFFLE · reset, right-aligned on the swatch row
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 999.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+            ImGui::SetCursorScreenPos(ImVec2(x + w - wShuf - wRes - sg, cy + (rowH - 22.0f) * 0.5f));
+            if (ImGui::Button("SHUFFLE", ImVec2(wShuf, 22.0f))) {
+                static std::mt19937 rng{std::random_device{}()};
+                std::uniform_real_distribution<float> u(0.0f, 1.0f);
+                float h0 = u(rng);
+                if (cols.empty()) {
+                    ss->setFloat("colorHue", h0);   // no colour inputs: turn the whole picture
+                } else {
+                    // analogous / complementary / triad / split, picked at random
+                    static const float kSchemes[4][3] = {{0.0f, 0.08f, -0.08f}, {0.0f, 0.5f, 0.04f},
+                                                         {0.0f, 0.333f, 0.667f}, {0.0f, 0.42f, 0.58f}};
+                    const float* off = kSchemes[(int)(u(rng) * 4.0f) & 3];
+                    for (size_t i = 0; i < cols.size(); i++) {
+                        glm::vec4 def = cols[i]->defaultColor;
+                        float lum = 0.299f * def.r + 0.587f * def.g + 0.114f * def.b;
+                        float mx = std::max(def.r, std::max(def.g, def.b)), mn = std::min(def.r, std::min(def.g, def.b));
+                        // near-black / near-white / grey defaults are backgrounds
+                        // and ink: they keep their value so the shader still reads
+                        bool neutral = (mx - mn) < 0.08f && (lum < 0.18f || lum > 0.88f);
+                        float h = h0 + off[i % 3] + (i >= 3 ? 0.03f * (float)(i / 3) : 0.0f);
+                        h -= std::floor(h);
+                        float sat = neutral ? 0.15f : 0.55f + 0.4f * u(rng);
+                        float val = neutral ? mx : 0.75f + 0.25f * u(rng);
+                        float r, g, b;
+                        ImGui::ColorConvertHSVtoRGB(h, sat, val, r, g, b);
+                        ss->setColor(cols[i]->name, glm::vec4(r, g, b, def.a));
+                    }
+                    ss->setFloat("colorHue", 0.0f);
+                }
+                if (pal && !(cols.size() > 0 && u(rng) < 0.5f)) {
+                    int n = (int)pal->longLabels.size();
+                    int k = std::min(n - 1, (int)(u(rng) * n));
+                    ss->setFloat(pal->name, (float)(pal->longValues.size() > (size_t)k ? pal->longValues[k] : k));
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(cols.empty() ? "new colours: turns the hue of the whole picture"
+                                                                       : "new colours: a fresh matching set for every colour of this shader");
+            ImGui::SameLine(0, sg);
+            if (ImGui::Button("\xe2\x86\xba", ImVec2(wRes, 22.0f))) {   // ↺
+                for (auto* c : cols) ss->setColor(c->name, c->defaultColor);
+                if (pal) ss->setFloat(pal->name, pal->defaultFloat);
+                ss->setFloat("colorHue", 0.0f);
+                ss->setFloat("colorSat", 1.0f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("colours back to the shader's own");
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar();
+            cy += rowH;
+            // the shader's own palette switch: ‹ name ›
+            if (pal) {
+                int n = (int)pal->longLabels.size();
+                int iv = std::holds_alternative<float>(pal->value) ? (int)std::get<float>(pal->value) : 0;
+                int idx = iv;
+                for (int k = 0; k < (int)pal->longValues.size(); k++) if (pal->longValues[k] == iv) { idx = k; break; }
+                idx = std::clamp(idx, 0, n - 1);
+                auto setIdx = [&](int k) {
+                    k = ((k % n) + n) % n;
+                    ss->setFloat(pal->name, (float)(pal->longValues.size() > (size_t)k ? pal->longValues[k] : k));
+                };
+                const float bw = 26.0f;
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, kGhostBtn);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGhostBtnHov);
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1, 1, 1, 0.07f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1, 1, 1, 0.12f));
+                ImGui::SetCursorScreenPos(ImVec2(x, cy));
+                if (ImGui::Button("\xe2\x80\xb9", ImVec2(bw, 0))) setIdx(idx - 1);   // ‹
+                ImGui::SameLine(0, 4);
+                ImGui::SetNextItemWidth(w - 2.0f * bw - 8.0f);
+                if (ImGui::BeginCombo("##pal", pal->longLabels[idx].c_str())) {
+                    for (int k = 0; k < n; k++)
+                        if (ImGui::Selectable(pal->longLabels[k].c_str(), k == idx)) setIdx(k);
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", pal->label.empty() ? pal->name.c_str() : pal->label.c_str());
+                ImGui::SameLine(0, 4);
+                if (ImGui::Button("\xe2\x80\xba", ImVec2(bw, 0))) setIdx(idx + 1);   // ›
+                ImGui::PopStyleColor(4);
+                ImGui::PopStyleVar();
+                cy += ImGui::GetFrameHeight() + 6.0f;
+            }
+            ImGui::PopID();
+            return cy + 4.0f;
+        };
 
         // a deck's parameters: react dot · label · slider, every row on one
         // centre line, label column fixed so the sliders line up
@@ -23937,7 +25207,16 @@ void Application::renderShowPanel() {
                     ImGui::SetNextItemWidth(w - sliderX - 4.0f);
                     float v = sp.cur;
                     if (audio) ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.29f, 0.62f, 1.0f, 1.0f));
-                    if (ImGui::SliderFloat("##v", &v, sp.lo, sp.hi, "%.2f") && ss) ss->setFloat(sp.name, v);
+                    if (ImGui::SliderFloat("##v", &v, sp.lo, sp.hi, "%.2f")) {
+                        // shaders by name; native sources through their live param tables
+                        if (ss) ss->setFloat(sp.name, v);
+                        else if (auto* f3 = dynamic_cast<FluidSource3D*>(L->source.get())) {
+                            if (auto* d = f3->findParam(sp.name)) *d->ptr = v;
+                        } else if (auto* sk = dynamic_cast<SceneKnobSource*>(L->source.get())) {
+                            for (const auto& d : sk->scene->params())
+                                if (sp.name == d.id) { *d.ptr = v; break; }
+                        }
+                    }
                     if (audio) {
                         ImGui::PopStyleColor();
                         // the range the signal sweeps, as a blue band under the slider
@@ -23949,6 +25228,88 @@ void Application::renderShowPanel() {
                     }
                     ImGui::PopID();
                     ry += rowH;
+                }
+                // ── TEXTURE: feed an image source into the shader — the
+                // shader's own image input, or the Easel texture kit every
+                // other shader gets (blended in the kit pass). Sources: any
+                // non-deck layer (WebRTC/WHEP, NDI, camera, video…) or a file.
+                if (ss) {
+                    for (auto& in : ss->inputs()) {
+                        if (in.type != "image" || !in.importedPath.empty()) continue;
+                        ImGui::PushID(in.name.c_str());
+                        ry += 4.0f;
+                        float cyy = ry + rowH * 0.5f;
+                        std::string lbl = in.label.empty() ? in.name : in.label;
+                        ImVec2 ls = ImGui::CalcTextSize(lbl.c_str());
+                        pd->AddText(ImVec2(base.x + dotW + 2, cyy - ls.y * 0.5f), IM_COL32(140, 148, 163, 255), lbl.c_str());
+                        auto& binds = ss->imageBindings();
+                        auto bit = binds.find(in.name);
+                        std::string cur = "None";
+                        if (bit != binds.end()) {
+                            if (!bit->second.filePath.empty()) cur = std::filesystem::path(bit->second.filePath).filename().string();
+                            else if (bit->second.sourceLayerId) {
+                                cur = "(missing layer)";
+                                for (int j = 0; j < m_layerStack.count(); j++)
+                                    if (m_layerStack[j] && m_layerStack[j]->id == bit->second.sourceLayerId) { cur = m_layerStack[j]->name; break; }
+                            } else if (bit->second.textureId) cur = "Camera";
+                        }
+                        if (in.name == "liveStream" && cur == "None") cur = "WebRTC (auto)";
+                        ImGui::SetCursorScreenPos(ImVec2(base.x + sliderX, cyy - ImGui::GetFrameHeight() * 0.5f));
+                        ImGui::SetNextItemWidth(w - sliderX - 4.0f);
+                        if (ImGui::BeginCombo("##texsrc", cur.c_str())) {
+                            if (ImGui::Selectable("None", cur == "None")) ss->unbindImageInput(in.name);
+                            bool any = false;
+                            for (int j = 0; j < m_layerStack.count(); j++) {
+                                auto& sl = m_layerStack[j];
+                                if (!sl || !sl->source || sl.get() == L) continue;
+                                if (sl->managedKey == kDeckKey[0] || sl->managedKey == kDeckKey[1]) continue;
+                                any = true;
+                                std::string item = sl->name + "  (" + sl->source->typeName() + ")";
+                                ImGui::PushID((int)sl->id);
+                                bool isCur = bit != binds.end() && bit->second.sourceLayerId == sl->id;
+                                if (ImGui::Selectable(item.c_str(), isCur)) {
+                                    ss->bindImageInput(in.name, sl->source->textureId(), sl->source->width(),
+                                                       sl->source->height(), sl->id, sl->source->isFlippedV());
+                                    if (in.kit && ss->getFloat("kitTexMix", 0.0f) < 0.01f) ss->setFloat("kitTexMix", 1.0f);
+                                }
+                                ImGui::PopID();
+                            }
+                            if (!any) ImGui::TextDisabled("no layers — add WebRTC / NDI / camera in Sources");
+                            ImGui::Separator();
+                            if (ImGui::Selectable("Image file...")) {
+                                std::string path = openFileDialog("Images\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tga\0All Files\0*.*\0");
+                                if (!path.empty() && ss->bindImageFileInput(in.name, path) && in.kit
+                                    && ss->getFloat("kitTexMix", 0.0f) < 0.01f) ss->setFloat("kitTexMix", 1.0f);
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("feed a live source or an image into this shader");
+                        ry += rowH;
+                        if (in.kit) {
+                            // blend + fit for the kit texture, as two half-width combos
+                            auto enumCombo = [&](const char* id, const char* name, float x, float wd) {
+                                for (auto& e : ss->inputs()) {
+                                    if (e.name != name) continue;
+                                    int idx = (int)std::lround(ss->getFloat(name, 0.0f));
+                                    idx = std::clamp(idx, 0, (int)e.longLabels.size() - 1);
+                                    ImGui::SetCursorScreenPos(ImVec2(x, ry + (rowH - ImGui::GetFrameHeight()) * 0.5f));
+                                    ImGui::SetNextItemWidth(wd);
+                                    if (ImGui::BeginCombo(id, e.longLabels[idx].c_str())) {
+                                        for (int k = 0; k < (int)e.longLabels.size(); k++)
+                                            if (ImGui::Selectable(e.longLabels[k].c_str(), k == idx)) ss->setFloat(name, (float)k);
+                                        ImGui::EndCombo();
+                                    }
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.label.c_str());
+                                    break;
+                                }
+                            };
+                            float fullW = w - sliderX - 4.0f, half = (fullW - 4.0f) * 0.5f;
+                            enumCombo("##texmode", "kitTexMode", base.x + sliderX, half);
+                            enumCombo("##texfit",  "kitTexFit",  base.x + sliderX + half + 4.0f, half);
+                            ry += rowH;
+                        }
+                        ImGui::PopID();
+                    }
                 }
                 ImGui::SetCursorScreenPos(ImVec2(base.x, ry));
                 ImGui::Dummy(ImVec2(1, 1));
@@ -23994,7 +25355,7 @@ void Application::renderShowPanel() {
                     }
                     ImGui::EndCombo();
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("blend mode: how deck %s mixes over the other deck", di == 0 ? "A" : "B");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("blend mode: deck %s blends onto everything under it, like a layer.\nAny blend mode stacks the decks: the crossfader's middle = both full", di == 0 ? "A" : "B");
                 ImGui::PopStyleColor(2);
                 ImGui::PopStyleVar();
                 ImGui::PopID();
@@ -24005,13 +25366,24 @@ void Application::renderShowPanel() {
                 // deck knobs start right under the deck's speed row (yDeck),
                 // higher than the centre's content — deckHeader / paramList
                 // read y by reference
+                ImGui::SetCursorScreenPos(ImVec2(x, yDeck));
+                ImGui::BeginChild(di == 0 ? "##deckColA" : "##deckColB",
+                                  ImVec2(sideW, (origin.y + avail.y - kShowFloor) - yDeck), false,
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                cd = ImGui::GetWindowDrawList();
                 float saveY = y; y = yDeck;
                 deckHeader(di, x, sideW);
                 y = yDeck + cardHdr;
+                y = colorStrip(di, x + cardPad, sideW - 2.0f * cardPad);
                 paramList(di, x + cardPad, sideW - 2.0f * cardPad, (origin.y + avail.y - kShowFloor) - y);
                 y = saveY;
+                ImGui::EndChild();
             }
         }
+        // the centre column's tab content starts BELOW the transport
+        ImGui::SetCursorScreenPos(ImVec2(xM, y));
+        ImGui::BeginChild("##showTab", ImVec2(mainW, contentH), false, ImGuiWindowFlags_NoScrollbar);
+        cd = ImGui::GetWindowDrawList();
         if (m_showTab == 0) {
 
             auto ccParam = [&](int cc) -> std::pair<std::string, std::string> {
@@ -24139,9 +25511,11 @@ void Application::renderShowPanel() {
             {
                 // one row, one baseline, centred under the surface (the
                 // "XL -> ..." caption above is centred the same way)
-                const char* xlLbl = m_showLCXLMk3 ? "XL 3" : "XL Classic";
+                const char* xlLbl = lcxlMk3() ? "XL 3" : "XL Classic";
                 char midiLbl[96];
-                snprintf(midiLbl, sizeof(midiLbl), "MIDI: %s", m_midiManager.currentDeviceLabel().c_str());
+                const bool midiOn = !m_midiUserDisconnected;
+                if (midiOn) snprintf(midiLbl, sizeof(midiLbl), "MIDI ON: %s", m_midiManager.currentDeviceLabel().c_str());
+                else        snprintf(midiLbl, sizeof(midiLbl), "MIDI OFF");
                 const float gap = 10.0f, pad = 16.0f;
                 float wRemap = ImGui::CalcTextSize("Re-map").x + pad;
                 float wMore  = ImGui::CalcTextSize("More").x + pad;
@@ -24162,14 +25536,25 @@ void Application::renderShowPanel() {
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("next page of parameters onto the surface");
                 ImGui::SameLine(0, gap);
                 lcxlBank(0);
-                if (ImGui::Button(xlLbl, ImVec2(wXl, 0))) m_showLCXLMk3 = !m_showLCXLMk3;
+                if (ImGui::Button(xlLbl, ImVec2(wXl, 0))) {
+                    m_showLCXLMk3 = !lcxlMk3();
+                    m_showLCXLDetected = true;          // a hand pick sticks
+                    if (target) autoMapShaderToLCXL(target->source.get());
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("which Launch Control XL this is (normally picked automatically\nfrom the knobs you turn) - click to switch");
                 ImGui::SameLine(0, gap);
-                // the MIDI device: same pill, but it is a readout, not a button
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
-                ImGui::Button(midiLbl, ImVec2(wMidi, 0));
+                // MIDI on/off: one click, remembered across launches
+                ImGui::PushStyleColor(ImGuiCol_Button, midiOn ? ImVec4(0.961f, 0.965f, 0.973f, 0.85f) : ImVec4(1, 1, 1, 0.04f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, midiOn ? ImVec4(1, 1, 1, 0.95f) : kGhostBtnHov);
+                ImGui::PushStyleColor(ImGuiCol_Text, midiOn ? ImVec4(0.05f, 0.06f, 0.08f, 1.0f) : ImVec4(0.55f, 0.58f, 0.64f, 1));
+                if (ImGui::Button(midiLbl, ImVec2(wMidi, 0))) {
+                    if (midiOn) { m_midiManager.closeDevice(); setMidiEnabled(false); }
+                    else        { setMidiEnabled(true); m_midiManager.openAll(); }
+                }
                 ImGui::PopStyleColor(3);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(midiOn ? "MIDI is on (stays on next launch) - click to turn it off"
+                                             : "MIDI is off - click to turn it on (stays on next launch)");
                 ImGui::PopStyleColor(4);
                 ImGui::PopStyleVar(2);
             }
@@ -24402,15 +25787,17 @@ void Application::renderShaderGallery() {
         // showed another zone = "it didn't add"), the knob-target deck when
         // it was opened from SHOW. A pick in the dropdown sticks until the
         // active zone changes.
-        static int  s_destZone = 0;
+        // -4 = SHOW · LIVE (the default): the tile cues into the off-air
+        // deck and the decks GO to it, so the gallery and SHOW drive the
+        // same two decks, the same knobs and the same MIDI auto-map.
+        static int  s_destZone = -4;
         static int  s_destFollowZone = -1;
         static bool s_building = false;
         if (justOpened) {
             s_building = false;   // a fresh open adds tiles; BUILD SHOW is an explicit mode
-            s_destZone = UIManager::sGalleryFromShow ? (-2 - std::max(0, std::min(1, m_deckTarget))) : m_activeZone;
             s_destFollowZone = m_activeZone;
         } else if (m_activeZone != s_destFollowZone) {
-            s_destZone = m_activeZone;
+            if (s_destZone >= 0) s_destZone = m_activeZone;   // a zone pick follows the canvas
             s_destFollowZone = m_activeZone;
         }
         if (s_destZone >= (int)m_zones.size()) s_destZone = m_zones.empty() ? -1 : 0;
@@ -24455,6 +25842,93 @@ void Application::renderShaderGallery() {
         };
         pill("ALL", 0); pill("VFX", 1); pill("Text", 2); pill("3D", 3);
 
+        // ── GROUP: packs (packs.json, read-only) + your lists (shared with
+        // the SHOW library, ~/.easel/show_deck_playlists.json) ──
+        if (!m_deckPlaylistsLoaded) { loadDeckPlaylists(); m_deckPlaylistsLoaded = true; }
+        static char s_newGroup[64] = "";
+        static std::string s_newGroupSeed;   // a tile to drop into the new group
+        static bool s_wantNewGroup = false;
+        {
+            auto upper = [](std::string v) { for (auto& ch : v) ch = (char)toupper((unsigned char)ch); return v; };
+            std::string cur = "ALL SHADERS";
+            if (m_galleryGroup.rfind("pack:", 0) == 0) cur = upper(m_galleryGroup.substr(5)) + " (pack)";
+            else if (m_galleryGroup.rfind("list:", 0) == 0) {
+                cur = m_galleryGroup.substr(5);
+                if (deckPlaylistIndex(cur) < 0) { m_galleryGroup.clear(); cur = "ALL SHADERS"; }
+            }
+            ImGui::SameLine(0, 18);
+            ImGui::AlignTextToFramePadding();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.58f, 0.65f, 1.0f));
+            ImGui::TextUnformatted("GROUP");
+            ImGui::PopStyleColor();
+            ImGui::SameLine(0, 8);
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 9.0f);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, m_galleryGroup.empty() ? ImVec4(1, 1, 1, 0.06f)
+                                                                       : ImVec4(0.961f, 0.965f, 0.973f, 0.30f));
+            bool wantDelete = false, wantCopyPack = false;
+            if (ImGui::BeginCombo("##babyGroup", cur.c_str(), ImGuiComboFlags_HeightLarge)) {
+                if (ImGui::Selectable("ALL SHADERS", m_galleryGroup.empty())) m_galleryGroup.clear();
+                if (!m_deckPlaylists.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("MY GROUPS");
+                    for (int li = 0; li < (int)m_deckPlaylists.size(); li++) {
+                        const auto& pl = m_deckPlaylists[li];
+                        char lbl[128];
+                        snprintf(lbl, sizeof(lbl), "%s  (%d)##l%d", pl.name.c_str(), (int)pl.shaderPaths.size(), li);
+                        if (ImGui::Selectable(lbl, m_galleryGroup == "list:" + pl.name)) {
+                            m_galleryGroup = "list:" + pl.name;
+                            m_deckPlaylistSel[0] = m_deckPlaylistSel[1] = li;   // SHOW library follows
+                        }
+                    }
+                }
+                auto packs = m_shaderClaw.packs();
+                packs.insert(packs.begin(), "simulations");
+                if (!packs.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("PACKS");
+                    for (const auto& pk : packs) {
+                        std::string lbl = upper(pk) + "##p" + pk;
+                        if (ImGui::Selectable(lbl.c_str(), m_galleryGroup == "pack:" + pk)) m_galleryGroup = "pack:" + pk;
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::Selectable("+ NEW GROUP...")) { s_wantNewGroup = true; s_newGroupSeed.clear(); }
+                if (m_galleryGroup.rfind("pack:", 0) == 0 && ImGui::Selectable("COPY PACK TO MY GROUPS")) wantCopyPack = true;
+                if (m_galleryGroup.rfind("list:", 0) == 0 && ImGui::Selectable("DELETE THIS GROUP")) wantDelete = true;
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("shader groups: packs + your own lists\nright-click a tile to add it to a group\n(the SHOW library uses the same groups)");
+            if (wantCopyPack) {
+                std::string pk = m_galleryGroup.substr(5), name = upper(pk) + " PACK";
+                int li = deckPlaylistIndex(name);
+                if (li < 0) { m_deckPlaylists.push_back({name, {}}); li = (int)m_deckPlaylists.size() - 1; }
+                for (const auto& e : libraryEntries())
+                    if (e.group == pk) {
+                        auto& v = m_deckPlaylists[li].shaderPaths;
+                        if (std::find(v.begin(), v.end(), e.fullPath) == v.end()) v.push_back(e.fullPath);
+                    }
+                saveDeckPlaylists();
+                m_galleryGroup = "list:" + name;
+                m_deckPlaylistSel[0] = m_deckPlaylistSel[1] = li;
+            }
+            if (wantDelete) {
+                int gone = deckPlaylistIndex(m_galleryGroup.substr(5));
+                if (gone >= 0) {
+                    m_deckPlaylists.erase(m_deckPlaylists.begin() + gone);
+                    for (int sd = 0; sd < 2; sd++) {
+                        if      (m_deckPlaylistSel[sd] == gone) m_deckPlaylistSel[sd] = -1;
+                        else if (m_deckPlaylistSel[sd] >  gone) m_deckPlaylistSel[sd]--;
+                    }
+                    saveDeckPlaylists();
+                }
+                m_galleryGroup.clear();
+            }
+        }
+
         // destination dropdown (same semantics as the panel's ADD TO)
         ImGui::SameLine(0, 18);
         ImGui::AlignTextToFramePadding();
@@ -24463,7 +25937,8 @@ void Application::renderShaderGallery() {
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 8);
         const char* destPreview = "Main";   // no zones yet = the main output
-        if (s_destZone == -2) destPreview = "Deck A";
+        if (s_destZone == -4) destPreview = "SHOW - live";
+        else if (s_destZone == -2) destPreview = "Deck A";
         else if (s_destZone == -3) destPreview = "Deck B";
         else if (s_destZone >= 0 && s_destZone < (int)m_zones.size() && m_zones[s_destZone])
             destPreview = m_zones[s_destZone]->name.c_str();
@@ -24475,6 +25950,9 @@ void Application::renderShaderGallery() {
         if (ImGui::BeginCombo("##babyDest", destPreview)) {
             // SHOW decks first: a tile replaces that deck's shader and the
             // knobs follow it — the same thing the SHOW library does.
+            if (ImGui::Selectable("SHOW - live", s_destZone == -4)) s_destZone = -4;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("cue the tile into the off-air deck and crossfade to it;\nthe SHOW knobs + MIDI follow it");
             if (ImGui::Selectable("Deck A", s_destZone == -2)) s_destZone = -2;
             if (ImGui::Selectable("Deck B", s_destZone == -3)) s_destZone = -3;
             ImGui::Separator();
@@ -24510,6 +25988,22 @@ void Application::renderShaderGallery() {
                 ImGui::PopStyleColor(3);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Pick a show length, click tiles to add them,\nthen START - the shaders rotate as a playlist.");
+
+                // REFRESH THUMBNAILS: re-render every preview from its current settings
+                ImGui::SameLine(0, 8);
+                {
+                    int left = (int)m_thumbQueue.size() + (m_thumbJob ? 1 : 0);
+                    char lbl[64];
+                    if (left > 0) snprintf(lbl, sizeof(lbl), "THUMBNAILS %d/%d", std::max(0, m_thumbQueuedTotal - left), m_thumbQueuedTotal);
+                    else          snprintf(lbl, sizeof(lbl), "REFRESH THUMBNAILS");
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 0.08f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.18f));
+                    if (ImGui::Button(lbl) && left == 0) queueAllThumbs();
+                    ImGui::PopStyleColor(2);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(left > 0 ? "rendering previews in the background"
+                                                   : "re-render every preview from each shader's\ncurrent settings (about a second each)");
+                }
 
                 // ── SHOWS — saved show presets. Picking one loads its
                 // shader playlist + every saved parameter and starts it.
@@ -24706,72 +26200,30 @@ void Application::renderShaderGallery() {
                 if (d != std::string::npos) stem = stem.substr(0, d);
                 return sThumbCacheDir + "/" + stem + ".png";
             };
-            if (m_scThumbRenderer) {
-                m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
-                m_scThumbRenderer->update();
-                m_scThumbRenderFrame++;
-                if (m_scThumbRenderFrame > 3) {
-                    auto& entry = m_scThumbnails[m_scThumbRenderPath];
-                    if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                    GLint prevFBO;
-                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-                    GLuint thumbTex = m_scThumbRenderer->textureId();
-                    if (thumbTex != 0) {
-                        GLuint tempFBO;
-                        glGenFramebuffers(1, &tempFBO);
-                        glBindFramebuffer(GL_READ_FRAMEBUFFER, tempFBO);
-                        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                               GL_TEXTURE_2D, thumbTex, 0);
-                        if (!entry.texture->id() ||
-                            entry.texture->width() != kThumbRes ||
-                            entry.texture->height() != kThumbRes)
-                            entry.texture->createEmpty(kThumbRes, kThumbRes);
-                        glBindTexture(GL_TEXTURE_2D, entry.texture->id());
-                        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kThumbRes, kThumbRes);
-                        glBindTexture(GL_TEXTURE_2D, 0);
-                        {
-                            std::vector<unsigned char> px((size_t)kThumbRes * kThumbRes * 4);
-                            glReadPixels(0, 0, kThumbRes, kThumbRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-                            stbi_flip_vertically_on_write(1);
-                            stbi_write_png(thumbCachePath(m_scThumbRenderPath).c_str(),
-                                           kThumbRes, kThumbRes, 4, px.data(), kThumbRes * 4);
-                            stbi_flip_vertically_on_write(0);
-                        }
-                        glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-                        glDeleteFramebuffers(1, &tempFBO);
-                        entry.ready = true;
-                    }
-                    m_scThumbRenderer.reset();
-                    m_scThumbRenderPath.clear();
-                }
-            } else {
+            // Cached previews load a few per frame; a missing or stale one
+            // (older than its .fs) goes to the thumbnail queue, which renders
+            // it from its current settings (tickThumbJobs).
+            {
                 int cacheLoads = 0;
-                for (const auto& shader : m_shaderClaw.shaders()) {
+                for (const auto& shader : libraryEntries()) {
                     auto it = m_scThumbnails.find(shader.fullPath);
                     if (it != m_scThumbnails.end() && it->second.ready) continue;
                     std::string png = thumbCachePath(shader.fullPath);
                     std::error_code e1, e2;
                     auto pngT = std::filesystem::last_write_time(png, e1);
-                    auto srcT = std::filesystem::last_write_time(shader.fullPath, e2);
-                    if (!e1 && !e2 && pngT >= srcT) {
+                    bool stale = false;
+                    if (!e1 && shader.type != "sim") {
+                        auto srcT = std::filesystem::last_write_time(shader.fullPath, e2);
+                        stale = !e2 && pngT < srcT;
+                    }
+                    if (!e1 && !stale) {
                         auto& entry = m_scThumbnails[shader.fullPath];
                         if (!entry.texture) entry.texture = std::make_shared<Texture>();
-                        if (entry.texture->loadFromFile(png)) {
-                            entry.ready = true;
-                            if (++cacheLoads < 8) continue;
-                            break;
-                        }
+                        if (entry.texture->loadFromFile(png)) entry.ready = true;
+                        if (++cacheLoads >= 8) break;
+                        continue;
                     }
-                    m_scThumbRenderer = std::make_shared<ShaderSource>();
-                    m_scThumbRenderer->setResolution(kThumbRes, kThumbRes);
-                    if (m_scThumbRenderer->loadFromFile(shader.fullPath)) {
-                        m_scThumbRenderPath = shader.fullPath;
-                        m_scThumbRenderFrame = 0;
-                    } else {
-                        m_scThumbRenderer.reset();
-                        m_scThumbnails[shader.fullPath].ready = true;
-                    }
-                    break;
+                    queueThumb(shader.fullPath);
                 }
             }
 
@@ -24790,6 +26242,32 @@ void Application::renderShaderGallery() {
                 m_zones[zi]->visibleLayerIds.insert(lid);
             };
             auto addShaderRouted = [&](const std::string& fullPath) {
+                if (s_destZone == -4) {
+                    // SHOW · live: cue into the deck that is NOT on air and
+                    // GO to it with the SHOW transition. First pick ever (no
+                    // decks yet) lands straight on the on-screen side.
+                    std::string title;
+                    for (const auto& sh : libraryEntries())
+                        if (sh.fullPath == fullPath) { title = sh.title; break; }
+                    int onAir = m_deckBlend < 0.5f ? 0 : 1;
+                    if (!deckLayer(onAir) && deckLayer(1 - onAir)) {
+                        onAir = 1 - onAir;
+                        m_deckBlend = (float)onAir;   // the only loaded deck IS what's on screen
+                    }
+                    takeOverFromShowGlobal();
+                    if (!deckLayer(onAir)) {
+                        deckLoad(onAir, fullPath, title);
+                        deckTakeSurface(onAir, true);
+                        decksToFront();
+                    } else {
+                        int cue = 1 - onAir;
+                        deckLoad(cue, fullPath, title);
+                        deckTakeSurface(cue, true);
+                        deckGo();
+                    }
+                    usageNoteLoad(fullPath);
+                    return;
+                }
                 if (s_destZone <= -2) {
                     // a SHOW deck: swap its shader in and hand it the knobs
                     int di = -2 - s_destZone;
@@ -24801,7 +26279,11 @@ void Application::renderShaderGallery() {
                     return;
                 }
                 int before = m_layerStack.count();
-                loadShader(fullPath);
+                if      (fullPath == "__fluid__")      addFluid();
+                else if (fullPath == "__fluid3d__")    addFluid3D();
+                else if (fullPath == "__fluid3dbox__") addFluid3DBox();
+                else if (fullPath == "__particles__")  addParticles();
+                else loadShader(fullPath);
                 if (m_layerStack.count() > before) {
                     auto& nl = m_layerStack[m_layerStack.count() - 1];
                     if (s_destZone >= 0) placeInZoneOnly(nl->id, s_destZone);
@@ -24814,10 +26296,19 @@ void Application::renderShaderGallery() {
             };
 
 
+            if (!s_dbgGalleryPick.empty()) {
+                for (const auto& sh : libraryEntries())
+                    if (sh.fullPath == s_dbgGalleryPick || sh.file == s_dbgGalleryPick) {
+                        addShaderRouted(sh.fullPath);
+                        break;
+                    }
+                s_dbgGalleryPick.clear();
+            }
+
             // ── filter ──────────────────────────────────────────────────
             std::string needle = s_search;
             for (auto& c : needle) c = (char)tolower(c);
-            const auto& shaders = m_shaderClaw.shaders();
+            const auto& shaders = libraryEntries();   // simulations first, then shaders
             std::vector<int> vis;
             vis.reserve(shaders.size());
             for (int i = 0; i < (int)shaders.size(); i++) {
@@ -24832,6 +26323,15 @@ void Application::renderShaderGallery() {
                             (s_filter == 1 && !isText && !is3D) ||
                             (s_filter == 2 && isText) ||
                             (s_filter == 3 && is3D);
+                if (keep && !m_galleryGroup.empty()) {
+                    if (m_galleryGroup.rfind("pack:", 0) == 0) keep = (sh.group == m_galleryGroup.substr(5));
+                    else {
+                        int li = deckPlaylistIndex(m_galleryGroup.substr(5));
+                        keep = li >= 0 && std::find(m_deckPlaylists[li].shaderPaths.begin(),
+                                                    m_deckPlaylists[li].shaderPaths.end(),
+                                                    sh.fullPath) != m_deckPlaylists[li].shaderPaths.end();
+                    }
+                }
                 if (keep && !needle.empty()) {
                     std::string t = sh.title;
                     for (auto& c : t) c = (char)tolower(c);
@@ -24869,7 +26369,27 @@ void Application::renderShaderGallery() {
                         addShaderRouted(sh.fullPath);
                         s_addedAt[sh.fullPath] = ImGui::GetTime();
                     }
-                    if (ImGui::MenuItem("Duplicate")) {
+                    if (ImGui::BeginMenu("Group")) {
+                        for (int li = 0; li < (int)m_deckPlaylists.size(); li++) {
+                            auto& v = m_deckPlaylists[li].shaderPaths;
+                            bool in = std::find(v.begin(), v.end(), sh.fullPath) != v.end();
+                            ImGui::PushID(li);
+                            if (ImGui::MenuItem(m_deckPlaylists[li].name.c_str(), nullptr, in)) {
+                                if (in) v.erase(std::remove(v.begin(), v.end(), sh.fullPath), v.end());
+                                else    v.push_back(sh.fullPath);
+                                saveDeckPlaylists();
+                            }
+                            ImGui::PopID();
+                        }
+                        if (!m_deckPlaylists.empty()) ImGui::Separator();
+                        if (ImGui::MenuItem("+ New group with this shader...")) {
+                            s_wantNewGroup = true;
+                            s_newGroupSeed = sh.fullPath;
+                        }
+                        ImGui::EndMenu();
+                    }
+                    const bool isSim = sh.type == "sim";
+                    if (!isSim && ImGui::MenuItem("Duplicate")) {
                         // Copy the .fs + append a manifest entry (new id, " Copy").
                         namespace fs = std::filesystem;
                         try {
@@ -24905,7 +26425,7 @@ void Application::renderShaderGallery() {
                             std::cerr << "[Gallery] Duplicate failed: " << e.what() << "\n";
                         }
                     }
-                    if (ImGui::MenuItem("Push Further...")) {
+                    if (!isSim && ImGui::MenuItem("Push Further...")) {
                         m_pushPath  = sh.fullPath;
                         m_pushTitle = sh.title;
                         m_pushFile  = sh.file;
@@ -24915,8 +26435,8 @@ void Application::renderShaderGallery() {
                         m_pushOpen = true;
                         UIManager::sGalleryOpen = false;  // panel lives under the overlay
                     }
-                    ImGui::Separator();
-                    if (ImGui::BeginMenu("Delete Permanently")) {
+                    if (!isSim) ImGui::Separator();
+                    if (!isSim && ImGui::BeginMenu("Delete Permanently")) {
                         if (ImGui::MenuItem("Yes - delete forever")) {
                             // PERMANENT (Lu's rule): file + thumbnail + vendored
                             // copy + manifest entry, no trash.
@@ -24971,9 +26491,21 @@ void Application::renderShaderGallery() {
                 auto it = m_scThumbnails.find(sh.fullPath);
                 if (it != m_scThumbnails.end() && it->second.ready &&
                     it->second.texture && it->second.texture->id()) {
+                    // square tile, 16:9 preview: show its centre
+                    float tw = (float)it->second.texture->width(), th = (float)it->second.texture->height();
+                    float u0 = 0.0f, u1 = 1.0f;
+                    if (tw > th && th > 0.0f) { float k = th / tw; u0 = 0.5f - 0.5f * k; u1 = 0.5f + 0.5f * k; }
                     d->AddImageRounded((ImTextureID)(intptr_t)it->second.texture->id(),
-                                       thumbMin, thumbMax, ImVec2(0, 1), ImVec2(1, 0),
+                                       thumbMin, thumbMax, ImVec2(u0, 1), ImVec2(u1, 0),
                                        IM_COL32(255, 255, 255, 255), 6.0f);
+                } else if (sh.type == "sim") {
+                    d->AddRectFilledMultiColor(thumbMin, thumbMax, IM_COL32(40, 70, 110, 255), IM_COL32(20, 30, 60, 255),
+                                               IM_COL32(10, 12, 20, 255), IM_COL32(30, 50, 90, 255));
+                    const char* tag = "SIMULATION";
+                    ImVec2 ws = ImGui::CalcTextSize(tag);
+                    d->AddText(ImVec2((thumbMin.x + thumbMax.x - ws.x) * 0.5f,
+                                      (thumbMin.y + thumbMax.y - ws.y) * 0.5f),
+                               IM_COL32(200, 220, 255, hov ? 255 : 200), tag);
                 } else {
                     d->AddRectFilled(thumbMin, thumbMax, IM_COL32(14, 18, 30, 255), 6.0f);
                     const char* wait = "...";
@@ -25037,6 +26569,33 @@ void Application::renderShaderGallery() {
                 ImGui::PopID();
             }
             ImGui::EndChild();
+        }
+
+        // NEW GROUP — opened from the GROUP combo or a tile's right-click;
+        // latched and opened here, at window scope, so the ID matches.
+        if (s_wantNewGroup) { ImGui::OpenPopup("##newGalleryGroup"); s_wantNewGroup = false; s_newGroup[0] = 0; }
+        if (ImGui::BeginPopup("##newGalleryGroup")) {
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::TextDisabled("NEW GROUP");
+            ImGui::SetNextItemWidth(200);
+            bool enter = ImGui::InputTextWithHint("##ngname", "group name", s_newGroup, sizeof(s_newGroup),
+                                                  ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            bool can = s_newGroup[0] != 0 && deckPlaylistIndex(s_newGroup) < 0;
+            if (!can) ImGui::BeginDisabled();
+            bool create = ImGui::Button("CREATE");
+            if (!can) ImGui::EndDisabled();
+            if (can && (create || enter)) {
+                m_deckPlaylists.push_back({std::string(s_newGroup), {}});
+                if (!s_newGroupSeed.empty()) m_deckPlaylists.back().shaderPaths.push_back(s_newGroupSeed);
+                int li = (int)m_deckPlaylists.size() - 1;
+                saveDeckPlaylists();
+                m_galleryGroup = "list:" + m_deckPlaylists[li].name;
+                m_deckPlaylistSel[0] = m_deckPlaylistSel[1] = li;
+                s_newGroupSeed.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
     }
     ImGui::End();

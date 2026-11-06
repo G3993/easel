@@ -36,6 +36,11 @@ public:
     void presentCrop(GLuint texture, float uOffX, float uOffY,
                      float uScaleX, float uScaleY);
 
+    // Several textures (one per zone routed to this projector) combined into
+    // one frame — see ProjectorOutput.cpp.
+    void presentStack(const GLuint* textures, int count, float uOffX = 0.0f, float uOffY = 0.0f,
+                      float uScaleX = 1.0f, float uScaleY = 1.0f);
+
     void requestClose() { m_closeRequested = true; }
     // is this window covering a screen point? (used when it has been
     // put on the editor's display by a mirror / relocation)

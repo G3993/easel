@@ -147,6 +147,10 @@ bool MIDIManager::openDevice(int index) {
         m_deviceName = sourceName(MIDIGetSource(index), index);
     }
     m_lastSourceCount = (int)sourceCount;
+    // Same name list the Windows path keeps — hasControlSurface() and
+    // isLaunchControlXL3() read it. It was never filled on macOS, so the XL 3
+    // was always taken for the classic XL (row 2 dead, row 3 driving row 2).
+    m_lastDeviceNames = listDevices();
     m_open = connected > 0;
     m_deviceIdx = m_open ? index : -1;
     if (m_open) {
@@ -164,6 +168,7 @@ void MIDIManager::handleHotplug() {
     bool changed = m_setupChanged.exchange(false) || (m_open && count != m_lastSourceCount);
     if (!changed) return;
     m_lastSourceCount = count;
+    m_lastDeviceNames = listDevices();
     if (!m_open) return; // Application's auto-connect handles the closed case
 
     if (m_deviceIdx == kAllDevices) {

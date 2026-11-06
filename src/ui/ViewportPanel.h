@@ -163,6 +163,7 @@ private:
     glm::vec2 m_maskBoxStart = {0, 0};
 public:
     std::vector<int>& maskSelectedPoints() { return m_maskSelectedPoints; }
+    int maskSelectedPoint() const { return m_maskSelectedPoint; }
 private:
 
     // Layer transform state

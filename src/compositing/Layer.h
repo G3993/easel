@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include <string>
 #include <memory>
+#include <map>
 
 enum class TransitionType { Fade = 0, WipeLeft, WipeRight, WipeUp, WipeDown, Dissolve, Shader, COUNT };
 
@@ -226,6 +227,25 @@ public:
             transitionActive = true;
             transitionProgress = 0.0f;
         }
+    }
+
+    // Per-zone transform: a layer can sit differently in every zone. The
+    // fields above always hold the ACTIVE zone's transform (so every editor —
+    // viewport drag, Properties, OSC — just edits them); each other zone's
+    // copy lives here, keyed by OutputZone::xformKey, and is swapped in while
+    // that zone composites. See Application::syncZoneXforms.
+    struct ZoneXform {
+        glm::vec2 position{0.0f}, scale{1.0f}, anchor{0.0f};
+        float rotation = 0.0f;
+        bool flipH = false, flipV = false;
+        float z3 = 0.0f;
+        glm::vec3 rot3{0.0f};
+    };
+    std::map<std::string, ZoneXform> zoneXforms;
+    ZoneXform xform() const { return {position, scale, anchor, rotation, flipH, flipV, z3, rot3}; }
+    void setXform(const ZoneXform& x) {
+        position = x.position; scale = x.scale; anchor = x.anchor; rotation = x.rotation;
+        flipH = x.flipH; flipV = x.flipV; z3 = x.z3; rot3 = x.rot3;
     }
 
     // canvasAspect (w/h) keeps rotation shear-free on non-square canvases;

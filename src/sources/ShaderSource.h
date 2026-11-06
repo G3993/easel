@@ -91,6 +91,10 @@ struct ISFInput {
     // baked SDF atlas): path relative to the shader. Auto-bound on load,
     // hidden from the TEXTURE pickers.
     std::string importedPath;
+
+    // Easel kit input (TEXTURE kit): lives in the param list / pickers but is
+    // never declared in the shader's GLSL — the kit post pass consumes it.
+    bool kit = false;
 };
 
 // Ping-pong FBO pair for persistent ISF pass buffers
@@ -235,6 +239,8 @@ public:
     bool sceneWantsDepth() const { return m_role == SceneRole::SDF || m_role == SceneRole::Volume; }
     // The first image input (a post shader reads the composite through it).
     std::string firstImageInput() const;
+    // current value of a float/long input (fallback if missing)
+    float getFloat(const std::string& name, float fallback) const { return kitValue(name.c_str(), fallback); }
     // Depth side-output (RGBA16F, z = scene depth 0..1) for SDF / volume roles.
     GLuint sceneDepthTexture() const { return m_auxTex; }
     // Render now through the zone camera; update() skips its own render on

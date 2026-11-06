@@ -505,8 +505,12 @@ void LayerPanel::render(LayerStack& stack, int& selectedLayer,
         m_insertIndex = std::max(0, std::min(hoverDisplay, layerCount));
     }
 
-    // Drop on release
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    // Drop on release — or as soon as the button is no longer held. A
+    // release can be missed entirely when focus leaves mid-drag (screen
+    // lock, a projector hot-plug, Cmd-Tab): the row then stayed "lifted"
+    // forever and every later click landed in a stuck drag.
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+        (m_dragIndex >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
         if (m_dragActive && m_dragIndex >= 0) {
             int dragDisplay = layerCount - 1 - m_dragIndex;
             int insertDisplay = m_insertIndex;

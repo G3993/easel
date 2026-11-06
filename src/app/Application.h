@@ -60,6 +60,7 @@
 #endif
 
 #include "speech/EthereaClient.h"
+#include "speech/EthereaSdkClient.h"
 #include "speech/CueClient.h"
 #include "app/AudioAnalyzer.h"
 #include "app/AudioMixer.h"
@@ -183,6 +184,26 @@ private:
     // Mapping profiles (warp + edge blend, independent of zones)
     std::vector<std::unique_ptr<MappingProfile>> m_mappings;
     MappingProfile* mappingForZone(OutputZone& z);
+    // per-zone layer transforms (Layer::zoneXforms)
+    const std::string& zoneXformKey(OutputZone& z);
+    void syncZoneXforms();
+    std::string m_xformLiveKey;   // whose transform the layers' live fields hold
+
+    // SPAN: projector zones form ONE big canvas. Layers visible in every
+    // span zone (the SHOW decks included) render once at the combined size
+    // and each zone shows only its own slice, instead of every zone showing
+    // the whole picture. Members = zones routed to an output (all zones if
+    // fewer than two are routed), in zone order (reversed by `reverse`).
+    struct SpanCanvas {
+        int  layout  = 0;      // 0 off, 1 side by side (left->right), 2 stacked (top->bottom)
+        bool reverse = false;  // swap the order of the zones in the span
+        std::set<std::string> members;   // zone xformKeys; empty = zones on a projector
+    } m_span;
+    std::vector<OutputZone*> spanZones();
+    // Zone's slice of the span canvas (x, y, w, h normalized, y from the top);
+    // false when span is off or the zone is not a member. totalW/H = canvas px.
+    bool spanSlice(const OutputZone* z, glm::vec4& slice, int* totalW = nullptr, int* totalH = nullptr);
+    bool layerSpans(const Layer* L);
 
 
     // Output zones (replaces singular compositor/warp/FBO)
@@ -297,6 +318,12 @@ private:
     Texture       m_testCardTex;
     Texture       m_duckTex;
     Texture m_maskGrid; // white alignment grid shown while a mask is being added/edited
+    // Live calibration patterns (shaders/mappattern.frag) drawn per zone at its
+    // own aspect, and the canvas-mask handles burned into the projected frame.
+    ShaderProgram m_mapPatternShader;
+    ShaderProgram m_maskHandlesShader;
+    GLuint renderMapPattern(OutputZone& zone, int pattern, bool animate, bool markers = true);
+    void   drawMaskHandlesOnOutput(OutputZone& zone, MappingProfile* mp);
 
     // MAPPING-workspace calibration patterns (black & white). In Mapping mode
     // the warp source is replaced by one of these so the user aligns geometry
@@ -305,7 +332,7 @@ private:
     // (WarpEditor::testPatternIndex). Order MUST match kPatternNames there:
     // 0 Grid, 1 Checkerboard, 2 Crosshair, 3 Concentric Circles, 4 Dots,
     // 5 Solid White.
-    static constexpr int kMapPatternCount = 6;
+    static constexpr int kMapPatternCount = 7;
     Texture m_mapPatterns[kMapPatternCount];
 
     // Phase Q v4 — bloom pipeline. Half-res FBOs ping-pong for the
@@ -496,6 +523,18 @@ private:
     // -1 = "All Shaders" (unfiltered); >=0 indexes m_deckPlaylists. Per rail
     // (0 = left/B, 1 = right/A) so each side can browse independently.
     int  m_deckPlaylistSel[2] = { -1, -1 };
+    // SHADER GROUPS — the gallery's view of the same data: packs from
+    // packs.json (read-only, e.g. "studio") plus these lists (yours, editable).
+    // "" = all shaders, "pack:<group>", "list:<name>". Picking a list here
+    // also points both SHOW library decks at it, so the two pages agree.
+    std::string m_galleryGroup;
+    // The edition's main pack (CMake -DEASEL_FEATURED_PACK=studio, or env
+    // EASEL_FEATURED_PACK): materialised once as an editable list
+    // ("STUDIO PACK") that the gallery and both SHOW decks open on.
+    bool m_featuredPackDone = false;
+    static std::string featuredPack();
+    void ensureFeaturedPack();
+    int  deckPlaylistIndex(const std::string& name) const;
     // Free-text filter typed above the playlist dropdown, per rail — narrows
     // the thumbnail grid to shaders whose name contains the query.
     char m_deckSearchQuery[2][64] = { { 0 }, { 0 } };
@@ -521,7 +560,11 @@ private:
     // Auto-connect the first MIDI controller so it "just works" without opening
     // it in the MIDI panel. Set true once the user explicitly picks "None",
     // so we stop forcing a reconnect.
-    bool m_midiUserDisconnected = false;
+    // MIDI is OFF until the user turns it on (SHOW's MIDI button or the MIDI
+    // panel); the choice is remembered in ~/.easel prefs ("midiEnabled"), so
+    // it's one click, not a toggle every session.
+    bool m_midiUserDisconnected = true;
+    void setMidiEnabled(bool on);
     int m_mosaicAudioDevice = -1; // -1 = system loopback, >=0 = index into device list
     bool m_projectorAutoConnect = false;
     int m_lastMonitorCount = 0;
@@ -684,6 +727,20 @@ private:
     std::shared_ptr<ShaderSource> m_scThumbRenderer; // temp shader for generating thumbnails
     std::string m_scThumbRenderPath; // currently rendering thumbnail for this shader
     int m_scThumbRenderFrame = 0;
+    // Thumbnail jobs (tickThumbJobs, every frame): one library item at a
+    // time is rendered with its CURRENT saved settings (shader presets / sim
+    // memory), warmed up ~1 s (sims 4 s), then saved 16:9 to
+    // ~/.easel/shader_thumbs/<stem>.png. Cache misses and REFRESH THUMBNAILS
+    // both feed the queue.
+    struct ThumbJob { std::string path; std::shared_ptr<ContentSource> src; double start = 0; int frames = 0; bool sim = false; };
+    std::deque<std::string> m_thumbQueue;
+    std::unique_ptr<ThumbJob> m_thumbJob;
+    Framebuffer m_thumbFBO;
+    int m_thumbQueuedTotal = 0;
+    void queueThumb(const std::string& path, bool front = false);
+    void queueAllThumbs();
+    void tickThumbJobs();
+    static std::string thumbPathFor(const std::string& fullPathOrToken);
     // Background thumbnail generation, independent of the Sources panel —
     // that panel's own generator above only runs while it's visible, so a
     // shader with no cached thumb yet (e.g. a freshly added one) never got
@@ -785,7 +842,11 @@ private:
     uint32_t m_showTargetLayerId = 0;   // 0 = automatic (selected / topmost)
     int m_showMapPage = 0;              // which page of 32 params is on the XL
     bool m_showLCXLMk3      = false;    // which XL generation the surface speaks
-    bool m_showLCXLDetected = false;    // auto-detect ran (from device names)
+    bool m_showLCXLDetected = false;    // a layout was settled by hand or by the CCs the XL sent (names no longer consulted)
+    // The ONE answer every surface uses (SHOW auto-map, deck knobs, canvas
+    // bank, faders): hand toggle / learned-from-traffic first, else the
+    // connected device names (live, hot-plug safe).
+    bool lcxlMk3();
 
     // Gallery shader show: built as REAL timeline clips (one layer + one
     // track per picked shader, cross-layer fades between) — the timeline
@@ -818,6 +879,8 @@ private:
 
     SpeechState m_speechState;
     EthereaClient m_ethereaClient;
+    EthereaSdkClient m_ethereaSdk;   // SDK control: Cue prompt + primary-model strength
+    void drawEthereaSdkPanel();
     CueClient m_cueClient;
     DataBus m_dataBus;
     std::string m_prevTranscript;       // Last full_transcript for diffing
@@ -842,6 +905,16 @@ private:
     // generator (addFluid) as an agent-managed, zone-assignable layer. Backs
     // /easel/layer/ensure/fluid.
     void ensureManagedFluidLayer(const std::string& slot, bool threeD = false);
+    // Simulations as library items: "__fluid__", "__fluid3d__",
+    // "__fluid3dbox__", "__particles__". A SHOW deck can hold one exactly like
+    // a shader (same crossfade, knobs, MIDI auto-map); the gallery adds them too.
+    std::shared_ptr<ContentSource> makeSimSource(const std::string& token, std::string& name);
+    void ensureManagedSimLayer(const std::string& slot, const std::string& token);
+    // The library = simulations first, then every shader (rebuilt when the
+    // manifest changes). Sims are ShaderEntry rows with type "sim".
+    const std::vector<ShaderClawBridge::ShaderEntry>& libraryEntries();
+    std::vector<ShaderClawBridge::ShaderEntry> m_libraryEntries;
+    size_t m_libraryEntriesFor = (size_t)-1;
     // Remove one managed layer by its exact key (drops an overlay/base layer).
     // Backs /easel/layer/remove-managed.
     void removeManagedLayer(const std::string& slot);

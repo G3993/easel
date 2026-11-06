@@ -19,10 +19,14 @@ public:
     // Dots / Solid White). Application reads this to pick the warp source.
     int  testPatternIndex() const { return m_testPattern; }
     void setTestPatternIndex(int i) { m_testPattern = i; }   // OSC / test harness
+    // Animate the calibration pattern (drift / sweep / hue cycle).
+    bool testPatternAnimate() const { return m_testPatternAnimate; }
+    void setTestPatternAnimate(bool a) { m_testPatternAnimate = a; }
 
 private:
     bool m_wantsLoadOBJ = false;
     bool m_renaming = false;
     char m_renameBuf[128] = {};
     int  m_testPattern = 0;   // default = Grid
+    bool m_testPatternAnimate = false;
 };

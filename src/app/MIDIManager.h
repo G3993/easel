@@ -83,9 +83,17 @@ public:
                 return true;
         return false;
     }
+    bool hasLaunchControl() const {
+        for (const auto& n : m_lastDeviceNames)
+            if (n.find("Launch Control") != std::string::npos || n.find("LCXL") != std::string::npos ||
+                n.find("LAUNCH CONTROL") != std::string::npos)
+                return true;
+        return false;
+    }
     bool isLaunchControlXL3() const {
         for (const auto& n : m_lastDeviceNames)
-            if (n.find("LCXL3") != std::string::npos || n.find("Launch Control XL 3") != std::string::npos)
+            if (n.find("LCXL3") != std::string::npos || n.find("Launch Control XL 3") != std::string::npos ||
+                n.find("LAUNCH CONTROL XL 3") != std::string::npos || n.find("XL3") != std::string::npos)
                 return true;
         return false;
     }

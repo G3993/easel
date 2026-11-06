@@ -1,3 +1,4 @@
+#include <limits>
 #include "sources/FluidSource3D.h"
 #include "sources/MeshSDF.h"
 #include "app/MIDIManager.h"
@@ -1776,7 +1777,10 @@ float FluidSource3D::effectiveScale() const {
     float s = std::min(2.0f, std::max(0.25f, m_renderScale));
     static const bool noCap = std::getenv("EASEL_F3D_NOCAP") != nullptr;
     if (noCap) return s;
-    const double kMaxPx = 2.5e6;
+    // ~0.82x of 1080p. Measured 2026-10-30 (3D Box, M-series): full 1080p
+    // render = 13-19 ms GPU/frame (the whole 60 fps budget, fans spin);
+    // at this cap ~9 ms with no visible loss (soft particles, fog, bloom).
+    const double kMaxPx = 1.4e6;
     double px = (double)std::max(2, m_zoneW) * (double)std::max(2, m_zoneH);
     if (px > kMaxPx) s *= (float)std::sqrt(kMaxPx / px);
     return std::max(0.2f, s);
@@ -1989,7 +1993,14 @@ void FluidSource3D::setSimUniforms(GLuint prog) {
     // also pumps vortex + turbulence so it churns harder as it gets loud.
     float audioPump = m_audioIntensity * m_audioEnergy;
     glUniform1f(U("uGravityAdd"), m_gravity - 1.0f);
-    glUniform3f(U("uGravityDir"), m_gravityTiltX, m_gravityTiltY, -1.0f);
+    if (isBox() && m_boxSpin != 0.0f) {
+        // the container turning like a drum: rotate (tiltX, down) in the x/z screen plane
+        float c = std::cos(m_boxSpin), sn = std::sin(m_boxSpin);
+        float gx = m_gravityTiltX, gz = -1.0f;
+        glUniform3f(U("uGravityDir"), gx * c - gz * sn, m_gravityTiltY, gx * sn + gz * c);
+    } else {
+        glUniform3f(U("uGravityDir"), m_gravityTiltX, m_gravityTiltY, -1.0f);
+    }
     glUniform1f(U("uForceAdd"),   m_forceScale - 1.0f);
     glUniform1f(U("uVortex"),     m_vortex + audioPump * 0.8f);
     glUniform1f(U("uVortexLift"), m_vortexLift);
@@ -2395,6 +2406,9 @@ void FluidSource3D::update() {
         m_shapeMix = std::min(1.0f, std::max(0.0f, (w - 0.1f) / 0.8f));
     }
     m_time += dt;
+    // Box mode: Spin Speed turns gravity around the view axis (rad/s),
+    // integrated so a knob move changes the speed without a jump.
+    if (isBox()) m_boxSpin = std::fmod(m_boxSpin + m_rotateSpeed * dt, 6.28318530718f);
 
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
@@ -2420,6 +2434,28 @@ void FluidSource3D::update() {
         if (std::fabs(m_twoTone - m_twoTonePrev) > 0.001f) { m_twoTonePrev = m_twoTone; m_frame = 0; }
     }
 
+    // Optional GPU timing (EASEL_F3D_GPU=1): sim passes vs render, ms/frame,
+    // averaged and printed every ~2 s. Results are read a frame late so the
+    // queries never stall the pipeline.
+    static const bool s_gpuLog = (std::getenv("EASEL_F3D_GPU") != nullptr);
+    static GLuint s_q[2] = {0, 0};
+    static bool s_qPending = false;
+    static double s_simMs = 0, s_renMs = 0; static int s_qn = 0; static double s_qT = 0;
+    if (s_gpuLog) {
+        if (!s_q[0]) glGenQueries(2, s_q);
+        if (s_qPending) {
+            GLuint64 a = 0, b = 0;
+            glGetQueryObjectui64v(s_q[0], GL_QUERY_RESULT, &a);
+            glGetQueryObjectui64v(s_q[1], GL_QUERY_RESULT, &b);
+            s_simMs += a / 1e6; s_renMs += b / 1e6; s_qn++;
+            if (glfwGetTime() - s_qT > 2.0 && s_qn) {
+                std::cerr << "[F3D gpu] sim " << (s_simMs / s_qn) << " ms  render " << (s_renMs / s_qn)
+                          << " ms  (size3d=" << m_size << " substeps=" << m_substeps << " out=" << m_outW << "x" << m_outH << ")" << std::endl;
+                s_simMs = s_renMs = 0; s_qn = 0; s_qT = glfwGetTime();
+            }
+        }
+        glBeginQuery(GL_TIME_ELAPSED, s_q[0]);
+    }
     int steps = std::max(1, m_substeps);
     for (int s = 0; s < steps; s++) {
         // A: volC(prev) → volA
@@ -2457,7 +2493,9 @@ void FluidSource3D::update() {
         m_frame++;
     }
 
+    if (s_gpuLog) { glEndQuery(GL_TIME_ELAPSED); glBeginQuery(GL_TIME_ELAPSED, s_q[1]); }
     if (!sceneFrame) renderToOutput();
+    if (s_gpuLog) { glEndQuery(GL_TIME_ELAPSED); s_qPending = true; }
 
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
     glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
@@ -2858,6 +2896,7 @@ void FluidSource3D::applyBoxPreset() {
     m_boxColor[0] = 0.97f; m_boxColor[1] = 0.97f; m_boxColor[2] = 0.975f;
     // camera: fixed, straight on, a little below the box centre (gallery eye height)
     m_autoRotate = false; m_tilt = 0.0f; m_zoom = 1.0f; m_camHeight = -0.1f;
+    m_rotateSpeed = 0.0f;   // Spin Speed turns the box's gravity; still by default
     // two liquids
     m_deepColor[0] = 0.08f;  m_deepColor[1] = 0.45f;  m_deepColor[2] = 1.00f;
     m_deepColor2[0] = 1.00f; m_deepColor2[1] = 0.10f; m_deepColor2[2] = 0.08f;
@@ -3046,13 +3085,36 @@ void FluidSource3D::applyAudioBindings(float level, float bass, float mid,
             default: have = false; break;
         }
         if (!have) continue;
-        float mapped = b.follow(raw, dt);
-        for (const auto& d : table) {
-            if (name != d.id) continue;
-            if (mapped < d.lo) mapped = d.lo; if (mapped > d.hi) mapped = d.hi;
-            *d.ptr = mapped;
-            break;
+        const ParamDef* pd = nullptr;
+        for (const auto& d : table) if (name == d.id) { pd = &d; break; }
+        if (!pd) continue;
+        if (b.signal == AudioSignal::MidiCC) {
+            // Endless knob (same as ShaderSource): the CC's motion nudges the
+            // param from where it is, so the SHOW slider / inspector can still
+            // move a knob-mapped param and the knob picks up from there.
+            float span = b.rangeMax - b.rangeMin;
+            float cur01 = std::fabs(span) > 1e-6f ? (*pd->ptr - b.rangeMin) / span : 0.5f;
+            if (b.ccTarget01 < 0.0f) {
+                b.ccTarget01 = std::max(0.0f, std::min(1.0f, cur01));
+                b.ccLastRaw = raw;
+                b.smoothedValue = b.ccTarget01; b.hasSmoothed = true;
+                b.ccLastWritten = *pd->ptr;
+                continue;
+            }
+            if (!std::isnan(b.ccLastWritten) && std::fabs(*pd->ptr - b.ccLastWritten) > 1e-5f) {
+                b.ccTarget01 = std::max(0.0f, std::min(1.0f, cur01));
+                b.smoothedValue = b.ccTarget01; b.hasSmoothed = true;
+            }
+            float delta = raw - b.ccLastRaw;
+            b.ccLastRaw = raw;
+            if (std::fabs(delta) > 0.0f)
+                b.ccTarget01 = std::max(0.0f, std::min(1.0f, b.ccTarget01 + delta));
+            raw = b.ccTarget01;
         }
+        float mapped = b.follow(raw, dt);
+        if (mapped < pd->lo) mapped = pd->lo; if (mapped > pd->hi) mapped = pd->hi;
+        *pd->ptr = mapped;
+        if (b.signal == AudioSignal::MidiCC) b.ccLastWritten = mapped;
     }
 }
 
@@ -3115,4 +3177,33 @@ void FluidSource3D::fireSplash(double now) {
         e.pos[0] = (0.25f + 0.5f * rnd()) * S; e.pos[1] = (0.25f + 0.5f * rnd()) * S; e.pos[2] = (0.15f + 0.4f * rnd()) * S;
     }
     e.t0 = now; e.on = true;
+}
+
+void FluidSource3D::setAuto(bool on) {
+    if (on == autoOn()) return;
+    struct V { const char* id; float* ptr; };
+    const V vals[] = { {"audioIntensity", &m_audioIntensity}, {"breath", &m_breath},
+                       {"lightDrift", &m_lightDrift}, {"shapeCycle", &m_shapeCycle} };
+    if (!on) {
+        m_autoSavedVals.clear();
+        m_autoSavedBindings.clear();
+        for (const auto& v : vals) { m_autoSavedVals[v.id] = *v.ptr; *v.ptr = 0.0f; }
+        for (auto it = m_audioBindings.begin(); it != m_audioBindings.end();) {
+            if (it->second.signal != AudioSignal::None && it->second.signal != AudioSignal::MidiCC) {
+                m_autoSavedBindings[it->first] = it->second;
+                it = m_audioBindings.erase(it);
+            } else ++it;
+        }
+        m_autoParked = true;
+    } else {
+        for (const auto& v : vals) {
+            auto it = m_autoSavedVals.find(v.id);
+            if (it != m_autoSavedVals.end() && *v.ptr == 0.0f) *v.ptr = it->second;   // a hand-set value wins
+        }
+        for (const auto& kv : m_autoSavedBindings)
+            if (!m_audioBindings.count(kv.first)) m_audioBindings[kv.first] = kv.second;
+        m_autoSavedVals.clear();
+        m_autoSavedBindings.clear();
+        m_autoParked = false;
+    }
 }

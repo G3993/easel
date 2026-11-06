@@ -1,4 +1,5 @@
 #pragma once
+#include <limits>
 #include "app/EaselAudio.h"
 #include <cmath>
 
@@ -96,6 +97,10 @@ struct AudioBinding {
     // target position from wherever the parameter is, so a knob never jumps
     // and its physical position is irrelevant. ccTarget01 = that position.
     float ccTarget01 = -1.0f;
+    // Value this binding last wrote. If the parameter no longer holds it, a
+    // slider / inspector / OSC edit moved it: the knob re-anchors there
+    // instead of snapping it back. NaN = nothing written yet.
+    float ccLastWritten = std::numeric_limits<float>::quiet_NaN();
 
     // Shared EaselAudio conditioning block (gate→attack→hold→release→
     // hard-change→character→remap→micro-slew). The legacy smoothing slider

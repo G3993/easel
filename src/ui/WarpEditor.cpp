@@ -64,11 +64,16 @@ void WarpEditor::render(MappingProfile& mapping, bool& maskEditMode,
     if (UIManager::sMode == UIManager::WorkspaceMode::Mapping) {
         static const char* kPatternNames[] = {
             "Grid", "Checkerboard", "Crosshair", "Color Bars",
-            "Rainbow", "Solid White"
+            "Rainbow", "Solid White", "Colors"
         };
         PropertyPanel::PanelLabel("TEST PATTERN");
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 96.0f);
         ImGui::Combo("##mapTestPattern", &m_testPattern,
                      kPatternNames, IM_ARRAYSIZE(kPatternNames));
+        ImGui::SameLine();
+        ImGui::Checkbox("Animate##mapPatAnim", &m_testPatternAnimate);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("move the pattern (drift, sweep, hue cycle)\nto check the mapping with motion");
     }
 
     // --- Mapping profile header ---

@@ -1,3 +1,5 @@
+#include <limits>
+#include <cstring>
 #include "sources/ShaderSource.h"
 #include "app/MIDIManager.h"
 #include "render/FontAtlas.h"
@@ -257,7 +259,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     // the _flip_<name> uniform is set but never consumed and the source ends up
     // upside down inside the shader.
     for (const auto& input : m_inputs) {
-        if (input.type != "image") continue;
+        if (input.type != "image" || input.kit) continue;
         const std::string& n = input.name;
         body = std::regex_replace(body,
             std::regex("\\btexture\\s*\\(\\s*" + n + "\\s*,"),
@@ -314,7 +316,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     // ISF image input stubs — provide samplers + IMG_SIZE + flip uniforms
     bool hasImageInputs = false;
     for (const auto& input : m_inputs) {
-        if (input.type == "image") {
+        if (input.type == "image" && !input.kit) {
             hasImageInputs = true;
             out << "uniform sampler2D " << input.name << ";\n";
             out << "uniform vec2 IMG_SIZE_" << input.name << ";\n";
@@ -395,7 +397,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "\n";
     // Per-image IMG_SIZE and IMG_PIXEL overloads for each image input
     for (const auto& input : m_inputs) {
-        if (input.type == "image") {
+        if (input.type == "image" && !input.kit) {
             // IMG_SIZE(inputName) -> IMG_SIZE_inputName (actual image dimensions)
             out << "vec2 _isf_img_size_" << input.name << "() { return IMG_SIZE_" << input.name << "; }\n";
             // IMG_PIXEL(inputName, coord) -> sample using image's own dimensions
@@ -521,7 +523,7 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
 }
 
 std::string ShaderSource::firstImageInput() const {
-    for (const auto& in : m_inputs) if (in.type == "image" && in.importedPath.empty()) return in.name;
+    for (const auto& in : m_inputs) if (in.type == "image" && in.importedPath.empty() && !in.kit) return in.name;
     return "";
 }
 
@@ -1125,6 +1127,13 @@ void ShaderSource::appendMotionKitInputs() {
         {"motionSpin",   "Spin",  -1.0f, 1.0f, 0.0f},
         {"motionBreath", "Breath", 0.0f, 1.0f, 0.0f},
         {"motionSway",   "Sway",   0.0f, 1.0f, 0.0f},
+        // COLOR kit — same idea for colour: every shader gets the same four
+        // colour knobs (the XL's second row), done in the same post pass.
+        // Identity defaults, so nothing changes until a knob moves.
+        {"colorHue",      "Hue Rotate", 0.0f, 1.0f, 0.0f},
+        {"colorSat",      "Color Sat",  0.0f, 2.0f, 1.0f},
+        {"colorBright",   "Brightness", 0.0f, 2.0f, 1.0f},
+        {"colorContrast", "Contrast",   0.0f, 2.0f, 1.0f},
     };
     std::vector<ISFInput> kit;
     for (const auto& k : kKit) {
@@ -1132,12 +1141,45 @@ void ShaderSource::appendMotionKitInputs() {
         for (const auto& in : m_inputs) if (in.name == k.name) { have = true; break; }
         if (have) continue;
         ISFInput p;
-        p.name = k.name; p.label = k.label; p.group = "Motion"; p.type = "float";
+        p.name = k.name; p.label = k.label; p.type = "float";
+        p.group = strncmp(k.name, "color", 5) == 0 ? "Color" : "Motion";
         p.minVal = k.lo; p.maxVal = k.hi; p.defaultFloat = k.def; p.value = k.def;
         kit.push_back(std::move(p));
     }
     m_inputs.insert(m_inputs.begin(), std::make_move_iterator(kit.begin()),
                     std::make_move_iterator(kit.end()));
+
+    // TEXTURE kit — every shader without an image input of its own gets one
+    // (WebRTC / NDI / camera / video / image file), blended over its output
+    // in the kit post pass. Appended at the END so the XL auto-map order of
+    // the shader's own knobs never shifts. Mix 0 = identity, zero cost.
+    bool hasImage = false;
+    for (const auto& in : m_inputs)
+        if (in.type == "image" && in.importedPath.empty() && !in.kit) { hasImage = true; break; }
+    bool haveKit = false;
+    for (const auto& in : m_inputs) if (in.name == "kitTexture") { haveKit = true; break; }
+    if (!hasImage && !haveKit) {
+        ISFInput img;
+        img.name = "kitTexture"; img.label = "Texture"; img.type = "image"; img.group = "Texture";
+        img.kit = true; img.value = false;
+        m_inputs.push_back(std::move(img));
+        ISFInput mix;
+        mix.name = "kitTexMix"; mix.label = "Texture Mix"; mix.type = "float"; mix.group = "Texture";
+        mix.minVal = 0.0f; mix.maxVal = 1.0f; mix.defaultFloat = 0.0f; mix.value = 0.0f; mix.noAudio = true;
+        m_inputs.push_back(std::move(mix));
+        ISFInput mode;
+        mode.name = "kitTexMode"; mode.label = "Texture Blend"; mode.type = "long"; mode.group = "Texture";
+        mode.longValues = {0, 1, 2, 3, 4, 5};
+        mode.longLabels = {"Mix", "Multiply", "Screen", "Overlay", "Fill Dark", "Shader Mask"};
+        mode.minVal = 0.0f; mode.maxVal = 5.0f; mode.defaultFloat = 0.0f; mode.value = 0.0f; mode.noAudio = true;
+        m_inputs.push_back(std::move(mode));
+        ISFInput fit;
+        fit.name = "kitTexFit"; fit.label = "Texture Fit"; fit.type = "long"; fit.group = "Texture";
+        fit.longValues = {0, 1, 2};
+        fit.longLabels = {"Fill", "Fit", "Stretch"};
+        fit.minVal = 0.0f; fit.maxVal = 2.0f; fit.defaultFloat = 0.0f; fit.value = 0.0f; fit.noAudio = true;
+        m_inputs.push_back(std::move(fit));
+    }
 }
 
 float ShaderSource::kitValue(const char* name, float fallback) const {
@@ -1157,8 +1199,25 @@ void ShaderSource::renderMotionPass() {
     float spin   = kitValue("motionSpin",   0.0f);
     float breath = kitValue("motionBreath", 0.0f);
     float sway   = kitValue("motionSway",   0.0f);
+    float hue    = kitValue("colorHue",      0.0f);
+    float sat    = kitValue("colorSat",      1.0f);
+    float bright = kitValue("colorBright",   1.0f);
+    float contr  = kitValue("colorContrast", 1.0f);
     bool active = std::fabs(drift) > 1e-4f || std::fabs(spin) > 1e-4f ||
-                  std::fabs(breath) > 1e-4f || std::fabs(sway) > 1e-4f;
+                  std::fabs(breath) > 1e-4f || std::fabs(sway) > 1e-4f ||
+                  (std::fabs(hue) > 1e-4f && std::fabs(hue - 1.0f) > 1e-4f) ||
+                  std::fabs(sat - 1.0f) > 1e-4f || std::fabs(bright - 1.0f) > 1e-4f ||
+                  std::fabs(contr - 1.0f) > 1e-4f;
+    float texMix = kitValue("kitTexMix", 0.0f);
+    GLuint texId = 0; int texW = 0, texH = 0; bool texFlip = false;
+    if (texMix > 1e-4f) {
+        auto it = m_imageBindings.find("kitTexture");
+        if (it != m_imageBindings.end() && it->second.textureId != 0) {
+            texId = it->second.textureId; texW = it->second.width; texH = it->second.height;
+            texFlip = it->second.flippedV;
+        }
+    }
+    if (texId) active = true;
     if (!active) { m_motionActive = false; return; }
 
     static ShaderProgram* sProg = nullptr;
@@ -1177,6 +1236,17 @@ void ShaderSource::renderMotionPass() {
             "out vec4 fragColor;\n"
             "uniform sampler2D uTex;\n"
             "uniform float uTime, uDrift, uSpin, uBreath, uSway, uAspect;\n"
+            "uniform float uHue, uSat, uBright, uContrast;\n"
+            "uniform sampler2D uImg;\n"
+            "uniform float uImgMix, uImgMode, uImgFit, uImgFlip;\n"
+            "uniform vec2 uImgSize;\n"
+            "vec3 hueRotate(vec3 c, float h) {\n"
+            "    const mat3 toYIQ = mat3(0.299, 0.596, 0.211, 0.587, -0.274, -0.523, 0.114, -0.322, 0.312);\n"
+            "    const mat3 toRGB = mat3(1.0, 1.0, 1.0, 0.956, -0.272, -1.106, 0.621, -0.647, 1.703);\n"
+            "    vec3 yiq = toYIQ * c; float a = h * 6.2831853; float cs = cos(a), sn = sin(a);\n"
+            "    yiq.yz = mat2(cs, sn, -sn, cs) * yiq.yz;\n"
+            "    return toRGB * yiq;\n"
+            "}\n"
             "vec2 mirrorUV(vec2 p) { return 1.0 - abs(fract(p * 0.5) * 2.0 - 1.0); }\n"
             "void main() {\n"
             "    float t = uTime;\n"
@@ -1184,14 +1254,44 @@ void ShaderSource::renderMotionPass() {
             "    // breath: slow zoom pulse around centre\n"
             "    uv /= 1.0 + uBreath * 0.18 * sin(t * 0.9);\n"
             "    // spin: continuous rotation, signed\n"
-            "    float a = uSpin * t * 0.6; float c = cos(a), s = sin(a);\n"
-            "    uv = mat2(c, -s, s, c) * uv;\n"
+            "    float ang = uSpin * t * 0.6; float ca = cos(ang), sa = sin(ang);\n"
+            "    uv = mat2(ca, -sa, sa, ca) * uv;\n"
             "    // sway: organic low-frequency wobble of the whole frame\n"
             "    uv += uSway * 0.035 * vec2(sin(t * 1.3 + uv.y * 3.0), cos(t * 1.1 + uv.x * 3.0));\n"
             "    // drift: bounded lissajous pan, never runs away\n"
             "    uv += uDrift * 0.25 * vec2(sin(t * 0.23), cos(t * 0.19));\n"
             "    uv.x /= uAspect; uv += 0.5;\n"
-            "    fragColor = texture(uTex, mirrorUV(uv));\n"
+            "    vec4 c = texture(uTex, mirrorUV(uv));\n"
+            "    vec3 rgb = c.rgb;\n"
+            "    if (uHue > 0.0001) rgb = hueRotate(rgb, uHue);\n"
+            "    float l = dot(rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+            "    rgb = mix(vec3(l), rgb, uSat);\n"
+            "    rgb = (rgb - 0.5 * c.a) * uContrast + 0.5 * c.a;\n"
+            "    rgb *= uBright;\n"
+            "    float outA = c.a;\n"
+            "    if (uImgMix > 0.0001 && uImgSize.x > 0.5) {\n"
+            "        float iAsp = uImgSize.x / max(uImgSize.y, 1.0);\n"
+            "        vec2 k = vec2(1.0);\n"
+            "        if (uImgFit < 0.5) k = (uAspect > iAsp) ? vec2(1.0, iAsp / uAspect) : vec2(uAspect / iAsp, 1.0);\n"
+            "        else if (uImgFit < 1.5) k = (uAspect > iAsp) ? vec2(uAspect / iAsp, 1.0) : vec2(1.0, iAsp / uAspect);\n"
+            "        vec2 iuv = 0.5 + (vUV - 0.5) * k;\n"
+            "        float inside = step(0.0, iuv.x) * step(iuv.x, 1.0) * step(0.0, iuv.y) * step(iuv.y, 1.0);\n"
+            "        if (uImgFlip > 0.5) iuv.y = 1.0 - iuv.y;\n"
+            "        vec3 t = texture(uImg, clamp(iuv, 0.0, 1.0)).rgb;\n"
+            "        vec3 s = max(rgb, 0.0);\n"
+            "        float ls = dot(s, vec3(0.2126, 0.7152, 0.0722));\n"
+            "        vec3 b = t;\n"
+            "        int m = int(uImgMode + 0.5);\n"
+            "        float w = uImgMix * inside;\n"
+            "        if (m == 1) b = s * t;\n"
+            "        else if (m == 2) b = 1.0 - (1.0 - s) * (1.0 - t);\n"
+            "        else if (m == 3) b = mix(2.0 * s * t, 1.0 - 2.0 * (1.0 - s) * (1.0 - t), step(0.5, s));\n"
+            "        else if (m == 4) { w *= 1.0 - smoothstep(0.04, 0.35, ls); }\n"
+            "        else if (m == 5) b = t * clamp(ls * 1.4, 0.0, 1.0);\n"
+            "        rgb = mix(s, b, w);\n"
+            "        if (m == 0 || m == 4) outA = max(outA, w);\n"
+            "    }\n"
+            "    fragColor = vec4(max(rgb, 0.0), outA);\n"
             "}\n";
         auto* p = new ShaderProgram();
         if (p->loadFromSource(kVS, kFS)) sProg = p;
@@ -1217,8 +1317,21 @@ void ShaderSource::renderMotionPass() {
     sProg->setFloat("uSpin", spin);
     sProg->setFloat("uBreath", breath);
     sProg->setFloat("uSway", sway);
+    sProg->setFloat("uHue", hue);
+    sProg->setFloat("uSat", sat);
+    sProg->setFloat("uBright", bright);
+    sProg->setFloat("uContrast", contr);
     sProg->setFloat("uAspect", m_height > 0 ? (float)m_width / (float)m_height : 1.0f);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    sProg->setInt("uImg", 1);
+    sProg->setFloat("uImgMix", texId ? texMix : 0.0f);
+    sProg->setFloat("uImgMode", kitValue("kitTexMode", 0.0f));
+    sProg->setFloat("uImgFit", kitValue("kitTexFit", 0.0f));
+    sProg->setFloat("uImgFlip", texFlip ? 1.0f : 0.0f);
+    sProg->setVec2("uImgSize", glm::vec2((float)texW, (float)texH));
     m_quad.draw();
+    glActiveTexture(GL_TEXTURE0);
     Framebuffer::unbind();
     glViewport(0, 0, m_width, m_height);
     m_motionActive = true;
@@ -1395,7 +1508,7 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
             }
         }
         // image inputs: bind external texture if available
-        if (input.type == "image") {
+        if (input.type == "image" && !input.kit) {
             auto it = m_imageBindings.find(input.name);
             if (it != m_imageBindings.end() && it->second.textureId != 0) {
                 // Bind to texture unit 8+ (after audio=2, font=3, pass buffers=4+)
@@ -1575,14 +1688,21 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
         // then on each turn adds the delta to a target that starts at the
         // parameter's current value. Full pot travel = full range.
         if (binding.signal == AudioSignal::MidiCC) {
-            float cur01 = 0.5f;
+            float cur01 = 0.5f, curVal = std::numeric_limits<float>::quiet_NaN();
             for (auto& input : m_inputs)
                 if (input.name == paramName && (input.type == "float" || input.type == "long")) {
                     float cv = std::holds_alternative<float>(input.value) ? std::get<float>(input.value) : input.minVal;
                     float span = binding.rangeMax - binding.rangeMin;
                     cur01 = std::fabs(span) > 1e-6f ? (cv - binding.rangeMin) / span : 0.5f;
+                    curVal = cv;
                     break;
                 }
+            // edited elsewhere (SHOW slider, inspector, OSC) → re-anchor the knob there
+            if (binding.ccTarget01 >= 0.0f && !std::isnan(binding.ccLastWritten) && !std::isnan(curVal)
+                && std::fabs(curVal - binding.ccLastWritten) > 1e-5f) {
+                binding.ccTarget01 = std::max(0.0f, std::min(1.0f, cur01));
+                binding.smoothedValue = binding.ccTarget01; binding.hasSmoothed = true;
+            }
             if (binding.ccTarget01 < 0.0f) {
                 binding.ccTarget01 = cur01;
                 binding.ccLastRaw = raw;
@@ -1602,6 +1722,7 @@ void ShaderSource::applyAudioBindings(float level, float bass, float mid, float 
             if (input.name == paramName && (input.type == "float" || input.type == "long")) {
                 mapped = std::max(input.minVal, std::min(input.maxVal, mapped));
                 input.value = mapped;
+                if (binding.signal == AudioSignal::MidiCC) binding.ccLastWritten = mapped;
                 break;
             }
         }

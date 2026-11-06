@@ -20,6 +20,7 @@ public:
         std::string fullPath;
         std::string type;
         std::vector<std::string> categories;
+        std::string group;   // pack from packs.json ("studio", "frontier", ...), empty = none
     };
 
     ShaderClawBridge() = default;
@@ -34,6 +35,8 @@ public:
     // Reload manifest.json from the shaders directory
     void refreshManifest();
     const std::vector<ShaderEntry>& shaders() const { return m_shaders; }
+    // Every pack named in packs.json that has at least one shader, sorted.
+    std::vector<std::string> packs() const;
 
     // Check for file changes (call once per frame)
     // Returns the path of the changed file, or empty string if no change

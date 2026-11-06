@@ -121,6 +121,27 @@ void ShaderClawBridge::refreshManifest() {
         std::cerr << "ShaderClaw: manifest parse error: " << e.what() << std::endl;
     }
 
+    // Packs (packs.json beside the manifest): { "<file stem>": { "group": "studio" } }
+    {
+        std::ifstream pf(m_shadersDir + "/packs.json");
+        if (pf.is_open()) {
+            try {
+                json packs; pf >> packs;
+                if (packs.is_object()) {
+                    for (auto& se : m_shaders) {
+                        std::string stem = fs::path(se.file).stem().string();
+                        auto it = packs.find(stem);
+                        if (it != packs.end() && it->is_object() && it->contains("group") &&
+                            (*it)["group"].is_string())
+                            se.group = (*it)["group"].get<std::string>();
+                    }
+                }
+            } catch (const json::exception& e) {
+                std::cerr << "ShaderClaw: packs.json parse error: " << e.what() << std::endl;
+            }
+        }
+    }
+
     // Sort shaders alphabetically by title
     std::sort(m_shaders.begin(), m_shaders.end(),
               [](const ShaderEntry& a, const ShaderEntry& b) {
@@ -229,4 +250,13 @@ uint64_t ShaderClawBridge::getFileModTime(const std::string& path) {
     } catch (...) {}
 #endif
     return 0;
+}
+
+std::vector<std::string> ShaderClawBridge::packs() const {
+    std::vector<std::string> out;
+    for (const auto& se : m_shaders)
+        if (!se.group.empty() && std::find(out.begin(), out.end(), se.group) == out.end())
+            out.push_back(se.group);
+    std::sort(out.begin(), out.end());
+    return out;
 }
