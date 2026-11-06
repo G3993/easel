@@ -1,4 +1,5 @@
 #include "app/ProjectorOutput.h"
+#include <algorithm>
 #include <iostream>
 #include <cstdio>
 #include <cstdlib>
