@@ -8,6 +8,8 @@
 <meta property="og:title" content="Easel">
 <meta property="og:description" content="Shaders, sound and surfaces in one instrument.">
 <meta property="og:image" content="https://g3993.github.io/easel/img/gallery.jpg">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<link rel="apple-touch-icon" href="img/icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
@@ -31,7 +33,8 @@
   nav { position: sticky; top: 0; z-index: 10; background: rgba(245,244,240,.82); backdrop-filter: saturate(180%) blur(16px); -webkit-backdrop-filter: saturate(180%) blur(16px); border-bottom: 1px solid rgba(0,0,0,.06); }
   nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 52px; font-size: 14px; }
   .logo { font-weight: 600; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; }
+  .mark { width: 22px; height: 22px; display: block; }
+  footer .mark { width: 16px; height: 16px; }
   nav .links { display: flex; gap: 26px; color: var(--grey); }
   nav .links a:hover { color: var(--ink); }
   nav .get { color: var(--ink); }
@@ -107,7 +110,7 @@
 
 <nav>
   <div class="wrap">
-    <a class="logo" href="#"><span class="dot" aria-hidden="true"></span>Easel</a>
+    <a class="logo" href="#"><img class="mark" src="img/icon.png" alt="" width="22" height="22">Easel</a>
     <div class="links">
       <a href="#shaderclaw">ShaderClaw</a>
       <a href="#specs">Specs</a>
@@ -206,7 +209,7 @@
 <footer>
   <div class="wrap">
     <div class="line">
-      <span><span class="dot" aria-hidden="true"></span>&nbsp; Easel</span>
+      <span class="logo"><img class="mark" src="img/icon.png" alt="" width="16" height="16">Easel</span>
       <span><a href="https://github.com/G3993/easel">Source</a> &nbsp;·&nbsp; <a href="https://github.com/G3993/easel/releases">All releases</a></span>
     </div>
   </div>
