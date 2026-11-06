@@ -24,8 +24,8 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
 fi
 
 MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
-if [ "$MACOS_MAJOR" -lt 26 ]; then
-  echo "Easel needs macOS 26 (Tahoe) or newer; this Mac runs $(sw_vers -productVersion)." >&2
+if [ "$MACOS_MAJOR" -lt 14 ]; then
+  echo "Easel needs macOS 14 (Sonoma) or newer; this Mac runs $(sw_vers -productVersion)." >&2
   exit 1
 fi
 
