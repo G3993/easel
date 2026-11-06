@@ -39,3 +39,4 @@ smithers.db-wal
 external/webrtc/
 build-*/
 dist/
+external/mac-deps/

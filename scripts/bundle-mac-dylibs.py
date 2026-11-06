@@ -32,7 +32,11 @@ def resolve(dep, owner, owner_orig):
     if dep.startswith("@executable_path/"):
         return None  # already app-relative
     if dep.startswith("@rpath/"):
-        for rp in rpaths(owner) + ["/opt/homebrew/lib"]:
+        # BUNDLE_LIB_DIRS (colon-separated) is searched first; Homebrew is
+        # only a fallback when BUNDLE_NO_HOMEBREW is unset.
+        extra = [d for d in os.environ.get("BUNDLE_LIB_DIRS", "").split(":") if d]
+        brew = [] if os.environ.get("BUNDLE_NO_HOMEBREW") else ["/opt/homebrew/lib"]
+        for rp in extra + rpaths(owner) + brew:
             rp = rp.replace("@loader_path", d)
             cand = os.path.join(rp, dep[len("@rpath/"):])
             if os.path.exists(cand):
