@@ -3,7 +3,7 @@
   "CREDIT": "Easel / ShaderClaw house shader — Shades of New York series, 2026-11-11 — original.",
   "CATEGORIES": ["Generator", "Shades of New York", "Texture", "3D", "Interactive", "Audio Reactive"],
   "INPUTS": [
-    { "NAME": "domeRows",    "LABEL": "Dome Rows On Screen", "TYPE": "float", "AUDIO": false, "MIN": 5.0, "MAX": 40.0, "DEFAULT": 14.0, "GROUP": "Floor" },
+    { "NAME": "domeRows",    "LABEL": "Dome Rows On Screen", "TYPE": "float", "AUDIO": false, "MIN": 5.0, "MAX": 40.0, "DEFAULT": 24.0, "GROUP": "Floor" },
     { "NAME": "tilt",        "LABEL": "Camera Tilt",      "TYPE": "float", "AUDIO": false, "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.12, "GROUP": "Floor" },
     { "NAME": "drift",       "LABEL": "Walk / Drift",     "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.25, "GROUP": "Floor" },
     { "NAME": "sway",        "LABEL": "Sway",             "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.3, "GROUP": "Floor" },
