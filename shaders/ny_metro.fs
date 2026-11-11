@@ -1,10 +1,10 @@
 /*{
-  "DESCRIPTION": "Metro — Shades of New York 004. A living map of the New York subway, seen by a camera that orbits and tours over the city. The five boroughs sit in their rivers: the long island of Manhattan with its street grid and the park in its middle, the Bronx above, Queens and Brooklyn across the East River, the Rockaways around Jamaica Bay, Staten Island across the harbour and the New Jersey shore. An original schematic of the trunk lines runs over them in the line colours: the west-side red, the east-side green, the 8th Avenue blue, the 6th Avenue orange, the Broadway yellow, the purple Flushing line, the lime crosstown, the grey 14th Street line, the brown Jamaica line and the Staten Island railway. Every line has two tracks and the trains never stop: lit cars with headlights in front and tail lights behind leave streaks of light along the tracks, and stations flash as a train pulls through. Streets carry tiny moving traffic lights and the water shimmers. Colours change here and there: Colour Drift lets lines trade colours now and then, and the themes go from Night Map and Day Map to Neon, Blueprint and Ink on Paper. Camera: Orbit spins slowly around the city while the tour glides between Manhattan, Brooklyn and Queens; Tilt lowers the camera from straight down to a skyline-height view, and Zoom pulls from the whole city into the streets. Camera friendly: put an image or the live camera under the map. Body tracking (MediaPipe pose + segmentation) turns you into a subway line: your skeleton is drawn over the city as a glowing line in trunk-line colours (red spine, yellow shoulders and hips, green arms, blue legs) with trains running along your limbs and a station at every joint, while the map lights up and shows the camera inside your silhouette. Your mouse, or your hand in ShaderClaw, lights the district under it; press or pinch to send a pulse racing out through the tracks. Audio: bass makes the trains glow and the lines breathe, beats send a ring of light out from Times Square through the network, mids drive train speed, highs make the stations twinkle. Show dynamics: at Rest the city is dim, the trains slow and the camera high and still; the Build speeds every train up, brightens the network, spins the camera faster and lowers it toward the streets; the Drop flashes the whole network in a shockwave out of Midtown with a camera punch; the Peak runs the system at full rush hour.",
+  "DESCRIPTION": "Metro — Shades of New York 004. A living map of the New York subway, seen by a camera that orbits and tours over the city. The city is drawn from real coordinates: Manhattan on its true 29° street grid with Central Park, the Bronx, Queens and Brooklyn across the East River, the Rockaways around Jamaica Bay, Staten Island across the harbour, the Jersey shore, Randall's, Roosevelt, Governors, Liberty and Rikers islands, the big parks and both airports. The trunk lines follow their real routes through their real stations (Broadway–7th Av from Van Cortlandt to South Ferry, Lexington to Woodlawn and Pelham Bay, 8th Av to Inwood and out to the Rockaways, 6th Av to Coney Island, Queens Blvd to Jamaica, Broadway to Astoria and Bay Ridge, the Flushing line, the crosstown, 14th St to Canarsie, the Jamaica line and the Staten Island Railway), drawn in the line colours: the west-side red, the east-side green, the 8th Avenue blue, the 6th Avenue orange, the Broadway yellow, the purple Flushing line, the lime crosstown, the grey 14th Street line, the brown Jamaica line and the Staten Island railway. Every line has two tracks and the trains never stop: lit cars with headlights in front and tail lights behind leave streaks of light along the tracks, and stations flash as a train pulls through. Streets carry tiny moving traffic lights and the water shimmers. Colours change here and there: Colour Drift lets lines trade colours now and then, and the themes go from Night Map and Day Map to Neon, Blueprint and Ink on Paper. Camera: Orbit spins slowly around the city while the tour glides between Manhattan, Brooklyn and Queens; Tilt lowers the camera from straight down to a skyline-height view, and Zoom pulls from the whole city into the streets. Camera friendly: put an image or the live camera under the map. Body tracking (MediaPipe pose + segmentation) turns you into a subway line: your skeleton is drawn over the city as a glowing line in trunk-line colours (red spine, yellow shoulders and hips, green arms, blue legs) with trains running along your limbs and a station at every joint, while the map lights up and shows the camera inside your silhouette. Your mouse, or your hand in ShaderClaw, lights the district under it; press or pinch to send a pulse racing out through the tracks. Audio: bass makes the trains glow and the lines breathe, beats send a ring of light out from Times Square through the network, mids drive train speed, highs make the stations twinkle. Show dynamics: at Rest the city is dim, the trains slow and the camera high and still; the Build speeds every train up, brightens the network, spins the camera faster and lowers it toward the streets; the Drop flashes the whole network in a shockwave out of Midtown with a camera punch; the Peak runs the system at full rush hour.",
   "CREDIT": "Easel / ShaderClaw house shader — Shades of New York series, 2026-11-11 — original schematic, not the official map.",
   "CATEGORIES": ["Generator", "Shades of New York", "Map", "3D", "Interactive", "Audio Reactive"],
   "INPUTS": [
     { "NAME": "theme",       "LABEL": "Theme", "TYPE": "long", "DEFAULT": 0, "VALUES": [0, 1, 2, 3, 4], "LABELS": ["Night Map", "Day Map", "Neon", "Blueprint", "Ink on Paper"], "GROUP": "Look" },
-    { "NAME": "colourDrift", "LABEL": "Colour Drift",     "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.2, "GROUP": "Look" },
+    { "NAME": "colourDrift", "LABEL": "Colour Drift",     "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0, "GROUP": "Look" },
     { "NAME": "hueShift",    "LABEL": "Hue Shift",        "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0, "GROUP": "Look" },
     { "NAME": "lineWidth",   "LABEL": "Line Width",       "TYPE": "float", "MIN": 0.4, "MAX": 2.5, "DEFAULT": 1.0, "GROUP": "Look" },
     { "NAME": "glowAmt",     "LABEL": "Glow",             "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.9, "GROUP": "Look" },
@@ -57,7 +57,7 @@
 
 #define PI  3.14159265359
 #define TAU 6.28318530718
-#define NL 16
+#define NL 18
 
 float h11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
 float h12(vec2 p)  { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -218,225 +218,349 @@ vec2 limbPt(float wk, float t, float asp) {
     return mix(A, B, clamp(u, 0.0, 1.0));
 }
 
-// generated by metro_data.py: control point i of line L (x > 90 = end of line)
+// generated by metro_data.py (real coordinates, see the comments there)
 vec2 netPt(float L, float i) {
     if (L < 0.5) {
-        if (i < 0.5) return vec2(-0.8231, 1.4769);
-        else if (i < 1.5) return vec2(-0.8154, 1.0769);
-        else if (i < 2.5) return vec2(-0.8031, 0.7385);
-        else if (i < 3.5) return vec2(-0.7769, 0.4615);
-        else if (i < 4.5) return vec2(-0.6846, 0.3231);
-        else if (i < 5.5) return vec2(-0.6646, 0.0000);
-        else if (i < 6.5) return vec2(-0.6385, -0.3846);
-        else if (i < 7.5) return vec2(-0.5692, -0.4923);
-        else if (i < 8.5) return vec2(-0.2769, -0.5538);
-        else if (i < 9.5) return vec2(-0.0923, -0.6462);
+        if (i < 0.5) return vec2(0.3896, 1.6930);
+        else if (i < 1.5) return vec2(0.3418, 1.5890);
+        else if (i < 2.5) return vec2(0.1849, 1.4060);
+        else if (i < 3.5) return vec2(0.0750, 1.2060);
+        else if (i < 4.5) return vec2(-0.0243, 1.0210);
+        else if (i < 5.5) return vec2(-0.1698, 0.7360);
+        else if (i < 6.5) return vec2(-0.2418, 0.4810);
+        else if (i < 7.5) return vec2(-0.2827, 0.3530);
+        else if (i < 8.5) return vec2(-0.3805, 0.1780);
+        else if (i < 9.5) return vec2(-0.4494, -0.0450);
+        else if (i < 10.5) return vec2(-0.4775, -0.1800);
         return vec2(99.0);
     }
     else if (L < 1.5) {
-        if (i < 0.5) return vec2(-0.0923, -0.6462);
-        else if (i < 1.5) return vec2(0.1231, -0.7231);
-        else if (i < 2.5) return vec2(0.3846, -0.7692);
-        else if (i < 3.5) return vec2(0.6615, -1.0462);
+        if (i < 0.5) return vec2(-0.4494, -0.0450);
+        else if (i < 1.5) return vec2(-0.4487, -0.1320);
+        else if (i < 2.5) return vec2(-0.3016, -0.2700);
+        else if (i < 3.5) return vec2(-0.2084, -0.3600);
+        else if (i < 4.5) return vec2(-0.1576, -0.4500);
+        else if (i < 5.5) return vec2(-0.0606, -0.4950);
+        else if (i < 6.5) return vec2(0.1440, -0.5110);
+        else if (i < 7.5) return vec2(0.5002, -0.5360);
         return vec2(99.0);
     }
     else if (L < 2.5) {
-        if (i < 0.5) return vec2(0.3846, -0.7692);
-        else if (i < 1.5) return vec2(0.6000, -0.6000);
-        else if (i < 2.5) return vec2(0.8154, -0.3538);
+        if (i < 0.5) return vec2(-0.0606, -0.4950);
+        else if (i < 1.5) return vec2(-0.0152, -0.7000);
+        else if (i < 2.5) return vec2(0.0167, -0.8730);
         return vec2(99.0);
     }
     else if (L < 3.5) {
-        if (i < 0.5) return vec2(-0.4077, 1.5231);
-        else if (i < 1.5) return vec2(-0.4123, 0.8923);
-        else if (i < 2.5) return vec2(-0.4000, 0.4615);
-        else if (i < 3.5) return vec2(-0.3846, 0.0000);
-        else if (i < 4.5) return vec2(-0.3769, -0.3846);
-        else if (i < 5.5) return vec2(-0.3692, -0.6462);
-        else if (i < 6.5) return vec2(-0.1231, -0.7077);
-        else if (i < 7.5) return vec2(0.1231, -0.7385);
-        else if (i < 8.5) return vec2(0.3692, -0.8000);
-        else if (i < 9.5) return vec2(0.6769, -1.0154);
+        if (i < 0.5) return vec2(-0.1698, 0.7360);
+        else if (i < 1.5) return vec2(-0.0152, 0.7900);
+        else if (i < 2.5) return vec2(0.0720, 0.9460);
+        else if (i < 3.5) return vec2(0.1736, 0.9840);
+        else if (i < 4.5) return vec2(0.5821, 1.2180);
+        else if (i < 5.5) return vec2(0.7549, 1.8310);
         return vec2(99.0);
     }
     else if (L < 4.5) {
-        if (i < 0.5) return vec2(-0.4000, 0.8769);
-        else if (i < 1.5) return vec2(-0.2154, 0.9231);
-        else if (i < 2.5) return vec2(-0.0769, 1.0308);
-        else if (i < 3.5) return vec2(0.2462, 1.3692);
+        if (i < 0.5) return vec2(0.5411, 1.6620);
+        else if (i < 1.5) return vec2(0.3987, 1.4210);
+        else if (i < 2.5) return vec2(0.1842, 1.0790);
+        else if (i < 3.5) return vec2(0.0947, 0.8450);
+        else if (i < 4.5) return vec2(-0.0424, 0.5950);
+        else if (i < 5.5) return vec2(-0.1341, 0.4260);
+        else if (i < 6.5) return vec2(-0.2031, 0.3180);
+        else if (i < 7.5) return vec2(-0.3054, 0.1470);
+        else if (i < 8.5) return vec2(-0.4100, -0.0700);
+        else if (i < 9.5) return vec2(-0.4858, -0.1540);
+        else if (i < 10.5) return vec2(-0.3047, -0.2720);
+        else if (i < 11.5) return vec2(-0.2092, -0.3640);
+        else if (i < 12.5) return vec2(-0.0606, -0.4950);
+        else if (i < 13.5) return vec2(0.1440, -0.5110);
         return vec2(99.0);
     }
     else if (L < 5.5) {
-        if (i < 0.5) return vec2(-0.9000, 1.2769);
-        else if (i < 1.5) return vec2(-0.8692, 1.0308);
-        else if (i < 2.5) return vec2(-0.7692, 0.8462);
-        else if (i < 3.5) return vec2(-0.7615, 0.4615);
-        else if (i < 4.5) return vec2(-0.7508, -0.0769);
-        else if (i < 5.5) return vec2(-0.5692, -0.1385);
-        else if (i < 6.5) return vec2(-0.5462, -0.4615);
-        else if (i < 7.5) return vec2(-0.0923, -0.4923);
-        else if (i < 8.5) return vec2(0.1538, -0.4462);
-        else if (i < 9.5) return vec2(0.4615, -0.2769);
+        if (i < 0.5) return vec2(0.0947, 0.8450);
+        else if (i < 1.5) return vec2(0.1804, 0.9050);
+        else if (i < 2.5) return vec2(0.4502, 1.0090);
+        else if (i < 3.5) return vec2(0.6761, 1.1340);
+        else if (i < 4.5) return vec2(0.9239, 1.3260);
         return vec2(99.0);
     }
     else if (L < 6.5) {
-        if (i < 0.5) return vec2(0.4615, -0.2769);
-        else if (i < 1.5) return vec2(0.7692, -0.1538);
-        else if (i < 2.5) return vec2(0.9231, -0.0923);
-        else if (i < 3.5) return vec2(1.0769, 0.3385);
+        if (i < 0.5) return vec2(0.2312, 1.4810);
+        else if (i < 1.5) return vec2(0.0750, 1.2060);
+        else if (i < 2.5) return vec2(0.0402, 1.0430);
+        else if (i < 3.5) return vec2(-0.0167, 0.9110);
+        else if (i < 4.5) return vec2(-0.2418, 0.4810);
+        else if (i < 5.5) return vec2(-0.3009, 0.3720);
+        else if (i < 6.5) return vec2(-0.3956, 0.2040);
+        else if (i < 7.5) return vec2(-0.3835, 0.1230);
+        else if (i < 8.5) return vec2(-0.4184, 0.0080);
+        else if (i < 9.5) return vec2(-0.4373, -0.0990);
+        else if (i < 10.5) return vec2(-0.3070, -0.2070);
+        else if (i < 11.5) return vec2(-0.2835, -0.2770);
+        else if (i < 12.5) return vec2(-0.2660, -0.3160);
+        else if (i < 13.5) return vec2(-0.0030, -0.3960);
+        else if (i < 14.5) return vec2(0.1448, -0.4070);
+        else if (i < 15.5) return vec2(0.3411, -0.4150);
         return vec2(99.0);
     }
     else if (L < 7.5) {
-        if (i < 0.5) return vec2(-0.7538, 0.3385);
-        else if (i < 1.5) return vec2(-0.4308, 0.3231);
-        else if (i < 2.5) return vec2(-0.1231, 0.3077);
-        else if (i < 3.5) return vec2(0.2615, 0.5538);
-        else if (i < 4.5) return vec2(0.7385, 0.5538);
-        else if (i < 5.5) return vec2(0.9385, 0.3692);
-        else if (i < 6.5) return vec2(1.0615, 0.4615);
+        if (i < 0.5) return vec2(0.3411, -0.4150);
+        else if (i < 1.5) return vec2(0.5881, -0.4460);
+        else if (i < 2.5) return vec2(0.8064, -0.3990);
+        else if (i < 3.5) return vec2(0.9072, -0.5970);
+        else if (i < 4.5) return vec2(1.0148, -1.1140);
+        else if (i < 5.5) return vec2(1.1748, -1.2750);
+        else if (i < 6.5) return vec2(1.4756, -1.1640);
         return vec2(99.0);
     }
     else if (L < 8.5) {
-        if (i < 0.5) return vec2(-0.4923, 1.5077);
-        else if (i < 1.5) return vec2(-0.4800, 0.9385);
-        else if (i < 2.5) return vec2(-0.5462, 0.4615);
-        else if (i < 3.5) return vec2(-0.5385, -0.1538);
-        else if (i < 4.5) return vec2(-0.3538, -0.2462);
-        else if (i < 5.5) return vec2(-0.0923, -0.4308);
-        else if (i < 6.5) return vec2(0.1385, -0.8000);
-        else if (i < 7.5) return vec2(0.2615, -1.0769);
-        else if (i < 8.5) return vec2(0.3846, -1.3538);
+        if (i < 0.5) return vec2(-0.2713, 0.4240);
+        else if (i < 1.5) return vec2(-0.1645, 0.3770);
+        else if (i < 2.5) return vec2(0.0296, 0.2710);
+        else if (i < 3.5) return vec2(0.0963, 0.2890);
+        else if (i < 4.5) return vec2(0.4434, 0.2650);
+        else if (i < 5.5) return vec2(0.7973, 0.0150);
+        else if (i < 6.5) return vec2(0.9072, -0.0600);
+        else if (i < 7.5) return vec2(1.0755, -0.1940);
+        else if (i < 8.5) return vec2(1.1247, -0.1780);
         return vec2(99.0);
     }
     else if (L < 9.5) {
-        if (i < 0.5) return vec2(-0.5462, 0.4615);
-        else if (i < 1.5) return vec2(-0.3538, 0.4769);
-        else if (i < 2.5) return vec2(0.0000, 0.5692);
-        else if (i < 3.5) return vec2(0.3077, 0.5846);
-        else if (i < 4.5) return vec2(0.8308, 0.6154);
+        if (i < 0.5) return vec2(0.5427, 1.5430);
+        else if (i < 1.5) return vec2(0.3964, 1.4120);
+        else if (i < 2.5) return vec2(0.1834, 1.0770);
+        else if (i < 3.5) return vec2(0.0409, 1.0450);
+        else if (i < 4.5) return vec2(-0.0167, 0.9110);
+        else if (i < 5.5) return vec2(-0.2357, 0.4500);
+        else if (i < 6.5) return vec2(-0.2403, 0.3870);
+        else if (i < 7.5) return vec2(-0.2850, 0.2990);
+        else if (i < 8.5) return vec2(-0.3835, 0.1230);
+        else if (i < 9.5) return vec2(-0.3509, 0.0530);
+        else if (i < 10.5) return vec2(-0.2403, -0.2950);
+        else if (i < 11.5) return vec2(-0.2084, -0.3600);
+        else if (i < 12.5) return vec2(-0.0909, -0.5850);
+        else if (i < 13.5) return vec2(-0.0553, -1.1130);
+        else if (i < 14.5) return vec2(-0.2365, -1.4260);
         return vec2(99.0);
     }
     else if (L < 10.5) {
-        if (i < 0.5) return vec2(-0.0308, 0.7692);
-        else if (i < 1.5) return vec2(-0.0846, 0.4769);
-        else if (i < 2.5) return vec2(-0.3846, 0.4538);
-        else if (i < 3.5) return vec2(-0.6231, 0.4154);
-        else if (i < 4.5) return vec2(-0.6308, 0.1538);
-        else if (i < 5.5) return vec2(-0.4769, 0.0000);
-        else if (i < 6.5) return vec2(-0.4385, -0.3846);
-        else if (i < 7.5) return vec2(-0.3385, -0.5385);
-        else if (i < 8.5) return vec2(0.0308, -0.7692);
-        else if (i < 9.5) return vec2(0.3846, -1.3538);
+        if (i < 0.5) return vec2(-0.2403, 0.3870);
+        else if (i < 1.5) return vec2(-0.1220, 0.4460);
+        else if (i < 2.5) return vec2(-0.0121, 0.3900);
+        else if (i < 3.5) return vec2(0.0568, 0.3400);
+        else if (i < 4.5) return vec2(0.4434, 0.2650);
+        else if (i < 5.5) return vec2(0.7973, 0.0150);
+        else if (i < 6.5) return vec2(1.2627, -0.0730);
         return vec2(99.0);
     }
     else if (L < 11.5) {
-        if (i < 0.5) return vec2(-0.8462, 0.1538);
-        else if (i < 1.5) return vec2(-0.6154, 0.1846);
-        else if (i < 2.5) return vec2(-0.3692, 0.2154);
-        else if (i < 3.5) return vec2(-0.1231, 0.3077);
-        else if (i < 4.5) return vec2(0.1538, 0.5538);
-        else if (i < 5.5) return vec2(0.5231, 0.9077);
+        if (i < 0.5) return vec2(0.2880, 0.5510);
+        else if (i < 1.5) return vec2(0.0743, 0.3090);
+        else if (i < 2.5) return vec2(-0.1304, 0.4270);
+        else if (i < 3.5) return vec2(-0.2327, 0.4470);
+        else if (i < 4.5) return vec2(-0.2744, 0.3460);
+        else if (i < 5.5) return vec2(-0.2888, 0.2960);
+        else if (i < 6.5) return vec2(-0.3032, 0.1570);
+        else if (i < 7.5) return vec2(-0.3918, -0.0100);
+        else if (i < 8.5) return vec2(-0.2403, -0.2950);
+        else if (i < 9.5) return vec2(-0.2084, -0.3600);
+        else if (i < 10.5) return vec2(-0.4070, -0.6490);
+        else if (i < 11.5) return vec2(-0.5146, -0.7870);
+        else if (i < 12.5) return vec2(-0.6109, -1.0360);
         return vec2(99.0);
     }
     else if (L < 12.5) {
-        if (i < 0.5) return vec2(-0.1231, 0.3077);
-        else if (i < 1.5) return vec2(-0.1923, 0.0000);
-        else if (i < 2.5) return vec2(-0.0923, -0.2615);
-        else if (i < 3.5) return vec2(0.0923, -0.4154);
-        else if (i < 4.5) return vec2(0.1154, -0.7692);
-        else if (i < 5.5) return vec2(0.2923, -0.9231);
+        if (i < 0.5) return vec2(-0.2084, -0.3600);
+        else if (i < 1.5) return vec2(-0.0909, -0.5850);
+        else if (i < 2.5) return vec2(-0.0947, -0.8500);
+        else if (i < 3.5) return vec2(-0.0568, -1.1140);
+        else if (i < 4.5) return vec2(-0.0864, -1.4240);
+        else if (i < 5.5) return vec2(-0.2365, -1.4260);
         return vec2(99.0);
     }
     else if (L < 13.5) {
-        if (i < 0.5) return vec2(-0.7538, -0.0615);
-        else if (i < 1.5) return vec2(-0.3846, -0.0692);
-        else if (i < 2.5) return vec2(-0.0923, 0.0000);
-        else if (i < 3.5) return vec2(0.2000, -0.0923);
-        else if (i < 4.5) return vec2(0.4769, -0.2769);
-        else if (i < 5.5) return vec2(0.7538, -0.5846);
+        if (i < 0.5) return vec2(-0.3949, 0.3560);
+        else if (i < 1.5) return vec2(-0.2827, 0.3530);
+        else if (i < 2.5) return vec2(-0.2031, 0.3180);
+        else if (i < 3.5) return vec2(-0.0053, 0.2260);
+        else if (i < 4.5) return vec2(0.0333, 0.2700);
+        else if (i < 5.5) return vec2(0.0743, 0.3090);
+        else if (i < 6.5) return vec2(0.3547, 0.2540);
+        else if (i < 7.5) return vec2(0.4449, 0.2680);
+        else if (i < 8.5) return vec2(0.6094, 0.2920);
+        else if (i < 9.5) return vec2(0.7913, 0.3460);
+        else if (i < 10.5) return vec2(0.9095, 0.3960);
         return vec2(99.0);
     }
     else if (L < 14.5) {
-        if (i < 0.5) return vec2(-0.3846, -0.4615);
-        else if (i < 1.5) return vec2(-0.2000, -0.2308);
-        else if (i < 2.5) return vec2(0.4615, -0.2769);
-        else if (i < 3.5) return vec2(0.6923, 0.2308);
-        else if (i < 4.5) return vec2(1.0615, 0.4769);
+        if (i < 0.5) return vec2(0.0333, 0.2700);
+        else if (i < 1.5) return vec2(-0.0318, 0.1130);
+        else if (i < 2.5) return vec2(-0.0099, -0.0720);
+        else if (i < 3.5) return vec2(0.0076, -0.2540);
+        else if (i < 4.5) return vec2(-0.0265, -0.3040);
+        else if (i < 5.5) return vec2(-0.1918, -0.3270);
+        else if (i < 6.5) return vec2(-0.2660, -0.3160);
+        else if (i < 7.5) return vec2(-0.3464, -0.4590);
+        else if (i < 8.5) return vec2(-0.2251, -0.7570);
         return vec2(99.0);
     }
     else if (L < 15.5) {
-        if (i < 0.5) return vec2(-0.4154, -0.8000);
-        else if (i < 1.5) return vec2(-0.4769, -0.9385);
-        else if (i < 2.5) return vec2(-0.6154, -1.0769);
-        else if (i < 3.5) return vec2(-0.7846, -1.3385);
+        if (i < 0.5) return vec2(-0.3987, 0.1970);
+        else if (i < 1.5) return vec2(-0.3032, 0.1470);
+        else if (i < 2.5) return vec2(-0.2410, 0.1070);
+        else if (i < 3.5) return vec2(-0.0538, -0.0290);
+        else if (i < 4.5) return vec2(-0.0030, -0.0600);
+        else if (i < 5.5) return vec2(0.2827, -0.2060);
+        else if (i < 6.5) return vec2(0.3411, -0.4150);
+        else if (i < 7.5) return vec2(0.3630, -0.7340);
         return vec2(99.0);
     }
     else if (L < 16.5) {
-        if (i < 0.5) return vec2(-0.2154, 0.8154);
-        else if (i < 1.5) return vec2(0.0000, 0.8615);
-        else if (i < 2.5) return vec2(0.1231, 0.7385);
-        else if (i < 3.5) return vec2(0.2308, 0.8154);
-        else if (i < 4.5) return vec2(0.4308, 0.8769);
-        else if (i < 5.5) return vec2(0.6923, 0.9538);
-        else if (i < 6.5) return vec2(1.3231, 1.0769);
-        else if (i < 7.5) return vec2(1.3231, -0.2769);
-        else if (i < 8.5) return vec2(1.0769, -0.2769);
-        else if (i < 9.5) return vec2(0.9692, -0.3692);
-        else if (i < 10.5) return vec2(0.7692, -0.3385);
-        else if (i < 11.5) return vec2(0.5538, -0.5077);
-        else if (i < 12.5) return vec2(0.5538, -0.7231);
-        else if (i < 13.5) return vec2(0.8154, -0.8615);
-        else if (i < 14.5) return vec2(0.8308, -1.0769);
-        else if (i < 15.5) return vec2(0.6154, -1.2769);
-        else if (i < 16.5) return vec2(0.3846, -1.4000);
-        else if (i < 17.5) return vec2(0.1538, -1.3077);
-        else if (i < 18.5) return vec2(-0.0923, -1.2154);
-        else if (i < 19.5) return vec2(-0.1538, -1.0000);
-        else if (i < 20.5) return vec2(-0.2154, -0.7538);
-        else if (i < 21.5) return vec2(-0.3154, -0.6615);
-        else if (i < 22.5) return vec2(-0.2769, -0.5077);
-        else if (i < 23.5) return vec2(-0.2077, -0.3385);
-        else if (i < 24.5) return vec2(-0.1923, -0.1231);
-        else if (i < 25.5) return vec2(-0.2385, 0.1077);
-        else if (i < 26.5) return vec2(-0.2769, 0.3385);
-        else if (i < 27.5) return vec2(-0.2462, 0.6154);
+        if (i < 0.5) return vec2(-0.4623, -0.1350);
+        else if (i < 1.5) return vec2(-0.4055, -0.0670);
+        else if (i < 2.5) return vec2(-0.2857, -0.0170);
+        else if (i < 3.5) return vec2(-0.0576, -0.1160);
+        else if (i < 4.5) return vec2(0.1076, -0.2270);
+        else if (i < 5.5) return vec2(0.3411, -0.4150);
+        else if (i < 6.5) return vec2(0.5760, -0.3070);
+        else if (i < 7.5) return vec2(0.7458, -0.2630);
+        else if (i < 8.5) return vec2(0.9209, -0.1970);
+        else if (i < 9.5) return vec2(1.1247, -0.1780);
         return vec2(99.0);
     }
     else if (L < 17.5) {
-        if (i < 0.5) return vec2(-0.6923, 1.6308);
-        else if (i < 1.5) return vec2(0.6154, 1.6308);
-        else if (i < 2.5) return vec2(0.6154, 1.3231);
-        else if (i < 3.5) return vec2(0.3538, 1.2769);
-        else if (i < 4.5) return vec2(0.2769, 1.0923);
-        else if (i < 5.5) return vec2(0.0923, 0.9462);
-        else if (i < 6.5) return vec2(-0.1538, 0.9000);
-        else if (i < 7.5) return vec2(-0.3538, 0.8385);
-        else if (i < 8.5) return vec2(-0.4769, 0.8615);
-        else if (i < 9.5) return vec2(-0.6154, 1.0154);
-        else if (i < 10.5) return vec2(-0.6954, 1.3077);
+        if (i < 0.5) return vec2(-0.9360, -0.7630);
+        else if (i < 1.5) return vec2(-0.9231, -0.9870);
+        else if (i < 2.5) return vec2(-1.1649, -1.4120);
+        else if (i < 3.5) return vec2(-1.5287, -1.6870);
+        else if (i < 4.5) return vec2(-2.2085, -2.0710);
         return vec2(99.0);
     }
     else if (L < 18.5) {
-        if (i < 0.5) return vec2(-0.7538, -0.8615);
-        else if (i < 1.5) return vec2(-0.4308, -0.7923);
-        else if (i < 2.5) return vec2(-0.3462, -0.9077);
-        else if (i < 3.5) return vec2(-0.3769, -1.1231);
-        else if (i < 4.5) return vec2(-0.5538, -1.3538);
-        else if (i < 5.5) return vec2(-0.7692, -1.4000);
-        else if (i < 6.5) return vec2(-0.9077, -1.2923);
-        else if (i < 7.5) return vec2(-0.8692, -1.0462);
+        if (i < 0.5) return vec2(0.1516, 0.6000);
+        else if (i < 1.5) return vec2(0.4547, 0.6300);
+        else if (i < 2.5) return vec2(0.6821, 0.5000);
+        else if (i < 3.5) return vec2(0.8337, 0.4500);
+        else if (i < 4.5) return vec2(0.8716, 0.7500);
+        else if (i < 5.5) return vec2(1.3263, 0.7500);
+        else if (i < 6.5) return vec2(1.4779, 0.5000);
+        else if (i < 7.5) return vec2(2.6527, 0.4500);
+        else if (i < 8.5) return vec2(2.6527, -0.9000);
+        else if (i < 9.5) return vec2(1.5916, -0.7500);
+        else if (i < 10.5) return vec2(1.2127, -0.9500);
+        else if (i < 11.5) return vec2(0.9095, -0.8000);
+        else if (i < 12.5) return vec2(0.5305, -0.9000);
+        else if (i < 13.5) return vec2(0.2653, -1.1000);
+        else if (i < 14.5) return vec2(0.1137, -1.4000);
+        else if (i < 15.5) return vec2(-0.0758, -1.4700);
+        else if (i < 16.5) return vec2(-0.3411, -1.4800);
+        else if (i < 17.5) return vec2(-0.4699, -1.4200);
+        else if (i < 18.5) return vec2(-0.3790, -1.2800);
+        else if (i < 19.5) return vec2(-0.6594, -1.0800);
+        else if (i < 20.5) return vec2(-0.6063, -0.7500);
+        else if (i < 21.5) return vec2(-0.5154, -0.4400);
+        else if (i < 22.5) return vec2(-0.3714, -0.2400);
+        else if (i < 23.5) return vec2(-0.1895, -0.1500);
+        else if (i < 24.5) return vec2(-0.1137, 0.0500);
+        else if (i < 25.5) return vec2(-0.0758, 0.2500);
+        else if (i < 26.5) return vec2(0.0379, 0.4000);
         return vec2(99.0);
     }
     else if (L < 19.5) {
-        if (i < 0.5) return vec2(-1.6923, 1.6308);
-        else if (i < 1.5) return vec2(-0.9923, 1.6308);
-        else if (i < 2.5) return vec2(-0.9769, 0.7692);
-        else if (i < 3.5) return vec2(-0.9462, 0.1538);
-        else if (i < 4.5) return vec2(-0.9077, -0.4615);
-        else if (i < 5.5) return vec2(-0.8308, -0.7692);
-        else if (i < 6.5) return vec2(-0.9692, -1.0769);
-        else if (i < 7.5) return vec2(-0.9538, -1.6923);
-        else if (i < 8.5) return vec2(-1.6923, -1.6923);
+        if (i < 0.5) return vec2(0.2804, 1.6100);
+        else if (i < 1.5) return vec2(0.2653, 2.3000);
+        else if (i < 2.5) return vec2(1.3642, 2.3000);
+        else if (i < 3.5) return vec2(1.2505, 1.3000);
+        else if (i < 4.5) return vec2(1.1899, 0.8500);
+        else if (i < 5.5) return vec2(0.9095, 0.9000);
+        else if (i < 6.5) return vec2(0.6442, 0.8800);
+        else if (i < 7.5) return vec2(0.5305, 0.8500);
+        else if (i < 8.5) return vec2(0.3032, 0.8000);
+        else if (i < 9.5) return vec2(0.1743, 0.8800);
+        else if (i < 10.5) return vec2(0.1592, 1.0600);
+        else if (i < 11.5) return vec2(0.1895, 1.2400);
+        else if (i < 12.5) return vec2(0.2577, 1.4200);
+        else if (i < 13.5) return vec2(0.3335, 1.5300);
+        return vec2(99.0);
+    }
+    else if (L < 20.5) {
+        if (i < 0.5) return vec2(-0.5093, -0.1970);
+        else if (i < 1.5) return vec2(-0.5267, -0.1200);
+        else if (i < 2.5) return vec2(-0.4888, 0.0000);
+        else if (i < 3.5) return vec2(-0.4608, 0.1500);
+        else if (i < 4.5) return vec2(-0.4472, 0.3000);
+        else if (i < 5.5) return vec2(-0.4093, 0.4100);
+        else if (i < 6.5) return vec2(-0.3297, 0.5400);
+        else if (i < 7.5) return vec2(-0.2653, 0.6600);
+        else if (i < 8.5) return vec2(-0.1819, 0.8200);
+        else if (i < 9.5) return vec2(-0.0758, 1.0000);
+        else if (i < 10.5) return vec2(0.0000, 1.1400);
+        else if (i < 11.5) return vec2(0.0758, 1.3300);
+        else if (i < 12.5) return vec2(0.1516, 1.5000);
+        else if (i < 13.5) return vec2(0.2274, 1.5900);
+        else if (i < 14.5) return vec2(0.2956, 1.5450);
+        else if (i < 15.5) return vec2(0.2274, 1.4200);
+        else if (i < 16.5) return vec2(0.1440, 1.2400);
+        else if (i < 17.5) return vec2(0.1175, 1.0600);
+        else if (i < 18.5) return vec2(0.1288, 0.9000);
+        else if (i < 19.5) return vec2(0.0985, 0.7800);
+        else if (i < 20.5) return vec2(0.0606, 0.6500);
+        else if (i < 21.5) return vec2(-0.0076, 0.5000);
+        else if (i < 22.5) return vec2(-0.0909, 0.3600);
+        else if (i < 23.5) return vec2(-0.1364, 0.2400);
+        else if (i < 24.5) return vec2(-0.1667, 0.1000);
+        else if (i < 25.5) return vec2(-0.1971, -0.0700);
+        else if (i < 26.5) return vec2(-0.3032, -0.1200);
+        else if (i < 27.5) return vec2(-0.3941, -0.1500);
+        else if (i < 28.5) return vec2(-0.4623, -0.1900);
+        return vec2(99.0);
+    }
+    else if (L < 21.5) {
+        if (i < 0.5) return vec2(-0.9095, -0.7500);
+        else if (i < 1.5) return vec2(-0.8034, -1.2500);
+        else if (i < 2.5) return vec2(-1.0611, -1.5500);
+        else if (i < 3.5) return vec2(-1.2884, -1.7500);
+        else if (i < 4.5) return vec2(-1.5916, -2.0000);
+        else if (i < 5.5) return vec2(-1.9327, -2.1500);
+        else if (i < 6.5) return vec2(-2.2737, -2.2000);
+        else if (i < 7.5) return vec2(-2.2358, -1.9000);
+        else if (i < 8.5) return vec2(-1.9327, -1.5500);
+        else if (i < 9.5) return vec2(-1.8948, -1.2000);
+        else if (i < 10.5) return vec2(-1.7432, -0.8500);
+        else if (i < 11.5) return vec2(-1.5158, -0.7500);
+        else if (i < 12.5) return vec2(-1.1369, -0.7500);
+        return vec2(99.0);
+    }
+    else if (L < 22.5) {
+        if (i < 0.5) return vec2(-4.9264, 2.3000);
+        else if (i < 1.5) return vec2(0.2653, 2.3000);
+        else if (i < 2.5) return vec2(0.1516, 1.8000);
+        else if (i < 3.5) return vec2(-0.0758, 1.3000);
+        else if (i < 4.5) return vec2(-0.2880, 0.8000);
+        else if (i < 5.5) return vec2(-0.4926, 0.4500);
+        else if (i < 6.5) return vec2(-0.5836, 0.2000);
+        else if (i < 7.5) return vec2(-0.6366, -0.0500);
+        else if (i < 8.5) return vec2(-0.7579, -0.2500);
+        else if (i < 9.5) return vec2(-0.9095, -0.6800);
+        else if (i < 10.5) return vec2(-1.2127, -0.6800);
+        else if (i < 11.5) return vec2(-1.5916, -0.7000);
+        else if (i < 12.5) return vec2(-1.9706, -0.8000);
+        else if (i < 13.5) return vec2(-2.1600, -1.5000);
+        else if (i < 14.5) return vec2(-2.3495, -2.1000);
+        else if (i < 15.5) return vec2(-2.4253, -2.8000);
+        else if (i < 16.5) return vec2(-4.9264, -2.8000);
+        return vec2(99.0);
+    }
+    else if (L < 23.5) {
+        if (i < 0.5) return vec2(0.0606, -1.6700);
+        else if (i < 1.5) return vec2(0.5305, -1.5600);
+        else if (i < 2.5) return vec2(1.1369, -1.4000);
+        else if (i < 3.5) return vec2(1.5916, -1.2800);
+        else if (i < 4.5) return vec2(1.5916, -1.2000);
+        else if (i < 5.5) return vec2(1.1369, -1.3000);
+        else if (i < 6.5) return vec2(0.5305, -1.4600);
+        else if (i < 7.5) return vec2(0.1137, -1.5500);
         return vec2(99.0);
     }
     return vec2(99.0);
@@ -445,19 +569,21 @@ float netColIdx(float L) {
     if (L < 0.5) return 2.0;
     else if (L < 1.5) return 2.0;
     else if (L < 2.5) return 2.0;
-    else if (L < 3.5) return 3.0;
+    else if (L < 3.5) return 2.0;
     else if (L < 4.5) return 3.0;
-    else if (L < 5.5) return 4.0;
+    else if (L < 5.5) return 3.0;
     else if (L < 6.5) return 4.0;
     else if (L < 7.5) return 4.0;
-    else if (L < 8.5) return 1.0;
+    else if (L < 8.5) return 4.0;
     else if (L < 9.5) return 1.0;
-    else if (L < 10.5) return 0.0;
-    else if (L < 11.5) return 6.0;
-    else if (L < 12.5) return 5.0;
-    else if (L < 13.5) return 8.0;
-    else if (L < 14.5) return 7.0;
-    else if (L < 15.5) return 9.0;
+    else if (L < 10.5) return 1.0;
+    else if (L < 11.5) return 0.0;
+    else if (L < 12.5) return 0.0;
+    else if (L < 13.5) return 6.0;
+    else if (L < 14.5) return 5.0;
+    else if (L < 15.5) return 8.0;
+    else if (L < 16.5) return 7.0;
+    else if (L < 17.5) return 9.0;
     return 0.0;
 }
 
@@ -479,7 +605,8 @@ vec3 lineColBase(float i) {
 
 // ── geography (reference-photo pixel coords → city units) ───────────────
 vec4 netTex(float i, float L) { return texture2D(netBuf, vec2(i + 0.5, L + 0.5) / RENDERSIZE.xy); }
-vec2 PX(float x, float y) { return vec2((x - 700.0) / 650.0, (1000.0 - y) / 650.0); }
+// real coordinates → city units: x = (lon + 73.95)·cos 40.72°·10, y = (lat − 40.72)·10 (1 unit ≈ 11 km)
+vec2 LL(float lon, float lat) { return vec2((lon + 73.95) * 0.75814 * 10.0, (lat - 40.72) * 10.0); }
 float sdSeg(vec2 p, vec2 a, vec2 b) { vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0); return length(pa - ba * h); }
 float sdBox(vec2 p, vec2 c, vec2 b) { vec2 q = abs(p - c) - b; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0); }
 float smin(float a, float b, float k) { float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); return mix(b, a, h) - k * h * (1.0 - h); }
@@ -503,34 +630,44 @@ float polySD(float row, vec2 p) {
     return s * sqrt(d);
 }
 float landSD(vec2 c) {
-    float wob = 0.012 * (vnoise(c * 7.0) - 0.5) + 0.006 * (vnoise(c * 23.0) - 0.5) + 0.002 * (vnoise(c * 80.0) - 0.5);
-    // Manhattan: a tapered chain of capsules
-    float m = 9.0;
-    m = min(m, sdSeg(c, PX(345.0, 1420.0), PX(272.0, 1250.0)) - 0.105);
-    m = min(m, sdSeg(c, PX(272.0, 1250.0), PX(240.0, 1000.0)) - 0.16);
-    m = min(m, sdSeg(c, PX(240.0, 1000.0), PX(226.0, 760.0)) - 0.17);
-    m = min(m, sdSeg(c, PX(226.0, 760.0), PX(188.0, 560.0)) - 0.165);
-    m = min(m, sdSeg(c, PX(188.0, 560.0), PX(142.0, 330.0)) - 0.135);
-    m = min(m, sdSeg(c, PX(142.0, 330.0), PX(125.0, 120.0)) - 0.1);
+    float wob = 0.004 * (vnoise(c * 30.0) - 0.5) + 0.0015 * (vnoise(c * 110.0) - 0.5);
+    float li = polySD(float(NL), c);                     // Queens + Brooklyn
+    float bx = polySD(float(NL) + 1.0, c);               // the Bronx
+    float m  = polySD(float(NL) + 2.0, c);               // Manhattan
+    float si = polySD(float(NL) + 3.0, c);               // Staten Island
+    float nj = polySD(float(NL) + 4.0, c);               // the Jersey shore
+    float rk = polySD(float(NL) + 5.0, c);               // the Rockaways
     gManh = m;
-    float li = polySD(float(NL), c);
-    li = max(li, -(length((c - PX(1240.0, 1330.0)) / vec2(0.3, 0.1)) - 1.0) * 0.1);    // Jamaica Bay
-    li = min(li, sdSeg(c, PX(1120.0, 1500.0), PX(1560.0, 1370.0)) - 0.03);            // the Rockaways
-    float bx = polySD(float(NL) + 1.0, c);
-    float si = polySD(float(NL) + 2.0, c);
-    float nj = polySD(float(NL) + 3.0, c);
-    return min(min(m, bx), min(li, min(si, nj))) + wob;
+    // small islands: Randall's / Wards, Roosevelt, Governors, Rikers, Liberty, Ellis
+    float isl = length((c - LL(-73.9230, 40.7930)) / vec2(1.0, 1.3)) - 0.06;
+    isl = min(isl, sdSeg(c, LL(-73.9600, 40.7500), LL(-73.9440, 40.7720)) - 0.008);
+    isl = min(isl, length(c - LL(-74.0170, 40.6890)) - 0.03);
+    isl = min(isl, length(c - LL(-73.8850, 40.7930)) - 0.045);
+    isl = min(isl, length(c - LL(-74.0445, 40.6892)) - 0.012);
+    isl = min(isl, length(c - LL(-74.0396, 40.6995)) - 0.01);
+    return min(min(min(li, bx), min(m, si)), min(min(nj, rk), isl)) + wob;
 }
 float parkSD(vec2 c) {
-    float cp = sdBox(c, PX(210.0, 600.0), vec2(0.045, 0.2)) - 0.01;                   // the park in Manhattan
-    float pp = length(c - PX(800.0, 1600.0)) - 0.07;                                    // a Brooklyn park
-    float fm = length((c - PX(1050.0, 680.0)) / vec2(1.0, 1.6)) - 0.06;                 // a Queens park
-    return min(cp, min(pp, fm));
+    // Central Park: a long rectangle on the grid's 29° tilt
+    vec2 cc = c - LL(-73.9655, 40.7826);
+    vec2 cr = mat2(0.8746, 0.4848, -0.4848, 0.8746) * cc;
+    float cp = sdBox(cr, vec2(0.0), vec2(0.042, 0.205)) - 0.004;
+    float pp = length((c - LL(-73.9690, 40.6600)) / vec2(1.0, 1.2)) - 0.075;    // Prospect Park
+    float fm = length((c - LL(-73.8450, 40.7400)) / vec2(0.7, 1.4)) - 0.08;    // Flushing Meadows
+    float vc = length(c - LL(-73.8850, 40.8970)) - 0.08;                        // Van Cortlandt
+    float pb = length((c - LL(-73.8100, 40.8650)) / vec2(1.0, 1.4)) - 0.09;    // Pelham Bay Park
+    float fp = length((c - LL(-73.8650, 40.7050)) / vec2(1.6, 0.8)) - 0.07;    // Forest Park
+    return min(min(min(cp, pp), min(fm, vc)), min(pb, fp));
+}
+float airportSD(vec2 c) {
+    float lga = sdBox(c, LL(-73.8740, 40.7770), vec2(0.1, 0.035)) - 0.005;
+    float jfk = length((c - LL(-73.7781, 40.6413)) / vec2(1.2, 1.0)) - 0.18;
+    return min(lga, jfk);
 }
 
 // ── network data (pass 0) ───────────────────────────────────────────────
 vec4 dataPass(vec2 fc) {
-    if (fc.x > 32.0 || fc.y > float(NL) + 4.0) return vec4(0.0);
+    if (fc.x > 32.0 || fc.y > float(NL) + 6.0) return vec4(0.0);
     float i = floor(fc.x), L = floor(fc.y);
     vec2 prev = vec2(0.0);
     float acc = 0.0;
@@ -560,7 +697,7 @@ void trace(vec2 c, float maxD) {
         if (c.x < bb.x - maxD || c.y < bb.y - maxD || c.x > bb.z + maxD || c.y > bb.w + maxD) continue;
         vec4 a = netTex(0.0, fL);
         float best = 9.0;
-        for (int i = 1; i < 10; i++) {
+        for (int i = 1; i < 16; i++) {
             vec4 b = netTex(float(i), fL);
             if (b.x > 90.0) break;
             vec2 ab = b.xy - a.xy, pa = c - a.xy;
@@ -607,7 +744,7 @@ void main() {
     float th = float(theme);
 
     // ── theme ──
-    if (th < 0.5)      { gLand = vec3(0.075, 0.078, 0.09); gWater = vec3(0.02, 0.035, 0.07); gCoast = vec3(0.18, 0.24, 0.36); gPark = vec3(0.05, 0.11, 0.07); gStreet = vec3(0.13, 0.13, 0.15); gThemeLines = 0.0; }
+    if (th < 0.5)      { gLand = vec3(0.1, 0.102, 0.115); gWater = vec3(0.02, 0.035, 0.07); gCoast = vec3(0.18, 0.24, 0.36); gPark = vec3(0.05, 0.11, 0.07); gStreet = vec3(0.13, 0.13, 0.15); gThemeLines = 0.0; }
     else if (th < 1.5) { gLand = vec3(0.93, 0.92, 0.88); gWater = vec3(0.62, 0.74, 0.88); gCoast = vec3(0.75, 0.8, 0.86); gPark = vec3(0.78, 0.86, 0.72); gStreet = vec3(0.86, 0.85, 0.82); gThemeLines = 0.0; }
     else if (th < 2.5) { gLand = vec3(0.012, 0.01, 0.02); gWater = vec3(0.0); gCoast = vec3(0.35, 0.1, 0.6); gPark = vec3(0.0, 0.04, 0.03); gStreet = vec3(0.04, 0.03, 0.06); gThemeLines = 0.0; }
     else if (th < 3.5) { gLand = vec3(0.07, 0.2, 0.42); gWater = vec3(0.04, 0.13, 0.3); gCoast = vec3(0.75, 0.88, 1.0); gPark = vec3(0.08, 0.24, 0.46); gStreet = vec3(0.13, 0.3, 0.52); gThemeLines = 1.0; }
@@ -621,8 +758,9 @@ void main() {
     float yaw = T * spin * 0.06 + audioMidTime * 0.01 * ar * spin + 1.2 * gBuild * gBuild * sign(spin + 1e-3);
     float pitch = mix(1.5707963, 0.42, clamp(tilt + 0.25 * gBuild * gBuild, 0.0, 1.0));
     pitch -= 0.05 * gRest;
-    float dist = mix(5.2, 1.3, zoomAmt) * (1.0 - 0.18 * gDrop * gDrop) * (1.0 + 0.12 * gRest);
-    vec2 tg = PX(520.0, 1000.0) + tour * vec2(0.45 * sin(T * 0.031) + 0.2 * sin(T * 0.077), 0.55 * sin(T * 0.023 + 1.0)) * (0.4 + 0.6 * zoomAmt);
+    float dist = mix(7.5, 1.0, zoomAmt) * (1.0 - 0.18 * gDrop * gDrop) * (1.0 + 0.12 * gRest);
+    // the tour glides between Midtown, Downtown Brooklyn, Long Island City and Harlem
+    vec2 tg = LL(-73.975, 40.735) + tour * vec2(0.6 * sin(T * 0.031) + 0.25 * sin(T * 0.077), 0.85 * sin(T * 0.023 + 1.0)) * (0.35 + 0.65 * zoomAmt);
     vec3 fwd = vec3(cos(pitch) * sin(yaw), cos(pitch) * cos(yaw), -sin(pitch));
     vec3 rgt = vec3(cos(yaw), -sin(yaw), 0.0);
     vec3 upv = cross(rgt, fwd);
@@ -654,12 +792,13 @@ void main() {
         float land = smoothstep(aa, -aa, ld);
         float Tw = TIME * 0.15;
         float rip = vnoise(c * 38.0 + vec2(Tw, -Tw * 0.7)) * 0.6 + vnoise(c * 90.0 - vec2(Tw * 1.3, Tw)) * 0.4;
-        vec3 water = gWater * (0.85 + 0.3 * rip);
+        vec3 water = gWater * (0.94 + 0.1 * smoothstep(0.2, 0.8, rip));
         // reflections of the city lights on the water near the shore
         water += gCoast * 0.25 * exp(-max(ld, 0.0) / 0.05) * (0.6 + 0.4 * rip) * float(dark);
-        water += vec3(1.0) * pow(rip, 8.0) * 0.12 * float(dark);
+        water += vec3(1.0) * pow(rip, 10.0) * 0.06 * float(dark);
         vec3 landC = gLand * (0.9 + 0.12 * vnoise(c * 6.0)) * (0.88 + 0.2 * smoothstep(0.0, -0.05, ld));
         landC = mix(landC, gPark, smoothstep(aa, -aa, parkSD(c)) * 0.9);
+        landC = mix(landC, mix(landC, gStreet, 0.6) * 1.05, smoothstep(aa, -aa, airportSD(c)) * 0.8);
         if (camMix > 0.001) {
             vec3 ci = texture2D(camTex, uv).rgb;
             landC = mix(landC, ci * (dark ? 0.55 : 1.0), camMix);
@@ -667,9 +806,10 @@ void main() {
         }
         // streets: Manhattan's tight grid, a looser grid elsewhere; tiny traffic lights move along them
         float inM = smoothstep(0.01, -0.02, gManh);
-        vec2 sg = inM > 0.5 ? c * vec2(1.0 / 0.024, 1.0 / 0.011) : (c * mat2(0.96, -0.28, 0.28, 0.96)) / 0.03;
+        // Manhattan's grid runs 29° east of north: avenues ~250 m apart, streets ~80 m
+        vec2 sg = inM > 0.5 ? (mat2(0.8746, 0.4848, -0.4848, 0.8746) * c) * vec2(1.0 / 0.025, 1.0 / 0.0075) : (c * mat2(0.96, -0.28, 0.28, 0.96)) / 0.016;
         vec2 sf = abs(fract(sg) - 0.5);
-        float lw = fp / (inM > 0.5 ? 0.011 : 0.03) * 0.9;
+        float lw = fp / (inM > 0.5 ? 0.0075 : 0.016) * 0.9;
         float st = max(smoothstep(lw + 0.04, 0.0, 0.5 - sf.x), smoothstep(lw + 0.04, 0.0, 0.5 - sf.y));
         st *= streets * land * smoothstep(0.03, 0.12, fp < 0.004 ? 1.0 : 0.004 / fp);
         vec2 cell = floor(sg);
@@ -706,7 +846,7 @@ void main() {
         float casing = smoothstep(w * 1.45 + aa, w * 1.45 - aa, d);
         float lat = gNd * gNside;                                     // signed offset across the line
         // beat ring out of Midtown, drop shockwave, hand pulse
-        vec2 O = PX(300.0, 880.0);
+        vec2 O = LL(-73.9862, 40.7546);                              // Times Square
         float dO = length(c - O);
         float ringR = (1.0 - audioBeatPulse) * 1.6;
         float beatRing = exp(-pow((dO - ringR) / 0.08, 2.0)) * audioBeatPulse * ar;
@@ -746,7 +886,7 @@ void main() {
         base += lc * glowAmt * 0.6 * tr.x * exp(-d / (w * 2.0)) * (dark ? 1.0 : 0.3);              // train glow
 
         // stations: dots along every line, flashing as trains pull through
-        float sp = 0.085;
+        float sp = 0.065;
         float so = h11(L * 2.3) * sp;
         float sk = floor((gNs + so) / sp);
         float sC = sk * sp + 0.5 * sp - so;
