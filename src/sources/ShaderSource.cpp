@@ -270,6 +270,8 @@ std::string ShaderSource::translateFragment(const std::string& isfBody) {
     out << "uniform sampler2D mpFaceLandmarks;\n";
     out << "uniform sampler2D mpHandLandmarks;\n";
     out << "uniform sampler2D mpSegmentation;\n";
+    // ShaderClaw's name for the selfie-segmentation mask (Shades of New York body layer)
+    out << "uniform sampler2D mpSegMask;\n";
     out << "\n";
 
     // ISF image input stubs — provide samplers + IMG_SIZE + flip uniforms
@@ -871,6 +873,26 @@ void ShaderSource::uploadUniforms(int passIndex, int passWidth, int passHeight) 
     m_shader.setInt("fontAtlasTex", 3);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, fontAtlas);
+
+    // MediaPipe body samplers: until a vision source feeds them, bind an empty
+    // texture so shaders read "no body" (visibility 0, mask 0) instead of
+    // whatever happens to sit on texture unit 0. Unit 15 stays clear of
+    // audio (2), font (3), pass buffers (4+) and image inputs (8+).
+    {
+        static GLuint s_emptyBodyTex = 0;
+        if (s_emptyBodyTex == 0) {
+            const unsigned char zero[4] = {0, 0, 0, 0};
+            glGenTextures(1, &s_emptyBodyTex);
+            glBindTexture(GL_TEXTURE_2D, s_emptyBodyTex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, zero);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        glActiveTexture(GL_TEXTURE15);
+        glBindTexture(GL_TEXTURE_2D, s_emptyBodyTex);
+        for (const char* n : {"mpPoseLandmarks", "mpFaceLandmarks", "mpHandLandmarks", "mpSegmentation", "mpSegMask"})
+            m_shader.setInt(n, 15);
+    }
 
     // User inputs
     for (const auto& input : m_inputs) {
