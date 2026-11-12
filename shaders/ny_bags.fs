@@ -65,6 +65,24 @@
       "GROUP": "Bags"
     },
     {
+      "NAME": "tornado",
+      "LABEL": "Bag Tornado",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
+      "GROUP": "Bags"
+    },
+    {
+      "NAME": "nightGlow",
+      "LABEL": "Night (glowing ink)",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
+      "GROUP": "Bags"
+    },
+    {
       "NAME": "bodyMode",
       "LABEL": "Body Tracking",
       "TYPE": "long",
@@ -592,7 +610,9 @@ vec4 bag(vec2 q, float kind, float hs, float t, float aa) {
         vec3 film = kind < 0.5 ? vec3(0.96, 0.96, 0.95) : vec3(1.0, 0.92, 0.35);
         vec3 inkC = kind < 0.5 ? vec3(0.85, 0.06, 0.08) : vec3(0.05, 0.12, 0.6);
         float ink = bagPrint(w, kind);
-        c = mix(film, inkC, ink * 0.92) * dif + spec * 0.35;
+        c = mix(film * mix(1.0, 0.32, nightGlow), inkC, ink * 0.92) * dif + spec * 0.35;
+        c += inkC * ink * nightGlow * (2.6 + 1.2 * audioBeatPulse * audioReact) + vec3(1.0, 0.5, 0.5) * ink * nightGlow * 0.5;
+        c += vec3(0.5, 0.6, 1.0) * pow(1.0 - smoothstep(-0.25, 0.0, d), 2.0) * 0.0 + vec3(0.6, 0.65, 1.0) * smoothstep(-0.12, 0.0, d) * nightGlow * 0.5;
         c = mix(c, c * 0.7 + 0.15, 0.25 * (1.0 - smoothstep(-0.3, -0.02, d)));    // translucent edges
     } else if (kind < 1.5) {
         c = vec3(0.03, 0.03, 0.035) * dif + spec * 0.9 + vec3(0.25, 0.27, 0.3) * pow(1.0 - N.z, 2.0) * 0.6;
@@ -615,7 +635,13 @@ void main() {
     float sil = bodyOn * bodyUseSil() * bodySeg(uv);
 
     // a soft city: blurred street bokeh behind the bags
-    vec3 col = backdrop(uv);
+    vec3 col = mix(backdrop(uv), mix(vec3(0.02, 0.02, 0.05), vec3(0.08, 0.03, 0.08), uv.y), nightGlow);
+    // the funnel of the tornado, a dust swirl behind the bags
+    if (tornado > 0.01) {
+        float fw = 0.12 + 0.28 * (p.y + 0.6);
+        float sw = fbm3(vec2(p.x / max(fw, 0.05) * 2.0 + t * 2.5, p.y * 6.0 - t * 1.5));
+        col = mix(col, mix(col, vec3(0.65, 0.6, 0.55), 0.5), smoothstep(fw, fw * 0.5, abs(p.x)) * sw * tornado * 0.6 * (1.0 - nightGlow * 0.6));
+    }
     for (int b = 0; b < 6; b++) {
         float fb = float(b);
         vec2 c = vec2((h11(fb * 3.1) - 0.5) * asp, h11(fb * 5.7) - 0.5);
@@ -646,6 +672,16 @@ void main() {
                       fract(h2 * 5.0 + t * sp * (0.6 + 0.6 * h)) * 1.6 - 0.8);
         c += vec2(0.06 * sin(t * (0.9 + h) + fi * 2.0), 0.05 * cos(t * (0.7 + h2) + fi));
         c += vec2(0.0, 0.08 * bassP() * ar);
+        // tornado: the bags spiral up a funnel, the ones behind smaller and darker
+        if (tornado > 0.01) {
+            float ty = fract(h2 * 3.0 + t * (0.08 + 0.05 * h) * (0.6 + wind)) * 1.6 - 0.8;
+            float an = t * (1.4 + 0.6 * h) + fi * 2.4;
+            float rad = (0.1 + 0.3 * (ty + 0.8) / 1.6) * min(asp, 1.6);
+            vec2 vc = vec2(cos(an) * rad, ty);
+            c = mix(c, vc, tornado);
+            z = mix(z, 0.55 + 0.45 * (0.5 + 0.5 * sin(an)), tornado);
+            sc = 0.17 * bagSize * z;
+        }
         // skeleton: the first two bags hang from your wrists
         float carried = 0.0;
         if (fi < 1.5 && bodyOn > 0.5 && bodyUseSkel() > 0.5) {

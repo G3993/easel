@@ -8,6 +8,7 @@
     { "NAME": "hueShift",    "LABEL": "Hue Shift",        "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0, "GROUP": "Look" },
     { "NAME": "lineWidth",   "LABEL": "Line Width",       "TYPE": "float", "MIN": 0.15, "MAX": 2.5, "DEFAULT": 0.45, "GROUP": "Look" },
     { "NAME": "glowAmt",     "LABEL": "Glow",             "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.55, "GROUP": "Look" },
+    { "NAME": "rainbowLines", "LABEL": "Rainbow Lines",   "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0, "GROUP": "Look" },
     { "NAME": "streets",     "LABEL": "Streets & Traffic","TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.7, "GROUP": "Look" },
     { "NAME": "landTint",    "LABEL": "Land Tint",        "TYPE": "color", "DEFAULT": [1.0, 1.0, 1.0, 1.0], "GROUP": "Look" },
     { "NAME": "waterTint",   "LABEL": "Water Tint",       "TYPE": "color", "DEFAULT": [1.0, 1.0, 1.0, 1.0], "GROUP": "Look" },
@@ -841,6 +842,7 @@ void main() {
         lc = hueRot(lc, hueShift);
         if (gThemeLines > 0.5 && gThemeLines < 1.5) lc = mix(vec3(0.85, 0.95, 1.0), lc, 0.15);
         if (neon) lc = clamp(lc * 1.25 + 0.05, 0.0, 1.0);
+        lc = mix(lc, 0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + dk * 0.13 + TIME * 0.12 - 0.15 * audioBeatPulse * ar)), rainbowLines);
 
         float lineM = smoothstep(w + aa, w - aa, d);
         float casing = smoothstep(w * 1.45 + aa, w * 1.45 - aa, d);

@@ -15,7 +15,7 @@
       "TYPE": "float",
       "MIN": 0.0,
       "MAX": 2.0,
-      "DEFAULT": 1.0,
+      "DEFAULT": 1.25,
       "GROUP": "Steam"
     },
     {
@@ -72,6 +72,24 @@
       "MAX": 1.0,
       "DEFAULT": 0.5,
       "GROUP": "Street"
+    },
+    {
+      "NAME": "lightBeams",
+      "LABEL": "Light Beams",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.7,
+      "GROUP": "Steam"
+    },
+    {
+      "NAME": "colorSteam",
+      "LABEL": "Rave Colour",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
+      "GROUP": "Steam"
     },
     {
       "NAME": "bodyMode",
@@ -627,11 +645,22 @@ void main() {
             d += exp(-length(lp - mp) * 10.0) * smoothstep(0.3, 0.7, fbm(lp * 6.0 - t)) * steamAmt;
         }
         float back = exp(-length(lp - lamp) * 2.2) * 1.4 + 0.12;
+        vec3 rave = hue(fract(t * 0.08 + lp.y * 0.6 + lp.x * 0.2)) * (1.0 + 1.5 * audioBeatPulse * ar);
+        vec3 backC = mix(lampC, rave, colorSteam);
         float side = hl * exp(-abs(lp.x - car.x) * 3.0) * 0.8;
-        light += (lampC * back + vec3(0.85, 0.9, 1.0) * side + vec3(0.12, 0.13, 0.16)) * d * (1.0 - dens);
+        light += (backC * back + vec3(0.85, 0.9, 1.0) * side + vec3(0.12, 0.13, 0.16) + rave * colorSteam * 0.25) * d * (1.0 - dens);
         dens = clamp(dens + d * 0.42, 0.0, 1.0);
     }
     col = col * (1.0 - dens * 0.85) + light * 0.6;
+    // light beams: shafts from the lamp cutting through the steam
+    if (lightBeams > 0.01) {
+        vec2 dl = p - lamp;
+        float ang = atan(dl.y, dl.x);
+        float shafts = pow(vnoise(vec2(ang * 18.0, t * 0.15)), 3.0) * 2.0 + pow(vnoise(vec2(ang * 45.0 + 7.0, t * 0.3)), 4.0);
+        float cone = smoothstep(0.2, -0.6, dl.y / max(length(dl), 1e-3));     // the lamp shines down and out
+        vec3 bc = mix(lampC, hue(fract(t * 0.08 + ang * 0.3)), colorSteam);
+        col += bc * shafts * cone * exp(-length(dl) * 1.6) * (0.25 + dens * 1.4) * lightBeams * (1.0 + 0.6 * bassP() * ar);
+    }
     col = aces(col * 1.15);
     col = studioPalette(clamp(col, 0.0, 1.0));
     gl_FragColor = vec4(col, 1.0);

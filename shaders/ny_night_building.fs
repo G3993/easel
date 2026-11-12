@@ -40,7 +40,9 @@
         4,
         5,
         6,
-        7
+        7,
+        8,
+        9
       ],
       "LABELS": [
         "Auto Show",
@@ -50,9 +52,37 @@
         "Scan",
         "Checker",
         "Rain",
-        "Message"
+        "Message",
+        "Fireworks",
+        "Heartbeat"
       ],
       "GROUP": "Show"
+    },
+    {
+      "NAME": "bloom",
+      "LABEL": "Window Bloom",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 2.0,
+      "DEFAULT": 1.1,
+      "GROUP": "Show"
+    },
+    {
+      "NAME": "windowShape",
+      "LABEL": "Windows",
+      "TYPE": "long",
+      "DEFAULT": 0,
+      "VALUES": [
+        0,
+        1,
+        2
+      ],
+      "LABELS": [
+        "Grid",
+        "Tall Slits",
+        "Wide Panes"
+      ],
+      "GROUP": "Facade"
     },
     {
       "NAME": "litAmount",
@@ -599,6 +629,26 @@ vec3 windowShow(float md, float cx, float cy, float nc, float nr, float t, float
         float on = d >= 0.0 ? exp(-d * 14.0) : 0.0;
         return mix(vec3(0.3, 1.0, 0.6), show, 0.5) * on;
     }
+    if (md > 6.5 && md < 7.5) {                                       // fireworks: bursts of windows from random points, one per beat
+        vec3 acc = vec3(0.0);
+        for (int k = 0; k < 2; k++) {
+            float b = floor(beat) - float(k);
+            vec2 c = vec2(h11(b * 3.1) * nc, (0.35 + 0.55 * h11(b * 7.7)) * nr);
+            float age = fract(beat) + float(k);
+            float d = length((vec2(cx, cy) - c) * vec2(1.0, 0.6));
+            float ring = exp(-abs(d - age * nc * 0.45) * 1.4) * (1.0 - age * 0.5);
+            float spark = step(0.6, h12(vec2(cx, cy) + b)) * ring;
+            acc += mix(hue(h11(b * 5.3)), vec3(1.0), 0.25) * (ring * 1.0 + spark * 1.8);
+        }
+        return acc;
+    }
+    if (md > 7.5) {                                                   // heartbeat: rings pulse out from the middle of the tower
+        float d = length((vec2(cx, cy) - vec2(nc * 0.5, nr * 0.55)) * vec2(1.0, 0.55));
+        float ph = fract(beat);
+        float ring = exp(-abs(d - ph * nc * 0.8) * 1.1) * (1.0 - ph);
+        float core = exp(-d * 0.35) * (0.3 + 0.7 * exp(-ph * 5.0));
+        return mix(vec3(1.0, 0.1, 0.25), vec3(1.0, 0.55, 0.7), ring) * (ring * 1.4 + core) * mix(1.0, 1.0, colorful);
+    }
     // message: the windows are pixels of a scrolling dot-matrix word
     float row = cy - floor(nr * 0.5 - 3.5);
     if (row < 0.0 || row > 6.0) return vec3(0.0);
@@ -642,14 +692,16 @@ void main() {
         // facade: dark granite piers and spandrels, a little sheen
         vec3 fac = vec3(0.035, 0.037, 0.045) * (0.8 + 0.3 * vnoise(g * vec2(3.0, 1.0)));
         fac += vec3(0.08, 0.09, 0.12) * pow(1.0 - abs(fc.x / W * 2.0), 3.0) * 0.4;
-        float win = step(0.16, f.x) * step(f.x, 0.84) * step(0.22, f.y) * step(f.y, 0.9);
-        float soft = smoothstep(0.0, 0.08, min(min(f.x - 0.16, 0.84 - f.x), min(f.y - 0.22, 0.9 - f.y)));
+        float wsh = float(windowShape);
+        vec4 ins = wsh < 0.5 ? vec4(0.16, 0.84, 0.22, 0.9) : wsh < 1.5 ? vec4(0.32, 0.68, 0.08, 0.96) : vec4(0.05, 0.95, 0.3, 0.82);
+        float win = step(ins.x, f.x) * step(f.x, ins.y) * step(ins.z, f.y) * step(f.y, ins.w);
+        float soft = smoothstep(0.0, 0.08, min(min(f.x - ins.x, ins.y - f.x), min(f.y - ins.z, ins.w - f.y)));
         // show mode, with Auto stepping through every mode on the bar grid and crossfading
         float md = float(pattern);
         vec3 wc;
         if (md < 0.5) {
             float slot = floor(beats / 32.0);
-            float a = mod(slot, 7.0), b = mod(slot + 1.0, 7.0);
+            float a = mod(slot, 9.0), b = mod(slot + 1.0, 9.0);
             float x = smoothstep(0.85, 1.0, fract(beats / 32.0));
             wc = mix(windowShow(a, id.x, id.y, nc, nr, t, beats), windowShow(b, id.x, id.y, nc, nr, t, beats), x);
         } else wc = windowShow(md - 1.0, id.x, id.y, nc, nr, t, beats);
@@ -664,7 +716,7 @@ void main() {
             vec2 wuv = pToUV(wcen);
             float s = bodyUseSil() * bodySeg(wuv);
             vec3 you = mix(palRed.rgb, palBlue.rgb, smoothstep(0.2, 0.8, lum(camAt(wuv)))) * 1.3;
-            if (float(pattern) == 7.0) you = vec3(1.0);
+            if (float(pattern) > 6.5 && float(pattern) < 7.5) you = vec3(1.0);
             wc = mix(wc, you, s * bodyOn);
             float bd = boneDist(wcen, asp);
             wc = mix(wc, vec3(1.0, 0.95, 0.85) * 1.4, bodyUseSkel() * bodyOn * (1.0 - smoothstep(0.012, 0.03, bd)));
@@ -674,7 +726,8 @@ void main() {
         c = mix(fac, glass + wc * soft, win);
         // light spill onto the piers (cheap bloom)
         vec2 dw = vec2(max(0.0, abs(f.x - 0.5) - 0.34), max(0.0, abs(f.y - 0.56) - 0.34));
-        c += wc * exp(-length(dw) * 18.0) * 0.18 * (1.0 - win);
+        c += wc * exp(-length(dw) * mix(18.0, 5.0, clamp(bloom * 0.5, 0.0, 1.0))) * 0.2 * bloom * (1.0 - win);
+        c += wc * win * 0.25 * bloom * bloom;
         // the crown: setbacks and a spire with an aircraft light
         float crown = step(0.62, p.y);
         c = mix(c, vec3(0.04, 0.045, 0.06) + vec3(0.9, 0.85, 0.7) * 0.25 * step(0.97, fract(p.y * 30.0)), crown);

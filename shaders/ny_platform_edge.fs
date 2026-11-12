@@ -21,6 +21,7 @@
     { "NAME": "contrast",    "LABEL": "Contrast",         "TYPE": "float", "MIN": 0.5, "MAX": 2.0, "DEFAULT": 1.25, "GROUP": "Colour" },
     { "NAME": "domeOnly",    "LABEL": "Domes Only (tile stays yellow)", "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.0, "GROUP": "Colour" },
     { "NAME": "domeGlow",    "LABEL": "Dome Glow",        "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.6, "GROUP": "Colour" },
+    { "NAME": "discoFloor",  "LABEL": "Disco Floor",      "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.35, "GROUP": "Colour" },
     { "NAME": "gloss",       "LABEL": "Gloss",            "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.8, "GROUP": "Light" },
     { "NAME": "fluoros",     "LABEL": "Fluorescent Tubes","TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.75, "GROUP": "Light" },
     { "NAME": "exposure",    "LABEL": "Exposure",         "TYPE": "float", "MIN": 0.3, "MAX": 3.0, "DEFAULT": 1.0, "GROUP": "Light" },
@@ -651,6 +652,13 @@ void main() {
         // domes glow from inside like LEDs (emissive, linear)
         float glowK = domeGlow * (gGlowK * 0.45 + 0.6 * gPeak * bassP() * ar + gDrop * 1.2) * onDome;
         vec3 domeL = pow(clamp(domeC, 0.0, 1.0), vec3(2.2));
+        // disco floor: domes light up in rainbow chases that jump on the beat
+        float beatsD = TIME * (audioBPM > 1.0 ? audioBPM : 120.0) / 60.0;
+        float chase = fract(dot(gDid, vec2(0.071, 0.113)) - floor(beatsD) * 0.25 + 0.0);
+        float discoOn = step(0.62, fract(h12(gDid + floor(beatsD)) + chase * 0.6));
+        vec3 discoC = pow(0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + dot(gDid, vec2(0.031, 0.047)) + TIME * 0.08)), vec3(2.2));
+        domeL = mix(domeL, discoC, discoFloor * discoOn);
+        glowK += discoFloor * discoOn * onDome * (0.7 + 1.4 * audioBeatPulse * ar + gDrop);
         Lo += domeL * glowK * (0.6 + 0.8 * topM) * 1.6;
         Lo += domeL * 0.15 * domeGlow * gDrop * (1.0 - onDome);
         // body: the skeleton glows through the domes

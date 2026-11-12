@@ -29,6 +29,7 @@
     { "NAME": "gravity",     "LABEL": "Drip Gravity",     "TYPE": "float", "AUDIO": false, "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.5, "GROUP": "Spray" },
     { "NAME": "paintColor",  "LABEL": "Paint",            "TYPE": "color", "DEFAULT": [0.87, 0.93, 0.97, 1.0], "GROUP": "Spray" },
     { "NAME": "glowAmt",     "LABEL": "Fresh Paint Glow", "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.7, "GROUP": "Spray" },
+    { "NAME": "paintFX",     "LABEL": "Paint Style", "TYPE": "long", "DEFAULT": 0, "VALUES": [0, 1, 2, 3], "LABELS": ["Classic", "Rainbow Fade", "Chrome Fill", "Blacklight UV"], "GROUP": "Spray" },
     { "NAME": "canMode",     "LABEL": "Hand Spray", "TYPE": "long", "DEFAULT": 1, "VALUES": [0, 1, 2], "LABELS": ["Off", "While Pressed / Pinching", "Always Follow"], "GROUP": "Hand Spray" },
     { "NAME": "canSize",     "LABEL": "Can Nozzle",       "TYPE": "float", "AUDIO": false, "MIN": 0.3, "MAX": 3.0, "DEFAULT": 1.2, "GROUP": "Hand Spray" },
     { "NAME": "resetPaint",  "LABEL": "Clean Wall",       "TYPE": "bool",  "DEFAULT": false, "GROUP": "Hand Spray" },
@@ -644,6 +645,27 @@ vec4 finalPass() {
     float cys = paintAt(suv + vec2(0.0, 9.0 / R.y)).r, cyd = paintAt(suv - vec2(0.0, 9.0 / R.y)).r;
     float cshade = clamp(0.95 + 1.6 * (cyd - cys) + 0.15 * smoothstep(0.3, 0.5, S.r), 0.7, 1.15);   // lit tops, greyer bellies
     vec3 cc = cloudColor.rgb * cshade;
+    // paint styles: a rainbow fade fill, a chrome fill with a black outline, or blacklight paint on a dark wall
+    float pfx = float(paintFX);
+    if (pfx > 0.5) {
+        float edgeP = clamp(length(vec2(cx - S.r, cy - S.r)) * 9.0, 0.0, 1.0);
+        if (pfx < 1.5) {
+            vec3 fade = 0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + p.y * 1.6 + p.x * 0.35 + TIME * 0.05));
+            pc = mix(pc, fade * 1.15 + 0.05, 0.85) + vec3(0.12) * pspec * relief;
+            pc = mix(pc, vec3(0.02), edgeP * 0.8);
+        } else if (pfx < 2.5) {
+            float band = fract(p.y * 5.0 + 0.1 * sin(p.x * 9.0));
+            vec3 chrome = mix(vec3(0.95, 0.97, 1.0), vec3(0.25, 0.28, 0.35), smoothstep(0.42, 0.55, band)) ;
+            chrome = mix(chrome, vec3(0.75, 0.6, 0.45), smoothstep(0.75, 0.95, band) * 0.6);
+            chrome += vec3(1.0) * pow(pspec, 0.5) * 0.6 + vec3(1.0) * step(0.997, h12(floor(p * 160.0))) * (0.5 + 0.5 * sin(TIME * 6.0));
+            pc = mix(chrome, vec3(0.01), edgeP);
+        } else {
+            wall *= 0.12; wall += vec3(0.04, 0.0, 0.08);
+            cc = mix(cc * 0.15, vec3(0.6, 0.2, 1.0), 0.35);
+            vec3 uvC = 0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + p.x * 0.5 + TIME * 0.07));
+            pc = uvC * 1.6 + 0.1;
+        }
+    }
     vec3 col = mix(wall, cc, cloudA * cloudOpacity * mix(1.0, 0.85, mortar));
     col = mix(col, pc, a);
 
@@ -658,6 +680,7 @@ vec4 finalPass() {
     }
     float gk = glowAmt * (0.25 + 0.9 * audioBeatPulse * ar + 1.4 * gDrop + 0.35 * gPeak);
     vec3 glow = gsum / 8.0 * gk * mix(paintColor.rgb, vec3(1.0), 0.4);
+    if (pfx > 2.5) { glow *= 2.5 * (0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + p.x * 0.5 + TIME * 0.07))); }
     col += glow * 0.6 + paintColor.rgb * S.a * a * gk * 0.35;
 
     // live spray mist at every pen that is down (pen heads from the state texels)

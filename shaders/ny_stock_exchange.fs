@@ -80,6 +80,32 @@
       "GROUP": "Market"
     },
     {
+      "NAME": "chartStyle",
+      "LABEL": "Chart",
+      "TYPE": "long",
+      "DEFAULT": 0,
+      "VALUES": [
+        0,
+        1,
+        2
+      ],
+      "LABELS": [
+        "Candles",
+        "Line + Fill",
+        "Neon Mountain"
+      ],
+      "GROUP": "Market"
+    },
+    {
+      "NAME": "bigPrice",
+      "LABEL": "Giant Index Digits",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.6,
+      "GROUP": "Market"
+    },
+    {
       "NAME": "bodyMode",
       "LABEL": "Body Tracking",
       "TYPE": "long",
@@ -544,6 +570,7 @@ void main() {
     float md = float(mood);
     gTrend = md < 0.5 ? sin(t * 0.05) * 1.5 : md < 1.5 ? 2.5 : md < 2.5 ? -2.5 : 0.0;
     vec3 up = vec3(0.1, 1.0, 0.45), dn = vec3(1.0, 0.18, 0.16), amb = vec3(1.0, 0.72, 0.15);
+    p += (h21(floor(t * 30.0)) - 0.5) * 0.025 * gDrop;                     // the floor shakes on the crash
 
     vec3 col = backdrop(uv);
     float cover = 0.0;
@@ -553,6 +580,20 @@ void main() {
     col = mix(col, vec3(0.06, 0.065, 0.08) * (0.7 + 0.6 * pow(1.0 - abs(colx - 0.5) * 3.0, 2.0)), column * 0.8);
     col += vec3(0.05, 0.07, 0.1) * smoothstep(0.5, -0.5, p.y) * 0.5;
 
+    // giant LED index digits counting behind everything
+    if (bigPrice > 0.01) {
+        float idx = floor(18000.0 + price(t * 0.8) * 4000.0 + t * 3.0);
+        float ch = 0.34, cw = ch * 0.78;
+        float n = 6.0;
+        vec2 tq = vec2((p.x + n * cw * 0.5) / cw, (p.y + ch * 0.5 - 0.02) / ch);
+        float ci = floor(tq.x);
+        if (ci >= 0.0 && ci < n && tq.y > 0.0 && tq.y < 1.0) {
+            float dig = ci < 4.5 ? mod(floor(idx / exp2(0.0) / pow(10.0, 4.0 - ci)), 10.0) : 38.0;
+            if (ci > 4.5) dig = mod(floor(t * 7.0), 10.0);
+            float on = glyph(dig, vec2(fract(tq.x), tq.y), 0.0);
+            col += (gTrend >= 0.0 ? up : dn) * on * 0.22 * bigPrice * (0.7 + 0.3 * audioBeatPulse * ar);
+        }
+    }
     // ── the ticker tape across the top ──
     float th = 0.09;
     float ty = 0.5 - th * 0.5 - 0.02;
@@ -616,6 +657,21 @@ void main() {
         c += amb * (1.0 - smoothstep(0.0, 0.004, dl - 0.0015)) + amb * exp(-dl * 70.0) * 0.3;
         // last price tag
         c += (cl >= o ? up : dn) * exp(-abs(xs - n + 0.5) * 2.0) * 0.15 * (0.5 + audioBeatPulse * ar);
+        float cs = float(chartStyle);
+        if (cs > 0.5) {
+            float val = mix(price(x0), price(x1), smoothstep(0.0, 1.0, fxk));
+            if (gDrop > 0.05) val -= gDrop * 0.6 * smoothstep(n * 0.7, n, xs);
+            float above = yv - val;
+            float edgeL = 1.0 - smoothstep(0.0, 0.006, abs(above));
+            if (cs < 1.5) {                                                // line + gradient fill
+                vec3 lc = val >= price(x0 - 4.0) ? up : dn;
+                c = cbg + lc * step(above, 0.0) * (0.06 + 0.3 * smoothstep(-0.45, 0.0, above)) + lc * edgeL * 1.4 + lc * exp(-abs(above) * 60.0) * 0.35;
+            } else {                                                       // neon mountain with scanlines
+                float fill = step(above, 0.0) * (0.5 + 0.5 * step(0.5, fract(cq.y * 40.0 - t * 2.0)));
+                vec3 m1 = vec3(0.1, 0.9, 1.0), m2 = vec3(1.0, 0.2, 0.85);
+                c = cbg + mix(m2, m1, smoothstep(-0.45, 0.0, above)) * fill * 0.35 + vec3(1.0) * edgeL * 1.2 + m1 * exp(-abs(above) * 45.0) * 0.6;
+            }
+        }
         col = mix(col, c, 0.95);
         // frame
         cover = 1.0;

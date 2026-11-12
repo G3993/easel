@@ -24,7 +24,7 @@
       "TYPE": "float",
       "MIN": 0.4,
       "MAX": 1.8,
-      "DEFAULT": 1.0,
+      "DEFAULT": 1.15,
       "GROUP": "Apple"
     },
     {
@@ -54,7 +54,35 @@
       "TYPE": "float",
       "MIN": 0.0,
       "MAX": 1.0,
-      "DEFAULT": 0.55,
+      "DEFAULT": 0.7,
+      "GROUP": "Apple"
+    },
+    {
+      "NAME": "material",
+      "LABEL": "Material",
+      "TYPE": "long",
+      "DEFAULT": 0,
+      "VALUES": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "LABELS": [
+        "Candy Red",
+        "Chrome",
+        "Gold",
+        "Neon Wire"
+      ],
+      "GROUP": "Apple"
+    },
+    {
+      "NAME": "sliceOpen",
+      "LABEL": "Slice Open",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
       "GROUP": "Apple"
     },
     {
@@ -507,8 +535,11 @@ const float HANZI_N = 16.0;
 
 
 // ── the apple: a lobed, dimpled sphere with a stem and a leaf, raymarched ──
-float gPart;                                   // 0 skin, 1 stem, 2 leaf
+float gPart;                                   // 0 skin, 1 stem, 2 leaf, 3 cut flesh
+float gGap;
 float appleSD(vec3 q) {
+    float side = q.x >= 0.0 ? 1.0 : -1.0;
+    q.x -= side * gGap;                         // sliced: the two halves part
     float r = length(q.xz);
     vec3 s = q * vec3(1.0, 1.1, 1.0);
     float d = length(s) - 1.0;
@@ -529,6 +560,7 @@ float appleSD(vec3 q) {
     float leaf = length(lq * vec3(1.0, 5.5, 2.4)) - 0.36;
     leaf = leaf / 5.5 + 0.004 * sin(lq.x * 30.0);
     if (leaf < d) { d = leaf; gPart = 2.0; }
+    if (gGap > 0.001) { float cut = -side * q.x; if (cut > d) { d = cut; gPart = 3.0; } }
     return d;
 }
 vec3 appleN(vec3 q) {
@@ -605,6 +637,7 @@ void main() {
 
     // the hero apple
     float scl = (0.33 + 0.04 * bassP() * ar + 0.05 * gDrop) * appleSize;
+    gGap = sliceOpen * 0.42 + gDrop * 0.45 + 0.1 * gPeak * audioBeatPulse * ar;
     vec3 ro = vec3(0.0, 0.0, -3.4);
     vec3 rd = normalize(vec3((p - ac) / scl * 0.42, 1.4));
     float spin = t * spinSpeed + 2.5 * gDrop;
@@ -639,10 +672,31 @@ void main() {
         float gl = part > 0.5 ? 0.3 : gloss;
         float spec = pow(max(dot(nw, Hh), 0.0), mix(12.0, 160.0, gl)) * mix(0.2, 2.2, gl);
         vec3 R3 = reflect(rd, nw);
-        vec3 env = R3.y > -0.05 ? mix(vec3(0.05, 0.06, 0.12), vec3(0.3, 0.32, 0.45), R3.y) : vec3(0.02);
+        vec3 env = R3.y > -0.05 ? mix(vec3(0.05, 0.06, 0.12), vec3(0.3, 0.32, 0.45), R3.y) : mix(vec3(0.16, 0.1, 0.09), vec3(0.4, 0.22, 0.12), smoothstep(-0.05, -0.6, R3.y)) * (0.7 + 0.6 * step(0.6, h11(floor(atan(R3.z, R3.x) * 20.0 + R3.y * 8.0))));
         float winRef = step(0.0, R3.y) * step(R3.y, 0.35) * step(0.5, h11(floor(atan(R3.z, R3.x) * 30.0))) * 0.8;
         env += vec3(1.0, 0.8, 0.5) * winRef;
         vec3 c = alb * (0.08 + 1.1 * wrap) + sss + spec * vec3(1.0, 0.95, 0.9) + env * fres * gl * 1.4;
+        float mt = float(material);
+        if (part < 0.5 && mt > 0.5) {
+            float ndv = max(dot(nw, V), 0.0);
+            if (mt < 1.5) c = env * 1.7 + vec3(0.9, 0.95, 1.0) * spec * 1.5 + vec3(0.04);                    // chrome
+            else if (mt < 2.5) c = vec3(1.0, 0.74, 0.3) * (env * 1.8 + 0.12 + 0.6 * ndl) + vec3(1.0, 0.85, 0.5) * spec * 1.8;   // gold
+            else {                                                                                            // neon wire
+                float lon = 1.0 - smoothstep(0.0, 0.06, abs(fract(a / 6.2832 * 12.0) - 0.5) * 2.0 - 0.9);
+                float lat = 1.0 - smoothstep(0.0, 0.06, abs(fract(q.y * 5.0) - 0.5) * 2.0 - 0.9);
+                c = appleRed.rgb * (pow(1.0 - ndv, 3.0) * 2.5 + max(lon, lat) * 1.6) + vec3(1.0) * max(lon, lat) * 0.3;
+            }
+        }
+        if (part > 2.5) {                                                // the cut face: flesh, core and a star of seeds
+            vec2 fq = q.yz;
+            float core = 1.0 - smoothstep(0.18, 0.3, length(fq * vec2(0.8, 1.0)));
+            float seeds = 0.0;
+            for (int k = 0; k < 5; k++) { float an = float(k) * 1.2566 + 0.3; vec2 sp = vec2(cos(an), sin(an)) * 0.17; seeds = max(seeds, 1.0 - smoothstep(0.04, 0.055, length((fq - sp) * vec2(1.0, 1.7)))); }
+            vec3 flesh = mix(vec3(0.98, 0.93, 0.72), vec3(0.9, 0.82, 0.55), core) * (0.35 + 0.8 * ndl + 0.2);
+            flesh = mix(flesh, vec3(0.25, 0.12, 0.04), seeds);
+            flesh += vec3(1.0) * pow(max(dot(nw, Hh), 0.0), 60.0) * 0.6;            // juicy
+            c = flesh;
+        }
         c += appleRed.rgb * (0.2 * bassP() * ar + 0.6 * gDrop) * pow(1.0 - max(dot(nw, V), 0.0), 2.0);
         col = c;
         cover = 1.0;

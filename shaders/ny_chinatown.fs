@@ -65,6 +65,24 @@
       "GROUP": "Street"
     },
     {
+      "NAME": "dragon",
+      "LABEL": "Dragon Dance",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.8,
+      "GROUP": "Street"
+    },
+    {
+      "NAME": "goldRain",
+      "LABEL": "Gold Coins",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.3,
+      "GROUP": "Street"
+    },
+    {
       "NAME": "bodyMode",
       "LABEL": "Body Tracking",
       "TYPE": "long",
@@ -627,6 +645,68 @@ void main() {
         col += vec3(1.0, 0.25, 0.08) * exp(-length(p - vec2(lx, ly)) / r * 1.2) * 0.12 * depth;
     }
 
+    // the dragon dance: a long red-and-gold body undulating across the street, head first
+    if (dragon > 0.01) {
+        float L = 1.5 * (0.6 + 0.4 * dragon);
+        float hx = mod(t * 0.28, asp + L + 0.6) - asp * 0.5 - 0.3;
+        hx = asp * 0.5 + 0.3 - (hx + asp * 0.5 + 0.3);                     // travels right → left
+        float baseY = -0.18 + (mouseDown > 0.5 ? (mousePos.y - 0.5) * 0.6 : 0.0);
+        float best = 9.0, bs = 0.0;
+        vec2 prev = vec2(hx, baseY + 0.07 * sin(hx * 5.0 - t * 3.0));
+        for (int i = 1; i < 24; i++) {
+            float sd = float(i) / 23.0 * L;
+            float x = hx + sd;
+            vec2 cur = vec2(x, baseY + (0.07 + 0.04 * bassP() * ar) * sin(x * 5.0 - t * 3.0));
+            vec2 pa = p - prev, ba = cur - prev;
+            float hh = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+            float d = length(pa - ba * hh);
+            float sAt = (float(i) - 1.0 + hh) / 23.0;
+            float r = 0.055 * dragon * (1.0 - 0.55 * sAt) + 0.01;
+            if (d - r < best) { best = d - r; bs = sAt; }
+            prev = cur;
+        }
+        float body = 1.0 - smoothstep(0.0, 0.004, best);
+        if (body > 0.0) {
+            float scale = step(0.5, fract(bs * 60.0 + floor(-best * 80.0) * 0.5));
+            vec3 dc = mix(vec3(0.85, 0.06, 0.04), vec3(1.0, 0.75, 0.15), scale * 0.6);
+            dc *= 0.6 + 0.6 * smoothstep(-0.05, 0.0, best);               // rounded
+            float fringe = step(0.8, fract(bs * 40.0)) * smoothstep(-0.012, 0.0, best);
+            dc = mix(dc, vec3(1.0, 0.85, 0.3), fringe);
+            col = mix(col, dc, body);
+        }
+        // the head: a big painted head with gold horns, white eyes and whiskers
+        vec2 hc = vec2(hx, baseY + 0.07 * sin(hx * 5.0 - t * 3.0));
+        vec2 hq = (p - hc) / (0.09 * dragon + 0.02);
+        float head = sdEllipse(hq, vec2(1.1, 0.8));
+        float horn = min(sdSeg(hq, vec2(0.2, 0.5), vec2(0.7, 1.3)), sdSeg(hq, vec2(-0.1, 0.55), vec2(0.2, 1.4))) - 0.12;
+        float jaw = sdEllipse(hq - vec2(-0.7, -0.35 - 0.15 * sin(t * 6.0)), vec2(0.6, 0.25));
+        float whisk = min(sdSeg(hq, vec2(-0.9, 0.0), vec2(-1.7, 0.4 + 0.2 * sin(t * 4.0))), sdSeg(hq, vec2(-0.9, -0.1), vec2(-1.8, -0.5 + 0.2 * cos(t * 3.0)))) - 0.04;
+        float eye = length(hq - vec2(-0.3, 0.3)) - 0.22;
+        vec3 hcl = vec3(0.9, 0.08, 0.05);
+        col = mix(col, vec3(1.0, 0.8, 0.2), 1.0 - smoothstep(0.0, 0.08, min(horn, whisk)));
+        col = mix(col, hcl * (0.8 + 0.4 * smoothstep(0.0, -0.6, head)), 1.0 - smoothstep(0.0, 0.08, min(head, jaw)));
+        col = mix(col, vec3(1.0), 1.0 - smoothstep(0.0, 0.06, eye));
+        col = mix(col, vec3(0.02), 1.0 - smoothstep(0.0, 0.06, length(hq - vec2(-0.35, 0.28)) - 0.1));
+    }
+    // gold coins tumbling down (a shower on the drop)
+    float gr = goldRain + gDrop;
+    if (gr > 0.01) {
+        for (int k = 0; k < 2; k++) {
+            float fk = float(k);
+            vec2 q = p * (10.0 + fk * 7.0) + vec2(sin(t * 0.6 + fk) * 0.5, t * (1.6 + fk));
+            vec2 id = floor(q);
+            float hh = h12(id + fk * 23.0);
+            if (hh > gr * 0.35) continue;
+            vec2 fq = fract(q) - 0.5;
+            float spin = t * (2.0 + hh * 5.0) + hh * 9.0;
+            vec2 cq = fq / vec2(max(abs(cos(spin)), 0.08), 1.0);
+            float coin = length(cq) - 0.28;
+            float hole = sdBox(cq, vec2(0.07));
+            float m = (1.0 - smoothstep(0.0, 0.05, coin)) * smoothstep(0.0, 0.03, hole);
+            vec3 gc = vec3(1.0, 0.78, 0.25) * (0.6 + 0.5 * abs(cos(spin))) + vec3(1.0) * pow(abs(sin(spin)), 20.0) * 0.6;
+            col = mix(col, gc, m);
+        }
+    }
     // you: red and gold, filled with characters
     if (sil > 0.001) {
         vec2 g = p * 9.0 + vec2(0.0, t * 0.3);

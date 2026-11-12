@@ -15,7 +15,7 @@
       "TYPE": "float",
       "MIN": 4.0,
       "MAX": 48.0,
-      "DEFAULT": 26.0,
+      "DEFAULT": 34.0,
       "GROUP": "Flock"
     },
     {
@@ -61,6 +61,24 @@
       "MIN": 0.0,
       "MAX": 1.0,
       "DEFAULT": 0.7,
+      "GROUP": "Flock"
+    },
+    {
+      "NAME": "formYou",
+      "LABEL": "Flock Forms You",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.45,
+      "GROUP": "Flock"
+    },
+    {
+      "NAME": "featherFall",
+      "LABEL": "Feathers",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.35,
       "GROUP": "Flock"
     },
     {
@@ -648,6 +666,14 @@ void main() {
         vec2 away = normalize(pos - lead + 1e-4);
         pos += away * burst * (0.3 + 0.5 * h);
         if (mouseDown > 0.5) { vec2 dm = pos - mp; pos += normalize(dm + 1e-4) * 0.25 * exp(-length(dm) * 5.0); }
+        // the flock forms you: birds hold stations along your limbs, hovering, until the drop breaks them up
+        if (bodyOn > 0.5 && formYou > 0.01 && fi >= 7.0) {
+            vec2 tp = limbPt(mod(fi, 3.0), fract(h2 * 1.7 + fi * 0.13), asp);
+            tp += gLimbN * (h - 0.5) * 0.06 + vec2(0.012 * sin(TIME * 7.0 + fi), 0.01 * cos(TIME * 5.0 + fi));
+            float w = formYou * bodyOn * (1.0 - smoothstep(0.1, 0.5, gDrop + burst * 0.5));
+            pos = mix(pos, tp, w);
+            z = mix(z, 0.75, w);
+        }
         // perch: a few birds take turns landing on your head, shoulders and arms
         float perched = 0.0;
         if (fi < 7.0 && bodyOn > 0.5 && perch > 0.01) {
@@ -677,6 +703,23 @@ void main() {
     }
     col = mix(col, best.yzw, best.x);
     cover = max(cover, best.x);
+    // feathers drifting down (more on the drop)
+    float fa = featherFall + gDrop * 0.8;
+    if (fa > 0.01) {
+        for (int k = 0; k < 2; k++) {
+            float fk = float(k);
+            vec2 q = p * (9.0 + fk * 6.0) + vec2(sin(TIME * 0.7 + fk) * 0.8, TIME * (0.5 + fk * 0.3));
+            vec2 id = floor(q);
+            float hh = h12(id + fk * 31.0);
+            if (hh > fa * 0.35) continue;
+            vec2 fq = fract(q) - 0.5;
+            fq = rot(TIME * (hh - 0.5) * 3.0 + hh * 6.0) * fq;
+            float shaft = sdSeg(fq, vec2(-0.22, 0.0), vec2(0.22, 0.0));
+            float vane = sdEllipse(fq - vec2(0.02, 0.0), vec2(0.2, 0.07 + 0.02 * sin(fq.x * 20.0)));
+            float fm = 1.0 - smoothstep(0.0, 0.02, min(vane, shaft - 0.005));
+            col = mix(col, mix(vec3(0.72, 0.74, 0.78), vec3(0.95), hh * 3.0), fm * (0.6 + 0.4 * fk));
+        }
+    }
 
     // skeleton: a dove-grey line along your bones with feathers shed on the beat
     if (bodyOn > 0.01 && bodyUseSkel() > 0.5) {

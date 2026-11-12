@@ -55,6 +55,24 @@
       "GROUP": "Square"
     },
     {
+      "NAME": "glitch",
+      "LABEL": "Glitch",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.45,
+      "GROUP": "Square"
+    },
+    {
+      "NAME": "confetti",
+      "LABEL": "NYE Confetti",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.35,
+      "GROUP": "Square"
+    },
+    {
       "NAME": "youOnScreen",
       "LABEL": "You on the Jumbotron",
       "TYPE": "bool",
@@ -793,6 +811,11 @@ void main() {
     float ar = audioReact, t = TIME;
     gBody = float(bodyMode) > 0.5 ? smoothstep(0.3, 0.7, bodyPresence()) : 0.0;
     gBeats = TIME * (audioBPM > 1.0 ? audioBPM : 120.0) / 60.0;
+    // glitch: on the beat, slices of the frame tear sideways and swap channels
+    float gl = glitch * (0.35 * smoothstep(0.4, 1.0, audioBeatPulse) * ar + gDrop + 0.08);
+    vec2 blk = floor(vec2(p.y * 24.0, floor(gBeats * 4.0)));
+    float tear = step(1.0 - gl * 0.5, h12(blk)) ;
+    p.x += tear * (h12(blk + 3.0) - 0.5) * 0.25;
     float camZ = t * dolly * 0.6;
     vec3 ro = vec3(0.12 * sin(t * 0.13), 0.15 + 0.03 * sin(t * 0.21), camZ);
     vec3 rd = normalize(vec3(p.x, p.y + 0.12, 1.25));
@@ -829,6 +852,26 @@ void main() {
     if (gBody > 0.01 && bodyUseSil() > 0.5 && !youOnScreen) {
         float s = bodySeg(uv);
         col = mix(col, texture2D(camTex, bodyCamUV(uv)).rgb, s * gBody);
+    }
+    if (tear > 0.5) col = h12(blk + 7.0) < 0.5 ? col.gbr : col.brg;
+    col += step(0.997, h12(floor(p * vec2(300.0, 2.0)) + floor(t * 30.0))) * gl * 0.6;
+    // New Year's Eve: confetti tumbling down in front of everything
+    float cf = confetti + gDrop * 1.2;
+    if (cf > 0.01) {
+        for (int k = 0; k < 3; k++) {
+            float fk = float(k);
+            vec2 q = p * (14.0 + fk * 9.0) + vec2(sin(t * 0.8 + fk * 2.0) * 1.5, t * (2.0 + fk * 0.8));
+            vec2 id = floor(q);
+            float hh = h12(id + fk * 17.0);
+            if (hh > cf * 0.4) continue;
+            vec2 fq = fract(q) - 0.5 + (h21(hh * 50.0) - 0.5) * 0.4;
+            float spin = t * (2.0 + hh * 6.0) + hh * 9.0;
+            fq = rot(spin * 0.5) * fq;
+            float w = 0.16 * abs(cos(spin));
+            float pc = 1.0 - smoothstep(0.0, 0.02, sdBox(fq, vec2(w + 0.01, 0.07)));
+            vec3 cc = hh * 2.5 < 0.33 ? vec3(1.0, 0.85, 0.2) : hue(fract(hh * 7.0));
+            col = mix(col, cc * (0.6 + 0.6 * abs(cos(spin))), pc);
+        }
     }
     col = aces(col * 1.2);
     col = studioPalette(clamp(col, 0.0, 1.0));

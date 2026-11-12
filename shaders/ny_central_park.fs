@@ -76,6 +76,33 @@
       "GROUP": "Lake"
     },
     {
+      "NAME": "mist",
+      "LABEL": "Morning Mist",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.45,
+      "GROUP": "Lake"
+    },
+    {
+      "NAME": "starsAmt",
+      "LABEL": "Stars & Moon",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.9,
+      "GROUP": "Park"
+    },
+    {
+      "NAME": "blossomBurst",
+      "LABEL": "Blossom Bursts",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.7,
+      "GROUP": "Park"
+    },
+    {
       "NAME": "bridge",
       "LABEL": "Bow Bridge",
       "TYPE": "bool",
@@ -549,6 +576,18 @@ vec3 scene(vec2 p, float asp, float t, float dusk) {
     vec3 sky = mix(mix(vec3(0.55, 0.72, 0.92), vec3(0.98, 0.62, 0.42), dusk), vec3(0.05, 0.06, 0.14), smoothstep(0.55, 1.0, dusk));
     sky = mix(sky, mix(vec3(0.3, 0.5, 0.85), vec3(0.03, 0.04, 0.1), smoothstep(0.4, 1.0, dusk)), smoothstep(0.0, 0.5, p.y));
     vec3 c = mix(sky, backdrop(vec2(0.5, p.y + 0.5)), 0.25);
+    // night: stars and a moon over the towers
+    float night = smoothstep(0.55, 0.9, dusk) * starsAmt;
+    if (night > 0.0) {
+        vec2 sg = p * 90.0; vec2 si = floor(sg);
+        float st = step(0.985, h12(si)) * (1.0 - smoothstep(0.05, 0.3, length(fract(sg) - 0.5))) * (0.6 + 0.4 * sin(t * 3.0 + h12(si) * 40.0));
+        c += vec3(0.9, 0.95, 1.0) * st * night * smoothstep(0.08, 0.3, p.y);
+        vec2 mq = p - vec2(asp * 0.28, 0.36);
+        float moon = 1.0 - smoothstep(0.045, 0.05, length(mq));
+        float shade = 1.0 - smoothstep(0.04, 0.05, length(mq - vec2(0.018, 0.01)));
+        c = mix(c, vec3(1.0, 0.97, 0.88) * (0.85 + 0.15 * vnoise(mq * 120.0)), moon * (1.0 - shade * 0.85) * night);
+        c += vec3(0.8, 0.85, 1.0) * exp(-length(mq) * 9.0) * 0.18 * night;
+    }
     // the skyline beyond the park: Central Park South's slender towers
     float x = p.x * 6.0;
     float id = floor(x);
@@ -571,6 +610,9 @@ vec3 scene(vec2 p, float asp, float t, float dusk) {
         vec3 fc = foliage(n) * (0.45 + 0.75 * smoothstep(0.25, 0.75, fbm(lq * 0.5 + 9.0)));
         fc *= mix(1.0, 0.25, smoothstep(0.5, 1.0, dusk));
         fc *= 0.7 + 0.4 * smoothstep(-0.05, canopy, p.y);                 // lit from above
+        // blossom bursts: flowers pop open across the canopy on the beat
+        float pop = step(0.86, h12(floor(lq * 1.6))) * (1.0 - smoothstep(0.15, 0.4, length(fract(lq * 1.6) - 0.5)));
+        fc = mix(fc, particleCol() * 1.3, pop * blossomBurst * (0.25 + 0.9 * audioBeatPulse * audioReact + 0.8 * gDrop));
         // trunks in winter show through
         c = mix(c, fc, tree);
     }
@@ -626,6 +668,13 @@ void main() {
         col = mix(col, vec3(0.02, 0.05, 0.06), smoothstep(-0.05, -0.5, sp.y) * 0.5);
     }
 
+    // morning mist drifting across the water and the bank
+    if (mist > 0.01) {
+        float mh = exp(-abs(p.y - horizon - 0.01) * 9.0);
+        float mn = fbm(vec2(p.x * 2.5 - t * 0.05 * (0.4 + wind), p.y * 9.0 + 3.0));
+        vec3 mc = mix(vec3(0.92, 0.94, 0.97), vec3(0.35, 0.38, 0.5), dusk);
+        col = mix(col, mc, clamp(mh * smoothstep(0.3, 0.8, mn) * mist * 1.3, 0.0, 0.85));
+    }
     // you become foliage of the season; leaves fall from you
     if (sil > 0.001) {
         vec2 lq = p * vec2(30.0, 34.0);

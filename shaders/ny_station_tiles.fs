@@ -16,6 +16,7 @@
     { "NAME": "morphSpeed",  "LABEL": "Morph Speed",      "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.6, "GROUP": "Ornament" },
     { "NAME": "fillColor",   "LABEL": "Motif Fill",       "TYPE": "color", "DEFAULT": [0.14, 0.36, 0.52, 1.0], "GROUP": "Ornament" },
     { "NAME": "gridGlow",    "LABEL": "Grout Light",      "TYPE": "float", "MIN": 0.0, "MAX": 2.0, "DEFAULT": 0.7, "GROUP": "Grid" },
+    { "NAME": "rainbowGlaze", "LABEL": "Iridescent Glaze", "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.3, "GROUP": "Glaze" },
     { "NAME": "glowColor",   "LABEL": "Grout Light Colour", "TYPE": "color", "DEFAULT": [1.0, 0.82, 0.45, 1.0], "GROUP": "Grid" },
     { "NAME": "liftAmt",     "LABEL": "Tile Lift",        "TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.6, "GROUP": "Grid" },
     { "NAME": "tiltAmt",     "LABEL": "Tile Tilt / Glints", "TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.5, "GROUP": "Grid" },
@@ -727,6 +728,10 @@ void main() {
     float gGlow = gridGlow * (0.35 * runner + 0.9 * audioBeatPulse * ar + 1.2 * gDrop + 0.5 * gBuild * runner + 2.2 * front);
     vec3 groutLit = groutC * (0.75 + 0.3 * topLight) + glowColor.rgb * gGlow;
 
+    // iridescent glaze: each tile shifts through oil-slick colours with the light and the beat
+    vec3 irid = 0.5 + 0.5 * cos(6.2832 * (vec3(0.0, 0.33, 0.67) + id * 0.137 + topLight * 0.6 + TIME * 0.06 + 0.2 * audioBeatPulse * ar));
+    lit = mix(lit, lit * (0.55 + 0.9 * irid), rainbowGlaze);
+    groutLit += irid * gGlow * rainbowGlaze * 0.6;
     vec3 col = mix(groutLit, lit, inside);
     vec3 bg = backdrop(uv);
     if (back > 0.5) col = bg * 0.7 + glowColor.rgb * gridGlow * 0.35 * front;   // the empty bed behind a turning tile

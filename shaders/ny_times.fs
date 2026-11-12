@@ -56,6 +56,24 @@
       "GROUP": "Press"
     },
     {
+      "NAME": "nightEdition",
+      "LABEL": "Night Edition (neon ink)",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
+      "GROUP": "Press"
+    },
+    {
+      "NAME": "zoomPunch",
+      "LABEL": "Camera Punch",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.5,
+      "GROUP": "Press"
+    },
+    {
       "NAME": "bodyMode",
       "LABEL": "Body Tracking",
       "TYPE": "long",
@@ -732,6 +750,9 @@ void main() {
     gSil = step(0.5, silWide);
     gCamOK = step(0.02, lum(texture2D(camTex, vec2(0.5)).rgb) + lum(texture2D(camTex, vec2(0.3, 0.6)).rgb) + lum(texture2D(camTex, vec2(0.7, 0.4)).rgb));
 
+    // camera punch: on the beat the view slams in toward the page
+    float zp = 1.0 + zoomPunch * (0.18 * smoothstep(0.3, 1.0, audioBeatPulse) * ar + 0.5 * gDrop);
+    p = (p - vec2(-0.1, 0.05)) / zp + vec2(-0.1, 0.05);
     // the web press: pages come off the roll and scroll up; the drop runs the press flat out
     float pageH = 1.35;
     float scroll = t * pressSpeed * 0.06 + gDrop * 0.4;
@@ -756,6 +777,10 @@ void main() {
     vec3 inkC = vec3(0.07, 0.07, 0.08);
     vec3 col = paper * vec3(1.0 - kc * 0.92, 1.0 - km * 0.92, 1.0 - k0 * 0.92);
     col = mix(col, inkC, k0 * 0.08);
+    // night edition: black stock, the plates printed in glowing ink
+    vec3 nightC = vec3(0.015, 0.018, 0.028) + vec3(0.95, 0.2, 0.7) * max(km - k0, 0.0) * 0.9 + vec3(0.15, 0.9, 1.0) * max(kc - k0, 0.0) * 0.9 + vec3(0.25, 0.85, 1.0) * k0 * 0.42;
+    nightC *= 1.0 + 0.5 * audioBeatPulse * ar;
+    col = mix(col, nightC, nightEdition);
     // off the page: the press hall behind
     float onPage = step(abs(p.x), gW * 0.5) * (1.0 - gap);
     vec3 hall = backdrop(uv) * (0.6 + 0.4 * step(0.5, fract(p.y * 3.0 + t * pressSpeed * 0.3)));

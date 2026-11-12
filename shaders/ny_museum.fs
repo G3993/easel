@@ -67,6 +67,24 @@
       "GROUP": "Gallery"
     },
     {
+      "NAME": "spill",
+      "LABEL": "Paint Spill",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.5,
+      "GROUP": "Gallery"
+    },
+    {
+      "NAME": "neonFrames",
+      "LABEL": "Neon Frames",
+      "TYPE": "float",
+      "MIN": 0.0,
+      "MAX": 1.0,
+      "DEFAULT": 0.0,
+      "GROUP": "Gallery"
+    },
+    {
       "NAME": "bodyMode",
       "LABEL": "Body Tracking",
       "TYPE": "long",
@@ -636,7 +654,7 @@ void main() {
     float yaw = t * rotateSpeed * 0.3 + 0.4 * gDrop;
     rd.xz = rot(yaw) * rd.xz;
     float nF = floor(frameCount);
-    float bestT = 1e4; vec2 bl = vec2(0.0); float bi = -1.0; vec2 bsz = vec2(1.0);
+    float bestT = 1e4; vec2 bl = vec2(0.0); float bi = -1.0; vec2 bsz = vec2(1.0); float drip = 0.0;
     for (int i = 0; i < 10; i++) {
         float fi = float(i);
         if (fi >= nF) break;
@@ -652,9 +670,24 @@ void main() {
         vec3 right = vec3(n.z, 0.0, -n.x);
         vec2 l = vec2(dot(hp - C, right), hp.y - C.y);
         vec2 sz = vec2(0.62 + 0.25 * h11(fi * 7.0), 0.8 + 0.3 * h11(fi * 11.0)) * (1.0 + 0.04 * bassP() * ar);
-        if (abs(l.x) < sz.x && abs(l.y) < sz.y) { bestT = tt; bl = l; bi = fi; bsz = sz; }
+        if (abs(l.x) < sz.x && abs(l.y) < sz.y) { bestT = tt; bl = l; bi = fi; bsz = sz; drip = 0.0; }
+        else if (spill > 0.01 && abs(l.x) < sz.x - 0.16 && l.y < -sz.y && l.y > -sz.y - 0.9) {
+            // paint spilling out of the bottom of the frame and running down the wall
+            float colx = floor((l.x + sz.x) * 38.0);
+            float hc = h11(colx * 3.7 + fi * 11.0);
+            float len = spill * (0.15 + 0.7 * hc * hc) * (0.6 + 0.4 * sin(t * 0.3 + hc * 9.0) + 0.3 * bassP() * ar);
+            float w = 1.0 - smoothstep(0.25, 0.45, abs(fract((l.x + sz.x) * 38.0) - 0.5));
+            float y = -sz.y - l.y;
+            float bead = 1.0 - smoothstep(0.0, 0.02, length(vec2((fract((l.x + sz.x) * 38.0) - 0.5) / 38.0, y - len)) - 0.012);
+            if (step(0.45, hc) * (w * step(y, len) + bead) > 0.5) { bestT = tt; bl = l; bi = fi; bsz = sz; drip = 1.0; }
+        }
     }
-    if (bi >= 0.0) {
+    if (bi >= 0.0 && drip > 0.5) {
+        float style = mod(bi + floor(t / 40.0) * 3.0, 10.0);
+        vec2 q = vec2((bl.x + bsz.x - 0.16) / (2.0 * (bsz.x - 0.16)), 0.03);
+        col = painting(style, q, t, h11(bi * 13.0 + 1.0)) * 1.05 + vec3(0.25) * pow(max(0.0, sin(bl.x * 120.0)), 8.0) * 0.2;
+        col *= exp(-(bestT - 3.0) * 0.15);
+    } else if (bi >= 0.0) {
         float B = 0.16;
         vec2 e2 = bsz - abs(bl);
         float e = min(e2.x, e2.y);
@@ -675,6 +708,10 @@ void main() {
             gold *= mix(1.0, 0.35, goldAge * (1.0 - smoothstep(0.1, 0.5, hh)));
             col = gold * (0.12 + 0.9 * dif) * spot + vec3(1.0, 0.9, 0.7) * spec * (1.0 - wear) * 1.4;
             col *= 1.0 - 0.6 * smoothstep(0.08, 0.0, x);
+            // neon frames: the gilt turns into glowing tubes on the beat
+            vec3 neon = hue(fract(bi * 0.13 + t * 0.05));
+            float tubes = (1.0 - smoothstep(0.0, 0.12, abs(x - 0.2))) + (1.0 - smoothstep(0.0, 0.1, abs(x - 0.85)));
+            col = mix(col, col * 0.3 + neon * tubes * (1.2 + 0.8 * audioBeatPulse * ar), neonFrames);
         } else {
             vec2 q = (bl + bsz - B) / (2.0 * (bsz - B));
             float style = mod(bi + floor(t / 40.0) * 3.0, 10.0);
