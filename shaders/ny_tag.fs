@@ -35,6 +35,8 @@
     { "NAME": "bodyMode",    "LABEL": "Body Tracking", "TYPE": "long", "DEFAULT": 3, "VALUES": [0, 1, 2, 3], "LABELS": ["Off", "Silhouette (swirl fill + outline)", "Skeleton (tags along limbs)", "Both"], "GROUP": "Body" },
     { "NAME": "bodyMirror",  "LABEL": "Mirror (selfie view)", "TYPE": "bool", "DEFAULT": true, "GROUP": "Body" },
     { "NAME": "swirlAmt",    "LABEL": "Swirl Fill",       "TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.8, "GROUP": "Body" },
+    { "NAME": "swirlSpeed",  "LABEL": "Swirl Speed",      "TYPE": "float", "MIN": 0.2, "MAX": 6.0, "DEFAULT": 3.0, "GROUP": "Body" },
+    { "NAME": "swirlSize",   "LABEL": "Swirl Can Size",   "TYPE": "float", "MIN": 0.4, "MAX": 3.0, "DEFAULT": 1.7, "GROUP": "Body" },
     { "NAME": "outlineAmt",  "LABEL": "Outline Spray",    "TYPE": "float", "MIN": 0.0, "MAX": 1.5, "DEFAULT": 0.7, "GROUP": "Body" },
     { "NAME": "bodyFade",    "LABEL": "Paint Fade (follows you)", "TYPE": "float", "MIN": 0.0, "MAX": 1.0, "DEFAULT": 0.25, "GROUP": "Body" },
     { "NAME": "wallSource",  "LABEL": "Wall", "TYPE": "long", "DEFAULT": 0, "VALUES": [0, 1, 2, 3], "LABELS": ["Painted Brick", "Image / Camera", "Camera + Brick Relief", "Background Colour"], "GROUP": "Wall" },
@@ -340,8 +342,9 @@ vec3 swirlPen(float ci, float c) {                                    // loops t
     float torso = max(length(neck - pelv), 0.05);
     vec2 cen = ci < 0.5 ? mix(neck, pelv, 0.3) : ci < 1.5 ? mix(neck, pelv, 0.85)
              : ci < 2.5 ? (bodyJoint(25.0).xy - 0.5) * s : (bodyJoint(26.0).xy - 0.5) * s;
-    float r = torso * (ci < 1.5 ? 0.42 : 0.3) * (0.8 + 0.4 * h11(ci * 3.1));
-    float a = c * (3.2 + ci * 0.7) * swirlAmt + ci * 2.1;
+    float r = torso * (ci < 1.5 ? 0.42 : 0.3) * (0.8 + 0.4 * h11(ci * 3.1)) * (0.85 + 0.15 * swirlSize);
+    float a = c * (3.2 + ci * 0.7) * swirlAmt * swirlSpeed + ci * 2.1;
+    cen += torso * 0.22 * vec2(sin(c * 0.9 * swirlSpeed + ci * 1.7), cos(c * 0.7 * swirlSpeed + ci * 2.9));   // roam so the fill covers you fast
     vec2 q = cen + r * vec2(cos(a), sin(a)) + 0.55 * r * vec2(cos(2.3 * a + ci), sin(1.7 * a + 2.0 * ci));
     gPr = 0.5;
     return vec3(q, step(0.05, swirlAmt));
@@ -452,7 +455,7 @@ vec4 paintPass() {
         bool swirl = isCloud && gBody > 0.5 && bodyUseSil() > 0.5;
         if (swirl) {
             pb = swirlPen(gi, cj);
-            w = wBase * (0.8 + 0.5 * h11(gi * 5.1)) * (1.0 + 0.4 * bassP() * ar);
+            w = wBase * (0.8 + 0.5 * h11(gi * 5.1)) * (1.0 + 0.4 * bassP() * ar) * swirlSize;
             pool = 0.0; dripOn = 0.0; flag = 2.0;
         } else if (isCloud) {
             pb = cloudPen(gi, cj);
